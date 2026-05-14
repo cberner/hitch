@@ -48,7 +48,8 @@ jobs:
         uses: actions/cache@v4
         with:
             path: |
-                ~/.cargo/bin/
+                ~/.cargo/bin/uv
+                ~/.cargo/bin/just
                 ~/.cargo/registry/index/
                 ~/.cargo/registry/cache/
                 ~/.cargo/git/db/
