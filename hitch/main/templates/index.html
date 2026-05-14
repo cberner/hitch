@@ -28,6 +28,13 @@
             text-transform: uppercase;
             letter-spacing: 0.04em;
         }
+        .header {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
         .session-list {
             list-style: none;
             padding: 0;
@@ -71,10 +78,91 @@
             color: #57606a;
             font-style: italic;
         }
+        .button {
+            font: inherit;
+            background: #1f6feb;
+            color: #fff;
+            border: 1px solid #1f6feb;
+            border-radius: 6px;
+            padding: 0.4rem 0.9rem;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-block;
+        }
+        .button:hover {
+            background: #1858c4;
+            border-color: #1858c4;
+        }
+        .button.secondary {
+            background: transparent;
+            color: #1f2328;
+            border-color: #d0d7de;
+        }
+        .button.secondary:hover {
+            background: #eaeef2;
+        }
+        dialog.new-session {
+            border: 1px solid #d0d7de;
+            border-radius: 8px;
+            padding: 0;
+            background: #fff;
+            color: #1f2328;
+            max-width: min(560px, calc(100% - 2rem));
+            width: 100%;
+        }
+        dialog.new-session::backdrop {
+            background: rgba(15, 23, 42, 0.45);
+        }
+        dialog.new-session form {
+            display: flex;
+            flex-direction: column;
+            gap: 0.85rem;
+            padding: 1.25rem 1.25rem 1rem;
+        }
+        dialog.new-session h2 {
+            margin: 0;
+            font-size: 1.1rem;
+            color: #1f2328;
+            text-transform: none;
+            letter-spacing: 0;
+        }
+        dialog.new-session label {
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+            font-size: 0.9rem;
+            color: #57606a;
+        }
+        dialog.new-session textarea,
+        dialog.new-session select {
+            font: inherit;
+            border: 1px solid #d0d7de;
+            border-radius: 6px;
+            padding: 0.5rem 0.6rem;
+            background: #fff;
+            color: #1f2328;
+        }
+        dialog.new-session textarea {
+            min-height: 8rem;
+            resize: vertical;
+        }
+        dialog.new-session .actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 0.5rem;
+        }
+        dialog.new-session .empty-repos {
+            color: #cf222e;
+            font-size: 0.85rem;
+            margin: 0;
+        }
     </style>
 </head>
 <body>
-    <h1>HITCH</h1>
+    <div class="header">
+        <h1>HITCH</h1>
+        <button type="button" class="button" data-new-session-open>New session</button>
+    </div>
     <h2>Codex sessions</h2>
     {% if sessions %}
     <ul class="session-list">
@@ -94,6 +182,35 @@
     {% else %}
     <p class="empty">No sessions found.</p>
     {% endif %}
+
+    <dialog class="new-session" data-new-session-dialog aria-labelledby="new-session-title">
+        <form method="post" action="{{ new_session_url }}">
+            {% csrf_token %}
+            <h2 id="new-session-title">Start a new session</h2>
+            <label>
+                Prompt
+                <textarea name="prompt" required autocomplete="off" placeholder="Describe what you want the agent to do…"></textarea>
+            </label>
+            <label>
+                Repository
+                {% if repos %}
+                <select name="cwd" required>
+                    {% for repo in repos %}
+                    <option value="{{ repo }}">{{ repo }}</option>
+                    {% endfor %}
+                </select>
+                {% else %}
+                <select name="cwd" required disabled></select>
+                <p class="empty-repos">No git repositories found within two levels of your home directory.</p>
+                {% endif %}
+            </label>
+            <div class="actions">
+                <button type="button" class="button secondary" data-new-session-cancel>Cancel</button>
+                <button type="submit" class="button" {% if not repos %}disabled{% endif %}>Start session</button>
+            </div>
+        </form>
+    </dialog>
+
     <script>
         (function () {
             const absolute = new Intl.DateTimeFormat(undefined, {
@@ -125,6 +242,30 @@
                 el.dateTime = date.toISOString();
                 el.title = date.toString();
                 el.textContent = `${absolute.format(date)} (${relativeFromNow(date)})`;
+            }
+
+            const dialog = document.querySelector("[data-new-session-dialog]");
+            const openButton = document.querySelector("[data-new-session-open]");
+            const cancelButton = dialog && dialog.querySelector("[data-new-session-cancel]");
+            if (dialog && openButton) {
+                openButton.addEventListener("click", () => {
+                    if (typeof dialog.showModal === "function") {
+                        dialog.showModal();
+                    } else {
+                        dialog.setAttribute("open", "");
+                    }
+                    const textarea = dialog.querySelector("textarea[name='prompt']");
+                    if (textarea) textarea.focus();
+                });
+            }
+            if (dialog && cancelButton) {
+                cancelButton.addEventListener("click", () => {
+                    if (typeof dialog.close === "function") {
+                        dialog.close();
+                    } else {
+                        dialog.removeAttribute("open");
+                    }
+                });
             }
         })();
     </script>
