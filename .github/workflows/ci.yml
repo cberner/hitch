@@ -61,6 +61,14 @@ jobs:
         with:
           python-version: "3.14"
 
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install codex
+        run: npm install -g @openai/codex
+
       - name: Install just
         if: steps.rust-cache.outputs.cache-hit != 'true'
         run: cargo install --force --version 1.36.0 just --locked
@@ -71,6 +79,9 @@ jobs:
 
       - name: Run tests
         run: just test
+
+      - name: Run integration tests
+        run: just test-integration
 
       - name: Run coverage
         run: just coverage
