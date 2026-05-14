@@ -21,8 +21,11 @@ def _user_message(*texts: str) -> SimpleNamespace:
     )
 
 
-def _agent_message(text: str) -> SimpleNamespace:
-    return _root(SimpleNamespace(type="agentMessage", text=text))
+def _agent_message(text: str, phase: str | None = None) -> SimpleNamespace:
+    # The SDK surfaces phase as a MessagePhase enum (with `.value`); mirror
+    # that shape so tests match production deserialization.
+    phase_obj = SimpleNamespace(value=phase) if phase is not None else None
+    return _root(SimpleNamespace(type="agentMessage", text=text, phase=phase_obj))
 
 
 def _command(command: str, status: str = "completed") -> SimpleNamespace:
@@ -116,9 +119,9 @@ class SessionViewTests(TestCase):
         self.assertContains(response, "./scripts/build.sh")
         self.assertContains(response, "./scripts/test.sh")
         self.assertContains(response, "hitch/main/views.py")
-        # Three separate tool-call rows, not a summary count.
+        # Three separate tool-call rows (now inside the collapsed intermediate
+        # block), not a single aggregate row.
         self.assertEqual(response.content.decode().count('class="tool-call"'), 3)
-        self.assertNotContains(response, "3 tool calls")
 
     @patch("hitch.main.views.Codex")
     def test_trailing_tool_calls_are_rendered(self, mock_codex: MagicMock) -> None:
@@ -214,6 +217,187 @@ class SessionViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "No messages in this session yet.")
+
+
+class IntermediateCollapseTests(TestCase):
+    """Non-final agent messages and tool calls fold into a <details> block so
+    the page renders only the user/final-agent conversation by default."""
+
+    @patch("hitch.main.views.Codex")
+    def test_intermediate_thinking_and_tool_calls_collapse(
+        self, mock_codex: MagicMock
+    ) -> None:
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message("Help me out"),
+                        _agent_message("Let me look at this."),
+                        _command("./scripts/check.sh"),
+                        _agent_message("Trying something else."),
+                        _agent_message("Here is the answer."),
+                    ]
+                ),
+            ]
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Here is the answer.")
+        self.assertContains(response, '<details class="intermediate">')
+        self.assertContains(response, "2 thinking messages and 1 tool call")
+        # Intermediate content stays in the document (collapsed, not removed).
+        self.assertContains(response, "Let me look at this.")
+        self.assertContains(response, "Trying something else.")
+        self.assertContains(response, "./scripts/check.sh")
+        # <details> appears before the final agent message in source order.
+        self.assertLess(body.index("<details"), body.index("Here is the answer."))
+
+    @patch("hitch.main.views.Codex")
+    def test_no_collapse_when_nothing_intermediate(
+        self, mock_codex: MagicMock
+    ) -> None:
+        thread = _thread(
+            [_turn([_user_message("Hi"), _agent_message("Hello.")])]
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "<details")
+
+    @patch("hitch.main.views.Codex")
+    def test_summary_with_only_tool_calls(self, mock_codex: MagicMock) -> None:
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message("Run it"),
+                        _command("./scripts/run.sh"),
+                        _agent_message("Done."),
+                    ]
+                ),
+            ]
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "<summary>1 tool call</summary>", html=False)
+        self.assertNotContains(response, "thinking message")
+
+    @patch("hitch.main.views.Codex")
+    def test_summary_with_only_thinking(self, mock_codex: MagicMock) -> None:
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message("Think it through"),
+                        _agent_message("Step 1."),
+                        _agent_message("Final."),
+                    ]
+                ),
+            ]
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "<summary>1 thinking message</summary>", html=False)
+
+    @patch("hitch.main.views.Codex")
+    def test_phase_final_answer_wins_over_position(
+        self, mock_codex: MagicMock
+    ) -> None:
+        """An explicit final_answer phase is the final reply even if later
+        agent messages have no phase set."""
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message("Question"),
+                        _agent_message("The answer is 42.", phase="final_answer"),
+                        _agent_message("post-answer noise"),
+                    ]
+                ),
+            ]
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        # "The answer is 42." renders as the top-level Agent block.
+        agent_pos = body.index(">Agent<")
+        answer_pos = body.index("The answer is 42.")
+        noise_pos = body.index("post-answer noise")
+        self.assertLess(agent_pos, answer_pos)
+        self.assertLess(answer_pos, noise_pos)
+        # The trailing message lives inside an intermediate block.
+        self.assertContains(response, ">Agent (thinking)<")
+
+    @patch("hitch.main.views.Codex")
+    def test_commentary_phase_is_never_final(self, mock_codex: MagicMock) -> None:
+        """All-commentary turns (in-progress) collapse entirely; no top-level
+        Agent block."""
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message("Working on it"),
+                        _agent_message("Step 1", phase="commentary"),
+                        _agent_message("Step 2", phase="commentary"),
+                    ]
+                ),
+            ]
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '<details class="intermediate">')
+        self.assertContains(response, "2 thinking messages")
+        self.assertNotContains(response, ">Agent<")
+        self.assertContains(response, ">Agent (thinking)<")
+
+    @patch("hitch.main.views.Codex")
+    def test_phase_accepts_raw_string_shape(self, mock_codex: MagicMock) -> None:
+        """Robustness: phase as a raw wire string (e.g. data deserialized
+        without pydantic) is still recognized."""
+        commentary = _root(
+            SimpleNamespace(type="agentMessage", text="Thinking.", phase="commentary")
+        )
+        final = _root(
+            SimpleNamespace(type="agentMessage", text="42.", phase="final_answer")
+        )
+        thread = _thread(
+            [_turn([_user_message("Q"), commentary, final])]
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        agent_pos = body.index(">Agent<")
+        answer_pos = body.index("42.")
+        self.assertLess(agent_pos, answer_pos)
+        self.assertContains(response, ">Agent (thinking)<")
 
 
 class ToolCallDetailTests(TestCase):

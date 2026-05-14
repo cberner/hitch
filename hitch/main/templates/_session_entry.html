@@ -1,0 +1,29 @@
+{% comment %}
+Renders a single entry (user, agent, thinking, or tool_call). Used for both
+top-level entries on the session page and for items inside a collapsed
+intermediate block, so the per-item layout stays identical in both contexts.
+{% endcomment %}
+{% if entry.kind == "user" or entry.kind == "agent" or entry.kind == "thinking" %}
+<div class="entry">
+    <div class="entry-header">
+        <span class="role">{% if entry.kind == "user" %}User{% elif entry.kind == "thinking" %}Agent (thinking){% else %}Agent{% endif %}</span>
+        {% if entry.timestamp %}
+        <time data-ts="{{ entry.timestamp }}">{{ entry.timestamp }}</time>
+        {% endif %}
+    </div>
+    <div class="message {{ entry.kind }}">
+        <div class="body">{{ entry.text }}</div>
+    </div>
+</div>
+{% elif entry.kind == "tool_call" %}
+<div class="entry">
+    <div class="tool-call">
+        <span class="label">{{ entry.label }}</span>
+        {% if entry.detail %}<span class="detail">{{ entry.detail }}</span>{% endif %}
+        {% if entry.status %}<span class="status {{ entry.status }}">{{ entry.status }}</span>{% endif %}
+        {% if entry.timestamp %}
+        <time class="timestamp" data-ts="{{ entry.timestamp }}" data-format="time">{{ entry.timestamp }}</time>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
