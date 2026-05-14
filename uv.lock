@@ -130,7 +130,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "django", specifier = ">=6.0,<7.0" },
-    { name = "openai-codex", git = "https://github.com/openai/codex.git?subdirectory=sdk%2Fpython&rev=d8ddeb68696dd7b90fe41cd3809821d2ddf7d1b0" },
+    { name = "openai-codex", git = "https://github.com/openai/codex.git?subdirectory=sdk%2Fpython&tag=rust-v0.131.0-alpha.18" },
 ]
 
 [package.metadata.requires-dev]
@@ -168,7 +168,7 @@ wheels = [
 [[package]]
 name = "openai-codex"
 version = "0.131.0a4"
-source = { git = "https://github.com/openai/codex.git?subdirectory=sdk%2Fpython&rev=d8ddeb68696dd7b90fe41cd3809821d2ddf7d1b0#d8ddeb68696dd7b90fe41cd3809821d2ddf7d1b0" }
+source = { git = "https://github.com/openai/codex.git?subdirectory=sdk%2Fpython&tag=rust-v0.131.0-alpha.18#24a6ff96aa0a1c15098eca61dd5c8a6188a9380f" }
 dependencies = [
     { name = "pydantic" },
 ]
