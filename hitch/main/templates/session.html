@@ -43,6 +43,7 @@
         }
         .message.user { background: #ddf4ff; border-color: #b6e3ff; }
         .message.agent { background: #fff; }
+        .message.thinking { background: #fff; color: #57606a; font-style: italic; }
         .message .body { white-space: pre-wrap; word-wrap: break-word; }
 
         .tool-call {
@@ -88,6 +89,24 @@
             font-variant-numeric: tabular-nums;
             white-space: nowrap;
         }
+
+        details.intermediate {
+            margin: 0.75rem 0;
+            padding: 0.25rem 0.7rem;
+            border-left: 3px solid #d0d7de;
+            background: #f6f8fa;
+            border-radius: 0 4px 4px 0;
+            font-size: 0.85rem;
+            color: #57606a;
+        }
+        details.intermediate > summary {
+            cursor: pointer;
+            user-select: none;
+            padding: 0.25rem 0;
+        }
+        details.intermediate[open] > summary { margin-bottom: 0.5rem; }
+        details.intermediate .intermediate-body > .entry:first-child { margin-top: 0; }
+        details.intermediate .intermediate-body > .entry:last-child { margin-bottom: 0; }
     </style>
 </head>
 <body>
@@ -102,30 +121,14 @@
     {% if entries %}
     <section>
         {% for entry in entries %}
-            {% if entry.kind == "user" or entry.kind == "agent" %}
-            <div class="entry">
-                <div class="entry-header">
-                    <span class="role">{% if entry.kind == "user" %}User{% else %}Agent{% endif %}</span>
-                    {% if entry.timestamp %}
-                    <time data-ts="{{ entry.timestamp }}">{{ entry.timestamp }}</time>
-                    {% endif %}
+            {% if entry.kind == "intermediate" %}
+            <details class="intermediate">
+                <summary>{% if entry.thinking_count and entry.tool_call_count %}{{ entry.thinking_count }} thinking message{{ entry.thinking_count|pluralize }} and {{ entry.tool_call_count }} tool call{{ entry.tool_call_count|pluralize }}{% elif entry.thinking_count %}{{ entry.thinking_count }} thinking message{{ entry.thinking_count|pluralize }}{% else %}{{ entry.tool_call_count }} tool call{{ entry.tool_call_count|pluralize }}{% endif %}</summary>
+                <div class="intermediate-body">
+                    {% for item in entry.items %}{% include "_session_entry.html" with entry=item %}{% endfor %}
                 </div>
-                <div class="message {{ entry.kind }}">
-                    <div class="body">{{ entry.text }}</div>
-                </div>
-            </div>
-            {% elif entry.kind == "tool_call" %}
-            <div class="entry">
-                <div class="tool-call">
-                    <span class="label">{{ entry.label }}</span>
-                    {% if entry.detail %}<span class="detail">{{ entry.detail }}</span>{% endif %}
-                    {% if entry.status %}<span class="status {{ entry.status }}">{{ entry.status }}</span>{% endif %}
-                    {% if entry.timestamp %}
-                    <time class="timestamp" data-ts="{{ entry.timestamp }}" data-format="time">{{ entry.timestamp }}</time>
-                    {% endif %}
-                </div>
-            </div>
-            {% endif %}
+            </details>
+            {% else %}{% include "_session_entry.html" with entry=entry %}{% endif %}
         {% endfor %}
     </section>
     {% else %}

@@ -78,39 +78,108 @@ def new_session(request: HttpRequest) -> HttpResponse:
 
 
 def _render_entries(thread: Any) -> Iterator[dict[str, Any]]:
-    """Walk every turn's items in order, emitting one entry per item.
+    """Walk every turn's items in order, surfacing the user message and the
+    final agent reply as top-level entries and folding everything else
+    (intermediate agent commentary plus every tool-call variant) into a
+    single collapsible "intermediate" entry per run so long sessions don't
+    bury the actual answer behind dozens of tool rows.
 
-    Every thread item — user/agent messages and every tool-call variant — gets
-    its own entry so the UI shows the full activity log instead of collapsing
-    tool calls behind an aggregate count. Each entry carries the turn's
-    started_at timestamp; per-item timestamps are not exposed by the SDK.
+    The SDK marks final responses with MessagePhase.final_answer when known;
+    for sessions where phase is unset (older data or an in-progress turn)
+    the last agentMessage in the turn is treated as final. Each entry
+    carries the turn's started_at timestamp; per-item timestamps are not
+    exposed by the SDK.
     """
     for turn in thread.turns:
         timestamp = getattr(turn, "started_at", None)
-        for thread_item in turn.items:
-            item = thread_item.root
-            item_type = item.type
-            if item_type == "userMessage":
+        items = [thread_item.root for thread_item in turn.items]
+        final_idx = _find_final_agent_idx(items)
+        intermediate: list[dict[str, Any]] = []
+
+        for i, item in enumerate(items):
+            if i == final_idx:
+                if intermediate:
+                    yield _make_intermediate_entry(intermediate)
+                    intermediate = []
+                yield {"kind": "agent", "text": item.text, "timestamp": timestamp}
+            elif item.type == "userMessage":
+                if intermediate:
+                    yield _make_intermediate_entry(intermediate)
+                    intermediate = []
                 yield {
                     "kind": "user",
                     "text": _user_message_text(item),
                     "timestamp": timestamp,
                 }
-            elif item_type == "agentMessage":
-                yield {
-                    "kind": "agent",
-                    "text": item.text,
-                    "timestamp": timestamp,
-                }
+            elif item.type == "agentMessage":
+                intermediate.append(
+                    {"kind": "thinking", "text": item.text, "timestamp": timestamp}
+                )
             else:
-                yield {
-                    "kind": "tool_call",
-                    "type": item_type,
-                    "label": _NON_MESSAGE_LABELS.get(item_type, item_type),
-                    "detail": _tool_call_detail(item, item_type),
-                    "status": _tool_call_status(item),
-                    "timestamp": timestamp,
-                }
+                intermediate.append(_make_tool_call_entry(item, timestamp))
+
+        if intermediate:
+            yield _make_intermediate_entry(intermediate)
+
+
+def _find_final_agent_idx(items: list[Any]) -> int:
+    """Index of the agent message to display as this turn's final response, or
+    -1 if there is no agent message that could be the final.
+
+    An explicit MessagePhase.final_answer always wins (the last one if
+    multiple). Otherwise the last agent message whose phase is not
+    MessagePhase.commentary is treated as final — i.e. unset phases (older
+    sessions / in-progress turns) are eligible to be the final, but explicit
+    commentary never is.
+    """
+    for i in range(len(items) - 1, -1, -1):
+        item = items[i]
+        if item.type == "agentMessage" and _phase_value(item) == "final_answer":
+            return i
+    for i in range(len(items) - 1, -1, -1):
+        item = items[i]
+        if item.type != "agentMessage":
+            continue
+        if _phase_value(item) == "commentary":
+            continue
+        return i
+    return -1
+
+
+def _phase_value(item: Any) -> str | None:
+    # The SDK normally deserializes `phase` into a MessagePhase enum instance
+    # (with `.value`), but accept a raw wire string too so this stays robust
+    # against thread data that bypasses pydantic deserialization.
+    phase = getattr(item, "phase", None)
+    if phase is None:
+        return None
+    if isinstance(phase, str):
+        return phase
+    value = getattr(phase, "value", None)
+    return value if isinstance(value, str) else None
+
+
+def _make_tool_call_entry(item: Any, timestamp: Any) -> dict[str, Any]:
+    item_type = item.type
+    return {
+        "kind": "tool_call",
+        "type": item_type,
+        "label": _NON_MESSAGE_LABELS.get(item_type, item_type),
+        "detail": _tool_call_detail(item, item_type),
+        "status": _tool_call_status(item),
+        "timestamp": timestamp,
+    }
+
+
+def _make_intermediate_entry(items: list[dict[str, Any]]) -> dict[str, Any]:
+    thinking_count = sum(1 for e in items if e["kind"] == "thinking")
+    tool_call_count = sum(1 for e in items if e["kind"] == "tool_call")
+    return {
+        "kind": "intermediate",
+        "thinking_count": thinking_count,
+        "tool_call_count": tool_call_count,
+        "items": items,
+    }
 
 
 def _user_message_text(item: Any) -> str:
