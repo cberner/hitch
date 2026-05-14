@@ -1,11 +1,16 @@
 import shutil
+import threading
 from collections import Counter
 from collections.abc import Iterator
 from typing import Any
 
-from django.http import HttpRequest, HttpResponse
-from django.shortcuts import render
+from django.http import HttpRequest, HttpResponse, HttpResponseBadRequest
+from django.shortcuts import redirect, render
+from django.urls import reverse
+from django.views.decorators.http import require_http_methods
 from openai_codex import AppServerConfig, Codex
+
+from hitch.main.repos import discover_repos
 
 # Friendly labels for non-message thread item types, surfaced in the per-session
 # tool-call summary. Anything not in this map falls back to the raw type tag.
@@ -32,7 +37,12 @@ def index(request: HttpRequest) -> HttpResponse:
     with Codex(config=config) as codex:
         sessions = codex.thread_list().data
     sessions = sorted(sessions, key=lambda s: s.updated_at, reverse=True)
-    return render(request, "index.html", {"sessions": sessions})
+    repos = [str(p) for p in discover_repos()]
+    return render(
+        request,
+        "index.html",
+        {"sessions": sessions, "repos": repos, "new_session_url": reverse("new_session")},
+    )
 
 
 def session(request: HttpRequest, session_id: str) -> HttpResponse:
@@ -41,6 +51,31 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
         thread = codex._client.thread_read(session_id, include_turns=True).thread
     entries = list(_render_entries(thread))
     return render(request, "session.html", {"thread": thread, "entries": entries})
+
+
+@require_http_methods(["POST"])
+def new_session(request: HttpRequest) -> HttpResponse:
+    prompt = request.POST.get("prompt", "").strip()
+    cwd = request.POST.get("cwd", "").strip()
+    if not prompt:
+        return HttpResponseBadRequest("prompt is required")
+    if not cwd:
+        return HttpResponseBadRequest("cwd is required")
+    # Restrict cwd to a discovered repo so an arbitrary path can't be injected
+    # via the form post.
+    allowed = {str(p) for p in discover_repos()}
+    if cwd not in allowed:
+        return HttpResponseBadRequest("cwd must be a discovered repository")
+
+    config = AppServerConfig(codex_bin=shutil.which("codex"))
+    with Codex(config=config) as codex:
+        thread = codex.thread_start(cwd=cwd)
+        thread_id = thread.id
+    # Run the initial turn from a background worker so the HTTP request can
+    # redirect immediately. The thread is already persisted by thread_start,
+    # so the worker just resumes it to issue the user prompt.
+    _spawn_initial_turn(thread_id, prompt)
+    return redirect("session", session_id=thread_id)
 
 
 def _render_entries(thread: Any) -> Iterator[dict[str, Any]]:
@@ -100,3 +135,18 @@ def _user_message_text(item: Any) -> str:
             case "localImage":
                 parts.append(f"[image: {inner.path}]")
     return "\n".join(parts)
+
+
+def _spawn_initial_turn(thread_id: str, prompt: str) -> None:
+    threading.Thread(
+        target=_run_initial_turn,
+        args=(thread_id, prompt),
+        daemon=True,
+    ).start()
+
+
+def _run_initial_turn(thread_id: str, prompt: str) -> None:
+    config = AppServerConfig(codex_bin=shutil.which("codex"))
+    with Codex(config=config) as codex:
+        thread = codex.thread_resume(thread_id)
+        thread.run(prompt)
