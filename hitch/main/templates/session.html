@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>HITCH — {{ thread.name|default:thread.preview|default:thread.id }}</title>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
+        .message { margin: 1rem 0; padding: 0.75rem 1rem; border-radius: 0.5rem; }
+        .message.user { background: #e8f1ff; border-left: 4px solid #3b82f6; }
+        .message.agent { background: #f3f4f6; border-left: 4px solid #6b7280; }
+        .message .role { font-weight: 600; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.25rem; }
+        .message .body { white-space: pre-wrap; }
+        .tool-calls { margin: 0.75rem 0; padding: 0.5rem 1rem; background: #fafafa; border: 1px dashed #d4d4d8; border-radius: 0.5rem; font-size: 0.9rem; color: #52525b; }
+        .tool-calls ul { margin: 0.25rem 0 0; padding-left: 1.25rem; }
+    </style>
+</head>
+<body>
+    <p><a href="{% url 'index' %}">&larr; Back to sessions</a></p>
+    <h1>{{ thread.name|default:thread.preview|default:thread.id }}</h1>
+    <p>
+        <small>
+            id: <code>{{ thread.id }}</code> &middot;
+            cwd: <code>{{ thread.cwd }}</code> &middot;
+            updated: {{ thread.updated_at }}
+        </small>
+    </p>
+
+    {% if entries %}
+    <section>
+        {% for entry in entries %}
+            {% if entry.kind == "user" %}
+            <div class="message user">
+                <div class="role">User</div>
+                <div class="body">{{ entry.text }}</div>
+            </div>
+            {% elif entry.kind == "agent" %}
+            <div class="message agent">
+                <div class="role">Agent</div>
+                <div class="body">{{ entry.text }}</div>
+            </div>
+            {% elif entry.kind == "tool_calls" %}
+            <div class="tool-calls">
+                {{ entry.total }} tool call{{ entry.total|pluralize }}:
+                <ul>
+                    {% for row in entry.summary %}
+                    <li>{{ row.label }} &times; {{ row.count }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+        {% endfor %}
+    </section>
+    {% else %}
+    <p>No messages in this session yet.</p>
+    {% endif %}
+</body>
+</html>
