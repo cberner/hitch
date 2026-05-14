@@ -6,5 +6,20 @@
 </head>
 <body>
     <h1>HITCH</h1>
+    <h2>Codex sessions</h2>
+    {% if sessions %}
+    <ul>
+        {% for session in sessions %}
+        <li>
+            <strong>{{ session.name|default:session.preview|default:session.id }}</strong>
+            <div>id: <code>{{ session.id }}</code></div>
+            <div>cwd: <code>{{ session.cwd }}</code></div>
+            <div>updated: {{ session.updated_at }}</div>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <p>No sessions found.</p>
+    {% endif %}
 </body>
 </html>

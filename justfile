@@ -7,10 +7,13 @@ pre: sync
   uv run mypy .
 
 test: pre
-  uv run python -Wa ./manage.py test --settings hitch.settings.dev
+  uv run python -Wa ./manage.py test --exclude-tag integration --settings hitch.settings.dev
+
+test-integration: pre
+  uv run python -Wa ./manage.py test --tag integration --settings hitch.settings.dev
 
 coverage: pre
-  uv run coverage run ./manage.py test --settings hitch.settings.dev
+  uv run coverage run ./manage.py test --exclude-tag integration --settings hitch.settings.dev
   uv run coverage report
   uv run coverage xml
   uv run coverage html
