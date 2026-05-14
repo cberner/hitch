@@ -80,7 +80,9 @@
     <ul class="session-list">
         {% for session in sessions %}
         <li class="session">
-            <div class="session-title">{{ session.name|default:session.preview|default:session.id }}</div>
+            <div class="session-title">
+                <a href="{% url 'session' session_id=session.id %}">{{ session.name|default:session.preview|default:session.id }}</a>
+            </div>
             <div class="session-meta">
                 <span>id: <code>{{ session.id }}</code></span>
                 <span>cwd: <code>{{ session.cwd }}</code></span>

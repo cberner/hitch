@@ -31,6 +31,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Refactor login flow")
         self.assertContains(response, "abc123")
         self.assertContains(response, "/home/user/proj")
+        self.assertContains(response, reverse("session", kwargs={"session_id": "abc123"}))
 
     @patch("hitch.main.views.Codex")
     def test_index_sorts_sessions_by_updated_at_descending(self, mock_codex: MagicMock) -> None:
