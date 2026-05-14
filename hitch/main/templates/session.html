@@ -4,48 +4,126 @@
     <meta charset="utf-8">
     <title>HITCH — {{ thread.name|default:thread.preview|default:thread.id }}</title>
     <style>
-        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; }
-        .message { margin: 1rem 0; padding: 0.75rem 1rem; border-radius: 0.5rem; }
-        .message.user { background: #e8f1ff; border-left: 4px solid #3b82f6; }
-        .message.agent { background: #f3f4f6; border-left: 4px solid #6b7280; }
-        .message .role { font-weight: 600; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 0.25rem; }
-        .message .body { white-space: pre-wrap; }
-        .tool-calls { margin: 0.75rem 0; padding: 0.5rem 1rem; background: #fafafa; border: 1px dashed #d4d4d8; border-radius: 0.5rem; font-size: 0.9rem; color: #52525b; }
-        .tool-calls ul { margin: 0.25rem 0 0; padding-left: 1.25rem; }
+        :root { color-scheme: light dark; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            max-width: 900px;
+            margin: 2rem auto;
+            padding: 0 1rem 3rem;
+            color: #1f2328;
+            background: #f6f8fa;
+            line-height: 1.45;
+        }
+        a { color: #0969da; }
+        h1 { margin: 0.5rem 0 0.25rem; font-size: 1.4rem; }
+        .meta { color: #57606a; font-size: 0.85rem; margin-bottom: 1.5rem; }
+        .meta code { background: #eaeef2; padding: 0 0.3rem; border-radius: 3px; font-size: 0.82rem; }
+
+        .entry { margin: 0.75rem 0; }
+        .entry-header {
+            display: flex;
+            align-items: baseline;
+            gap: 0.5rem;
+            font-size: 0.78rem;
+            color: #57606a;
+            margin-bottom: 0.2rem;
+        }
+        .entry-header .role {
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .entry-header time { font-variant-numeric: tabular-nums; }
+
+        .message {
+            padding: 0.6rem 0.9rem;
+            border-radius: 6px;
+            background: #fff;
+            border: 1px solid #d0d7de;
+        }
+        .message.user { background: #ddf4ff; border-color: #b6e3ff; }
+        .message.agent { background: #fff; }
+        .message .body { white-space: pre-wrap; word-wrap: break-word; }
+
+        .tool-call {
+            display: flex;
+            align-items: baseline;
+            gap: 0.5rem;
+            padding: 0.3rem 0.7rem;
+            background: #f6f8fa;
+            border-left: 3px solid #d0d7de;
+            border-radius: 0 4px 4px 0;
+            font-size: 0.88rem;
+            color: #57606a;
+        }
+        .tool-call .label {
+            font-weight: 600;
+            color: #57606a;
+            white-space: nowrap;
+        }
+        .tool-call .detail {
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+            font-size: 0.85rem;
+            color: #1f2328;
+            overflow-wrap: anywhere;
+            white-space: pre-wrap;
+        }
+        .tool-call .status {
+            margin-left: auto;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            font-size: 0.72rem;
+            padding: 0 0.4rem;
+            border-radius: 3px;
+            background: #eaeef2;
+            color: #57606a;
+            white-space: nowrap;
+        }
+        .tool-call .status.failed,
+        .tool-call .status.declined { background: #ffebe9; color: #82071e; }
+        .tool-call .status.inProgress { background: #fff8c5; color: #7d4e00; }
+        .tool-call .timestamp {
+            font-size: 0.72rem;
+            color: #8b949e;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
     </style>
 </head>
 <body>
     <p><a href="{% url 'index' %}">&larr; Back to sessions</a></p>
     <h1>{{ thread.name|default:thread.preview|default:thread.id }}</h1>
-    <p>
-        <small>
-            id: <code>{{ thread.id }}</code> &middot;
-            cwd: <code>{{ thread.cwd }}</code> &middot;
-            updated: {{ thread.updated_at }}
-        </small>
+    <p class="meta">
+        id: <code>{{ thread.id }}</code> &middot;
+        cwd: <code>{{ thread.cwd }}</code> &middot;
+        updated: <time data-ts="{{ thread.updated_at }}">{{ thread.updated_at }}</time>
     </p>
 
     {% if entries %}
     <section>
         {% for entry in entries %}
-            {% if entry.kind == "user" %}
-            <div class="message user">
-                <div class="role">User</div>
-                <div class="body">{{ entry.text }}</div>
+            {% if entry.kind == "user" or entry.kind == "agent" %}
+            <div class="entry">
+                <div class="entry-header">
+                    <span class="role">{% if entry.kind == "user" %}User{% else %}Agent{% endif %}</span>
+                    {% if entry.timestamp %}
+                    <time data-ts="{{ entry.timestamp }}">{{ entry.timestamp }}</time>
+                    {% endif %}
+                </div>
+                <div class="message {{ entry.kind }}">
+                    <div class="body">{{ entry.text }}</div>
+                </div>
             </div>
-            {% elif entry.kind == "agent" %}
-            <div class="message agent">
-                <div class="role">Agent</div>
-                <div class="body">{{ entry.text }}</div>
-            </div>
-            {% elif entry.kind == "tool_calls" %}
-            <div class="tool-calls">
-                {{ entry.total }} tool call{{ entry.total|pluralize }}:
-                <ul>
-                    {% for row in entry.summary %}
-                    <li>{{ row.label }} &times; {{ row.count }}</li>
-                    {% endfor %}
-                </ul>
+            {% elif entry.kind == "tool_call" %}
+            <div class="entry">
+                <div class="tool-call">
+                    <span class="label">{{ entry.label }}</span>
+                    {% if entry.detail %}<span class="detail">{{ entry.detail }}</span>{% endif %}
+                    {% if entry.status %}<span class="status {{ entry.status }}">{{ entry.status }}</span>{% endif %}
+                    {% if entry.timestamp %}
+                    <time class="timestamp" data-ts="{{ entry.timestamp }}" data-format="time">{{ entry.timestamp }}</time>
+                    {% endif %}
+                </div>
             </div>
             {% endif %}
         {% endfor %}
@@ -53,5 +131,26 @@
     {% else %}
     <p>No messages in this session yet.</p>
     {% endif %}
+
+    <script>
+        (function () {
+            const dateTime = new Intl.DateTimeFormat(undefined, {
+                dateStyle: "medium",
+                timeStyle: "medium",
+            });
+            const timeOnly = new Intl.DateTimeFormat(undefined, {
+                timeStyle: "medium",
+            });
+            for (const el of document.querySelectorAll("time[data-ts]")) {
+                const seconds = Number(el.dataset.ts);
+                if (!Number.isFinite(seconds) || seconds <= 0) continue;
+                const date = new Date(seconds * 1000);
+                el.dateTime = date.toISOString();
+                el.title = date.toString();
+                const fmt = el.dataset.format === "time" ? timeOnly : dateTime;
+                el.textContent = fmt.format(date);
+            }
+        })();
+    </script>
 </body>
 </html>

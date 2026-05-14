@@ -1,6 +1,5 @@
 import shutil
 import threading
-from collections import Counter
 from collections.abc import Iterator
 from typing import Any
 
@@ -12,10 +11,10 @@ from openai_codex import AppServerConfig, Codex
 
 from hitch.main.repos import discover_repos
 
-# Friendly labels for non-message thread item types, surfaced in the per-session
-# tool-call summary. Anything not in this map falls back to the raw type tag.
+# Friendly labels for non-message thread item types. Anything not in this map
+# falls back to the raw type tag so we never silently drop an item from the UI.
 _NON_MESSAGE_LABELS = {
-    "commandExecution": "Command execution",
+    "commandExecution": "Command",
     "mcpToolCall": "MCP tool call",
     "dynamicToolCall": "Tool call",
     "fileChange": "File change",
@@ -79,44 +78,39 @@ def new_session(request: HttpRequest) -> HttpResponse:
 
 
 def _render_entries(thread: Any) -> Iterator[dict[str, Any]]:
-    """Walk every turn's items in order, emitting user/agent messages individually
-    and collapsing runs of non-message items into a single tool-call summary.
+    """Walk every turn's items in order, emitting one entry per item.
+
+    Every thread item — user/agent messages and every tool-call variant — gets
+    its own entry so the UI shows the full activity log instead of collapsing
+    tool calls behind an aggregate count. Each entry carries the turn's
+    started_at timestamp; per-item timestamps are not exposed by the SDK.
     """
-    pending: Counter[str] = Counter()
-
-    def flush() -> dict[str, Any] | None:
-        if not pending:
-            return None
-        entry = {
-            "kind": "tool_calls",
-            "total": sum(pending.values()),
-            "summary": [
-                {"label": label, "count": count}
-                for label, count in sorted(pending.items())
-            ],
-        }
-        pending.clear()
-        return entry
-
     for turn in thread.turns:
+        timestamp = getattr(turn, "started_at", None)
         for thread_item in turn.items:
             item = thread_item.root
             item_type = item.type
             if item_type == "userMessage":
-                flushed = flush()
-                if flushed is not None:
-                    yield flushed
-                yield {"kind": "user", "text": _user_message_text(item)}
+                yield {
+                    "kind": "user",
+                    "text": _user_message_text(item),
+                    "timestamp": timestamp,
+                }
             elif item_type == "agentMessage":
-                flushed = flush()
-                if flushed is not None:
-                    yield flushed
-                yield {"kind": "agent", "text": item.text}
+                yield {
+                    "kind": "agent",
+                    "text": item.text,
+                    "timestamp": timestamp,
+                }
             else:
-                pending[_NON_MESSAGE_LABELS.get(item_type, item_type)] += 1
-    flushed = flush()
-    if flushed is not None:
-        yield flushed
+                yield {
+                    "kind": "tool_call",
+                    "type": item_type,
+                    "label": _NON_MESSAGE_LABELS.get(item_type, item_type),
+                    "detail": _tool_call_detail(item, item_type),
+                    "status": _tool_call_status(item),
+                    "timestamp": timestamp,
+                }
 
 
 def _user_message_text(item: Any) -> str:
@@ -150,3 +144,63 @@ def _run_initial_turn(thread_id: str, prompt: str) -> None:
     with Codex(config=config) as codex:
         thread = codex.thread_resume(thread_id)
         thread.run(prompt)
+
+
+def _tool_call_detail(item: Any, item_type: str) -> str:
+    """Return a short, human-readable description of a tool-call item.
+
+    Returns an empty string for item types that do not carry useful inline
+    detail; the label alone is enough to surface them in the UI.
+    """
+    match item_type:
+        case "commandExecution":
+            return getattr(item, "command", "") or ""
+        case "mcpToolCall":
+            return f"{item.server} / {item.tool}"
+        case "dynamicToolCall":
+            namespace = getattr(item, "namespace", None)
+            return f"{namespace}::{item.tool}" if namespace else item.tool
+        case "fileChange":
+            paths = [str(change.path) for change in getattr(item, "changes", []) or []]
+            if not paths:
+                return ""
+            if len(paths) == 1:
+                return paths[0]
+            return f"{paths[0]} (+{len(paths) - 1} more)"
+        case "webSearch":
+            return getattr(item, "query", "") or ""
+        case "plan":
+            text = getattr(item, "text", "") or ""
+            return text.split("\n", 1)[0]
+        case "imageView":
+            return getattr(item, "path", "") or ""
+        case "imageGeneration":
+            return (
+                getattr(item, "revised_prompt", None)
+                or getattr(item, "saved_path", None)
+                or ""
+            )
+        case "collabAgentToolCall":
+            tool = getattr(item, "tool", None)
+            tool_name = getattr(tool, "value", None) or (tool if isinstance(tool, str) else "")
+            receivers = getattr(item, "receiver_thread_ids", None) or []
+            if receivers:
+                return f"{tool_name} → {receivers[0]}"
+            return str(tool_name)
+        case _:
+            return ""
+
+
+def _tool_call_status(item: Any) -> str | None:
+    """Return a non-success status string (e.g. ``failed``) or None.
+
+    Hides ``completed`` so the common case stays uncluttered; surfaces
+    in-progress, failed, and declined so unusual outcomes are visible.
+    """
+    status = getattr(item, "status", None)
+    if status is None:
+        return None
+    value = getattr(status, "value", status)
+    if not isinstance(value, str) or value == "completed":
+        return None
+    return value
