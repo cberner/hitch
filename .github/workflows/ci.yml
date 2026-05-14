@@ -69,6 +69,39 @@ jobs:
       - name: Install codex
         run: npm install -g @openai/codex
 
+      - name: Cache ollama models
+        uses: actions/cache@v4
+        with:
+          path: ~/.ollama/models
+          key: ollama-qwen2.5-coder-0.5b
+
+      - name: Install ollama and pull model
+        env:
+          # Pinned to a published release with a known sha256 so the install
+          # is not a `curl | sh` supply-chain entry point. Bump both fields
+          # together; the checksum is published at
+          # https://github.com/ollama/ollama/releases/download/<ver>/sha256sum.txt
+          OLLAMA_VERSION: v0.23.4
+          OLLAMA_SHA256: c0822ce85413647f8502862c7179740311f271fcff8f21d61c6d352729f4c28d
+        run: |
+          sudo apt-get install -y zstd
+          curl -fsSL "https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}/ollama-linux-amd64.tar.zst" -o /tmp/ollama.tar.zst
+          echo "${OLLAMA_SHA256}  /tmp/ollama.tar.zst" | sha256sum -c -
+          sudo tar -I zstd -C /usr -xf /tmp/ollama.tar.zst
+          nohup ollama serve > /tmp/ollama.log 2>&1 &
+          for _ in $(seq 1 30); do
+            if curl -fsS http://localhost:11434/api/tags > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          if ! curl -fsS http://localhost:11434/api/tags > /dev/null; then
+            echo "ollama did not become ready within 30s" >&2
+            cat /tmp/ollama.log >&2
+            exit 1
+          fi
+          ollama pull qwen2.5-coder:0.5b
+
       - name: Install just
         if: steps.rust-cache.outputs.cache-hit != 'true'
         run: cargo install --force --version 1.36.0 just --locked
