@@ -7,7 +7,7 @@ on:
       - master
 
 jobs:
-  commit-authors:
+  compliance:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
@@ -27,6 +27,12 @@ jobs:
             echo "Commits authored or committed by Claude or Codex are not allowed:"
             echo "$offenders"
             exit 1
+          fi
+      - name: Non ASCII characters
+        run: |
+          if grep -P -n "[^\x00-\x7F]" -r --include="*.rs" --include="*.py" --include="*.toml" --exclude-dir='.*' .; then
+          echo "Non-ASCII characters detected"
+          exit 1
           fi
 
   ci:
