@@ -15,7 +15,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-openai-codex = { git = "https://github.com/openai/codex.git", subdirectory = "sdk/python", rev = "d8ddeb68696dd7b90fe41cd3809821d2ddf7d1b0" }
+openai-codex = { git = "https://github.com/openai/codex.git", subdirectory = "sdk/python", tag = "rust-v0.131.0-alpha.18" }
 
 # The Codex SDK pins `openai-codex-cli-bin`, which only ships musllinux/macos/win
 # wheels and cannot install on manylinux (e.g. our Ubuntu CI). The runtime
