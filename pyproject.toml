@@ -1,0 +1,70 @@
+[build-system]
+requires = ["setuptools>=70.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hitch"
+version = "0.1.0"
+description = "Human Interface for Taming Coding Helpers"
+readme = "README.md"
+requires-python = ">=3.14"
+license = { file = "LICENSE" }
+dependencies = [
+    "Django>=6.0,<7.0",
+]
+
+[dependency-groups]
+dev = [
+    "coverage>=7.8.0,<8.0",
+    "django-stubs>=6.0,<7.0",
+    "django-stubs-ext>=6.0,<7.0",
+    "mypy==1.15.0",
+    "ruff>=0.11.4,<0.12",
+    "setuptools==70.0.0",
+]
+
+[tool.mypy]
+python_version = "3.14"
+warn_return_any = true
+warn_unused_configs = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = false
+no_implicit_optional = true
+strict_optional = true
+enable_error_code = ["explicit-override", "ignore-without-code"]
+strict = true
+plugins = ["mypy_django_plugin.main"]
+
+[tool.django-stubs]
+django_settings_module = "hitch.settings.dev"
+
+[[tool.mypy.overrides]]
+module = ["*.migrations.*"]
+ignore_errors = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+lint.select = [
+    "A",
+    "B",
+    "DJ",
+    "E",
+    "F",
+    "I",
+    "N",
+    "SIM",
+    "UP",
+    "W",
+]
+lint.ignore = ["SIM108"]
+exclude = [
+    ".git",
+    "__pycache__",
+    "build",
+    "dist",
+    "migrations",
+]

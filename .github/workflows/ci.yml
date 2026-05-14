@@ -28,3 +28,64 @@ jobs:
             echo "$offenders"
             exit 1
           fi
+
+  ci:
+    strategy:
+      matrix:
+        os: ["ubuntu-latest"]
+
+    runs-on: ${{ matrix.os }}
+
+    permissions:
+      # Required for codecov/codecov-action OIDC token exchange
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v6
+      - name: Cache
+        id: rust-cache
+        uses: actions/cache@v4
+        with:
+            path: |
+                ~/.cargo/bin/
+                ~/.cargo/registry/index/
+                ~/.cargo/registry/cache/
+                ~/.cargo/git/db/
+                ~/.cache/uv/
+            key: ${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('pyproject.toml', 'uv.lock', '.github/workflows/*.yml') }}
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install just
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        run: cargo install --force --version 1.36.0 just --locked
+
+      - name: Install uv
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        run: cargo install --force --version 0.9.11 uv --locked
+
+      - name: Run tests
+        run: just test
+
+      - name: Run coverage
+        run: just coverage
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: ./coverage.xml
+          use_oidc: true
+          fail_ci_if_error: true
+
+      - name: Upload coverage reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: |
+            htmlcov/
+            coverage.xml
+          if-no-files-found: error
