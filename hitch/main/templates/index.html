@@ -3,23 +3,128 @@
 <head>
     <meta charset="utf-8">
     <title>HITCH</title>
+    <style>
+        :root {
+            color-scheme: light dark;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            max-width: 900px;
+            margin: 2rem auto;
+            padding: 0 1rem 3rem;
+            color: #1f2328;
+            background: #f6f8fa;
+            line-height: 1.4;
+        }
+        h1 {
+            margin: 0 0 0.25rem;
+            font-size: 1.6rem;
+        }
+        h2 {
+            margin: 1.5rem 0 0.75rem;
+            font-size: 1rem;
+            color: #57606a;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .session-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        .session {
+            background: #fff;
+            border: 1px solid #d0d7de;
+            border-radius: 6px;
+            padding: 0.75rem 1rem;
+        }
+        .session-title {
+            font-weight: 600;
+            margin: 0 0 0.35rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+        }
+        .session-meta {
+            color: #57606a;
+            font-size: 0.85rem;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.25rem 1rem;
+        }
+        .session-meta code {
+            background: #eaeef2;
+            padding: 0 0.3rem;
+            border-radius: 3px;
+            font-size: 0.82rem;
+        }
+        .session-meta time {
+            font-variant-numeric: tabular-nums;
+        }
+        .empty {
+            color: #57606a;
+            font-style: italic;
+        }
+    </style>
 </head>
 <body>
     <h1>HITCH</h1>
     <h2>Codex sessions</h2>
     {% if sessions %}
-    <ul>
+    <ul class="session-list">
         {% for session in sessions %}
-        <li>
-            <strong>{{ session.name|default:session.preview|default:session.id }}</strong>
-            <div>id: <code>{{ session.id }}</code></div>
-            <div>cwd: <code>{{ session.cwd }}</code></div>
-            <div>updated: {{ session.updated_at }}</div>
+        <li class="session">
+            <div class="session-title">{{ session.name|default:session.preview|default:session.id }}</div>
+            <div class="session-meta">
+                <span>id: <code>{{ session.id }}</code></span>
+                <span>cwd: <code>{{ session.cwd }}</code></span>
+                <span>updated: <time data-updated-at="{{ session.updated_at }}">{{ session.updated_at }}</time></span>
+            </div>
         </li>
         {% endfor %}
     </ul>
     {% else %}
-    <p>No sessions found.</p>
+    <p class="empty">No sessions found.</p>
     {% endif %}
+    <script>
+        (function () {
+            const absolute = new Intl.DateTimeFormat(undefined, {
+                dateStyle: "medium",
+                timeStyle: "short",
+            });
+            const relative = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+            const units = [
+                ["year", 31536000],
+                ["month", 2592000],
+                ["week", 604800],
+                ["day", 86400],
+                ["hour", 3600],
+                ["minute", 60],
+            ];
+            function relativeFromNow(date) {
+                const diff = (date.getTime() - Date.now()) / 1000;
+                for (const [unit, secs] of units) {
+                    if (Math.abs(diff) >= secs) {
+                        return relative.format(Math.round(diff / secs), unit);
+                    }
+                }
+                return "just now";
+            }
+            for (const el of document.querySelectorAll("time[data-updated-at]")) {
+                const seconds = Number(el.dataset.updatedAt);
+                if (!Number.isFinite(seconds) || seconds <= 0) continue;
+                const date = new Date(seconds * 1000);
+                el.dateTime = date.toISOString();
+                el.title = date.toString();
+                el.textContent = `${absolute.format(date)} (${relativeFromNow(date)})`;
+            }
+        })();
+    </script>
 </body>
 </html>
