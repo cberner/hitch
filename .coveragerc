@@ -1,0 +1,11 @@
+[run]
+source = hitch
+relative_files = true
+omit =
+    */migrations/*
+    */tests.py
+    */test/*
+
+[report]
+exclude_lines =
+    pragma: no cover
