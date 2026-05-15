@@ -1,3 +1,6 @@
+import json
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -67,6 +70,25 @@ def _thread(turns: list[SimpleNamespace], **overrides: object) -> SimpleNamespac
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
+
+
+def _rollout_line(
+    line_type: str,
+    payload: dict[str, object],
+    *,
+    timestamp: str = "2025-01-05T12:00:00Z",
+) -> str:
+    return json.dumps({"timestamp": timestamp, "type": line_type, "payload": payload})
+
+
+def _write_rollout_tempfile(lines: list[str]) -> Path:
+    with tempfile.NamedTemporaryFile(
+        prefix="rollout-", suffix=".jsonl", mode="w", delete=False
+    ) as fh:
+        fh.write("\n".join(lines))
+        if lines:
+            fh.write("\n")
+        return Path(fh.name)
 
 
 class SessionViewTests(TestCase):
@@ -217,6 +239,336 @@ class SessionViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "No messages in this session yet.")
+
+    @patch("hitch.main.views.Codex")
+    def test_prefers_rollout_file_when_path_is_set(self, mock_codex: MagicMock) -> None:
+        # When thread.path points at a readable rollout file, the view parses
+        # it directly to recover the commandExecution items codex strips from
+        # `thread/read`. The shell call lands inside the intermediate
+        # <details> block, alongside the mid-turn agent commentary.
+        rollout_lines = [
+            _rollout_line(
+                "event_msg",
+                {"type": "user_message", "message": "build it"},
+                timestamp="2026-04-14T23:05:00Z",
+            ),
+            _rollout_line(
+                "event_msg",
+                {"type": "agent_message", "message": "looking into it"},
+                timestamp="2026-04-14T23:05:05Z",
+            ),
+            _rollout_line(
+                "response_item",
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": json.dumps({"cmd": "cargo build --release"}),
+                    "call_id": "c1",
+                },
+                timestamp="2026-04-14T23:05:10Z",
+            ),
+            _rollout_line(
+                "event_msg",
+                {"type": "agent_message", "message": "done"},
+                timestamp="2026-04-14T23:05:30Z",
+            ),
+        ]
+        rollout_path = _write_rollout_tempfile(rollout_lines)
+        self.addCleanup(rollout_path.unlink, missing_ok=True)
+
+        thread = _thread([], path=str(rollout_path))
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "build it")
+        self.assertContains(response, "cargo build --release")
+        self.assertContains(response, "done")
+        self.assertContains(response, '<details class="intermediate">')
+        self.assertContains(response, "1 thinking message and 1 tool call")
+
+    @patch("hitch.main.views.Codex")
+    def test_falls_back_to_sdk_when_rollout_path_missing(self, mock_codex: MagicMock) -> None:
+        # An unreadable thread.path must not crash the view; the SDK-derived
+        # entries take over instead.
+        thread = _thread(
+            [_turn([_user_message("hi"), _agent_message("hello")])],
+            path="/nonexistent/rollout.jsonl",
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "hi")
+        self.assertContains(response, "hello")
+
+    @patch("hitch.main.views.Codex")
+    def test_falls_back_to_sdk_when_rollout_parse_raises(self, mock_codex: MagicMock) -> None:
+        # The rollout file is unreadable as JSONL (whole file is binary
+        # garbage that survives line splitting). The view must still render
+        # the SDK-derived entries instead of bubbling the parse error.
+        with tempfile.NamedTemporaryFile(
+            prefix="rollout-", suffix=".jsonl", mode="wb", delete=False
+        ) as fh:
+            fh.write(b"\xff\xfe\x00not json\n")
+            rollout_path = Path(fh.name)
+        self.addCleanup(rollout_path.unlink, missing_ok=True)
+
+        thread = _thread(
+            [_turn([_user_message("hi"), _agent_message("hello")])],
+            path=str(rollout_path),
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "hi")
+        self.assertContains(response, "hello")
+
+    @patch("hitch.main.views.Codex")
+    def test_falls_back_to_sdk_when_rollout_has_no_messages(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # The rollout parses to tool-only entries (no user_message /
+        # agent_message). Under schema drift the SDK may still know how to
+        # surface the conversation, so prefer it over a tool-only view.
+        rollout_lines = [
+            _rollout_line(
+                "response_item",
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": json.dumps({"cmd": "uname -a"}),
+                    "call_id": "c1",
+                },
+            ),
+        ]
+        rollout_path = _write_rollout_tempfile(rollout_lines)
+        self.addCleanup(rollout_path.unlink, missing_ok=True)
+
+        thread = _thread(
+            [_turn([_user_message("hi"), _agent_message("hello")])],
+            path=str(rollout_path),
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "hi")
+        self.assertContains(response, "hello")
+        # Tool-only entries from the rollout aren't merged in; the SDK path
+        # took over entirely, so the command from the rollout isn't shown.
+        self.assertNotContains(response, "uname -a")
+
+    @patch("hitch.main.views.Codex")
+    def test_falls_back_to_sdk_when_rollout_is_empty(self, mock_codex: MagicMock) -> None:
+        # If the rollout parses to nothing but the SDK has turns, prefer the
+        # SDK output — schema drift or a truncated file shouldn't wipe the
+        # session detail page.
+        with tempfile.NamedTemporaryFile(
+            prefix="rollout-", suffix=".jsonl", mode="w", delete=False
+        ) as fh:
+            rollout_path = Path(fh.name)
+        self.addCleanup(rollout_path.unlink, missing_ok=True)
+
+        thread = _thread(
+            [_turn([_user_message("hi"), _agent_message("hello")])],
+            path=str(rollout_path),
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "hi")
+        self.assertContains(response, "hello")
+
+    @patch("hitch.main.views.Codex")
+    def test_empty_rollout_with_no_sdk_turns_renders_placeholder(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # Both the rollout and Thread.turns are empty — the page should still
+        # render its empty-state placeholder rather than fall back to a
+        # second SDK call.
+        with tempfile.NamedTemporaryFile(
+            prefix="rollout-", suffix=".jsonl", mode="w", delete=False
+        ) as fh:
+            rollout_path = Path(fh.name)
+        self.addCleanup(rollout_path.unlink, missing_ok=True)
+
+        thread = _thread([], path=str(rollout_path))
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "No messages in this session yet.")
+
+    @patch("hitch.main.views.Codex")
+    def test_rollout_groups_multiple_turns_separately(self, mock_codex: MagicMock) -> None:
+        # Two user messages in the rollout should produce two independent
+        # intermediate blocks — one per turn — rather than one giant block.
+        rollout_lines = [
+            _rollout_line("event_msg", {"type": "user_message", "message": "first ask"}),
+            _rollout_line(
+                "response_item",
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": json.dumps({"cmd": "echo a"}),
+                    "call_id": "c1",
+                },
+            ),
+            _rollout_line("event_msg", {"type": "agent_message", "message": "first reply"}),
+            _rollout_line("event_msg", {"type": "user_message", "message": "second ask"}),
+            _rollout_line(
+                "response_item",
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": json.dumps({"cmd": "echo b"}),
+                    "call_id": "c2",
+                },
+            ),
+            _rollout_line("event_msg", {"type": "agent_message", "message": "second reply"}),
+        ]
+        rollout_path = _write_rollout_tempfile(rollout_lines)
+        self.addCleanup(rollout_path.unlink, missing_ok=True)
+
+        thread = _thread([], path=str(rollout_path))
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content.decode().count('<details class="intermediate">'), 2)
+
+    @patch("hitch.main.views.Codex")
+    def test_rollout_turn_with_only_tool_calls_has_no_final_agent(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # An interrupted turn that produced no agent reply should still
+        # render, with the tool call(s) inside the intermediate block and no
+        # top-level agent message.
+        rollout_lines = [
+            _rollout_line("event_msg", {"type": "user_message", "message": "try this"}),
+            _rollout_line(
+                "response_item",
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": json.dumps({"cmd": "sleep 1"}),
+                    "call_id": "c1",
+                },
+            ),
+        ]
+        rollout_path = _write_rollout_tempfile(rollout_lines)
+        self.addCleanup(rollout_path.unlink, missing_ok=True)
+
+        thread = _thread([], path=str(rollout_path))
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "try this")
+        self.assertContains(response, "sleep 1")
+        self.assertContains(response, '<details class="intermediate">')
+        # No final agent message exists, so nothing renders outside the block.
+        self.assertNotContains(response, ">Agent<")
+
+    @patch("hitch.main.views.Codex")
+    def test_rollout_commentary_phase_never_treated_as_final(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # All agent messages are commentary, and the last entry is a tool
+        # call. Scanning from the end must skip the trailing tool call AND
+        # both commentary messages, falling through to "no final agent".
+        rollout_lines = [
+            _rollout_line("event_msg", {"type": "user_message", "message": "go"}),
+            _rollout_line(
+                "event_msg",
+                {"type": "agent_message", "message": "preamble", "phase": "commentary"},
+            ),
+            _rollout_line(
+                "event_msg",
+                {"type": "agent_message", "message": "narrating", "phase": "commentary"},
+            ),
+            _rollout_line(
+                "response_item",
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": json.dumps({"cmd": "ls"}),
+                    "call_id": "c1",
+                },
+            ),
+        ]
+        rollout_path = _write_rollout_tempfile(rollout_lines)
+        self.addCleanup(rollout_path.unlink, missing_ok=True)
+
+        thread = _thread([], path=str(rollout_path))
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "preamble")
+        self.assertContains(response, "narrating")
+        # Neither commentary becomes the final agent reply.
+        self.assertNotContains(response, ">Agent<")
+        self.assertContains(response, "2 thinking messages and 1 tool call")
+
+    @patch("hitch.main.views.Codex")
+    def test_rollout_final_answer_phase_wins_over_later_unphased(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # The explicit final_answer is the final agent reply even when an
+        # un-phased agent message follows it; the trailing message folds
+        # into the post-final intermediate block alongside any later tool
+        # call.
+        rollout_lines = [
+            _rollout_line("event_msg", {"type": "user_message", "message": "go"}),
+            _rollout_line(
+                "event_msg",
+                {"type": "agent_message", "message": "the answer", "phase": "final_answer"},
+            ),
+            _rollout_line(
+                "event_msg",
+                {"type": "agent_message", "message": "post-answer note"},
+            ),
+        ]
+        rollout_path = _write_rollout_tempfile(rollout_lines)
+        self.addCleanup(rollout_path.unlink, missing_ok=True)
+
+        thread = _thread([], path=str(rollout_path))
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        # The final_answer text renders outside the <details> block...
+        final_idx = body.index("the answer")
+        details_idx = body.index("<details")
+        self.assertLess(final_idx, details_idx)
+        # ...while the trailing un-phased message goes inside it.
+        self.assertContains(response, "post-answer note")
+        self.assertContains(response, "1 thinking message")
 
 
 class IntermediateCollapseTests(TestCase):
