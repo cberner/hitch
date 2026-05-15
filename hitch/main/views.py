@@ -76,7 +76,13 @@ def index(request: HttpRequest) -> HttpResponse:
 def session(request: HttpRequest, session_id: str) -> HttpResponse:
     config = AppServerConfig(codex_bin=shutil.which("codex"))
     with Codex(config=config) as codex:
-        thread = codex._client.thread_read(session_id, include_turns=True).thread
+        # ``thread/read`` only works for threads already loaded into the
+        # app-server's in-memory map. Each request spawns a fresh app-server
+        # subprocess, so newly-created threads (or any thread persisted by a
+        # different worker) need ``thread/resume`` to read them off disk.
+        # The resume response already carries the full thread including turns,
+        # so a follow-up ``thread/read`` would just be a redundant round-trip.
+        thread = codex._client.thread_resume(session_id).thread
     entries = list(_entries_for(thread))
     name_value = getattr(thread, "name", None) or ""
     return render(
