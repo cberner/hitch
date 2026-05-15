@@ -14,5 +14,10 @@ urlpatterns = [
         hitch.main.views.set_session_name,
         name="set_session_name",
     ),
+    path(
+        "sessions/<str:session_id>/message/",
+        hitch.main.views.send_message,
+        name="send_message",
+    ),
     path("admin/", admin.site.urls),
 ]
