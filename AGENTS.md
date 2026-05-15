@@ -16,8 +16,9 @@ If any of those fail, fix the underlying issue — do not bypass checks.
 
 ## Tests
 When adding new features, add tests — but aim for high code coverage and important integration
-tests without adding too many lines of new test code. Expanding a logically related existing test
-is often a good way to achieve coverage without bloating the suite.
+tests without adding too many lines of new test code. 90% coverage is a good target for new
+features; it does not have to be 100%. Expanding a logically related existing test is often a good
+way to achieve coverage without bloating the suite.
 
 ## Git commits
 1) git commits should use your human's name and email address for authorship. Add "Assisted-by:" and
