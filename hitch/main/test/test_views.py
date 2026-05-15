@@ -125,6 +125,14 @@ class IndexViewTests(TestCase):
         self.assertContains(
             response, reverse("session", kwargs={"session_id": "newer"})
         )
+        self.assertContains(
+            response,
+            'data-session-archive-url="'
+            + reverse("set_session_archived", kwargs={"session_id": "newer"})
+            + '"',
+        )
+        self.assertContains(response, 'data-session-archived="false"')
+        self.assertContains(response, "data-archive-undo")
         self.assertLess(body.index("Newer session"), body.index("Middle session"))
         self.assertLess(body.index("Middle session"), body.index("Older session"))
 
@@ -171,6 +179,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Active session")
         self.assertContains(response, "Archived session")
         self.assertContains(response, '<span class="archive-badge">Archived</span>')
+        self.assertContains(response, 'data-session-archived="true"')
         self.assertLess(body.index("Archived session"), body.index("Active session"))
         client = mock_codex.return_value.__enter__.return_value
         client.thread_list.assert_any_call()
@@ -681,6 +690,19 @@ class SetSessionArchivedViewTests(TestCase):
         client = mock_codex.return_value.__enter__.return_value
         client.thread_archive.assert_called_once_with("abc")
         client.thread_unarchive.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    def test_ajax_archive_returns_no_content(self, mock_codex: MagicMock) -> None:
+        response = self.client.post(
+            reverse("set_session_archived", kwargs={"session_id": "abc"}),
+            data={"archived": "true"},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertNotIn("Location", response.headers)
+        client = mock_codex.return_value.__enter__.return_value
+        client.thread_archive.assert_called_once_with("abc")
 
     @patch("hitch.main.views.Codex")
     def test_unarchives_session_and_redirects(self, mock_codex: MagicMock) -> None:
