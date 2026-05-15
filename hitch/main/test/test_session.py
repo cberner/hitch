@@ -134,9 +134,9 @@ class SessionViewTests(TestCase):
                 )
 
     @patch("hitch.main.views.Codex")
-    def test_h1_truncates_long_preview(self, mock_codex: MagicMock) -> None:
-        # The session page h1 uses the same `_display_title` as the index, so
-        # an unnamed thread with a long preview gets clipped here too.
+    def test_topbar_title_truncates_long_preview(self, mock_codex: MagicMock) -> None:
+        # The session page topbar title uses the same `_display_title` as the
+        # index, so an unnamed thread with a long preview gets clipped here too.
         thread = _thread([_turn([_user_message("x" * 200)])], name=None, preview="x" * 200)
         _patch_thread(self, mock_codex, thread)
 
@@ -144,8 +144,8 @@ class SessionViewTests(TestCase):
         body = response.content.decode()
 
         self.assertEqual(response.status_code, 200)
-        # The h1 contains the clipped title, not the full 200-char preview.
-        self.assertIn("<h1>" + "x" * 80 + "...</h1>", body)
+        # The topbar title contains the clipped title, not the full 200-char preview.
+        self.assertIn('<div class="topbar-title">' + "x" * 80 + "...</div>", body)
 
     @patch("hitch.main.views.Codex")
     def test_renders_messages_tool_calls_and_timestamps(
