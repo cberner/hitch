@@ -348,6 +348,62 @@
             margin: 0;
             font-weight: 400;
         }
+        .rate-limits {
+            display: flex;
+            flex-direction: column;
+            gap: 0.55rem;
+            padding-top: 0.25rem;
+            border-top: 1px solid var(--border);
+        }
+        .rate-limits-title {
+            font-size: 0.72rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            margin: 0;
+        }
+        .rate-limits-plan {
+            font-size: 0.78rem;
+            color: var(--text-faint);
+            margin: -0.3rem 0 0;
+        }
+        .rate-limit-row {
+            display: flex;
+            flex-direction: column;
+            gap: 0.3rem;
+        }
+        .rate-limit-row-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 0.5rem;
+            font-size: 0.82rem;
+            color: var(--text);
+        }
+        .rate-limit-row-head .rate-limit-remaining {
+            font-variant-numeric: tabular-nums;
+            color: var(--text-muted);
+            font-size: 0.78rem;
+        }
+        .rate-limit-bar {
+            position: relative;
+            height: 6px;
+            background: var(--surface-2);
+            border-radius: 999px;
+            overflow: hidden;
+        }
+        .rate-limit-bar-fill {
+            position: absolute;
+            inset: 0 auto 0 0;
+            background: var(--accent);
+            border-radius: inherit;
+        }
+        .rate-limit-meta {
+            font-size: 0.72rem;
+            color: var(--text-faint);
+            font-variant-numeric: tabular-nums;
+        }
         @media (max-width: 480px) {
             dialog.new-session {
                 max-width: calc(100% - 1rem);
@@ -441,6 +497,35 @@
                     {% endfor %}
                 </select>
             </label>
+            {% if rate_limits %}
+            <section class="rate-limits" aria-labelledby="rate-limits-title">
+                <h3 class="rate-limits-title" id="rate-limits-title">
+                    {% if rate_limits.limit_name %}{{ rate_limits.limit_name }} rate limits{% else %}Rate limits{% endif %}
+                </h3>
+                {% if rate_limits.plan_type %}
+                <p class="rate-limits-plan">Plan: {{ rate_limits.plan_type }}</p>
+                {% endif %}
+                {% for window in rate_limits.windows %}
+                <div class="rate-limit-row">
+                    <div class="rate-limit-row-head">
+                        <span>{{ window.label }}</span>
+                        <span class="rate-limit-remaining">{{ window.remaining_percent }}% remaining</span>
+                    </div>
+                    <div class="rate-limit-bar" role="progressbar"
+                         aria-valuenow="{{ window.remaining_percent }}"
+                         aria-valuemin="0" aria-valuemax="100"
+                         aria-label="{{ window.label }} remaining">
+                        <div class="rate-limit-bar-fill" style="width: {{ window.remaining_percent }}%"></div>
+                    </div>
+                    <div class="rate-limit-meta">
+                        {% if window.window_duration_mins %}{{ window.window_duration_mins }}-min window{% endif %}
+                        {% if window.window_duration_mins and window.resets_at %} · {% endif %}
+                        {% if window.resets_at %}resets <time data-resets-at="{{ window.resets_at }}">{{ window.resets_at }}</time>{% endif %}
+                    </div>
+                </div>
+                {% endfor %}
+            </section>
+            {% endif %}
             <div class="actions">
                 <button type="button" class="button secondary" data-settings-cancel>Cancel</button>
                 <button type="submit" class="button">Save</button>
@@ -507,6 +592,14 @@
                 el.dateTime = date.toISOString();
                 el.title = date.toString();
                 el.textContent = `${absolute.format(date)} (${relativeFromNow(date)})`;
+            }
+            for (const el of document.querySelectorAll("time[data-resets-at]")) {
+                const seconds = Number(el.dataset.resetsAt);
+                if (!Number.isFinite(seconds) || seconds <= 0) continue;
+                const date = new Date(seconds * 1000);
+                el.dateTime = date.toISOString();
+                el.title = date.toString();
+                el.textContent = relativeFromNow(date);
             }
 
             function showDialog(dialog) {

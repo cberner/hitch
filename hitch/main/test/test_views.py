@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 from django.core import signing
 from django.test import Client, TestCase
 from django.urls import reverse
+from openai_codex.errors import MethodNotFoundError
 
 
 def _setup_codex(
@@ -21,10 +22,15 @@ def _setup_codex(
     models: list[Any] | None = None,
 ) -> MagicMock:
     """Configure the Codex mock with both ``thread_list`` and ``models``;
-    the index view reads both."""
+    the index view reads both. Also stubs ``_client.request`` to raise
+    MethodNotFound so the rate-limits fetch falls through its
+    unsupported-endpoint branch — tests that care set their own value."""
     ctx: MagicMock = mock_codex.return_value.__enter__.return_value
     ctx.thread_list.return_value.data = threads or []
     ctx.models.return_value.data = models or []
+    ctx._client.request.side_effect = MethodNotFoundError(
+        -32601, "method not found", None
+    )
     return ctx
 
 

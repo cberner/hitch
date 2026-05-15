@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 from django.core import signing
 from django.test import Client, TestCase
 from django.urls import reverse
+from openai_codex.errors import MethodNotFoundError
 from openai_codex.generated.v2_all import ReasoningEffort
 
 _MODEL_COOKIE = "hitch_model"
@@ -49,10 +50,60 @@ def _configure_codex(
     *,
     models: list[SimpleNamespace],
     threads: list[SimpleNamespace] | None = None,
+    rate_limits: SimpleNamespace | BaseException | None = None,
 ) -> None:
     ctx = mock_codex.return_value.__enter__.return_value
     ctx.thread_list.return_value.data = threads or []
     ctx.models.return_value.data = models
+    # The rate-limits endpoint is a raw JSON-RPC request, not a typed
+    # client method. By default the helper raises MethodNotFound so the
+    # view's fallback path is exercised; tests that care set an explicit
+    # snapshot or pass an exception instance.
+    if isinstance(rate_limits, BaseException):
+        ctx._client.request.side_effect = rate_limits
+    elif rate_limits is not None:
+        ctx._client.request.return_value = SimpleNamespace(rate_limits=rate_limits)
+    else:
+        ctx._client.request.side_effect = MethodNotFoundError(
+            -32601, "method not found", None
+        )
+
+
+def _rate_limit_snapshot(
+    *,
+    primary_used: int | None = None,
+    secondary_used: int | None = None,
+    primary_resets_at: int | None = None,
+    secondary_resets_at: int | None = None,
+    primary_window_mins: int | None = None,
+    secondary_window_mins: int | None = None,
+    limit_name: str | None = None,
+    plan_type: str | None = None,
+) -> SimpleNamespace:
+    primary = (
+        SimpleNamespace(
+            used_percent=primary_used,
+            resets_at=primary_resets_at,
+            window_duration_mins=primary_window_mins,
+        )
+        if primary_used is not None
+        else None
+    )
+    secondary = (
+        SimpleNamespace(
+            used_percent=secondary_used,
+            resets_at=secondary_resets_at,
+            window_duration_mins=secondary_window_mins,
+        )
+        if secondary_used is not None
+        else None
+    )
+    return SimpleNamespace(
+        primary=primary,
+        secondary=secondary,
+        limit_name=limit_name,
+        plan_type=SimpleNamespace(value=plan_type) if plan_type else None,
+    )
 
 
 def _signer(name: str) -> signing.Signer:
@@ -123,6 +174,111 @@ class SettingsDialogRenderTests(TestCase):
         response = self.client.get(reverse("index"))
 
         self.assertContains(response, 'value="" selected')
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_dialog_renders_rate_limit_windows(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        """When the account/rateLimits/read call returns a snapshot, the
+        dialog must render each present window so a user can see how much
+        of their budget is left before kicking off a new turn."""
+        _configure_codex(
+            mock_codex,
+            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+            rate_limits=_rate_limit_snapshot(
+                primary_used=30,
+                primary_resets_at=1_700_000_000,
+                primary_window_mins=60,
+                secondary_used=80,
+                secondary_resets_at=1_700_010_000,
+                secondary_window_mins=10_080,
+                plan_type="plus",
+            ),
+        )
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        # Both windows surface, with "remaining" framing rather than "used"
+        # — the dialog answers "how much budget do I have left?".
+        self.assertContains(response, "Primary")
+        self.assertContains(response, "70% remaining")
+        self.assertContains(response, "Secondary")
+        self.assertContains(response, "20% remaining")
+        # Window duration and reset timestamp are surfaced; the timestamp
+        # is rendered into a <time> element so the client-side script can
+        # format it relative to the viewer.
+        self.assertContains(response, "60-min window")
+        self.assertContains(response, 'data-resets-at="1700000000"')
+        # Plan label gives context for which plan the limits apply to.
+        self.assertContains(response, "plus")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_dialog_hides_rate_limits_when_unsupported(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        """Local-dev (ollama) and older Codex builds reject the rate-limits
+        method; the dialog must still render with no Rate-limits section."""
+        _configure_codex(
+            mock_codex,
+            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+            # explicit MethodNotFound is the typical signal from Codex when
+            # the endpoint isn't wired in the current build.
+            rate_limits=MethodNotFoundError(-32601, "method not found", None),
+        )
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, 'aria-labelledby="rate-limits-title"')
+        self.assertNotContains(response, "% remaining")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_dialog_hides_rate_limits_on_unexpected_exception(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        """Non-Codex exceptions (pydantic ValidationError on a malformed
+        wire payload, transport hiccups not wrapped as AppServerError) must
+        also be swallowed — a settings dialog that 500s the index over a
+        cosmetic widget is worse than one that hides the widget."""
+        _configure_codex(
+            mock_codex,
+            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+            rate_limits=ValueError("malformed payload"),
+        )
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, 'aria-labelledby="rate-limits-title"')
+        self.assertNotContains(response, "% remaining")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_dialog_hides_rate_limits_when_both_windows_empty(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        """An account that has no metered usage at all returns a snapshot
+        with both windows unset; skip the section rather than render an
+        empty header."""
+        _configure_codex(
+            mock_codex,
+            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+            rate_limits=_rate_limit_snapshot(),
+        )
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, 'aria-labelledby="rate-limits-title"')
+        self.assertNotContains(response, "% remaining")
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
