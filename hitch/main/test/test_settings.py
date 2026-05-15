@@ -11,6 +11,7 @@ _MODEL_COOKIE = "hitch_model"
 _EFFORT_COOKIE = "hitch_reasoning_effort"
 _SANDBOX_COOKIE = "hitch_sandbox_policy"
 _APPROVAL_COOKIE = "hitch_approval_mode"
+_SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 
 # By default a test model accepts every enum value so tests that don't care
 # about supported-effort filtering can stay terse; tests that exercise the
@@ -165,6 +166,26 @@ class SettingsDialogRenderTests(TestCase):
         self.assertContains(response, 'value="auto_review" selected')
         self.assertContains(response, 'value="deny_all"')
         self.assertContains(response, 'value="approve_all"')
+        self.assertContains(response, 'name="show_archived_sessions"')
+        self.assertContains(response, "Show archived sessions")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_saved_archived_session_visibility_renders_checked(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
+        _configure_codex(
+            mock_codex,
+            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+        )
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(
+            response, 'name="show_archived_sessions" value="true" checked'
+        )
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -588,6 +609,30 @@ class UpdateSettingsViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(_cookie_value(response, _SANDBOX_COOKIE), "")
+
+    def test_saves_archived_session_visibility_to_signed_cookie(self) -> None:
+        cases = [
+            ({"show_archived_sessions": "true"}, "true"),
+            ({}, "false"),
+        ]
+        for data, expected in cases:
+            with self.subTest(expected=expected):
+                response = self.client.post(reverse("update_settings"), data=data)
+
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(
+                    _cookie_value(response, _SHOW_ARCHIVED_COOKIE), expected
+                )
+
+    def test_rejects_unknown_archived_session_visibility(self) -> None:
+        _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
+        response = self.client.post(
+            reverse("update_settings"),
+            data={"show_archived_sessions": "yes"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn(_SHOW_ARCHIVED_COOKIE, response.cookies)
 
 
 class ApprovalModeSettingsTests(TestCase):

@@ -19,19 +19,29 @@ from openai_codex.errors import MethodNotFoundError
 
 from hitch.main.models import CodexInstance
 
+_SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
+
 
 def _setup_codex(
     mock_codex: MagicMock,
     *,
     threads: list[Any] | None = None,
+    archived_threads: list[Any] | None = None,
     models: list[Any] | None = None,
 ) -> MagicMock:
-    """Configure the Codex mock with both ``thread_list`` and ``models``;
-    the index view reads both. Also stubs ``_client.request`` to raise
+    """Configure the Codex mock with ``thread_list`` and ``models``.
+
+    The index view reads both active and, when enabled, archived thread
+    lists. Also stubs ``_client.request`` to raise
     MethodNotFound so the rate-limits fetch falls through its
     unsupported-endpoint branch — tests that care set their own value."""
     ctx: MagicMock = mock_codex.return_value.__enter__.return_value
-    ctx.thread_list.return_value.data = threads or []
+
+    def thread_list(*, archived: bool | None = None, **_: Any) -> SimpleNamespace:
+        data = archived_threads if archived else threads
+        return SimpleNamespace(data=data or [])
+
+    ctx.thread_list.side_effect = thread_list
     ctx.models.return_value.data = models or []
     ctx._client.request.side_effect = MethodNotFoundError(
         -32601, "method not found", None
@@ -67,10 +77,16 @@ def _session(
     name: str | None = None,
     preview: str = "",
     cwd: str = "/repo",
+    path: str | None = None,
     updated_at: int = 1,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        id=session_id, name=name, preview=preview, cwd=cwd, updated_at=updated_at
+        id=session_id,
+        name=name,
+        preview=preview,
+        cwd=cwd,
+        path=path,
+        updated_at=updated_at,
     )
 
 
@@ -111,6 +127,54 @@ class IndexViewTests(TestCase):
         )
         self.assertLess(body.index("Newer session"), body.index("Middle session"))
         self.assertLess(body.index("Middle session"), body.index("Older session"))
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_hides_archived_sessions_by_default(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        active = _session("active", name="Active session")
+        archived = _session(
+            "archived",
+            name="Archived session",
+            path="/home/user/.codex/archived_sessions/archived.jsonl",
+        )
+        _setup_codex(mock_codex, threads=[active], archived_threads=[archived])
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, "Active session")
+        self.assertNotContains(response, "Archived session")
+        client = mock_codex.return_value.__enter__.return_value
+        client.thread_list.assert_called_once_with()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_shows_archived_sessions_when_setting_enabled(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
+        active = _session("active", name="Active session", updated_at=1000)
+        archived = _session(
+            "archived",
+            name="Archived session",
+            path="/home/user/.codex/archived_sessions/archived.jsonl",
+            updated_at=2000,
+        )
+        _setup_codex(mock_codex, threads=[active], archived_threads=[archived])
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+        body = response.content.decode()
+
+        self.assertContains(response, "Active session")
+        self.assertContains(response, "Archived session")
+        self.assertContains(response, '<span class="archive-badge">Archived</span>')
+        self.assertLess(body.index("Archived session"), body.index("Active session"))
+        client = mock_codex.return_value.__enter__.return_value
+        client.thread_list.assert_any_call()
+        client.thread_list.assert_any_call(archived=True)
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")

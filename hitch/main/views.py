@@ -69,6 +69,7 @@ _MODEL_COOKIE = "hitch_model"
 _EFFORT_COOKIE = "hitch_reasoning_effort"
 _SANDBOX_COOKIE = "hitch_sandbox_policy"
 _APPROVAL_COOKIE = "hitch_approval_mode"
+_SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 
 # Roughly one year. Long enough that a user's pick survives across
 # sessions without ever needing a manual revisit; short enough that the
@@ -123,25 +124,33 @@ def index(request: HttpRequest) -> HttpResponse:
     config = AppServerConfig(codex_bin=shutil.which("codex"))
     with Codex(config=config) as codex:
         models_data = list(codex.models().data)
-        threads = codex.thread_list().data
+        (
+            current_model,
+            current_effort,
+            current_sandbox,
+            current_approval,
+            current_show_archived_sessions,
+            cookie_updates,
+        ) = _resolved_settings(request, models_data)
+        threads = list(codex.thread_list().data)
+        if current_show_archived_sessions:
+            threads.extend(codex.thread_list(archived=True).data)
         rate_limits = _fetch_rate_limits(codex)
-    (
-        current_model,
-        current_effort,
-        current_sandbox,
-        current_approval,
-        cookie_updates,
-    ) = _resolved_settings(request, models_data)
     threads = sorted(threads, key=lambda s: s.updated_at, reverse=True)
-    sessions = [
-        {
-            "id": t.id,
-            "cwd": t.cwd,
-            "updated_at": t.updated_at,
-            "display_title": _display_title(t),
-        }
-        for t in threads
-    ]
+    sessions = []
+    for thread in threads:
+        is_archived = _thread_is_archived(thread)
+        if is_archived and not current_show_archived_sessions:
+            continue
+        sessions.append(
+            {
+                "id": thread.id,
+                "cwd": thread.cwd,
+                "updated_at": thread.updated_at,
+                "display_title": _display_title(thread),
+                "is_archived": is_archived,
+            }
+        )
     repos = [str(p) for p in discover_repos()]
     model_options = [
         {"id": m.id, "display_name": m.display_name} for m in models_data
@@ -171,6 +180,7 @@ def index(request: HttpRequest) -> HttpResponse:
             "current_effort": current_effort,
             "current_sandbox": current_sandbox,
             "current_approval": current_approval,
+            "current_show_archived_sessions": current_show_archived_sessions,
             "rate_limits": rate_limits,
         },
     )
@@ -457,13 +467,14 @@ def _entries_from_rollout(thread: Any) -> list[dict[str, Any]] | None:
 
 def _resolved_settings(
     request: HttpRequest, models_data: list[Any]
-) -> tuple[str, str, str, str, dict[str, str]]:
+) -> tuple[str, str, str, str, bool, dict[str, str]]:
     """Read the dialog state from cookies and reconcile against Codex.
 
-    Returns ``(model, effort, sandbox_policy, approval_mode, cookie_updates)``.
-    ``cookie_updates`` is a dict of cookie-name → new-value pairs the caller
-    must persist on the response (via ``_apply_cookie_updates``) so the
-    corrected state takes effect on the next request.
+    Returns ``(model, effort, sandbox_policy, approval_mode,
+    show_archived_sessions, cookie_updates)``. ``cookie_updates`` is a dict
+    of cookie-name → new-value pairs the caller must persist on the response
+    (via ``_apply_cookie_updates``) so the corrected state takes effect on
+    the next request.
 
     Two stale-state cases handled here:
       1. The saved model id is no longer offered → snap to the provider's
@@ -490,12 +501,20 @@ def _resolved_settings(
     saved_effort = _read_cookie(request, _EFFORT_COOKIE)
     saved_sandbox = _read_cookie(request, _SANDBOX_COOKIE)
     saved_approval = _read_cookie(request, _APPROVAL_COOKIE)
+    show_archived_sessions = _read_cookie(request, _SHOW_ARCHIVED_COOKIE) == "true"
     if saved_sandbox and saved_sandbox not in _VALID_SANDBOX_POLICIES:
         saved_sandbox = ""
     if saved_approval not in _VALID_APPROVAL_MODES:
         saved_approval = _DEFAULT_APPROVAL_MODE
     if not models_data:
-        return saved_model, saved_effort, saved_sandbox, saved_approval, {}
+        return (
+            saved_model,
+            saved_effort,
+            saved_sandbox,
+            saved_approval,
+            show_archived_sessions,
+            {},
+        )
 
     valid_ids = {m.id for m in models_data}
     if saved_model and saved_model in valid_ids:
@@ -509,9 +528,17 @@ def _resolved_settings(
                     new_effort,
                     saved_sandbox,
                     saved_approval,
+                    show_archived_sessions,
                     {_EFFORT_COOKIE: new_effort},
                 )
-        return saved_model, saved_effort, saved_sandbox, saved_approval, {}
+        return (
+            saved_model,
+            saved_effort,
+            saved_sandbox,
+            saved_approval,
+            show_archived_sessions,
+            {},
+        )
 
     default_model = next((m for m in models_data if m.is_default), models_data[0])
     new_effort = _model_default_effort(default_model)
@@ -520,6 +547,7 @@ def _resolved_settings(
         new_effort,
         saved_sandbox,
         saved_approval,
+        show_archived_sessions,
         {_MODEL_COOKIE: default_model.id, _EFFORT_COOKIE: new_effort},
     )
 
@@ -634,6 +662,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     effort = request.POST.get("reasoning_effort", "").strip()
     sandbox = request.POST.get("sandbox_policy", "").strip()
     approval = request.POST.get("approval_mode", "").strip()
+    show_archived = request.POST.get("show_archived_sessions", "").strip()
     if len(model) > _MODEL_MAX_LEN:
         return HttpResponseBadRequest("model id is too long")
     valid_efforts = {e.value for e in ReasoningEffort}
@@ -649,6 +678,9 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest("invalid approval mode")
     if not approval:
         approval = _DEFAULT_APPROVAL_MODE
+    if show_archived not in {"", "true"}:
+        return HttpResponseBadRequest("invalid archived sessions visibility")
+    show_archived = "true" if show_archived == "true" else "false"
     if model or effort:
         # Cross-check the posted (model, effort) pair against what Codex
         # actually offers so a malformed POST (typo, stale model id, effort
@@ -668,6 +700,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
             _EFFORT_COOKIE: effort,
             _SANDBOX_COOKIE: sandbox,
             _APPROVAL_COOKIE: approval,
+            _SHOW_ARCHIVED_COOKIE: show_archived,
         },
     )
     return response
@@ -810,6 +843,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
         reasoning_effort,
         sandbox_policy,
         approval_mode,
+        _show_archived_sessions,
         cookie_updates,
     ) = _resolved_settings(request, models_data)
 
