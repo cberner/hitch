@@ -461,6 +461,81 @@
             white-space: nowrap;
         }
 
+        .approval {
+            display: flex;
+            flex-direction: column;
+            gap: 0.55rem;
+            padding: 0.7rem 0.9rem;
+            background: var(--status-warn-bg);
+            color: var(--status-warn-fg);
+            border: 1px solid var(--status-warn-fg);
+            border-radius: var(--radius-sm);
+            font-size: 0.88rem;
+        }
+        .approval-header {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-weight: 600;
+        }
+        .approval-detail {
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+            font-size: 0.82rem;
+            color: var(--text);
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 0.45rem 0.6rem;
+            overflow-wrap: anywhere;
+            white-space: pre-wrap;
+            max-height: 12rem;
+            overflow-y: auto;
+        }
+        .approval-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.45rem;
+        }
+        .approval-actions button {
+            font: inherit;
+            font-size: 0.85rem;
+            padding: 0.4rem 0.85rem;
+            border-radius: 6px;
+            border: 1px solid var(--border-strong);
+            background: var(--surface);
+            color: var(--text);
+            cursor: pointer;
+            font-weight: 500;
+        }
+        .approval-actions button:hover { background: var(--surface-2); }
+        .approval-actions button[data-decision="approved"] {
+            background: var(--accent);
+            color: var(--accent-fg);
+            border-color: var(--accent);
+        }
+        .approval-actions button[data-decision="approved"]:hover {
+            background: var(--accent-hover);
+            border-color: var(--accent-hover);
+        }
+        .approval-actions button[data-decision="abort"] {
+            background: var(--status-error-bg);
+            color: var(--status-error-fg);
+            border-color: var(--status-error-fg);
+        }
+        .approval-actions button:disabled {
+            opacity: 0.55;
+            cursor: not-allowed;
+        }
+        .approval.resolved {
+            background: var(--surface-2);
+            color: var(--text-muted);
+            border-color: var(--border);
+        }
+        .approval-resolution {
+            font-size: 0.82rem;
+            font-style: italic;
+        }
+
         details.intermediate {
             margin: 0;
             padding: 0;
@@ -706,7 +781,9 @@
             </div>
             {% endif %}
             {% if active_worker %}
-            <div class="entry" data-live-root></div>
+            <div class="entry"
+                 data-live-root
+                 data-approval-url-template="{{ approval_url_template }}"></div>
             {% endif %}
         </section>
         {% else %}
@@ -859,6 +936,12 @@
             }, 1000);
 
             const liveRoot = document.querySelector("[data-live-root]");
+            // The Django ``resolve_approval`` URL is templated with a
+            // placeholder pk of ``0`` server-side; the JS swaps in the
+            // real ApprovalRequest id when a decision is posted.
+            const APPROVAL_URL_TEMPLATE = liveRoot
+                ? liveRoot.dataset.approvalUrlTemplate || ""
+                : "";
             const empty = document.querySelector(".empty-thread");
 
             // Per-item DOM trackers. Items are keyed by the server-assigned
@@ -886,6 +969,33 @@
                 exitedReviewMode: "Exited review mode",
                 contextCompaction: "Context compaction",
             };
+
+            // Pending approval prompts. Keyed by ApprovalRequest pk so an
+            // ``approval/resolved`` event can find and finalize the matching
+            // node without re-rendering the whole turn.
+            const approvals = new Map();
+
+            const APPROVAL_LABELS = {
+                "item/commandExecution/requestApproval": "Run command?",
+                "item/fileChange/requestApproval": "Apply file change?",
+            };
+
+            function csrfToken() {
+                const match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+                return match ? decodeURIComponent(match[1]) : "";
+            }
+
+            function approvalDetail(method, params) {
+                const item = (params && params.item) || params || {};
+                if (method === "item/commandExecution/requestApproval") {
+                    return item.command || JSON.stringify(item, null, 2);
+                }
+                if (method === "item/fileChange/requestApproval") {
+                    const paths = (item.changes || []).map((c) => c.path).filter(Boolean);
+                    if (paths.length) return paths.join("\n");
+                }
+                return JSON.stringify(item, null, 2);
+            }
 
             function ensureNoEmpty() {
                 if (empty && empty.parentNode) empty.remove();
@@ -1053,6 +1163,100 @@
                 return null;
             }
 
+            function handleApprovalRequested(payload) {
+                ensureNoEmpty();
+                const id = payload.id;
+                if (id == null || approvals.has(id)) return;
+                const wrap = document.createElement("div");
+                wrap.className = "entry";
+                wrap.dataset.approvalId = String(id);
+                const box = document.createElement("div");
+                box.className = "approval";
+                const header = document.createElement("div");
+                header.className = "approval-header";
+                header.textContent = APPROVAL_LABELS[payload.method] || "Approval requested";
+                box.appendChild(header);
+                const detail = document.createElement("div");
+                detail.className = "approval-detail";
+                detail.textContent = approvalDetail(payload.method, payload.params);
+                box.appendChild(detail);
+                const actions = document.createElement("div");
+                actions.className = "approval-actions";
+                const buttons = [
+                    { decision: "approved", label: "Run" },
+                    { decision: "denied", label: "Skip" },
+                    { decision: "abort", label: "Reject" },
+                ];
+                for (const { decision, label } of buttons) {
+                    const btn = document.createElement("button");
+                    btn.type = "button";
+                    btn.dataset.decision = decision;
+                    btn.textContent = label;
+                    btn.addEventListener("click", () => submitApproval(id, decision));
+                    actions.appendChild(btn);
+                }
+                box.appendChild(actions);
+                wrap.appendChild(box);
+                insertBeforeLive(wrap);
+                approvals.set(id, { node: wrap, box, actions });
+            }
+
+            function submitApproval(id, decision) {
+                const entry = approvals.get(id);
+                if (!entry) return;
+                const reenable = () => {
+                    for (const btn of entry.actions.querySelectorAll("button")) {
+                        btn.disabled = false;
+                    }
+                };
+                for (const btn of entry.actions.querySelectorAll("button")) {
+                    btn.disabled = true;
+                }
+                const body = new URLSearchParams({ decision });
+                // Swap the placeholder pk Django emits via
+                // ``reverse('resolve_approval', kwargs={'approval_id': 0})``
+                // for the real ApprovalRequest id. The regex anchors on the
+                // trailing ``/0/`` so a future URL prefix that happens to
+                // contain a ``0`` doesn't accidentally substitute there.
+                const url = APPROVAL_URL_TEMPLATE.replace(/\/0\/?$/, "/" + id + "/");
+                fetch(url, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "X-CSRFToken": csrfToken(),
+                    },
+                    body,
+                    credentials: "same-origin",
+                }).then((response) => {
+                    // ``fetch`` resolves on HTTP errors (403 CSRF, 409
+                    // race-with-another-tab), so a non-2xx response would
+                    // otherwise leave the buttons permanently disabled
+                    // with no retry path. The 409 case is intentional —
+                    // the row is already decided, and the matching
+                    // ``approval/resolved`` SSE frame will fold the UI;
+                    // for everything else, re-enable so the user can try
+                    // again.
+                    if (!response.ok && response.status !== 409) reenable();
+                }).catch(() => {
+                    // Network failure (no response). The approval/resolved
+                    // event from the worker is the canonical signal that a
+                    // decision took effect, so re-enabling here is safe.
+                    reenable();
+                });
+            }
+
+            function handleApprovalResolved(payload) {
+                const id = payload.id;
+                const entry = approvals.get(id);
+                if (!entry) return;
+                entry.box.classList.add("resolved");
+                if (entry.actions.parentNode) entry.actions.remove();
+                const note = document.createElement("div");
+                note.className = "approval-resolution";
+                note.textContent = "Decision: " + (payload.decision || "denied");
+                entry.box.appendChild(note);
+            }
+
             const source = new EventSource(streamUrl);
             source.addEventListener("heartbeat", (event) => {
                 bump();
@@ -1070,6 +1274,8 @@
                     case "item/started": handleItemStarted(payload); break;
                     case "item/agentMessage/delta": handleAgentDelta(payload); break;
                     case "item/completed": handleItemCompleted(payload); break;
+                    case "approval/requested": handleApprovalRequested(payload); break;
+                    case "approval/resolved": handleApprovalResolved(payload); break;
                 }
             });
             source.addEventListener("end", () => {

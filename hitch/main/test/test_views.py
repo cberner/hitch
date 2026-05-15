@@ -17,7 +17,7 @@ from django.test import Client, TestCase
 from django.urls import reverse
 from openai_codex.errors import MethodNotFoundError
 
-from hitch.main.models import CodexInstance
+from hitch.main.models import ApprovalRequest, CodexInstance
 
 
 def _setup_codex(
@@ -730,3 +730,152 @@ class SessionStreamViewTests(TestCase):
 
         self.assertIn(b"item/started", body)
         self.assertIn(b'"status": "completed"', body)
+
+
+class ResolveApprovalViewTests(TestCase):
+    """The ``POST /approval/<id>/`` endpoint that records the user's pick on
+    a pending command/file approval. The worker's polling loop wakes on the
+    row update and answers codex's JSON-RPC request with the recorded
+    decision — see ``hitch.main.management.commands.codex_worker``."""
+
+    def _make_approval(
+        self, *, decision: str = ApprovalRequest.DECISION_PENDING
+    ) -> ApprovalRequest:
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="thread-1",
+            cwd="/repo",
+            prompt="hi",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        return ApprovalRequest.objects.create(
+            instance=instance,
+            method="item/commandExecution/requestApproval",
+            params={"item": {"command": "ls"}},
+            decision=decision,
+        )
+
+    def test_records_decision_and_marks_decided_at(self) -> None:
+        approval = self._make_approval()
+
+        response = self.client.post(
+            reverse("resolve_approval", kwargs={"approval_id": approval.pk}),
+            data={"decision": "approved"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"approved")
+        approval.refresh_from_db()
+        self.assertEqual(approval.decision, "approved")
+        self.assertIsNotNone(approval.decided_at)
+
+    def test_accepts_each_valid_decision(self) -> None:
+        """Pin the wire-string contract — these three values are what
+        codex's ``ReviewDecision`` enum accepts (``approved`` /
+        ``denied`` / ``abort``). A regression that drops one of them
+        would silently break that decision in the UI."""
+        for decision in ("approved", "denied", "abort"):
+            with self.subTest(decision=decision):
+                approval = self._make_approval()
+                response = self.client.post(
+                    reverse("resolve_approval", kwargs={"approval_id": approval.pk}),
+                    data={"decision": decision},
+                )
+                self.assertEqual(response.status_code, 200)
+                approval.refresh_from_db()
+                self.assertEqual(approval.decision, decision)
+
+    def test_rejects_invalid_decision(self) -> None:
+        """A POST with a value outside the codex-accepted set must 400
+        rather than poison the row — the worker would otherwise round-trip
+        the bogus string into a JSON-RPC response codex rejects."""
+        approval = self._make_approval()
+
+        response = self.client.post(
+            reverse("resolve_approval", kwargs={"approval_id": approval.pk}),
+            data={"decision": "yes please"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        approval.refresh_from_db()
+        self.assertEqual(approval.decision, "")
+
+    def test_returns_404_for_missing_approval(self) -> None:
+        response = self.client.post(
+            reverse("resolve_approval", kwargs={"approval_id": 99999999}),
+            data={"decision": "approved"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_returns_409_when_already_resolved(self) -> None:
+        """Two browser tabs racing the same approval must not silently
+        clobber each other. The first POST wins; later POSTs get 409 so
+        the UI knows the choice is locked in."""
+        approval = self._make_approval(decision="approved")
+
+        response = self.client.post(
+            reverse("resolve_approval", kwargs={"approval_id": approval.pk}),
+            data={"decision": "denied"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        approval.refresh_from_db()
+        self.assertEqual(approval.decision, "approved")
+
+    def test_rejects_get(self) -> None:
+        approval = self._make_approval()
+        response = self.client.get(
+            reverse("resolve_approval", kwargs={"approval_id": approval.pk})
+        )
+        self.assertEqual(response.status_code, 405)
+
+
+class SessionViewApprovalContextTests(TestCase):
+    """The session detail view exposes a ``resolve_approval`` URL template
+    so the JS that handles SSE ``approval/requested`` events can POST
+    decisions back without hard-coding the route. Pin the template so a
+    URL refactor can't quietly break the streaming approval loop."""
+
+    @patch("hitch.main.views.Codex")
+    def test_session_template_renders_approval_url_template(
+        self, mock_codex: MagicMock
+    ) -> None:
+        ctx: MagicMock = mock_codex.return_value.__enter__.return_value
+        ctx._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(
+                id="thread-1",
+                cwd="/repo",
+                name="Demo",
+                preview="",
+                turns=[],
+                path=None,
+                updated_at=1,
+            )
+        )
+        # The approval-url template only renders inside the
+        # ``active_worker`` block (an idle session has no SSE stream and so
+        # no client-side approval prompts to wire up).
+        CodexInstance.objects.create(
+            pid=1,
+            thread_id="thread-1",
+            cwd="/repo",
+            prompt="hi",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "thread-1"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        # The placeholder pk is ``0`` — the JS swaps it for the real
+        # ApprovalRequest id when posting a decision.
+        self.assertContains(
+            response,
+            'data-approval-url-template="' + reverse(
+                "resolve_approval", kwargs={"approval_id": 0}
+            ),
+        )
