@@ -45,6 +45,56 @@
         .message.agent { background: #fff; }
         .message.thinking { background: #fff; color: #57606a; font-style: italic; }
         .message .body { white-space: pre-wrap; word-wrap: break-word; }
+        .message .body.markdown { white-space: normal; }
+        .message .body.markdown > :first-child { margin-top: 0; }
+        .message .body.markdown > :last-child { margin-bottom: 0; }
+        .message .body.markdown p { margin: 0.5em 0; }
+        .message .body.markdown h1,
+        .message .body.markdown h2,
+        .message .body.markdown h3,
+        .message .body.markdown h4,
+        .message .body.markdown h5,
+        .message .body.markdown h6 { margin: 0.85em 0 0.3em; font-weight: 600; line-height: 1.25; }
+        .message .body.markdown h1 { font-size: 1.3rem; }
+        .message .body.markdown h2 { font-size: 1.15rem; }
+        .message .body.markdown h3 { font-size: 1.05rem; }
+        .message .body.markdown h4,
+        .message .body.markdown h5,
+        .message .body.markdown h6 { font-size: 1rem; }
+        .message .body.markdown ul,
+        .message .body.markdown ol { margin: 0.5em 0; padding-left: 1.5em; }
+        .message .body.markdown li { margin: 0.15em 0; }
+        .message .body.markdown li > p { margin: 0.15em 0; }
+        .message .body.markdown code {
+            background: #eaeef2;
+            padding: 0 0.3em;
+            border-radius: 3px;
+            font-size: 0.9em;
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+        }
+        .message .body.markdown pre {
+            background: #eaeef2;
+            padding: 0.6em 0.8em;
+            border-radius: 4px;
+            overflow-x: auto;
+            margin: 0.5em 0;
+        }
+        .message .body.markdown pre code {
+            background: transparent;
+            padding: 0;
+            font-size: 0.85em;
+        }
+        .message .body.markdown blockquote {
+            margin: 0.5em 0;
+            padding: 0 0.8em;
+            border-left: 3px solid #d0d7de;
+            color: #57606a;
+        }
+        .message .body.markdown table { border-collapse: collapse; margin: 0.5em 0; }
+        .message .body.markdown th,
+        .message .body.markdown td { padding: 0.3em 0.6em; border: 1px solid #d0d7de; }
+        .message .body.markdown th { background: #eaeef2; font-weight: 600; }
+        .message .body.markdown hr { border: 0; border-top: 1px solid #d0d7de; margin: 0.8em 0; }
 
         .tool-call {
             display: flex;
