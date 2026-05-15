@@ -1,9 +1,12 @@
-"""View-layer tests: index, new_session, send_message, set_session_name.
+"""View-layer tests: index, new_session, send_message, set_session_name,
+session_stream.
 
 Shared helpers configure the Codex mock and seed signed cookies so each
 test stays focused on the behavior under examination.
 """
 
+import json
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -13,6 +16,8 @@ from django.core import signing
 from django.test import Client, TestCase
 from django.urls import reverse
 from openai_codex.errors import MethodNotFoundError
+
+from hitch.main.models import CodexInstance
 
 
 def _setup_codex(
@@ -493,3 +498,87 @@ class SetSessionNameViewTests(TestCase):
 
         self.assertEqual(response.status_code, 405)
         mock_codex.assert_not_called()
+
+
+class SessionStreamViewTests(TestCase):
+    """The SSE endpoint that mirrors a worker's events file to the browser."""
+
+    def _make(self, **kwargs: Any) -> CodexInstance:
+        defaults: dict[str, Any] = {
+            "pid": 0,
+            "thread_id": "thread-1",
+            "cwd": "/repo",
+            "prompt": "do work",
+            "events_path": "/dev/null",
+            "status": CodexInstance.STATUS_RUNNING,
+        }
+        defaults.update(kwargs)
+        return CodexInstance.objects.create(**defaults)
+
+    def test_returns_inactive_stream_when_no_worker(self) -> None:
+        response = self.client.get(
+            reverse("session_stream", kwargs={"session_id": "thread-1"})
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "text/event-stream")
+        body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
+        self.assertTrue(body.rstrip().endswith(b'data: {"status": "inactive"}'))
+
+    def test_returns_inactive_when_worker_already_completed(self) -> None:
+        # Inactive applies just as much to a terminal worker as to "never
+        # existed". Without this, every session detail page load would tail
+        # the last worker's events file forever.
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            Path(events_path).touch()
+            self._make(
+                thread_id="thread-done",
+                status=CodexInstance.STATUS_COMPLETED,
+                events_path=events_path,
+            )
+
+            response = self.client.get(
+                reverse("session_stream", kwargs={"session_id": "thread-done"})
+            )
+            body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
+
+        self.assertIn(b'"status": "inactive"', body)
+
+    def test_sets_no_buffering_headers(self) -> None:
+        # SSE needs frame-by-frame delivery; proxies (and Django's own
+        # middleware stack) honour these headers to disable coalescing.
+        response = self.client.get(
+            reverse("session_stream", kwargs={"session_id": "thread-1"})
+        )
+        self.assertEqual(response["Cache-Control"], "no-cache")
+        self.assertEqual(response["X-Accel-Buffering"], "no")
+        b"".join(response.streaming_content)  # type: ignore[attr-defined]
+
+    @patch("hitch.main.streaming._POLL_INTERVAL", 0.01)
+    def test_forwards_worker_events_through_view(self) -> None:
+        # End-to-end through the URL routing: a RUNNING instance with
+        # events on disk gets tailed, and once the status flips before the
+        # response is iterated the stream drains and closes.
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            with open(events_path, "w", encoding="utf-8") as fh:
+                fh.write(
+                    json.dumps({"method": "item/started", "payload": {"item": {"id": "a"}}})
+                    + "\n"
+                )
+            instance = self._make(
+                thread_id="thread-live",
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=events_path,
+            )
+            response = self.client.get(
+                reverse("session_stream", kwargs={"session_id": "thread-live"})
+            )
+            # Flip the row terminal before iterating so the generator's
+            # _is_done() check exits the read loop cleanly.
+            instance.status = CodexInstance.STATUS_COMPLETED
+            instance.save(update_fields=["status"])
+            body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
+
+        self.assertIn(b"item/started", body)
+        self.assertIn(b'"status": "completed"', body)

@@ -498,6 +498,48 @@
         }
         .empty-thread p { margin: 0; }
 
+        .live-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.45rem;
+            margin: 0.5rem 0 0;
+            padding: 0.35rem 0.65rem;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            font-size: 0.78rem;
+            color: var(--text-muted);
+            font-weight: 500;
+        }
+        .live-status::before {
+            content: "";
+            width: 0.55rem;
+            height: 0.55rem;
+            border-radius: 50%;
+            background: var(--accent);
+            box-shadow: 0 0 0 0 var(--accent-soft);
+            animation: live-pulse 1.6s ease-out infinite;
+        }
+        @keyframes live-pulse {
+            0% { box-shadow: 0 0 0 0 var(--accent-soft); }
+            70% { box-shadow: 0 0 0 8px transparent; }
+            100% { box-shadow: 0 0 0 0 transparent; }
+        }
+        .message.pending {
+            opacity: 0.85;
+        }
+        .message.streaming::after {
+            content: "▍";
+            display: inline-block;
+            color: var(--accent);
+            animation: caret-blink 1s steps(2) infinite;
+            margin-left: 0.05em;
+        }
+        @keyframes caret-blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0; }
+        }
+
         @media (max-width: 480px) {
             main { padding: 0.85rem 0.85rem 1.5rem; }
             .message { padding: 0.7rem 0.85rem; border-radius: 12px; }
@@ -538,8 +580,8 @@
             </p>
         </div>
 
-        {% if entries %}
-        <section class="thread">
+        {% if entries or pending_user_prompt or active_worker %}
+        <section class="thread" data-thread>
             {% for entry in entries %}
                 {% if entry.kind == "intermediate" %}
                 <details class="intermediate">
@@ -550,6 +592,19 @@
                 </details>
                 {% else %}{% include "_session_entry.html" with entry=entry %}{% endif %}
             {% endfor %}
+            {% if pending_user_prompt %}
+            <div class="entry" data-pending-user>
+                <div class="entry-header"><span class="role">User</span></div>
+                <div class="message user pending">
+                    <div class="body">{{ pending_user_prompt }}</div>
+                </div>
+            </div>
+            {% endif %}
+            {% if active_worker %}
+            <div class="entry" data-live-root data-stream-url="{{ stream_url }}">
+                <div class="live-status" data-live-status>Codex is working…</div>
+            </div>
+            {% endif %}
         </section>
         {% else %}
         <div class="empty-thread">
@@ -622,5 +677,239 @@
             }
         })();
     </script>
+
+    {% if active_worker %}
+    <script>
+        // Subscribe to the worker's SSE feed and progressively render items.
+        //
+        // We intentionally only render the parts that change visibly during a
+        // turn (agent message deltas + per-item status updates for tool
+        // calls); when the stream ends we reload the page so the canonical
+        // rollout-based render replaces our scratch UI in one step. That
+        // keeps the streaming layer thin and avoids re-implementing the
+        // collapsing/markdown rules the server already applies.
+        (function () {
+            const liveRoot = document.querySelector("[data-live-root]");
+            const liveStatus = document.querySelector("[data-live-status]");
+            if (!liveRoot) return;
+            const streamUrl = liveRoot.dataset.streamUrl;
+            if (!streamUrl) return;
+            const empty = document.querySelector(".empty-thread");
+
+            // Per-item DOM trackers. Items are keyed by the server-assigned
+            // item id; for agent messages we keep a reference to the body
+            // node so deltas append directly.
+            const items = new Map();
+            // The pending-user bubble is replaced once the server-side
+            // user message arrives via the stream, so it doesn't end up
+            // double-rendered with the canonical reload.
+            const pendingUser = document.querySelector("[data-pending-user]");
+
+            const TOOL_LABELS = {
+                commandExecution: "Command",
+                mcpToolCall: "MCP tool call",
+                dynamicToolCall: "Tool call",
+                fileChange: "File change",
+                webSearch: "Web search",
+                collabAgentToolCall: "Collab agent call",
+                imageView: "Image view",
+                imageGeneration: "Image generation",
+                reasoning: "Reasoning",
+                plan: "Plan",
+                hookPrompt: "Hook prompt",
+                enteredReviewMode: "Entered review mode",
+                exitedReviewMode: "Exited review mode",
+                contextCompaction: "Context compaction",
+            };
+
+            function ensureNoEmpty() {
+                if (empty && empty.parentNode) empty.remove();
+            }
+
+            function insertBeforeLive(node) {
+                liveRoot.parentNode.insertBefore(node, liveRoot);
+            }
+
+            function renderUserItem(item) {
+                if (pendingUser && pendingUser.parentNode) pendingUser.remove();
+                const wrap = document.createElement("div");
+                wrap.className = "entry";
+                wrap.dataset.itemId = item.id;
+                const header = document.createElement("div");
+                header.className = "entry-header";
+                const role = document.createElement("span");
+                role.className = "role";
+                role.textContent = "User";
+                header.appendChild(role);
+                const msg = document.createElement("div");
+                msg.className = "message user";
+                const body = document.createElement("div");
+                body.className = "body";
+                body.textContent = userMessageText(item);
+                msg.appendChild(body);
+                wrap.appendChild(header);
+                wrap.appendChild(msg);
+                insertBeforeLive(wrap);
+                items.set(item.id, { kind: "user", node: wrap });
+            }
+
+            function userMessageText(item) {
+                const parts = [];
+                for (const wrapped of item.content || []) {
+                    const inner = wrapped || {};
+                    switch (inner.type) {
+                        case "text": parts.push(inner.text || ""); break;
+                        case "mention": parts.push("@" + (inner.name || "")); break;
+                        case "skill": parts.push("/" + (inner.name || "")); break;
+                        case "image": parts.push("[image]"); break;
+                        case "localImage": parts.push("[image: " + (inner.path || "") + "]"); break;
+                    }
+                }
+                return parts.join("\n");
+            }
+
+            function renderAgentItem(item) {
+                const wrap = document.createElement("div");
+                wrap.className = "entry";
+                wrap.dataset.itemId = item.id;
+                const header = document.createElement("div");
+                header.className = "entry-header";
+                const role = document.createElement("span");
+                role.className = "role";
+                role.textContent = "Agent";
+                header.appendChild(role);
+                const msg = document.createElement("div");
+                msg.className = "message agent streaming";
+                const body = document.createElement("div");
+                body.className = "body";
+                body.textContent = item.text || "";
+                msg.appendChild(body);
+                wrap.appendChild(header);
+                wrap.appendChild(msg);
+                insertBeforeLive(wrap);
+                items.set(item.id, { kind: "agent", node: wrap, body, message: msg });
+            }
+
+            function renderToolCallItem(item) {
+                const wrap = document.createElement("div");
+                wrap.className = "entry";
+                wrap.dataset.itemId = item.id;
+                const row = document.createElement("div");
+                row.className = "tool-call";
+                const label = document.createElement("span");
+                label.className = "label";
+                label.textContent = TOOL_LABELS[item.type] || item.type;
+                row.appendChild(label);
+                const detail = document.createElement("span");
+                detail.className = "detail";
+                detail.textContent = toolDetail(item);
+                row.appendChild(detail);
+                const status = document.createElement("span");
+                status.className = "status inProgress";
+                status.textContent = "inProgress";
+                row.appendChild(status);
+                wrap.appendChild(row);
+                insertBeforeLive(wrap);
+                items.set(item.id, { kind: "tool", node: wrap, statusNode: status, detail });
+            }
+
+            function toolDetail(item) {
+                switch (item.type) {
+                    case "commandExecution": return item.command || "";
+                    case "mcpToolCall": return (item.server || "") + " / " + (item.tool || "");
+                    case "fileChange":
+                        const paths = (item.changes || []).map((c) => c.path).filter(Boolean);
+                        if (!paths.length) return "";
+                        return paths.length === 1 ? paths[0] : paths[0] + " (+" + (paths.length - 1) + " more)";
+                    case "webSearch": return item.query || "";
+                    case "plan": return (item.text || "").split("\n", 1)[0];
+                    case "imageView": return item.path || "";
+                    case "imageGeneration": return item.revisedPrompt || item.savedPath || "";
+                    default: return "";
+                }
+            }
+
+            function handleItemStarted(payload) {
+                ensureNoEmpty();
+                const item = payload.item || {};
+                if (!item.id || items.has(item.id)) return;
+                switch (item.type) {
+                    case "userMessage": renderUserItem(item); break;
+                    case "agentMessage": renderAgentItem(item); break;
+                    default: renderToolCallItem(item); break;
+                }
+            }
+
+            function handleAgentDelta(payload) {
+                const entry = items.get(payload.itemId);
+                if (!entry || entry.kind !== "agent") return;
+                entry.body.textContent += payload.delta || "";
+            }
+
+            function handleItemCompleted(payload) {
+                const item = payload.item || {};
+                const entry = items.get(item.id);
+                if (!entry) {
+                    // Item that completed without a prior started event —
+                    // render now so the user still sees it.
+                    handleItemStarted({ item });
+                    return handleItemCompleted(payload);
+                }
+                if (entry.kind === "agent" && item.type === "agentMessage") {
+                    entry.body.textContent = item.text || entry.body.textContent;
+                    entry.message.classList.remove("streaming");
+                    if (item.phase === "commentary") {
+                        entry.message.classList.remove("agent");
+                        entry.message.classList.add("thinking");
+                        const role = entry.node.querySelector(".role");
+                        if (role) role.textContent = "Agent (thinking)";
+                    }
+                    return;
+                }
+                if (entry.kind === "tool" && entry.statusNode) {
+                    const status = readStatus(item);
+                    entry.statusNode.classList.remove("inProgress");
+                    if (status && status !== "completed") {
+                        entry.statusNode.classList.add(status);
+                        entry.statusNode.textContent = status;
+                    } else {
+                        entry.statusNode.remove();
+                        entry.statusNode = null;
+                    }
+                    const detail = toolDetail(item);
+                    if (detail && entry.detail) entry.detail.textContent = detail;
+                }
+            }
+
+            function readStatus(item) {
+                if (typeof item.status === "string") return item.status;
+                if (item.status && typeof item.status === "object" && item.status.value) return item.status.value;
+                return null;
+            }
+
+            const source = new EventSource(streamUrl);
+            source.addEventListener("message", (event) => {
+                let parsed;
+                try { parsed = JSON.parse(event.data); } catch { return; }
+                const method = parsed.method;
+                const payload = parsed.payload || {};
+                switch (method) {
+                    case "item/started": handleItemStarted(payload); break;
+                    case "item/agentMessage/delta": handleAgentDelta(payload); break;
+                    case "item/completed": handleItemCompleted(payload); break;
+                }
+            });
+            source.addEventListener("end", () => {
+                source.close();
+                // Reload so the rollout-based render replaces the live DOM
+                // (markdown rendering, intermediate collapsing, etc.).
+                window.location.reload();
+            });
+            source.addEventListener("error", () => {
+                if (liveStatus) liveStatus.textContent = "Reconnecting…";
+            });
+        })();
+    </script>
+    {% endif %}
 </body>
 </html>

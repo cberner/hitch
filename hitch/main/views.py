@@ -4,7 +4,12 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from django.http import HttpRequest, HttpResponse, HttpResponseBadRequest
+from django.http import (
+    HttpRequest,
+    HttpResponse,
+    HttpResponseBadRequest,
+    StreamingHttpResponse,
+)
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views.decorators.http import require_http_methods
@@ -15,8 +20,9 @@ from openai_codex.generated.v2_all import (
     ReasoningEffort,
 )
 
-from hitch.main import codex_pool, rollout
+from hitch.main import codex_pool, rollout, streaming
 from hitch.main.formatting import looks_like_markdown, render_markdown
+from hitch.main.models import CodexInstance
 from hitch.main.repos import discover_repos
 
 logger = logging.getLogger(__name__)
@@ -138,6 +144,10 @@ def index(request: HttpRequest) -> HttpResponse:
 
 
 def session(request: HttpRequest, session_id: str) -> HttpResponse:
+    # Sweep stuck workers before reading status: a worker that died without
+    # writing a terminal status would otherwise leave the page in "streaming"
+    # mode forever, since the EventSource wouldn't reach an end event.
+    codex_pool.reconcile_dead()
     config = AppServerConfig(codex_bin=shutil.which("codex"))
     with Codex(config=config) as codex:
         # ``thread/read`` only works for threads already loaded into the
@@ -149,6 +159,13 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
         thread = codex._client.thread_resume(session_id).thread
     entries = list(_entries_for(thread))
     name_value = getattr(thread, "name", None) or ""
+    active_instance = _active_instance_for(session_id)
+    # While a worker is running, drop the entries that belong to its
+    # in-progress turn — the SSE stream replays them from byte 0 of the
+    # events file, so leaving the rollout-rendered copy in place would
+    # double up every entry in the live DOM. The page reload on stream end
+    # restores the canonical view.
+    entries = _trim_in_progress_turn(entries, active_instance)
     return render(
         request,
         "session.html",
@@ -160,8 +177,90 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             "name_max_len": _NAME_MAX_LEN,
             "set_name_url": reverse("set_session_name", kwargs={"session_id": session_id}),
             "send_message_url": reverse("send_message", kwargs={"session_id": session_id}),
+            "stream_url": reverse("session_stream", kwargs={"session_id": session_id}),
+            "active_worker": active_instance is not None,
+            # The in-progress turn is trimmed from ``entries`` above, so the
+            # user wouldn't see their own message at all without a pending
+            # bubble while the stream catches up.
+            "pending_user_prompt": _pending_user_prompt(active_instance),
         },
     )
+
+
+def _active_instance_for(session_id: str) -> CodexInstance | None:
+    """Return the latest *active* CodexInstance for ``session_id``, or None.
+
+    Selecting on status first (rather than picking the newest row and
+    checking its status) means a quickly-terminal newer row doesn't mask
+    an older worker that's still mid-turn — ``send_message`` can stack
+    workers, so the page must stay in streaming mode as long as any one
+    of them is alive.
+    """
+    return codex_pool.latest_active_for_thread(session_id)
+
+
+def _trim_in_progress_turn(
+    entries: list[dict[str, Any]], active: CodexInstance | None
+) -> list[dict[str, Any]]:
+    """Drop the in-progress turn's entries from the tail of ``entries``.
+
+    The SSE stream re-emits every event from the start of the worker's
+    events file, including the user message and any agent / tool items
+    the rollout has already captured. Without this trim those entries
+    render twice on the live page — once from the server-side rollout
+    pass, once by the streaming JS that can't dedupe against DOM nodes
+    it didn't create.
+
+    The in-progress turn is identified by the most recent user-message
+    entry whose text matches the active worker's prompt; anything from
+    that point onward is owned by the stream until the turn ends.
+    """
+    if active is None or not active.prompt:
+        return entries
+    for i in range(len(entries) - 1, -1, -1):
+        entry = entries[i]
+        if entry.get("kind") == "user" and entry.get("text") == active.prompt:
+            return entries[:i]
+    return entries
+
+
+def _pending_user_prompt(active: CodexInstance | None) -> str:
+    """Surface the active worker's prompt as a pending user bubble.
+
+    Pairs with ``_trim_in_progress_turn``: that helper strips the
+    in-progress turn from the rollout-rendered entries (so the stream
+    owns rendering it), which means the user wouldn't see their own
+    message at all between Send and the first stream event without this
+    placeholder. The streaming JS removes the bubble as soon as the
+    real ``userMessage`` event lands.
+    """
+    if active is None or not active.prompt:
+        return ""
+    return active.prompt
+
+
+@require_http_methods(["GET"])
+def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpResponse:
+    """SSE endpoint that mirrors the active worker's events file to the browser.
+
+    Returns immediately with an ``end`` event when no worker is active for the
+    given session, so the client can rely on the response shape regardless of
+    whether a turn is in progress.
+    """
+    active = _active_instance_for(session_id)
+    if active is None:
+        response = StreamingHttpResponse(
+            streaming.empty_stream(), content_type="text/event-stream"
+        )
+    else:
+        response = StreamingHttpResponse(
+            streaming.stream_for_instance(active), content_type="text/event-stream"
+        )
+    # Discourage proxies from buffering: SSE depends on every frame reaching
+    # the client immediately, not coalesced into a single response body.
+    response["Cache-Control"] = "no-cache"
+    response["X-Accel-Buffering"] = "no"
+    return response
 
 
 def _display_title(thread: Any) -> str:

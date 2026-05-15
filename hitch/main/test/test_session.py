@@ -1,5 +1,7 @@
 import json
+import os
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -8,7 +10,13 @@ from django.http import HttpResponse
 from django.test import Client, TestCase
 from django.urls import reverse
 
+from hitch.main.models import CodexInstance
 from hitch.main.views import _tool_call_detail, _tool_call_status
+
+# Used for active-worker rendering tests so the session view's
+# ``reconcile_dead`` sweep doesn't mark the row failed before the assertions
+# run; the current process pid is by definition alive.
+_LIVE_PID = os.getpid()
 
 
 def _root(item: SimpleNamespace) -> SimpleNamespace:
@@ -832,3 +840,165 @@ class ToolCallDetailTests(TestCase):
             _tool_call_status(SimpleNamespace(status=SimpleNamespace(value="failed"))),
             "failed",
         )
+
+
+def _make_codex_instance(**kwargs: object) -> CodexInstance:
+    """Helper used by the active-worker session view tests."""
+    defaults: dict[str, object] = {
+        "pid": 0,
+        "thread_id": "thread-1",
+        "cwd": "/repo",
+        "prompt": "do work",
+        "events_path": "/tmp/some.jsonl",
+        "status": CodexInstance.STATUS_RUNNING,
+    }
+    defaults.update(kwargs)
+    return CodexInstance.objects.create(**defaults)
+
+
+class SessionViewActiveWorkerTests(TestCase):
+    """How the session detail view surfaces an in-progress turn: the
+    streaming UI guard, the pending user bubble, the in-progress turn
+    trim, and the dead-worker reconciliation sweep.
+    """
+
+    @patch("hitch.main.views.Codex")
+    def test_inactive_thread_does_not_emit_streaming_script(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # The streaming UI lives behind an ``active_worker`` template guard;
+        # without an active CodexInstance row the page must not open an
+        # EventSource (would just hold a Django thread for no reason).
+        _patch_thread(self, mock_codex, _thread([]))
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "data-live-root")
+        self.assertNotContains(response, "EventSource")
+
+    @patch("hitch.main.views.Codex")
+    def test_active_worker_renders_live_section_and_stream_url(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _patch_thread(self, mock_codex, _thread([]))
+        _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_RUNNING,
+            prompt="please refactor",
+            pid=_LIVE_PID,
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "data-live-root")
+        self.assertContains(
+            response, reverse("session_stream", kwargs={"session_id": "thread-1"})
+        )
+        # The pending user message is surfaced as a regular user bubble so
+        # the user sees their own prompt immediately, even before the
+        # worker's user_message event reaches the rollout.
+        self.assertContains(response, "please refactor")
+        self.assertContains(response, "data-pending-user>")
+
+    @patch("hitch.main.views.Codex")
+    def test_in_progress_turn_is_trimmed_when_worker_active(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # The rollout may already have the in-progress turn's user (and
+        # possibly some early agent commentary) by the time the session
+        # page loads. The view must hide that range from the rollout-
+        # rendered entries so the SSE stream — which replays from byte 0
+        # of the events file — doesn't render every item twice.
+        prior_user = _user_message("earlier")
+        prior_agent = _agent_message("earlier reply")
+        in_progress_user = _user_message("run tests")
+        partial_agent = _agent_message("working on it")
+        thread = _thread(
+            [
+                _turn([prior_user, prior_agent], started_at=1700000000),
+                _turn([in_progress_user, partial_agent], started_at=1700000100),
+            ]
+        )
+        _patch_thread(self, mock_codex, thread)
+        _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_RUNNING,
+            prompt="run tests",
+            pid=_LIVE_PID,
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode()
+        # The earlier (completed) turn is still rendered server-side.
+        self.assertIn("earlier", body)
+        self.assertIn("earlier reply", body)
+        # The in-progress turn's content is *not* server-rendered. The
+        # stream owns that range; the pending bubble covers the user's
+        # message until the userMessage event arrives.
+        self.assertNotIn("working on it", body)
+        self.assertContains(response, "data-pending-user>")
+        self.assertContains(response, "run tests")
+        self.assertContains(response, "data-live-root")
+
+    @patch("hitch.main.views.Codex")
+    def test_active_worker_picked_over_newer_terminal_row(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # ``send_message`` can stack workers: a newer row may flip to
+        # FAILED quickly while an older row is still RUNNING. The session
+        # must stay in streaming mode until *all* workers are terminal.
+        _patch_thread(self, mock_codex, _thread([]))
+        older = _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_RUNNING,
+            prompt="still running",
+            pid=_LIVE_PID,
+        )
+        newer = _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_FAILED,
+            prompt="bailed fast",
+            pid=_LIVE_PID,
+        )
+        # Force a strictly later started_at on the newer terminal row so
+        # ``latest_for_thread`` would return it; the active-aware helper
+        # must skip past it.
+        CodexInstance.objects.filter(pk=newer.pk).update(
+            started_at=older.started_at + timedelta(seconds=1)
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "data-live-root")
+        # The pending bubble carries the still-running worker's prompt,
+        # not the bailed one — proves we picked the active row.
+        self.assertContains(response, "still running")
+        self.assertNotContains(response, "bailed fast")
+
+    @patch("hitch.main.views.codex_pool.is_alive", return_value=False)
+    @patch("hitch.main.views.Codex")
+    def test_dead_worker_is_reconciled_before_render(
+        self, mock_codex: MagicMock, _mock_alive: MagicMock
+    ) -> None:
+        # A worker that died without writing a terminal status would leave
+        # the page in "streaming" mode permanently. The session view
+        # sweeps such rows before reading status so the live UI doesn't
+        # appear.
+        _patch_thread(self, mock_codex, _thread([]))
+        instance = _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_RUNNING,
+            pid=99999999,
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "data-live-root")
