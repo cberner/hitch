@@ -23,7 +23,7 @@ def _model(
     display_name: str | None = None,
     supported_efforts: list[str] | None = None,
 ) -> SimpleNamespace:
-    """Build a minimal Model stand-in shaped like ``openai_codex...Model``.
+    """Minimal Model stand-in shaped like ``openai_codex...Model``.
 
     Only the fields the reconcile helper, the template, and the
     update-settings validator touch are populated so a future regression
@@ -54,29 +54,19 @@ def _configure_codex(
     ctx.models.return_value.data = models
 
 
-def _sign(name: str, value: str) -> str:
-    """Mint the cookie value Django's ``set_signed_cookie`` would emit.
-
-    Used to pre-seed the test client's cookie jar without going through
-    the application's POST handler — equivalent to ``set_signed_cookie``
-    inside-out.
-    """
-    return signing.get_cookie_signer(salt=name).sign(value)
-
-
-def _unsign(name: str, signed: str) -> str:
-    return signing.get_cookie_signer(salt=name).unsign(signed)
+def _signer(name: str) -> signing.Signer:
+    return signing.get_cookie_signer(salt=name)
 
 
 def _seed_cookies(client: Client, **values: str) -> None:
     for name, value in values.items():
-        client.cookies[name] = _sign(name, value)
+        client.cookies[name] = _signer(name).sign(value)
 
 
 def _cookie_value(response: object, name: str) -> str:
     """Pull a signed cookie's plaintext value out of a TestClient response."""
     raw = response.cookies[name].value  # type: ignore[attr-defined]
-    return _unsign(name, raw)
+    return _signer(name).unsign(raw)
 
 
 class SettingsDialogRenderTests(TestCase):
@@ -160,8 +150,8 @@ class ReconcileSettingsTests(TestCase):
         response = self.client.get(reverse("index"))
 
         # Defaults are written back to the browser so the next request has
-        # them in hand — this is the "reset on server start based on what
-        # Codex provides" behavior, now expressed through signed cookies.
+        # them in hand — the "reset on server start based on what Codex
+        # provides" behavior expressed through signed cookies.
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
         self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "high")
 
@@ -189,7 +179,7 @@ class ReconcileSettingsTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_preserves_settings_when_model_still_available(
+    def test_preserves_settings_when_still_valid(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _seed_cookies(
@@ -209,7 +199,6 @@ class ReconcileSettingsTests(TestCase):
         # Saved values are still valid → no Set-Cookie on this response.
         self.assertNotIn(_MODEL_COOKIE, response.cookies)
         self.assertNotIn(_EFFORT_COOKIE, response.cookies)
-        # And the template still shows the user's pick.
         self.assertContains(response, 'value="gpt-5"')
         self.assertContains(response, 'value="low" selected')
 
@@ -289,6 +278,9 @@ class UpdateSettingsViewTests(TestCase):
     def test_saves_model_and_effort_to_signed_cookies(
         self, mock_codex: MagicMock
     ) -> None:
+        """A valid POST persists the model and effort to signed cookies,
+        redirects back to the index, and uses cookie attributes that
+        outlive a session and survive cross-page form submits (Lax)."""
         _configure_codex(
             mock_codex,
             models=[
@@ -304,94 +296,19 @@ class UpdateSettingsViewTests(TestCase):
         self.assertEqual(response.headers["Location"], reverse("index"))
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
         self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "high")
-
-    @patch("hitch.main.views.Codex")
-    def test_cookie_has_long_lifetime_and_lax_samesite(
-        self, mock_codex: MagicMock
-    ) -> None:
-        """The cookie must outlive a typical session (so picks stick) and
-        use Lax SameSite (so the dialog form POST works while still
-        blocking cross-site abuse)."""
-        _configure_codex(
-            mock_codex,
-            models=[_model("gpt-5", is_default=True)],
-        )
-        response = self.client.post(
-            reverse("update_settings"),
-            data={"model": "gpt-5", "reasoning_effort": "high"},
-        )
-
         morsel = response.cookies[_MODEL_COOKIE]
         self.assertGreaterEqual(int(morsel["max-age"]), 30 * 24 * 60 * 60)
         self.assertEqual(morsel["samesite"], "Lax")
 
-    def test_rejects_unknown_reasoning_effort(self) -> None:
-        _seed_cookies(self.client, **{_EFFORT_COOKIE: "low"})
-        response = self.client.post(
-            reverse("update_settings"),
-            data={"model": "gpt-5", "reasoning_effort": "ludicrous"},
-        )
-
-        self.assertEqual(response.status_code, 400)
-        # A bad input must not stomp the previously-saved cookie.
-        self.assertNotIn(_EFFORT_COOKIE, response.cookies)
-
-    def test_rejects_oversized_model_value(self) -> None:
-        """A crafted huge model value would push the cookie past the
-        browser's 4KB limit and cause it to be silently dropped; reject
-        it here so the cookie never grows out of bounds in the first
-        place."""
-        response = self.client.post(
-            reverse("update_settings"),
-            data={"model": "x" * 1024, "reasoning_effort": "medium"},
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertNotIn(_MODEL_COOKIE, response.cookies)
-
     @patch("hitch.main.views.Codex")
-    def test_rejects_unknown_model_id(self, mock_codex: MagicMock) -> None:
-        """A POST that smuggles in a model id Codex doesn't offer must be
-        rejected at save time so it can't reach ``thread_start`` and 500
-        the next new-session click."""
-        _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
-        response = self.client.post(
-            reverse("update_settings"),
-            data={"model": "phantom-model", "reasoning_effort": "medium"},
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertNotIn(_MODEL_COOKIE, response.cookies)
-
-    @patch("hitch.main.views.Codex")
-    def test_rejects_effort_not_supported_by_chosen_model(
-        self, mock_codex: MagicMock
-    ) -> None:
-        """The full ReasoningEffort enum is wider than any single model's
-        supported set; saving an incompatible combo must be blocked so
-        every subsequent turn doesn't fail at runtime."""
-        _configure_codex(
-            mock_codex,
-            models=[
-                _model("gpt-5", is_default=True, supported_efforts=["low", "medium"])
-            ],
-        )
-        response = self.client.post(
-            reverse("update_settings"),
-            data={"model": "gpt-5", "reasoning_effort": "xhigh"},
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertNotIn(_EFFORT_COOKIE, response.cookies)
-
-    @patch("hitch.main.views.Codex")
-    def test_rejects_effort_unsupported_by_default_when_model_omitted(
-        self, mock_codex: MagicMock
-    ) -> None:
-        """When the POST omits the model, ``new_session`` will fall back to
-        whatever Codex's default model is — so the validator has to check
-        the posted effort against that default model's supported list, not
-        skip the check just because the model field was blank."""
+    def test_rejects_invalid_combinations(self, mock_codex: MagicMock) -> None:
+        """Validator boundary cases: bad effort enum, oversized model value
+        (would exceed the 4KB browser cookie cap and silently drop), unknown
+        model id (would 500 ``thread_start``), effort not supported by the
+        chosen model, and — when no model is posted — effort not supported
+        by the default model the spawn helper will fall back to. All must
+        return 400 without writing a cookie, so a previously-saved cookie
+        survives."""
         _configure_codex(
             mock_codex,
             models=[
@@ -404,13 +321,21 @@ class UpdateSettingsViewTests(TestCase):
                 _model("other"),
             ],
         )
-        response = self.client.post(
-            reverse("update_settings"),
-            data={"model": "", "reasoning_effort": "xhigh"},
-        )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertNotIn(_EFFORT_COOKIE, response.cookies)
+        cases = [
+            ({"model": "gpt-5", "reasoning_effort": "ludicrous"}, "bad effort enum"),
+            ({"model": "x" * 1024, "reasoning_effort": "medium"}, "oversized model"),
+            ({"model": "phantom-model", "reasoning_effort": "medium"}, "unknown model"),
+            ({"model": "gpt-5", "reasoning_effort": "xhigh"}, "effort unsupported by model"),
+            ({"model": "", "reasoning_effort": "xhigh"}, "effort unsupported by default"),
+        ]
+        for data, label in cases:
+            with self.subTest(label=label):
+                _seed_cookies(self.client, **{_EFFORT_COOKIE: "low"})
+                response = self.client.post(reverse("update_settings"), data=data)
+                self.assertEqual(response.status_code, 400)
+                self.assertNotIn(_MODEL_COOKIE, response.cookies)
+                self.assertNotIn(_EFFORT_COOKIE, response.cookies)
 
     @patch("hitch.main.views.Codex")
     def test_accepts_anything_when_codex_offers_no_models(

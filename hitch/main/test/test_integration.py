@@ -1,6 +1,15 @@
+"""End-to-end coverage against a real `codex app-server` subprocess.
+
+Requires the `codex` binary on PATH plus a local ollama instance with
+`qwen2.5-coder:0.5b` pulled; CI installs both. Tests run with a fresh
+CODEX_HOME so the listing and rollout state are deterministic.
+"""
+
 import os
 import shutil
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from unittest.mock import patch
 
 from django.test import TestCase, tag
@@ -10,15 +19,36 @@ from openai_codex import AppServerConfig, Codex
 from hitch.main import codex_pool
 
 
-@tag("integration")
-class SessionViewIntegrationTests(TestCase):
-    """End-to-end coverage of the session detail view against a real
-    `codex app-server` subprocess.
+@contextmanager
+def _fresh_codex_home() -> Iterator[None]:
+    with (
+        tempfile.TemporaryDirectory(prefix="codex-test-") as codex_home,
+        patch.dict(os.environ, {"CODEX_HOME": codex_home}),
+    ):
+        yield
 
-    Requires the `codex` binary on PATH plus a local ollama instance with
-    `qwen2.5-coder:0.5b` pulled; CI installs both. Tests run with a fresh
-    CODEX_HOME so the listing and rollout state are deterministic.
-    """
+
+def _start_codex() -> Codex:
+    return Codex(config=AppServerConfig(codex_bin=shutil.which("codex")))
+
+
+@tag("integration")
+class CodexIntegrationTests(TestCase):
+    def test_index_renders_empty_session_list(self) -> None:
+        with _fresh_codex_home():
+            response = self.client.get(reverse("index"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "No sessions found.")
+
+    def test_sdk_runs_turn_via_ollama(self) -> None:
+        with _fresh_codex_home(), _start_codex() as codex:
+            thread = codex.thread_start(
+                model="qwen2.5-coder:0.5b",
+                model_provider="ollama",
+            )
+            result = thread.run("Hi")
+        assert result.final_response is not None
+        self.assertGreater(len(result.final_response), 0)
 
     def test_session_view_loads_thread_persisted_to_disk(self) -> None:
         """Render the session page for a thread that lives only on disk.
@@ -29,17 +59,10 @@ class SessionViewIntegrationTests(TestCase):
         opened a *different* transient subprocess that had no thread in
         its in-memory map. ``thread/read`` requires a loaded thread, so the
         view has to call ``thread/resume`` (which reads the rollout off
-        disk) before it can render the page. This test creates the thread
-        in one Codex context, runs a turn through ollama, exits the
-        context, and then asks the view to render the result — the GET
-        only succeeds when the view loads the thread from disk.
+        disk) before it can render the page.
         """
-        with (
-            tempfile.TemporaryDirectory(prefix="codex-test-") as codex_home,
-            patch.dict(os.environ, {"CODEX_HOME": codex_home}),
-        ):
-            config = AppServerConfig(codex_bin=shutil.which("codex"))
-            with Codex(config=config) as codex:
+        with _fresh_codex_home():
+            with _start_codex() as codex:
                 thread = codex.thread_start(
                     model="qwen2.5-coder:0.5b",
                     model_provider="ollama",
@@ -59,18 +82,15 @@ class SessionViewIntegrationTests(TestCase):
     def test_session_view_loads_thread_before_any_turn_runs(self) -> None:
         """Render the session page immediately after thread/start, no turn.
 
-        This is the exact race the "new session" flow hits: ``new_session``
-        starts the thread and redirects to ``/sessions/<id>/`` before the
-        detached worker has had a chance to submit any prompt. ``thread/start``
-        on its own defers rollout materialisation, so an in-process
-        ``thread/resume`` from the session view's *next* Codex subprocess
-        fails with "no rollout found for thread id" unless the new-session
-        flow has forced the rollout file to be written. Verifies that the
-        codex_pool wires up that materialisation step on every spawn.
+        ``thread/start`` on its own defers rollout materialisation, so an
+        in-process ``thread/resume`` from the session view's *next* Codex
+        subprocess fails with "no rollout found for thread id" unless the
+        new-session flow has forced the rollout file to be written.
+        Verifies that codex_pool wires up that materialisation step on
+        every spawn.
         """
         with (
-            tempfile.TemporaryDirectory(prefix="codex-test-") as codex_home,
-            patch.dict(os.environ, {"CODEX_HOME": codex_home}),
+            _fresh_codex_home(),
             patch(
                 "hitch.main.codex_pool._launch_worker_process",
                 return_value=type("_Stub", (), {"pid": 1})(),
