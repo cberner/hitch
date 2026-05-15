@@ -14,13 +14,17 @@ from unittest.mock import MagicMock, patch
 
 from django.core.management import call_command
 from django.test import TestCase, override_settings
+from openai_codex import ApprovalMode
 from openai_codex.generated.v2_all import (
+    ApprovalsReviewer,
+    AskForApprovalValue,
     DangerFullAccessSandboxPolicy,
     ReasoningEffort,
     SandboxPolicy,
     Turn,
     TurnCompletedNotification,
     TurnError,
+    TurnStartParams,
     TurnStatus,
     WorkspaceWriteSandboxPolicy,
 )
@@ -98,10 +102,14 @@ class SpawnNewSessionTests(TestCase):
         # ``thread/start`` so the in-memory thread is still loaded.
         codex._client.thread_set_name.assert_called_once_with("thread-abc", "hi")
         # Worker subprocess only receives the row id and (when set) the
-        # reasoning effort and sandbox policy; the prompt is read from the
-        # row to avoid argparse misinterpreting prompts that begin with '-'.
+        # reasoning effort, sandbox policy, and approval mode; the prompt is
+        # read from the row to avoid argparse misinterpreting prompts that
+        # begin with '-'.
         mock_launch.assert_called_once_with(
-            instance_id=instance.pk, reasoning_effort=None, sandbox_policy=None
+            instance_id=instance.pk,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode=None,
         )
 
     @patch("hitch.main.codex_pool._launch_worker_process")
@@ -133,13 +141,13 @@ class SpawnNewSessionTests(TestCase):
 
     @patch("hitch.main.codex_pool._launch_worker_process")
     @patch("hitch.main.codex_pool.Codex")
-    def test_forwards_model_effort_and_sandbox(
+    def test_forwards_model_effort_sandbox_and_approval(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
         """The settings dialog's model selector flows into
-        ``thread_start(model=...)``; the effort and sandbox policy flow into
-        the worker as CLI args. Pin every wiring so a refactor can't quietly
-        drop one of them.
+        ``thread_start(model=...)``; effort, sandbox policy and approval
+        mode flow into the worker as CLI args. Pin every wiring so a
+        refactor can't quietly drop one of them.
         """
         codex = _stub_codex_thread_start(mock_codex)
         mock_launch.return_value = SimpleNamespace(pid=1)
@@ -154,6 +162,7 @@ class SpawnNewSessionTests(TestCase):
                 model="gpt-5",
                 reasoning_effort="high",
                 sandbox_policy="workspaceWrite",
+                approval_mode="deny_all",
             )
 
         codex.thread_start.assert_called_once_with(cwd="/repo", model="gpt-5")
@@ -161,6 +170,7 @@ class SpawnNewSessionTests(TestCase):
             instance_id=instance.pk,
             reasoning_effort="high",
             sandbox_policy="workspaceWrite",
+            approval_mode="deny_all",
         )
 
 
@@ -209,7 +219,10 @@ class SpawnTurnTests(TestCase):
         self.assertEqual(instance.prompt, "follow-up")
         self.assertEqual(instance.pid, 1234)
         mock_launch.assert_called_once_with(
-            instance_id=instance.pk, reasoning_effort=None, sandbox_policy=None
+            instance_id=instance.pk,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode=None,
         )
 
 
@@ -270,6 +283,16 @@ class LaunchWorkerProcessTests(TestCase):
         self.assertEqual(
             argv[argv.index("--sandbox-policy") + 1], "workspaceWrite"
         )
+
+    @patch("hitch.main.codex_pool.subprocess.Popen")
+    def test_forwards_approval_mode_as_cli_arg(self, mock_popen: MagicMock) -> None:
+        mock_popen.return_value = SimpleNamespace(pid=999)
+
+        codex_pool._launch_worker_process(instance_id=7, approval_mode="deny_all")
+
+        argv = mock_popen.call_args.args[0]
+        self.assertIn("--approval-mode", argv)
+        self.assertEqual(argv[argv.index("--approval-mode") + 1], "deny_all")
 
 
 class IsAliveTests(TestCase):
@@ -577,6 +600,101 @@ class CodexWorkerCommandTests(TestCase):
                     policy = captured.get("sandbox_policy")
                     assert isinstance(policy, SandboxPolicy)
                     self.assertIsInstance(policy.root, expected_variant)
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_approval_mode_cli_arg_round_trip(self, mock_codex: MagicMock) -> None:
+        """Approval mode rides in as a CLI arg just like sandbox policy. A
+        known value reaches ``turn(approval_mode=)`` as the matching enum
+        member; an unknown value (stale cookie after SDK upgrade) is
+        silently dropped so the turn runs under Codex's default rather
+        than crashing the worker."""
+        captured: dict[str, object] = {}
+
+        def _capture_turn(input_obj: object, **kwargs: object) -> object:
+            captured.update(kwargs)
+            return SimpleNamespace(
+                id="turn-1",
+                stream=lambda: iter([_completed_event("turn-1", TurnStatus.completed)]),
+            )
+
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.return_value = SimpleNamespace(turn=_capture_turn)
+
+        cases = [
+            ("deny_all", ApprovalMode.deny_all),
+            ("auto_review", ApprovalMode.auto_review),
+            ("phantom_mode", None),
+        ]
+        for cli_value, expected in cases:
+            with self.subTest(cli_value=cli_value):
+                captured.clear()
+                with tempfile.TemporaryDirectory() as raw:
+                    instance = self._make_instance(Path(raw))
+                    call_command(
+                        "codex_worker",
+                        "--instance-id",
+                        str(instance.pk),
+                        "--approval-mode",
+                        cli_value,
+                    )
+                if expected is None:
+                    self.assertNotIn("approval_mode", captured)
+                else:
+                    self.assertEqual(captured.get("approval_mode"), expected)
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_approve_all_bypasses_thread_turn(self, mock_codex: MagicMock) -> None:
+        """``approve_all`` is not in the SDK's ``ApprovalMode`` enum, so
+        the worker has to bypass ``Thread.turn(approval_mode=)`` and post
+        wire-level ``TurnStartParams`` directly: an on-request approval
+        policy paired with ``ApprovalsReviewer.user`` routes every
+        escalation to the client transport, where the default approval
+        handler rubber-stamps it. Pin the wire call so a refactor cannot
+        quietly downgrade the mode to one of the typed SDK values, or
+        drop the explicit reviewer (which would let server-side routing
+        send approvals to the auto-reviewer instead of the client)."""
+        captured_params: dict[str, object] = {}
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+
+        def _capture_turn_start(
+            _thread_id: str, _input: object, *, params: object
+        ) -> object:
+            captured_params["params"] = params
+            return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
+
+        codex_ctx._client.turn_start.side_effect = _capture_turn_start
+        codex_ctx._client.next_turn_notification.return_value = _completed_event(
+            "turn-1", TurnStatus.completed
+        )
+        codex_ctx.thread_resume.return_value = SimpleNamespace(
+            id="thread-1", turn=MagicMock()
+        )
+
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(Path(raw))
+            call_command(
+                "codex_worker",
+                "--instance-id",
+                str(instance.pk),
+                "--approval-mode",
+                "approve_all",
+            )
+
+        # ``Thread.turn`` (the typed SDK entry point) must NOT be used —
+        # otherwise the call routes through ``ApprovalMode`` and the
+        # rubber-stamp pairing is unreachable.
+        codex_ctx.thread_resume.return_value.turn.assert_not_called()
+        params = captured_params["params"]
+        assert isinstance(params, TurnStartParams)
+        # On-request approval policy + ``user`` reviewer means every
+        # escalation is routed to the client transport, where the
+        # default auto-approve handler answers it unconditionally.
+        # ``reviewer=None`` would defer to server-side routing and is
+        # NOT a safe substitute.
+        approval_policy = params.approval_policy
+        assert approval_policy is not None
+        self.assertEqual(approval_policy.root, AskForApprovalValue.on_request)
+        self.assertEqual(params.approvals_reviewer, ApprovalsReviewer.user)
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_marks_running_before_streaming(self, mock_codex: MagicMock) -> None:

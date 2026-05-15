@@ -10,6 +10,7 @@ from openai_codex.generated.v2_all import ReasoningEffort
 _MODEL_COOKIE = "hitch_model"
 _EFFORT_COOKIE = "hitch_reasoning_effort"
 _SANDBOX_COOKIE = "hitch_sandbox_policy"
+_APPROVAL_COOKIE = "hitch_approval_mode"
 
 # By default a test model accepts every enum value so tests that don't care
 # about supported-effort filtering can stay terse; tests that exercise the
@@ -155,6 +156,15 @@ class SettingsDialogRenderTests(TestCase):
         self.assertContains(response, 'value="readOnly"')
         self.assertContains(response, 'value="workspaceWrite"')
         self.assertContains(response, 'value="dangerFullAccess"')
+        # Approval mode dropdown: ``auto_review`` (safe default) is
+        # pre-selected when no cookie has been written; the stricter
+        # ``deny_all`` and the rubber-stamp ``approve_all`` (a custom
+        # non-SDK mode) are opt-in. No empty option — the worker
+        # always wants an explicit value.
+        self.assertContains(response, 'name="approval_mode"')
+        self.assertContains(response, 'value="auto_review" selected')
+        self.assertContains(response, 'value="deny_all"')
+        self.assertContains(response, 'value="approve_all"')
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -578,6 +588,89 @@ class UpdateSettingsViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(_cookie_value(response, _SANDBOX_COOKIE), "")
+
+
+class ApprovalModeSettingsTests(TestCase):
+    @patch("hitch.main.views.Codex")
+    def test_saves_approval_mode_to_signed_cookie(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
+        for mode in ("deny_all", "approve_all"):
+            with self.subTest(mode=mode):
+                response = self.client.post(
+                    reverse("update_settings"),
+                    data={
+                        "model": "gpt-5",
+                        "reasoning_effort": "high",
+                        "approval_mode": mode,
+                    },
+                )
+
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(_cookie_value(response, _APPROVAL_COOKIE), mode)
+
+    def test_rejects_unknown_approval_mode(self) -> None:
+        _seed_cookies(self.client, **{_APPROVAL_COOKIE: "deny_all"})
+        response = self.client.post(
+            reverse("update_settings"),
+            data={
+                "model": "",
+                "reasoning_effort": "",
+                "approval_mode": "evilMode",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        # Reject must not stomp the previously-saved choice.
+        self.assertNotIn(_APPROVAL_COOKIE, response.cookies)
+
+    def test_empty_approval_mode_snaps_to_safe_default(self) -> None:
+        """A form post without the approval dropdown (e.g. an older client,
+        a hand-crafted POST) must persist the safe default rather than an
+        empty value the worker can't interpret."""
+        response = self.client.post(
+            reverse("update_settings"),
+            data={"model": "", "reasoning_effort": "", "approval_mode": ""},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(_cookie_value(response, _APPROVAL_COOKIE), "auto_review")
+
+
+class ApprovalModeDialogTests(TestCase):
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_saved_approval_renders_as_selected(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        """A mode persisted in the cookie must come back marked selected
+        on the next render — otherwise the dropdown silently rolls back
+        to the safe default and the user assumes the pick was lost."""
+        _seed_cookies(self.client, **{_APPROVAL_COOKIE: "deny_all"})
+        _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, 'value="deny_all" selected')
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_unknown_approval_cookie_falls_back_to_safe_default(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        """A legacy/tampered cookie value must not render as a phantom
+        option; the dialog snaps back to the safe default so the user has
+        a coherent UI to recover from."""
+        _seed_cookies(self.client, **{_APPROVAL_COOKIE: "phantomMode"})
+        _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertNotContains(response, "phantomMode")
+        self.assertContains(response, 'value="auto_review" selected')
 
 
 class SandboxPolicyDialogTests(TestCase):

@@ -497,6 +497,14 @@
                     {% endfor %}
                 </select>
             </label>
+            <label>
+                Approval mode
+                <select name="approval_mode">
+                    {% for option in approval_options %}
+                    <option value="{{ option.id }}" {% if option.id == current_approval %}selected{% endif %}>{{ option.display_name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
             {% if rate_limits %}
             <section class="rate-limits" aria-labelledby="rate-limits-title">
                 <h3 class="rate-limits-title" id="rate-limits-title">

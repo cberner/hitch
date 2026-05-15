@@ -35,14 +35,15 @@ def spawn_new_session(
     model: str | None = None,
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
+    approval_mode: str | None = None,
 ) -> CodexInstance:
     """Create a fresh Codex thread and detach a worker to run the initial prompt.
 
-    ``model``, ``reasoning_effort`` and ``sandbox_policy`` come from the
-    settings cookies the request handler reads; ``None`` means "let Codex
-    apply its own default." The thread is created synchronously (so the
-    caller has an id to redirect to immediately); the prompt itself is run
-    by the detached worker.
+    ``model``, ``reasoning_effort``, ``sandbox_policy`` and ``approval_mode``
+    come from the settings cookies the request handler reads; ``None`` means
+    "let Codex apply its own default." The thread is created synchronously
+    (so the caller has an id to redirect to immediately); the prompt itself
+    is run by the detached worker.
     """
     config = AppServerConfig(codex_bin=_codex_bin())
     with Codex(config=config) as codex:
@@ -66,6 +67,7 @@ def spawn_new_session(
         prompt=prompt,
         reasoning_effort=reasoning_effort,
         sandbox_policy=sandbox_policy,
+        approval_mode=approval_mode,
     )
 
 
@@ -94,6 +96,7 @@ def spawn_turn(
     prompt: str,
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
+    approval_mode: str | None = None,
 ) -> CodexInstance:
     """Detach a worker that resumes an existing thread to run one prompt."""
     return _spawn_worker(
@@ -102,6 +105,7 @@ def spawn_turn(
         prompt=prompt,
         reasoning_effort=reasoning_effort,
         sandbox_policy=sandbox_policy,
+        approval_mode=approval_mode,
     )
 
 
@@ -186,6 +190,7 @@ def _spawn_worker(
     prompt: str,
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
+    approval_mode: str | None = None,
 ) -> CodexInstance:
     target_dir = events_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -207,6 +212,7 @@ def _spawn_worker(
             instance_id=instance.pk,
             reasoning_effort=reasoning_effort,
             sandbox_policy=sandbox_policy,
+            approval_mode=approval_mode,
         )
     except Exception as exc:
         # Without this, a Popen failure (e.g. ENOMEM, E2BIG, missing python)
@@ -227,6 +233,7 @@ def _launch_worker_process(
     instance_id: int,
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
+    approval_mode: str | None = None,
 ) -> subprocess.Popen[bytes]:
     manage_py = str(Path(settings.BASE_DIR) / "manage.py")
     env = os.environ.copy()
@@ -249,6 +256,8 @@ def _launch_worker_process(
         argv.extend(["--reasoning-effort", reasoning_effort])
     if sandbox_policy:
         argv.extend(["--sandbox-policy", sandbox_policy])
+    if approval_mode:
+        argv.extend(["--approval-mode", approval_mode])
 
     return subprocess.Popen(
         argv,
