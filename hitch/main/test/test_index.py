@@ -110,3 +110,92 @@ class IndexViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "No git repositories found")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_index_truncates_long_preview(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        # Unnamed threads fall back to `preview` (the full first user
+        # message), which is often a long paragraph. The list row must clip
+        # it so the title stays compact.
+        long_text = "x" * 200
+        session = SimpleNamespace(
+            id="sess",
+            name=None,
+            preview=long_text,
+            cwd="/repo",
+            updated_at=1,
+        )
+        mock_codex.return_value.__enter__.return_value.thread_list.return_value.data = [session]
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "x" * 80 + "...")
+        # The untruncated 200-char preview must not leak through.
+        self.assertNotContains(response, "x" * 120)
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_index_collapses_multiline_preview_to_first_line(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        session = SimpleNamespace(
+            id="sess",
+            name=None,
+            preview="first line\nsecond line\nthird line",
+            cwd="/repo",
+            updated_at=1,
+        )
+        mock_codex.return_value.__enter__.return_value.thread_list.return_value.data = [session]
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "first line")
+        self.assertNotContains(response, "second line")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_index_uses_name_when_set(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        # A user-set name wins over the preview fallback.
+        session = SimpleNamespace(
+            id="sess",
+            name="Short title",
+            preview="ignored long preview " * 20,
+            cwd="/repo",
+            updated_at=1,
+        )
+        mock_codex.return_value.__enter__.return_value.thread_list.return_value.data = [session]
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Short title")
+        self.assertNotContains(response, "ignored long preview")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_index_falls_back_to_id_when_no_title_text(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        session = SimpleNamespace(
+            id="bare-id",
+            name=None,
+            preview="",
+            cwd="/repo",
+            updated_at=1,
+        )
+        mock_codex.return_value.__enter__.return_value.thread_list.return_value.data = [session]
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, ">bare-id<")

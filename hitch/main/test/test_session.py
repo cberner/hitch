@@ -93,6 +93,51 @@ def _write_rollout_tempfile(lines: list[str]) -> Path:
 
 class SessionViewTests(TestCase):
     @patch("hitch.main.views.Codex")
+    def test_renders_edit_title_form(self, mock_codex: MagicMock) -> None:
+        # The edit form is pre-populated with the current name so the user
+        # can revise it rather than retype from scratch.
+        thread = _thread([_turn([_user_message("hi")])], name="Custom title")
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'name="name"')
+        self.assertContains(response, 'value="Custom title"')
+        self.assertContains(
+            response, reverse("set_session_name", kwargs={"session_id": "thread-1"})
+        )
+
+    @patch("hitch.main.views.Codex")
+    def test_edit_form_input_is_empty_when_thread_has_no_name(
+        self, mock_codex: MagicMock
+    ) -> None:
+        thread = _thread([_turn([_user_message("hello world")])], name=None)
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'value=""')
+
+    @patch("hitch.main.views.Codex")
+    def test_h1_truncates_long_preview(self, mock_codex: MagicMock) -> None:
+        # The session page h1 uses the same `_display_title` as the index, so
+        # an unnamed thread with a long preview gets clipped here too.
+        thread = _thread([_turn([_user_message("x" * 200)])], name=None, preview="x" * 200)
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        # The h1 contains the clipped title, not the full 200-char preview.
+        self.assertIn("<h1>" + "x" * 80 + "...</h1>", body)
+
+    @patch("hitch.main.views.Codex")
     def test_renders_user_and_agent_messages(self, mock_codex: MagicMock) -> None:
         thread = _thread(
             [
@@ -564,7 +609,7 @@ class SessionViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         # The final_answer text renders outside the <details> block...
         final_idx = body.index("the answer")
-        details_idx = body.index("<details")
+        details_idx = body.index('<details class="intermediate"')
         self.assertLess(final_idx, details_idx)
         # ...while the trailing un-phased message goes inside it.
         self.assertContains(response, "post-answer note")
@@ -622,7 +667,7 @@ class IntermediateCollapseTests(TestCase):
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
         self.assertEqual(response.status_code, 200)
-        self.assertNotContains(response, "<details")
+        self.assertNotContains(response, '<details class="intermediate"')
 
     @patch("hitch.main.views.Codex")
     def test_summary_with_only_tool_calls(self, mock_codex: MagicMock) -> None:

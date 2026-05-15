@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <title>HITCH — {{ thread.name|default:thread.preview|default:thread.id }}</title>
+    <title>HITCH — {{ display_title }}</title>
     <style>
         :root { color-scheme: light dark; }
         body {
@@ -107,11 +107,63 @@
         details.intermediate[open] > summary { margin-bottom: 0.5rem; }
         details.intermediate .intermediate-body > .entry:first-child { margin-top: 0; }
         details.intermediate .intermediate-body > .entry:last-child { margin-bottom: 0; }
+
+        details.edit-title {
+            margin: 0 0 0.5rem;
+            font-size: 0.85rem;
+        }
+        details.edit-title > summary {
+            cursor: pointer;
+            color: #0969da;
+            user-select: none;
+            list-style: none;
+            display: inline-block;
+        }
+        details.edit-title > summary::-webkit-details-marker { display: none; }
+        details.edit-title form {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 0.5rem;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        details.edit-title input[name="name"] {
+            font: inherit;
+            border: 1px solid #d0d7de;
+            border-radius: 6px;
+            padding: 0.35rem 0.5rem;
+            background: #fff;
+            color: #1f2328;
+            flex: 1;
+            min-width: 15rem;
+            max-width: 30rem;
+        }
+        details.edit-title button {
+            font: inherit;
+            background: #1f6feb;
+            color: #fff;
+            border: 1px solid #1f6feb;
+            border-radius: 6px;
+            padding: 0.35rem 0.9rem;
+            cursor: pointer;
+        }
+        details.edit-title button:hover {
+            background: #1858c4;
+            border-color: #1858c4;
+        }
     </style>
 </head>
 <body>
     <p><a href="{% url 'index' %}">&larr; Back to sessions</a></p>
-    <h1>{{ thread.name|default:thread.preview|default:thread.id }}</h1>
+    <h1>{{ display_title }}</h1>
+    <details class="edit-title">
+        <summary>Edit title</summary>
+        <form method="post" action="{{ set_name_url }}">
+            {% csrf_token %}
+            <input type="text" name="name" value="{{ name_value }}" maxlength="{{ name_max_len }}" required autocomplete="off" placeholder="Session title">
+            <button type="submit">Save</button>
+        </form>
+    </details>
     <p class="meta">
         id: <code>{{ thread.id }}</code> &middot;
         cwd: <code>{{ thread.cwd }}</code> &middot;
