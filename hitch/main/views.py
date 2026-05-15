@@ -25,6 +25,7 @@ from openai_codex.generated.v2_all import (
 )
 
 from hitch.main import codex_pool, rollout, streaming
+from hitch.main.diffs import build_worktree_diff
 from hitch.main.formatting import looks_like_markdown, render_markdown
 from hitch.main.models import ApprovalRequest, CodexInstance
 from hitch.main.repos import discover_repos
@@ -231,6 +232,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
     # restores the canonical view.
     entries = _trim_in_progress_turn(entries, active_instance)
     token_usage = _token_usage_for(thread)
+    diff_view = build_worktree_diff(_thread_cwd(thread))
     return render(
         request,
         "session.html",
@@ -270,6 +272,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             # bubble while the stream catches up.
             "pending_user_prompt": _pending_user_prompt(active_instance),
             "token_usage": token_usage,
+            "diff_view": diff_view,
         },
     )
 
