@@ -1,6 +1,5 @@
 import logging
 import shutil
-import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -11,7 +10,7 @@ from django.urls import reverse
 from django.views.decorators.http import require_http_methods
 from openai_codex import AppServerConfig, Codex
 
-from hitch.main import rollout
+from hitch.main import codex_pool, rollout
 from hitch.main.repos import discover_repos
 
 logger = logging.getLogger(__name__)
@@ -37,6 +36,10 @@ _NON_MESSAGE_LABELS = {
 
 
 def index(request: HttpRequest) -> HttpResponse:
+    # Sweep workers whose pid is gone: a Popen that crashed before a worker
+    # could record its terminal status (or a row stuck in ``starting``)
+    # otherwise stays pending forever, since we don't run a periodic task.
+    codex_pool.reconcile_dead()
     config = AppServerConfig(codex_bin=shutil.which("codex"))
     with Codex(config=config) as codex:
         sessions = codex.thread_list().data
@@ -128,15 +131,11 @@ def new_session(request: HttpRequest) -> HttpResponse:
     if cwd not in allowed:
         return HttpResponseBadRequest("cwd must be a discovered repository")
 
-    config = AppServerConfig(codex_bin=shutil.which("codex"))
-    with Codex(config=config) as codex:
-        thread = codex.thread_start(cwd=cwd)
-        thread_id = thread.id
-    # Run the initial turn from a background worker so the HTTP request can
-    # redirect immediately. The thread is already persisted by thread_start,
-    # so the worker just resumes it to issue the user prompt.
-    _spawn_initial_turn(thread_id, prompt)
-    return redirect("session", session_id=thread_id)
+    # Detach a worker subprocess so the initial turn keeps running past a
+    # Django restart. The thread itself is created synchronously to give the
+    # caller a stable id to redirect to.
+    instance = codex_pool.spawn_new_session(cwd=cwd, prompt=prompt)
+    return redirect("session", session_id=instance.thread_id)
 
 
 def _collapse_flat_entries(flat: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
@@ -327,21 +326,6 @@ def _user_message_text(item: Any) -> str:
             case "localImage":
                 parts.append(f"[image: {inner.path}]")
     return "\n".join(parts)
-
-
-def _spawn_initial_turn(thread_id: str, prompt: str) -> None:
-    threading.Thread(
-        target=_run_initial_turn,
-        args=(thread_id, prompt),
-        daemon=True,
-    ).start()
-
-
-def _run_initial_turn(thread_id: str, prompt: str) -> None:
-    config = AppServerConfig(codex_bin=shutil.which("codex"))
-    with Codex(config=config) as codex:
-        thread = codex.thread_resume(thread_id)
-        thread.run(prompt)
 
 
 def _tool_call_detail(item: Any, item_type: str) -> str:

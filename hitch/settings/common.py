@@ -116,3 +116,9 @@ STATIC_URL = "static/"
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+
+# Per-worker JSONL event logs (see hitch.main.codex_pool). Workers detach from
+# the Django process and write here; the dir must be writable by the user
+# running Django and live somewhere that survives restarts.
+CODEX_EVENTS_DIR = BASE_DIR / "codex_events"
