@@ -38,7 +38,37 @@ def spawn_new_session(*, cwd: str, prompt: str) -> CodexInstance:
     with Codex(config=config) as codex:
         thread = codex.thread_start(cwd=cwd)
         thread_id = thread.id
+        # ``thread/start`` only creates the thread in the app-server's
+        # in-memory map; the rollout file on disk is not written until
+        # something triggers a metadata persist. Without this step, the
+        # worker subprocess and the session view both fail with "no rollout
+        # found for thread id" the moment we exit the Codex context here
+        # (which tears down the app-server holding the in-memory thread).
+        # ``thread/set-name`` is the cheapest write that goes through
+        # ``live_thread_for_persistence``, so it blocks until the rollout
+        # file exists on disk. The first line of the prompt mirrors the
+        # title the session list would otherwise compute from ``preview``
+        # once the first turn streams in, so this is invisible in the UI.
+        codex._client.thread_set_name(thread_id, _initial_thread_name(prompt))
     return _spawn_worker(thread_id=thread_id, cwd=cwd, prompt=prompt)
+
+
+# Upper bound for the auto-derived thread name. Matches the
+# ``_NAME_MAX_LEN`` cap that ``set_session_name`` enforces on user-supplied
+# names so the two write paths stay consistent.
+_INITIAL_THREAD_NAME_MAX_LEN = 200
+
+
+def _initial_thread_name(prompt: str) -> str:
+    """Return a non-empty thread name derived from ``prompt``.
+
+    Codex rejects whitespace-only names, so a prompt that strips to empty
+    falls back to a static placeholder rather than failing the wire call.
+    The view layer already rejects empty prompts up front, so this branch
+    only protects against future callers passing a degenerate string.
+    """
+    first_line = prompt.split("\n", 1)[0].strip()[:_INITIAL_THREAD_NAME_MAX_LEN].rstrip()
+    return first_line or "New session"
 
 
 def spawn_turn(*, thread_id: str, cwd: str, prompt: str) -> CodexInstance:
