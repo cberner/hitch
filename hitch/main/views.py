@@ -1,6 +1,8 @@
+import logging
 import shutil
 import threading
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 from django.http import HttpRequest, HttpResponse, HttpResponseBadRequest
@@ -9,7 +11,10 @@ from django.urls import reverse
 from django.views.decorators.http import require_http_methods
 from openai_codex import AppServerConfig, Codex
 
+from hitch.main import rollout
 from hitch.main.repos import discover_repos
+
+logger = logging.getLogger(__name__)
 
 # Friendly labels for non-message thread item types. Anything not in this map
 # falls back to the raw type tag so we never silently drop an item from the UI.
@@ -48,8 +53,65 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
     config = AppServerConfig(codex_bin=shutil.which("codex"))
     with Codex(config=config) as codex:
         thread = codex._client.thread_read(session_id, include_turns=True).thread
-    entries = list(_render_entries(thread))
+    entries = list(_entries_for(thread))
     return render(request, "session.html", {"thread": thread, "entries": entries})
+
+
+def _entries_for(thread: Any) -> Iterator[dict[str, Any]]:
+    """Prefer the on-disk rollout so commandExecution rows surface.
+
+    ``thread/read`` rebuilds turns through codex's Limited-mode persistence
+    filter, which drops every commandExecution item. When ``Thread.path``
+    points at a rollout file we can read, parse it ourselves to recover the
+    dropped entries; otherwise (ephemeral threads, unreadable paths, parser
+    failures, or an empty rollout) fall back to rebuilding from
+    ``Thread.turns`` so the page is never empty just because the rollout
+    layer misbehaved.
+    """
+    flat = _entries_from_rollout(thread)
+    if flat is not None:
+        yield from _collapse_flat_entries(flat)
+        return
+    yield from _render_entries(thread)
+
+
+def _entries_from_rollout(thread: Any) -> list[dict[str, Any]] | None:
+    """Materialise entries from the on-disk rollout, or return None to fall back.
+
+    Returning ``None`` (vs. an empty list) is what triggers the SDK fallback;
+    an empty list is treated as "the rollout exists and is genuinely empty,"
+    matching the behaviour of an empty ``Thread.turns``.
+    """
+    path = getattr(thread, "path", None)
+    if not isinstance(path, str) or not path:
+        return None
+    rollout_path = Path(path)
+    if not rollout_path.is_file():
+        logger.warning("thread.path %s is not a readable file; falling back to SDK turns", path)
+        return None
+    try:
+        entries = list(rollout.iter_entries(rollout_path))
+    except Exception:
+        logger.exception("failed to parse rollout %s; falling back to SDK turns", path)
+        return None
+    # If the rollout reconstructs no conversation at all but the SDK has
+    # turns, prefer the SDK output — that combination almost always means
+    # the rollout schema drifted under us (renamed event tag, new wrapper)
+    # so our parser silently skipped the user/agent messages even though
+    # they are present on disk. A rollout with only tool-call entries is
+    # treated the same way: the SDK path may know how to surface the user
+    # request, and we'd rather render the conversation without commands
+    # than render commands without the conversation. A truly empty parse
+    # against an equally empty Thread.turns falls through so the page can
+    # show its empty-state placeholder.
+    if getattr(thread, "turns", None) and not any(
+        entry["kind"] in ("user", "agent") for entry in entries
+    ):
+        logger.warning(
+            "rollout %s yielded no user/agent entries; falling back to SDK turns", path
+        )
+        return None
+    return entries
 
 
 @require_http_methods(["POST"])
@@ -75,6 +137,73 @@ def new_session(request: HttpRequest) -> HttpResponse:
     # so the worker just resumes it to issue the user prompt.
     _spawn_initial_turn(thread_id, prompt)
     return redirect("session", session_id=thread_id)
+
+
+def _collapse_flat_entries(flat: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+    """Apply the same intermediate-collapsing as ``_render_entries`` to the
+    flat per-item entries produced by the rollout parser.
+
+    Turn boundaries are detected via the user kind because the rollout file
+    is a chronological log without per-item turn ids exposed at the entry
+    level. This matches the SDK's `handle_user_message` fallback for streams
+    that did not open turns explicitly.
+    """
+    turn: list[dict[str, Any]] = []
+    for entry in flat:
+        if entry["kind"] == "user" and turn:
+            yield from _emit_collapsed_turn(turn)
+            turn = []
+        turn.append(entry)
+    if turn:
+        yield from _emit_collapsed_turn(turn)
+
+
+def _emit_collapsed_turn(turn: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+    final_idx = _final_agent_idx_in_flat(turn)
+    intermediate: list[dict[str, Any]] = []
+    for i, entry in enumerate(turn):
+        if i == final_idx:
+            if intermediate:
+                yield _make_intermediate_entry(intermediate)
+                intermediate = []
+            yield _strip_phase(entry)
+        elif entry["kind"] == "user":
+            # `_collapse_flat_entries` splits on every user past the first, so
+            # any user reaching this branch is the leading entry of the turn
+            # and intermediate is empty.
+            yield entry
+        elif entry["kind"] == "agent":
+            intermediate.append({**_strip_phase(entry), "kind": "thinking"})
+        else:
+            intermediate.append(entry)
+    if intermediate:
+        yield _make_intermediate_entry(intermediate)
+
+
+def _final_agent_idx_in_flat(entries: list[dict[str, Any]]) -> int:
+    for i in range(len(entries) - 1, -1, -1):
+        entry = entries[i]
+        if entry["kind"] == "agent" and entry.get("phase") == "final_answer":
+            return i
+    for i in range(len(entries) - 1, -1, -1):
+        entry = entries[i]
+        if entry["kind"] != "agent":
+            continue
+        if entry.get("phase") == "commentary":
+            continue
+        return i
+    return -1
+
+
+def _strip_phase(entry: dict[str, Any]) -> dict[str, Any]:
+    """Return ``entry`` minus its ``phase`` key.
+
+    Called on every agent entry just before it leaves the collapsing pass so
+    the template never sees the internal phase marker. The rollout parser
+    sets ``phase`` on every agent entry (to ``None`` when absent), so this
+    function never has to consult the dict before stripping.
+    """
+    return {k: v for k, v in entry.items() if k != "phase"}
 
 
 def _render_entries(thread: Any) -> Iterator[dict[str, Any]]:
