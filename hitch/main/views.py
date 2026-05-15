@@ -8,8 +8,12 @@ from django.http import HttpRequest, HttpResponse, HttpResponseBadRequest
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views.decorators.http import require_http_methods
-from openai_codex import AppServerConfig, Codex
-from openai_codex.generated.v2_all import ReasoningEffort
+from openai_codex import AppServerConfig, AppServerError, Codex
+from openai_codex.generated.v2_all import (
+    GetAccountRateLimitsResponse,
+    RateLimitSnapshot,
+    ReasoningEffort,
+)
 
 from hitch.main import codex_pool, rollout
 from hitch.main.formatting import looks_like_markdown, render_markdown
@@ -89,6 +93,7 @@ def index(request: HttpRequest) -> HttpResponse:
     with Codex(config=config) as codex:
         models_data = list(codex.models().data)
         threads = codex.thread_list().data
+        rate_limits = _fetch_rate_limits(codex)
     current_model, current_effort, current_sandbox, cookie_updates = _resolved_settings(
         request, models_data
     )
@@ -125,6 +130,7 @@ def index(request: HttpRequest) -> HttpResponse:
             "current_model": current_model,
             "current_effort": current_effort,
             "current_sandbox": current_sandbox,
+            "rate_limits": rate_limits,
         },
     )
     _apply_cookie_updates(response, cookie_updates)
@@ -308,6 +314,62 @@ def _apply_cookie_updates(response: HttpResponse, updates: dict[str, str]) -> No
         response.set_signed_cookie(
             name, value, max_age=_COOKIE_MAX_AGE, samesite="Lax"
         )
+
+
+def _fetch_rate_limits(codex: Codex) -> dict[str, Any] | None:
+    """Fetch the account/rateLimits/read snapshot, or None if unavailable.
+
+    The endpoint is meaningful only when Codex is talking to a real OpenAI
+    account; local-dev (no auth, custom provider via ollama) and older
+    Codex builds will fail with MethodNotFound or an auth error. The
+    settings dialog must still render in those modes, so any failure here
+    swallows into None and the rate-limits section is omitted.
+    """
+    try:
+        response = codex._client.request(
+            "account/rateLimits/read",
+            None,
+            response_model=GetAccountRateLimitsResponse,
+        )
+    except AppServerError:
+        return None
+    except Exception:
+        logger.exception("failed to fetch account rate limits; omitting from settings dialog")
+        return None
+    return _format_rate_limit_snapshot(response.rate_limits)
+
+
+def _format_rate_limit_snapshot(snapshot: RateLimitSnapshot) -> dict[str, Any] | None:
+    """Project a RateLimitSnapshot into a template-friendly dict.
+
+    Returns None when neither the primary nor secondary window is set; the
+    template hides the section entirely in that case rather than render an
+    empty header. ``used_percent`` from Codex describes consumption, so we
+    expose ``remaining_percent`` (the more intuitive framing for a user
+    looking at their remaining budget) alongside it.
+    """
+    windows: list[dict[str, Any]] = []
+    for label, window in (("Primary", snapshot.primary), ("Secondary", snapshot.secondary)):
+        if window is None:
+            continue
+        used = max(0, min(100, window.used_percent))
+        windows.append(
+            {
+                "label": label,
+                "used_percent": used,
+                "remaining_percent": 100 - used,
+                "resets_at": window.resets_at,
+                "window_duration_mins": window.window_duration_mins,
+            }
+        )
+    if not windows:
+        return None
+    plan_type = snapshot.plan_type.value if snapshot.plan_type is not None else None
+    return {
+        "windows": windows,
+        "limit_name": snapshot.limit_name,
+        "plan_type": plan_type,
+    }
 
 
 def _supported_effort_values(model_obj: Any) -> set[str]:
