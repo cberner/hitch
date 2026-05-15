@@ -8,6 +8,7 @@ from openai_codex.generated.v2_all import ReasoningEffort
 
 _MODEL_COOKIE = "hitch_model"
 _EFFORT_COOKIE = "hitch_reasoning_effort"
+_SANDBOX_COOKIE = "hitch_sandbox_policy"
 
 # By default a test model accepts every enum value so tests that don't care
 # about supported-effort filtering can stay terse; tests that exercise the
@@ -96,6 +97,13 @@ class SettingsDialogRenderTests(TestCase):
         # set an explicit value has no UI path back to that state.
         self.assertContains(response, 'value=""')
         self.assertContains(response, "Model default")
+        # Sandbox policy dropdown: surface the three policy variants plus
+        # an empty "let Codex pick" option, so a future rename here can't
+        # quietly drop the field from the dialog.
+        self.assertContains(response, 'name="sandbox_policy"')
+        self.assertContains(response, 'value="readOnly"')
+        self.assertContains(response, 'value="workspaceWrite"')
+        self.assertContains(response, 'value="dangerFullAccess"')
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -369,3 +377,81 @@ class UpdateSettingsViewTests(TestCase):
     def test_rejects_get(self) -> None:
         response = self.client.get(reverse("update_settings"))
         self.assertEqual(response.status_code, 405)
+
+    @patch("hitch.main.views.Codex")
+    def test_saves_sandbox_policy_to_signed_cookie(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
+        response = self.client.post(
+            reverse("update_settings"),
+            data={
+                "model": "gpt-5",
+                "reasoning_effort": "high",
+                "sandbox_policy": "workspaceWrite",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            _cookie_value(response, _SANDBOX_COOKIE), "workspaceWrite"
+        )
+
+    def test_rejects_unknown_sandbox_policy(self) -> None:
+        _seed_cookies(self.client, **{_SANDBOX_COOKIE: "readOnly"})
+        response = self.client.post(
+            reverse("update_settings"),
+            data={
+                "model": "",
+                "reasoning_effort": "",
+                "sandbox_policy": "evilMode",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        # Reject must not stomp the previously-saved policy.
+        self.assertNotIn(_SANDBOX_COOKIE, response.cookies)
+
+    def test_allows_empty_sandbox_policy(self) -> None:
+        response = self.client.post(
+            reverse("update_settings"),
+            data={"model": "", "reasoning_effort": "", "sandbox_policy": ""},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(_cookie_value(response, _SANDBOX_COOKIE), "")
+
+
+class SandboxPolicyDialogTests(TestCase):
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_saved_sandbox_renders_as_selected(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        """A policy persisted in the cookie must come back marked selected
+        on the next render — otherwise the dropdown silently rolls back to
+        the empty default and the user assumes the pick was lost."""
+        _seed_cookies(self.client, **{_SANDBOX_COOKIE: "dangerFullAccess"})
+        _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, 'value="dangerFullAccess" selected')
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_unknown_sandbox_cookie_falls_back_to_empty(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        """A legacy/tampered cookie value must not render as a phantom
+        selected option; the dialog snaps back to the empty "Codex
+        default" state so the user has a coherent UI to recover from."""
+        _seed_cookies(self.client, **{_SANDBOX_COOKIE: "phantomPolicy"})
+        _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertNotContains(response, "phantomPolicy")
+        self.assertContains(response, 'value="" selected')

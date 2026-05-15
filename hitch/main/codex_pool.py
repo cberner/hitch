@@ -34,13 +34,15 @@ def spawn_new_session(
     prompt: str,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    sandbox_policy: str | None = None,
 ) -> CodexInstance:
     """Create a fresh Codex thread and detach a worker to run the initial prompt.
 
-    ``model`` and ``reasoning_effort`` come from the settings cookies the
-    request handler reads; ``None`` means "let Codex apply its own default."
-    The thread is created synchronously (so the caller has an id to redirect
-    to immediately); the prompt itself is run by the detached worker.
+    ``model``, ``reasoning_effort`` and ``sandbox_policy`` come from the
+    settings cookies the request handler reads; ``None`` means "let Codex
+    apply its own default." The thread is created synchronously (so the
+    caller has an id to redirect to immediately); the prompt itself is run
+    by the detached worker.
     """
     config = AppServerConfig(codex_bin=_codex_bin())
     with Codex(config=config) as codex:
@@ -59,7 +61,11 @@ def spawn_new_session(
         # once the first turn streams in, so this is invisible in the UI.
         codex._client.thread_set_name(thread_id, _initial_thread_name(prompt))
     return _spawn_worker(
-        thread_id=thread_id, cwd=cwd, prompt=prompt, reasoning_effort=reasoning_effort
+        thread_id=thread_id,
+        cwd=cwd,
+        prompt=prompt,
+        reasoning_effort=reasoning_effort,
+        sandbox_policy=sandbox_policy,
     )
 
 
@@ -87,10 +93,15 @@ def spawn_turn(
     cwd: str,
     prompt: str,
     reasoning_effort: str | None = None,
+    sandbox_policy: str | None = None,
 ) -> CodexInstance:
     """Detach a worker that resumes an existing thread to run one prompt."""
     return _spawn_worker(
-        thread_id=thread_id, cwd=cwd, prompt=prompt, reasoning_effort=reasoning_effort
+        thread_id=thread_id,
+        cwd=cwd,
+        prompt=prompt,
+        reasoning_effort=reasoning_effort,
+        sandbox_policy=sandbox_policy,
     )
 
 
@@ -174,6 +185,7 @@ def _spawn_worker(
     cwd: str,
     prompt: str,
     reasoning_effort: str | None = None,
+    sandbox_policy: str | None = None,
 ) -> CodexInstance:
     target_dir = events_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -192,7 +204,9 @@ def _spawn_worker(
 
     try:
         proc = _launch_worker_process(
-            instance_id=instance.pk, reasoning_effort=reasoning_effort
+            instance_id=instance.pk,
+            reasoning_effort=reasoning_effort,
+            sandbox_policy=sandbox_policy,
         )
     except Exception as exc:
         # Without this, a Popen failure (e.g. ENOMEM, E2BIG, missing python)
@@ -209,7 +223,10 @@ def _spawn_worker(
 
 
 def _launch_worker_process(
-    *, instance_id: int, reasoning_effort: str | None = None
+    *,
+    instance_id: int,
+    reasoning_effort: str | None = None,
+    sandbox_policy: str | None = None,
 ) -> subprocess.Popen[bytes]:
     manage_py = str(Path(settings.BASE_DIR) / "manage.py")
     env = os.environ.copy()
@@ -230,6 +247,8 @@ def _launch_worker_process(
         # the worker stays self-contained: the parent dies, the worker
         # already has every input it needs to finish the turn.
         argv.extend(["--reasoning-effort", reasoning_effort])
+    if sandbox_policy:
+        argv.extend(["--sandbox-policy", sandbox_policy])
 
     return subprocess.Popen(
         argv,

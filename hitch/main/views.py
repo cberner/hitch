@@ -17,12 +17,26 @@ from hitch.main.repos import discover_repos
 
 logger = logging.getLogger(__name__)
 
+# Sandbox-policy variants offered in the settings dialog. Stored as the
+# SandboxPolicy ``type`` discriminator string so the cookie value can map
+# 1:1 onto a constructed SandboxPolicy in the worker without any further
+# translation. We omit ``externalSandbox`` because it requires a host
+# sandbox the in-process worker doesn't speak; the three values below are
+# the union of variants the codex CLI ships out of the box.
+_SANDBOX_POLICY_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("readOnly", "Read only"),
+    ("workspaceWrite", "Workspace write"),
+    ("dangerFullAccess", "Danger - full access"),
+)
+_VALID_SANDBOX_POLICIES = {value for value, _ in _SANDBOX_POLICY_OPTIONS}
+
 # Dedicated signed cookies for the settings dialog. Kept separate from
 # Django's session cookie so the (non-revocable, long-lived) settings
 # state never rides alongside an auth session — admin auth is allowed to
 # stay DB-backed and therefore revocable on logout.
 _MODEL_COOKIE = "hitch_model"
 _EFFORT_COOKIE = "hitch_reasoning_effort"
+_SANDBOX_COOKIE = "hitch_sandbox_policy"
 
 # Roughly one year. Long enough that a user's pick survives across
 # sessions without ever needing a manual revisit; short enough that the
@@ -75,7 +89,9 @@ def index(request: HttpRequest) -> HttpResponse:
     with Codex(config=config) as codex:
         models_data = list(codex.models().data)
         threads = codex.thread_list().data
-    current_model, current_effort, cookie_updates = _resolved_settings(request, models_data)
+    current_model, current_effort, current_sandbox, cookie_updates = _resolved_settings(
+        request, models_data
+    )
     threads = sorted(threads, key=lambda s: s.updated_at, reverse=True)
     sessions = [
         {
@@ -91,6 +107,10 @@ def index(request: HttpRequest) -> HttpResponse:
         {"id": m.id, "display_name": m.display_name} for m in models_data
     ]
     effort_options = [effort.value for effort in ReasoningEffort]
+    sandbox_options = [
+        {"id": value, "display_name": label}
+        for value, label in _SANDBOX_POLICY_OPTIONS
+    ]
     response = render(
         request,
         "index.html",
@@ -101,8 +121,10 @@ def index(request: HttpRequest) -> HttpResponse:
             "settings_url": reverse("update_settings"),
             "model_options": model_options,
             "effort_options": effort_options,
+            "sandbox_options": sandbox_options,
             "current_model": current_model,
             "current_effort": current_effort,
+            "current_sandbox": current_sandbox,
         },
     )
     _apply_cookie_updates(response, cookie_updates)
@@ -215,11 +237,11 @@ def _entries_from_rollout(thread: Any) -> list[dict[str, Any]] | None:
 
 def _resolved_settings(
     request: HttpRequest, models_data: list[Any]
-) -> tuple[str, str, dict[str, str]]:
+) -> tuple[str, str, str, dict[str, str]]:
     """Read the dialog state from cookies and reconcile against Codex.
 
-    Returns ``(model, effort, cookie_updates)``. ``cookie_updates`` is a
-    dict of cookie-name → new-value pairs the caller must persist on the
+    Returns ``(model, effort, sandbox_policy, cookie_updates)``. ``cookie_updates``
+    is a dict of cookie-name → new-value pairs the caller must persist on the
     response (via ``_apply_cookie_updates``) so the corrected state takes
     effect on the next request.
 
@@ -234,11 +256,18 @@ def _resolved_settings(
 
     Empty ``models_data`` (transport hiccup, mock in tests) means we
     can't validate; return the saved values untouched with no updates.
+
+    Sandbox is validated against our own static enum rather than Codex's
+    model list (it's not a model-scoped setting), so a tampered/legacy
+    cookie value falls through to the empty "model default" state.
     """
     saved_model = _read_cookie(request, _MODEL_COOKIE)
     saved_effort = _read_cookie(request, _EFFORT_COOKIE)
+    saved_sandbox = _read_cookie(request, _SANDBOX_COOKIE)
+    if saved_sandbox and saved_sandbox not in _VALID_SANDBOX_POLICIES:
+        saved_sandbox = ""
     if not models_data:
-        return saved_model, saved_effort, {}
+        return saved_model, saved_effort, saved_sandbox, {}
 
     valid_ids = {m.id for m in models_data}
     if saved_model and saved_model in valid_ids:
@@ -247,14 +276,15 @@ def _resolved_settings(
             supported = _supported_effort_values(model_obj)
             if supported and saved_effort not in supported:
                 new_effort = _model_default_effort(model_obj)
-                return saved_model, new_effort, {_EFFORT_COOKIE: new_effort}
-        return saved_model, saved_effort, {}
+                return saved_model, new_effort, saved_sandbox, {_EFFORT_COOKIE: new_effort}
+        return saved_model, saved_effort, saved_sandbox, {}
 
     default_model = next((m for m in models_data if m.is_default), models_data[0])
     new_effort = _model_default_effort(default_model)
     return (
         default_model.id,
         new_effort,
+        saved_sandbox,
         {_MODEL_COOKIE: default_model.id, _EFFORT_COOKIE: new_effort},
     )
 
@@ -299,11 +329,14 @@ def _model_default_effort(model_obj: Any) -> str:
 def update_settings(request: HttpRequest) -> HttpResponse:
     model = request.POST.get("model", "").strip()
     effort = request.POST.get("reasoning_effort", "").strip()
+    sandbox = request.POST.get("sandbox_policy", "").strip()
     if len(model) > _MODEL_MAX_LEN:
         return HttpResponseBadRequest("model id is too long")
     valid_efforts = {e.value for e in ReasoningEffort}
     if effort and effort not in valid_efforts:
         return HttpResponseBadRequest("invalid reasoning effort")
+    if sandbox and sandbox not in _VALID_SANDBOX_POLICIES:
+        return HttpResponseBadRequest("invalid sandbox policy")
     if model or effort:
         # Cross-check the posted (model, effort) pair against what Codex
         # actually offers so a malformed POST (typo, stale model id, effort
@@ -316,7 +349,10 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         if compat_error:
             return HttpResponseBadRequest(compat_error)
     response = redirect("index")
-    _apply_cookie_updates(response, {_MODEL_COOKIE: model, _EFFORT_COOKIE: effort})
+    _apply_cookie_updates(
+        response,
+        {_MODEL_COOKIE: model, _EFFORT_COOKIE: effort, _SANDBOX_COOKIE: sandbox},
+    )
     return response
 
 
@@ -387,7 +423,19 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     # spawning so a follow-up cannot run a worker in an unintended directory.
     if cwd not in {str(p) for p in discover_repos()}:
         return HttpResponseBadRequest("thread cwd is not a discovered repository")
-    codex_pool.spawn_turn(thread_id=session_id, cwd=cwd, prompt=prompt)
+    # Sandbox policy is applied per-turn rather than persisted on the
+    # thread, so follow-up messages have to re-forward the cookie or every
+    # turn after the first silently reverts to Codex defaults — which
+    # breaks multi-turn workflows that depend on elevated permissions.
+    sandbox_policy = _read_cookie(request, _SANDBOX_COOKIE)
+    if sandbox_policy and sandbox_policy not in _VALID_SANDBOX_POLICIES:
+        sandbox_policy = ""
+    codex_pool.spawn_turn(
+        thread_id=session_id,
+        cwd=cwd,
+        prompt=prompt,
+        sandbox_policy=sandbox_policy or None,
+    )
     return redirect("session", session_id=session_id)
 
 
@@ -421,7 +469,9 @@ def new_session(request: HttpRequest) -> HttpResponse:
     config = AppServerConfig(codex_bin=shutil.which("codex"))
     with Codex(config=config) as codex:
         models_data = list(codex.models().data)
-    model, reasoning_effort, cookie_updates = _resolved_settings(request, models_data)
+    model, reasoning_effort, sandbox_policy, cookie_updates = _resolved_settings(
+        request, models_data
+    )
 
     # Detach a worker subprocess so the initial turn keeps running past a
     # Django restart. The thread itself is created synchronously to give the
@@ -431,6 +481,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
         prompt=prompt,
         model=model or None,
         reasoning_effort=reasoning_effort or None,
+        sandbox_policy=sandbox_policy or None,
     )
     response = redirect("session", session_id=instance.thread_id)
     _apply_cookie_updates(response, cookie_updates)

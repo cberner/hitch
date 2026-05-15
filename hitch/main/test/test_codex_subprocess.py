@@ -15,11 +15,14 @@ from unittest.mock import MagicMock, patch
 from django.core.management import call_command
 from django.test import TestCase, override_settings
 from openai_codex.generated.v2_all import (
+    DangerFullAccessSandboxPolicy,
     ReasoningEffort,
+    SandboxPolicy,
     Turn,
     TurnCompletedNotification,
     TurnError,
     TurnStatus,
+    WorkspaceWriteSandboxPolicy,
 )
 from pydantic import BaseModel
 
@@ -95,9 +98,11 @@ class SpawnNewSessionTests(TestCase):
         # ``thread/start`` so the in-memory thread is still loaded.
         codex._client.thread_set_name.assert_called_once_with("thread-abc", "hi")
         # Worker subprocess only receives the row id and (when set) the
-        # reasoning effort; the prompt is read from the row to avoid argparse
-        # misinterpreting prompts that begin with '-'.
-        mock_launch.assert_called_once_with(instance_id=instance.pk, reasoning_effort=None)
+        # reasoning effort and sandbox policy; the prompt is read from the
+        # row to avoid argparse misinterpreting prompts that begin with '-'.
+        mock_launch.assert_called_once_with(
+            instance_id=instance.pk, reasoning_effort=None, sandbox_policy=None
+        )
 
     @patch("hitch.main.codex_pool._launch_worker_process")
     @patch("hitch.main.codex_pool.Codex")
@@ -128,12 +133,13 @@ class SpawnNewSessionTests(TestCase):
 
     @patch("hitch.main.codex_pool._launch_worker_process")
     @patch("hitch.main.codex_pool.Codex")
-    def test_forwards_model_and_effort(
+    def test_forwards_model_effort_and_sandbox(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
         """The settings dialog's model selector flows into
-        ``thread_start(model=...)`` and the effort flows into the worker as
-        a CLI arg. Pin both wirings so a refactor can't quietly drop them.
+        ``thread_start(model=...)``; the effort and sandbox policy flow into
+        the worker as CLI args. Pin every wiring so a refactor can't quietly
+        drop one of them.
         """
         codex = _stub_codex_thread_start(mock_codex)
         mock_launch.return_value = SimpleNamespace(pid=1)
@@ -143,12 +149,18 @@ class SpawnNewSessionTests(TestCase):
             override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
         ):
             instance = codex_pool.spawn_new_session(
-                cwd="/repo", prompt="hi", model="gpt-5", reasoning_effort="high"
+                cwd="/repo",
+                prompt="hi",
+                model="gpt-5",
+                reasoning_effort="high",
+                sandbox_policy="workspaceWrite",
             )
 
         codex.thread_start.assert_called_once_with(cwd="/repo", model="gpt-5")
         mock_launch.assert_called_once_with(
-            instance_id=instance.pk, reasoning_effort="high"
+            instance_id=instance.pk,
+            reasoning_effort="high",
+            sandbox_policy="workspaceWrite",
         )
 
 
@@ -196,7 +208,9 @@ class SpawnTurnTests(TestCase):
         self.assertEqual(instance.thread_id, "thread-xyz")
         self.assertEqual(instance.prompt, "follow-up")
         self.assertEqual(instance.pid, 1234)
-        mock_launch.assert_called_once_with(instance_id=instance.pk, reasoning_effort=None)
+        mock_launch.assert_called_once_with(
+            instance_id=instance.pk, reasoning_effort=None, sandbox_policy=None
+        )
 
 
 class LaunchWorkerProcessTests(TestCase):
@@ -242,6 +256,20 @@ class LaunchWorkerProcessTests(TestCase):
         argv = mock_popen.call_args.args[0]
         self.assertIn("--reasoning-effort", argv)
         self.assertEqual(argv[argv.index("--reasoning-effort") + 1], "high")
+
+    @patch("hitch.main.codex_pool.subprocess.Popen")
+    def test_forwards_sandbox_policy_as_cli_arg(self, mock_popen: MagicMock) -> None:
+        mock_popen.return_value = SimpleNamespace(pid=999)
+
+        codex_pool._launch_worker_process(
+            instance_id=7, sandbox_policy="workspaceWrite"
+        )
+
+        argv = mock_popen.call_args.args[0]
+        self.assertIn("--sandbox-policy", argv)
+        self.assertEqual(
+            argv[argv.index("--sandbox-policy") + 1], "workspaceWrite"
+        )
 
 
 class IsAliveTests(TestCase):
@@ -506,6 +534,49 @@ class CodexWorkerCommandTests(TestCase):
                         cli_value,
                     )
                 self.assertEqual(captured.get("effort"), expected)
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_sandbox_policy_cli_arg_round_trip(self, mock_codex: MagicMock) -> None:
+        """The sandbox policy rides into the worker as a CLI arg, same as
+        reasoning effort. A known value reaches ``turn(sandbox_policy=)`` as
+        the matching SandboxPolicy variant; an unknown value (stale cookie
+        after SDK upgrade) is silently dropped so the turn runs under
+        Codex's default policy."""
+        captured: dict[str, object] = {}
+
+        def _capture_turn(input_obj: object, **kwargs: object) -> object:
+            captured.update(kwargs)
+            return SimpleNamespace(
+                id="turn-1",
+                stream=lambda: iter([_completed_event("turn-1", TurnStatus.completed)]),
+            )
+
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.return_value = SimpleNamespace(turn=_capture_turn)
+
+        cases = [
+            ("workspaceWrite", WorkspaceWriteSandboxPolicy),
+            ("dangerFullAccess", DangerFullAccessSandboxPolicy),
+            ("phantomPolicy", None),
+        ]
+        for cli_value, expected_variant in cases:
+            with self.subTest(cli_value=cli_value):
+                captured.clear()
+                with tempfile.TemporaryDirectory() as raw:
+                    instance = self._make_instance(Path(raw))
+                    call_command(
+                        "codex_worker",
+                        "--instance-id",
+                        str(instance.pk),
+                        "--sandbox-policy",
+                        cli_value,
+                    )
+                if expected_variant is None:
+                    self.assertNotIn("sandbox_policy", captured)
+                else:
+                    policy = captured.get("sandbox_policy")
+                    assert isinstance(policy, SandboxPolicy)
+                    self.assertIsInstance(policy.root, expected_variant)
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_marks_running_before_streaming(self, mock_codex: MagicMock) -> None:

@@ -432,6 +432,15 @@
                     {% endfor %}
                 </select>
             </label>
+            <label>
+                Sandbox policy
+                <select name="sandbox_policy">
+                    <option value="" {% if not current_sandbox %}selected{% endif %}>Codex default</option>
+                    {% for option in sandbox_options %}
+                    <option value="{{ option.id }}" {% if option.id == current_sandbox %}selected{% endif %}>{{ option.display_name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
             <div class="actions">
                 <button type="button" class="button secondary" data-settings-cancel>Cancel</button>
                 <button type="submit" class="button">Save</button>
