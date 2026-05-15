@@ -193,6 +193,7 @@ class NewSessionViewTests(TestCase):
             model=None,
             reasoning_effort=None,
             sandbox_policy=None,
+            approval_mode="auto_review",
         )
 
     @patch("hitch.main.views.Codex")
@@ -226,6 +227,38 @@ class NewSessionViewTests(TestCase):
             model="gpt-5",
             reasoning_effort="high",
             sandbox_policy="workspaceWrite",
+            approval_mode="auto_review",
+        )
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_forwards_approval_mode_cookie_to_spawn(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        """An explicit ``deny_all`` cookie must reach the spawn call; the
+        SDK default is the safe fallback otherwise, but a user who picked
+        the stricter mode expects it to take effect on session start."""
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+        _seed_cookies(self.client, hitch_approval_mode="deny_all")
+
+        self.client.post(
+            reverse("new_session"),
+            data={"prompt": "do thing", "cwd": self.REPO},
+        )
+
+        mock_spawn.assert_called_once_with(
+            cwd=self.REPO,
+            prompt="do thing",
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode="deny_all",
         )
 
     @patch("hitch.main.views.Codex")
@@ -258,6 +291,7 @@ class NewSessionViewTests(TestCase):
             model="gpt-5",
             reasoning_effort="medium",
             sandbox_policy=None,
+            approval_mode="auto_review",
         )
 
     @patch("hitch.main.views.codex_pool.spawn_new_session")
@@ -321,6 +355,7 @@ class SendMessageViewTests(TestCase):
             cwd="/repo",
             prompt="follow-up question",
             sandbox_policy=None,
+            approval_mode="auto_review",
         )
 
     @patch("hitch.main.views.discover_repos")
@@ -344,7 +379,11 @@ class SendMessageViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         mock_spawn.assert_called_once_with(
-            thread_id="abc", cwd="/repo", prompt="hi", sandbox_policy=None
+            thread_id="abc",
+            cwd="/repo",
+            prompt="hi",
+            sandbox_policy=None,
+            approval_mode="auto_review",
         )
 
     @patch("hitch.main.views.discover_repos")
@@ -375,6 +414,7 @@ class SendMessageViewTests(TestCase):
             cwd="/repo",
             prompt="follow-up",
             sandbox_policy="workspaceWrite",
+            approval_mode="auto_review",
         )
 
     @patch("hitch.main.views.discover_repos")
@@ -403,6 +443,67 @@ class SendMessageViewTests(TestCase):
             cwd="/repo",
             prompt="follow-up",
             sandbox_policy=None,
+            approval_mode="auto_review",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_forwards_approval_mode_cookie_to_spawn_turn(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        """Approval mode is applied per-turn just like sandbox policy, so
+        the cookie has to ride into every follow-up turn or the explicit
+        ``deny_all`` choice silently reverts to the SDK default."""
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        _seed_cookies(self.client, hitch_approval_mode="deny_all")
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="follow-up",
+            sandbox_policy=None,
+            approval_mode="deny_all",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_invalid_approval_cookie_falls_back_to_safe_default(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        """A tampered or post-SDK-upgrade cookie value must snap back to
+        the safe default rather than ride a bogus string into the worker
+        (which would map to ``None`` and silently drop the policy)."""
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        _seed_cookies(self.client, hitch_approval_mode="phantomMode")
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="follow-up",
+            sandbox_policy=None,
+            approval_mode="auto_review",
         )
 
     @patch("hitch.main.views.discover_repos")

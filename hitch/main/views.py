@@ -40,6 +40,26 @@ _SANDBOX_POLICY_OPTIONS: tuple[tuple[str, str], ...] = (
 )
 _VALID_SANDBOX_POLICIES = {value for value, _ in _SANDBOX_POLICY_OPTIONS}
 
+# Approval modes the dialog offers. ``auto_review`` and ``deny_all`` map 1:1
+# onto the SDK's ``ApprovalMode`` enum. ``approve_all`` is not in that enum —
+# the worker handles it specially by bypassing ``thread.turn(approval_mode=)``
+# and pairing an on-request policy with the ``user`` reviewer, which routes
+# every escalation to the client transport where the default auto-approve
+# handler rubber-stamps it. ``auto_review`` is also the SDK's own default;
+# keeping it first here makes it the safe default the dialog selects when
+# no cookie has been written yet.
+_APPROVAL_MODE_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("auto_review", "Auto review (default)"),
+    ("deny_all", "Deny all escalations"),
+    ("approve_all", "Approve all (dangerous)"),
+)
+_VALID_APPROVAL_MODES = {value for value, _ in _APPROVAL_MODE_OPTIONS}
+# Safe default: ``auto_review`` matches the SDK default and keeps an
+# automated reviewer in the loop. Tampered/legacy cookie values fall back
+# to this rather than to ``deny_all``, which would silently block the
+# agent from ever escalating.
+_DEFAULT_APPROVAL_MODE = "auto_review"
+
 # Dedicated signed cookies for the settings dialog. Kept separate from
 # Django's session cookie so the (non-revocable, long-lived) settings
 # state never rides alongside an auth session — admin auth is allowed to
@@ -47,6 +67,7 @@ _VALID_SANDBOX_POLICIES = {value for value, _ in _SANDBOX_POLICY_OPTIONS}
 _MODEL_COOKIE = "hitch_model"
 _EFFORT_COOKIE = "hitch_reasoning_effort"
 _SANDBOX_COOKIE = "hitch_sandbox_policy"
+_APPROVAL_COOKIE = "hitch_approval_mode"
 
 # Roughly one year. Long enough that a user's pick survives across
 # sessions without ever needing a manual revisit; short enough that the
@@ -102,9 +123,13 @@ def index(request: HttpRequest) -> HttpResponse:
         models_data = list(codex.models().data)
         threads = codex.thread_list().data
         rate_limits = _fetch_rate_limits(codex)
-    current_model, current_effort, current_sandbox, cookie_updates = _resolved_settings(
-        request, models_data
-    )
+    (
+        current_model,
+        current_effort,
+        current_sandbox,
+        current_approval,
+        cookie_updates,
+    ) = _resolved_settings(request, models_data)
     threads = sorted(threads, key=lambda s: s.updated_at, reverse=True)
     sessions = [
         {
@@ -124,6 +149,10 @@ def index(request: HttpRequest) -> HttpResponse:
         {"id": value, "display_name": label}
         for value, label in _SANDBOX_POLICY_OPTIONS
     ]
+    approval_options = [
+        {"id": value, "display_name": label}
+        for value, label in _APPROVAL_MODE_OPTIONS
+    ]
     response = render(
         request,
         "index.html",
@@ -135,9 +164,11 @@ def index(request: HttpRequest) -> HttpResponse:
             "model_options": model_options,
             "effort_options": effort_options,
             "sandbox_options": sandbox_options,
+            "approval_options": approval_options,
             "current_model": current_model,
             "current_effort": current_effort,
             "current_sandbox": current_sandbox,
+            "current_approval": current_approval,
             "rate_limits": rate_limits,
         },
     )
@@ -344,13 +375,13 @@ def _entries_from_rollout(thread: Any) -> list[dict[str, Any]] | None:
 
 def _resolved_settings(
     request: HttpRequest, models_data: list[Any]
-) -> tuple[str, str, str, dict[str, str]]:
+) -> tuple[str, str, str, str, dict[str, str]]:
     """Read the dialog state from cookies and reconcile against Codex.
 
-    Returns ``(model, effort, sandbox_policy, cookie_updates)``. ``cookie_updates``
-    is a dict of cookie-name → new-value pairs the caller must persist on the
-    response (via ``_apply_cookie_updates``) so the corrected state takes
-    effect on the next request.
+    Returns ``(model, effort, sandbox_policy, approval_mode, cookie_updates)``.
+    ``cookie_updates`` is a dict of cookie-name → new-value pairs the caller
+    must persist on the response (via ``_apply_cookie_updates``) so the
+    corrected state takes effect on the next request.
 
     Two stale-state cases handled here:
       1. The saved model id is no longer offered → snap to the provider's
@@ -367,14 +398,22 @@ def _resolved_settings(
     Sandbox is validated against our own static enum rather than Codex's
     model list (it's not a model-scoped setting), so a tampered/legacy
     cookie value falls through to the empty "model default" state.
+
+    Approval mode is validated against our own static enum and falls back
+    to ``_DEFAULT_APPROVAL_MODE`` (a safe default with an automated
+    reviewer in the loop) when the cookie is missing or invalid, so the
+    UI is never left in an ambiguous "no policy picked" state.
     """
     saved_model = _read_cookie(request, _MODEL_COOKIE)
     saved_effort = _read_cookie(request, _EFFORT_COOKIE)
     saved_sandbox = _read_cookie(request, _SANDBOX_COOKIE)
+    saved_approval = _read_cookie(request, _APPROVAL_COOKIE)
     if saved_sandbox and saved_sandbox not in _VALID_SANDBOX_POLICIES:
         saved_sandbox = ""
+    if saved_approval not in _VALID_APPROVAL_MODES:
+        saved_approval = _DEFAULT_APPROVAL_MODE
     if not models_data:
-        return saved_model, saved_effort, saved_sandbox, {}
+        return saved_model, saved_effort, saved_sandbox, saved_approval, {}
 
     valid_ids = {m.id for m in models_data}
     if saved_model and saved_model in valid_ids:
@@ -383,8 +422,14 @@ def _resolved_settings(
             supported = _supported_effort_values(model_obj)
             if supported and saved_effort not in supported:
                 new_effort = _model_default_effort(model_obj)
-                return saved_model, new_effort, saved_sandbox, {_EFFORT_COOKIE: new_effort}
-        return saved_model, saved_effort, saved_sandbox, {}
+                return (
+                    saved_model,
+                    new_effort,
+                    saved_sandbox,
+                    saved_approval,
+                    {_EFFORT_COOKIE: new_effort},
+                )
+        return saved_model, saved_effort, saved_sandbox, saved_approval, {}
 
     default_model = next((m for m in models_data if m.is_default), models_data[0])
     new_effort = _model_default_effort(default_model)
@@ -392,6 +437,7 @@ def _resolved_settings(
         default_model.id,
         new_effort,
         saved_sandbox,
+        saved_approval,
         {_MODEL_COOKIE: default_model.id, _EFFORT_COOKIE: new_effort},
     )
 
@@ -505,6 +551,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     model = request.POST.get("model", "").strip()
     effort = request.POST.get("reasoning_effort", "").strip()
     sandbox = request.POST.get("sandbox_policy", "").strip()
+    approval = request.POST.get("approval_mode", "").strip()
     if len(model) > _MODEL_MAX_LEN:
         return HttpResponseBadRequest("model id is too long")
     valid_efforts = {e.value for e in ReasoningEffort}
@@ -512,6 +559,14 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest("invalid reasoning effort")
     if sandbox and sandbox not in _VALID_SANDBOX_POLICIES:
         return HttpResponseBadRequest("invalid sandbox policy")
+    # Approval mode always carries one of the dialog's two values — there is
+    # no empty "Codex default" option because the SDK requires an enum and
+    # an empty form post is treated as "user picked nothing", which we
+    # snap to the safe default.
+    if approval and approval not in _VALID_APPROVAL_MODES:
+        return HttpResponseBadRequest("invalid approval mode")
+    if not approval:
+        approval = _DEFAULT_APPROVAL_MODE
     if model or effort:
         # Cross-check the posted (model, effort) pair against what Codex
         # actually offers so a malformed POST (typo, stale model id, effort
@@ -526,7 +581,12 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     response = redirect("index")
     _apply_cookie_updates(
         response,
-        {_MODEL_COOKIE: model, _EFFORT_COOKIE: effort, _SANDBOX_COOKIE: sandbox},
+        {
+            _MODEL_COOKIE: model,
+            _EFFORT_COOKIE: effort,
+            _SANDBOX_COOKIE: sandbox,
+            _APPROVAL_COOKIE: approval,
+        },
     )
     return response
 
@@ -598,18 +658,23 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     # spawning so a follow-up cannot run a worker in an unintended directory.
     if cwd not in {str(p) for p in discover_repos()}:
         return HttpResponseBadRequest("thread cwd is not a discovered repository")
-    # Sandbox policy is applied per-turn rather than persisted on the
-    # thread, so follow-up messages have to re-forward the cookie or every
-    # turn after the first silently reverts to Codex defaults — which
-    # breaks multi-turn workflows that depend on elevated permissions.
+    # Sandbox policy and approval mode are applied per-turn rather than
+    # persisted on the thread, so follow-up messages have to re-forward
+    # the cookies or every turn after the first silently reverts to Codex
+    # defaults — which breaks multi-turn workflows that depend on
+    # elevated permissions or stricter escalation handling.
     sandbox_policy = _read_cookie(request, _SANDBOX_COOKIE)
     if sandbox_policy and sandbox_policy not in _VALID_SANDBOX_POLICIES:
         sandbox_policy = ""
+    approval_mode = _read_cookie(request, _APPROVAL_COOKIE)
+    if approval_mode not in _VALID_APPROVAL_MODES:
+        approval_mode = _DEFAULT_APPROVAL_MODE
     codex_pool.spawn_turn(
         thread_id=session_id,
         cwd=cwd,
         prompt=prompt,
         sandbox_policy=sandbox_policy or None,
+        approval_mode=approval_mode,
     )
     return redirect("session", session_id=session_id)
 
@@ -644,9 +709,13 @@ def new_session(request: HttpRequest) -> HttpResponse:
     config = AppServerConfig(codex_bin=shutil.which("codex"))
     with Codex(config=config) as codex:
         models_data = list(codex.models().data)
-    model, reasoning_effort, sandbox_policy, cookie_updates = _resolved_settings(
-        request, models_data
-    )
+    (
+        model,
+        reasoning_effort,
+        sandbox_policy,
+        approval_mode,
+        cookie_updates,
+    ) = _resolved_settings(request, models_data)
 
     # Detach a worker subprocess so the initial turn keeps running past a
     # Django restart. The thread itself is created synchronously to give the
@@ -657,6 +726,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
         model=model or None,
         reasoning_effort=reasoning_effort or None,
         sandbox_policy=sandbox_policy or None,
+        approval_mode=approval_mode,
     )
     response = redirect("session", session_id=instance.thread_id)
     _apply_cookie_updates(response, cookie_updates)
