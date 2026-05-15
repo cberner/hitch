@@ -195,9 +195,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     prompt = request.POST.get("prompt", "").strip()
     if not prompt:
         return HttpResponseBadRequest("prompt is required")
-    # Resume the thread so we can reuse its existing cwd — the thread was
-    # already created against a discover_repos()-validated path, and the
-    # composer form intentionally does not expose cwd as a writable field.
     # ``Thread.cwd`` is an ``AbsolutePathBuf`` pydantic RootModel, so unwrap
     # ``.root`` to get the underlying string the worker subprocess expects;
     # also accept a plain str so a future SDK schema change does not break us.
@@ -207,6 +204,12 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     cwd = _thread_cwd(thread)
     if not cwd:
         return HttpResponseBadRequest("thread has no cwd")
+    # The session list surfaces every thread the app-server knows about, not
+    # just those created via ``new_session``, so the resumed ``cwd`` is not
+    # automatically inside the discover_repos() allowlist. Re-validate before
+    # spawning so a follow-up cannot run a worker in an unintended directory.
+    if cwd not in {str(p) for p in discover_repos()}:
+        return HttpResponseBadRequest("thread cwd is not a discovered repository")
     codex_pool.spawn_turn(thread_id=session_id, cwd=cwd, prompt=prompt)
     return redirect("session", session_id=session_id)
 
