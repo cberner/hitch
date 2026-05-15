@@ -7,6 +7,8 @@ from django.test import TestCase, tag
 from django.urls import reverse
 from openai_codex import AppServerConfig, Codex
 
+from hitch.main import codex_pool
+
 
 @tag("integration")
 class SessionViewIntegrationTests(TestCase):
@@ -53,3 +55,35 @@ class SessionViewIntegrationTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, thread_id)
+
+    def test_session_view_loads_thread_before_any_turn_runs(self) -> None:
+        """Render the session page immediately after thread/start, no turn.
+
+        This is the exact race the "new session" flow hits: ``new_session``
+        starts the thread and redirects to ``/sessions/<id>/`` before the
+        detached worker has had a chance to submit any prompt. ``thread/start``
+        on its own defers rollout materialisation, so an in-process
+        ``thread/resume`` from the session view's *next* Codex subprocess
+        fails with "no rollout found for thread id" unless the new-session
+        flow has forced the rollout file to be written. Verifies that the
+        codex_pool wires up that materialisation step on every spawn.
+        """
+        with (
+            tempfile.TemporaryDirectory(prefix="codex-test-") as codex_home,
+            patch.dict(os.environ, {"CODEX_HOME": codex_home}),
+            patch(
+                "hitch.main.codex_pool._launch_worker_process",
+                return_value=type("_Stub", (), {"pid": 1})(),
+            ),
+        ):
+            instance = codex_pool.spawn_new_session(
+                cwd=os.getcwd(),
+                prompt="What time is it",
+            )
+
+            response = self.client.get(
+                reverse("session", kwargs={"session_id": instance.thread_id})
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, instance.thread_id)

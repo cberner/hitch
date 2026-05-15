@@ -16,9 +16,8 @@ class SpawnNewSessionTests(TestCase):
     def test_creates_thread_then_spawns_worker(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
-        mock_codex.return_value.__enter__.return_value.thread_start.return_value = (
-            SimpleNamespace(id="thread-abc")
-        )
+        codex = mock_codex.return_value.__enter__.return_value
+        codex.thread_start.return_value = SimpleNamespace(id="thread-abc")
         mock_launch.return_value = SimpleNamespace(pid=4242)
 
         with (
@@ -33,12 +32,83 @@ class SpawnNewSessionTests(TestCase):
         self.assertEqual(instance.pid, 4242)
         self.assertEqual(instance.status, CodexInstance.STATUS_STARTING)
         self.assertTrue(instance.events_path.endswith(f"{instance.pk}.jsonl"))
-        mock_codex.return_value.__enter__.return_value.thread_start.assert_called_once_with(
-            cwd="/repo"
-        )
+        codex.thread_start.assert_called_once_with(cwd="/repo")
+        # ``thread/start`` defers writing the rollout file to disk, so the
+        # cross-process ``thread/resume`` the worker and the session view both
+        # rely on would fail with "no rollout found" without an explicit
+        # metadata write to materialise the rollout. ``thread/set-name`` is the
+        # cheapest such write; it must happen inside the same Codex context as
+        # ``thread/start`` so the in-memory thread is still loaded.
+        codex._client.thread_set_name.assert_called_once_with("thread-abc", "hi")
         # Worker subprocess only receives the row id; prompt is read from the
         # row to avoid argparse misinterpreting prompts that begin with '-'.
         mock_launch.assert_called_once_with(instance_id=instance.pk)
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.codex_pool.Codex")
+    def test_initial_thread_name_uses_first_line_of_prompt(
+        self, mock_codex: MagicMock, mock_launch: MagicMock
+    ) -> None:
+        codex = mock_codex.return_value.__enter__.return_value
+        codex.thread_start.return_value = SimpleNamespace(id="t")
+        mock_launch.return_value = SimpleNamespace(pid=1)
+
+        with (
+            tempfile.TemporaryDirectory() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            codex_pool.spawn_new_session(
+                cwd="/repo",
+                prompt="  Refactor the parser \nthen write tests\n",
+            )
+
+        # Leading whitespace and the trailing newline are trimmed so the wire
+        # call sees a clean single-line name; only the first line is used so
+        # the session list rows don't show a multi-line title.
+        codex._client.thread_set_name.assert_called_once_with(
+            "t", "Refactor the parser"
+        )
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.codex_pool.Codex")
+    def test_initial_thread_name_clipped_to_two_hundred_chars(
+        self, mock_codex: MagicMock, mock_launch: MagicMock
+    ) -> None:
+        codex = mock_codex.return_value.__enter__.return_value
+        codex.thread_start.return_value = SimpleNamespace(id="t")
+        mock_launch.return_value = SimpleNamespace(pid=1)
+
+        long_prompt = "a" * 500
+        with (
+            tempfile.TemporaryDirectory() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            codex_pool.spawn_new_session(cwd="/repo", prompt=long_prompt)
+
+        ((_, sent_name),) = (
+            call.args for call in codex._client.thread_set_name.mock_calls
+        )
+        self.assertEqual(len(sent_name), 200)
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.codex_pool.Codex")
+    def test_initial_thread_name_falls_back_for_whitespace_prompt(
+        self, mock_codex: MagicMock, mock_launch: MagicMock
+    ) -> None:
+        """Codex rejects whitespace-only thread names; a prompt that strips
+        to empty must yield a static placeholder instead of being passed
+        through verbatim and crashing the wire call."""
+        codex = mock_codex.return_value.__enter__.return_value
+        codex.thread_start.return_value = SimpleNamespace(id="t")
+        mock_launch.return_value = SimpleNamespace(pid=1)
+
+        with (
+            tempfile.TemporaryDirectory() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            codex_pool.spawn_new_session(cwd="/repo", prompt="   \n\t  ")
+
+        codex._client.thread_set_name.assert_called_once_with("t", "New session")
 
 
 class SpawnLaunchFailureTests(TestCase):
