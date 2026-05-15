@@ -140,6 +140,9 @@ class SessionViewTests(TestCase):
                     response,
                     reverse("set_session_name", kwargs={"session_id": "thread-1"}),
                 )
+                self.assertContains(response, 'aria-label="Session actions"')
+                self.assertContains(response, 'role="menuitem" data-edit-title-open>Rename')
+                self.assertNotContains(response, ">Edit</button>")
 
     @patch("hitch.main.views.Codex")
     def test_topbar_title_truncates_long_preview(self, mock_codex: MagicMock) -> None:

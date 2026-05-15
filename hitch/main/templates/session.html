@@ -136,18 +136,62 @@
             text-align: center;
             padding: 0 0.25rem;
         }
+        .topbar-menu {
+            position: relative;
+            flex: 0 0 auto;
+        }
         .topbar-action {
             font: inherit;
-            font-size: 0.88rem;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 2.25rem;
+            height: 2.25rem;
+            font-size: 1.2rem;
+            line-height: 1;
             background: transparent;
-            color: var(--link);
+            color: var(--text-muted);
             border: none;
             border-radius: 8px;
-            padding: 0.45rem 0.6rem;
+            padding: 0;
             cursor: pointer;
             font-weight: 500;
         }
         .topbar-action:hover { background: var(--surface-2); }
+        .topbar-action[aria-expanded="true"] {
+            background: var(--surface-2);
+            color: var(--text);
+        }
+        .session-menu {
+            position: absolute;
+            right: 0;
+            top: calc(100% + 0.3rem);
+            z-index: 20;
+            min-width: 9rem;
+            padding: 0.35rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--surface);
+            box-shadow: var(--shadow-lg);
+        }
+        .session-menu[hidden] { display: none; }
+        .session-menu button {
+            width: 100%;
+            font: inherit;
+            font-size: 0.9rem;
+            text-align: left;
+            border: 0;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text);
+            padding: 0.5rem 0.65rem;
+            cursor: pointer;
+        }
+        .session-menu button:hover,
+        .session-menu button:focus {
+            outline: none;
+            background: var(--surface-2);
+        }
 
         main {
             max-width: 820px;
@@ -561,7 +605,12 @@
                 <span class="chev" aria-hidden="true">‹</span>Back
             </a>
             <div class="topbar-title">{{ display_title }}</div>
-            <button type="button" class="topbar-action" data-edit-title-open>Edit</button>
+            <div class="topbar-menu" data-session-menu>
+                <button type="button" class="topbar-action" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false" data-session-menu-open>...</button>
+                <div class="session-menu" role="menu" data-session-menu-panel hidden>
+                    <button type="button" role="menuitem" data-edit-title-open>Rename</button>
+                </div>
+            </div>
         </div>
     </header>
     <main>
@@ -640,20 +689,43 @@
                 el.textContent = fmt.format(date);
             }
 
-            // Topbar "Edit" button toggles the inline edit-title form.
+            // Session actions menu and inline rename form.
             const editPanel = document.querySelector("[data-edit-title]");
             const editButton = document.querySelector("[data-edit-title-open]");
+            const menu = document.querySelector("[data-session-menu]");
+            const menuButton = document.querySelector("[data-session-menu-open]");
+            const menuPanel = document.querySelector("[data-session-menu-panel]");
+            const closeMenu = () => {
+                if (!menuButton || !menuPanel) return;
+                menuPanel.hidden = true;
+                menuButton.setAttribute("aria-expanded", "false");
+            };
+            if (menu && menuButton && menuPanel) {
+                menuButton.addEventListener("click", () => {
+                    const willOpen = menuPanel.hidden;
+                    menuPanel.hidden = !willOpen;
+                    menuButton.setAttribute("aria-expanded", willOpen ? "true" : "false");
+                });
+                document.addEventListener("click", (event) => {
+                    if (!menu.contains(event.target)) closeMenu();
+                });
+                document.addEventListener("keydown", (event) => {
+                    if (event.key !== "Escape") return;
+                    if (menuPanel.hidden) return;
+                    closeMenu();
+                    menuButton.focus();
+                });
+            }
             if (editPanel && editButton) {
                 editButton.addEventListener("click", () => {
-                    editPanel.hidden = !editPanel.hidden;
-                    if (!editPanel.hidden) {
-                        const input = editPanel.querySelector("input[name='name']");
-                        if (input) {
-                            input.focus();
-                            input.select();
-                        }
-                        editPanel.scrollIntoView({ behavior: "smooth", block: "center" });
+                    closeMenu();
+                    editPanel.hidden = false;
+                    const input = editPanel.querySelector("input[name='name']");
+                    if (input) {
+                        input.focus();
+                        input.select();
                     }
+                    editPanel.scrollIntoView({ behavior: "smooth", block: "center" });
                 });
             }
 
