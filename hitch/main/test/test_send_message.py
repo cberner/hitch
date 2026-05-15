@@ -37,6 +37,28 @@ class SendMessageViewTests(TestCase):
 
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
+    def test_unwraps_pydantic_rootmodel_cwd(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+    ) -> None:
+        # The SDK's Thread.cwd is an AbsolutePathBuf (pydantic RootModel[str]),
+        # not a bare str, so the view has to unwrap ``.root``.
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(cwd=SimpleNamespace(root="/repo"))
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "hi"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(thread_id="abc", cwd="/repo", prompt="hi")
+
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
     def test_trims_whitespace_before_spawning(
         self,
         mock_codex: MagicMock,

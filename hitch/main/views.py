@@ -198,14 +198,25 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     # Resume the thread so we can reuse its existing cwd — the thread was
     # already created against a discover_repos()-validated path, and the
     # composer form intentionally does not expose cwd as a writable field.
+    # ``Thread.cwd`` is an ``AbsolutePathBuf`` pydantic RootModel, so unwrap
+    # ``.root`` to get the underlying string the worker subprocess expects;
+    # also accept a plain str so a future SDK schema change does not break us.
     config = AppServerConfig(codex_bin=shutil.which("codex"))
     with Codex(config=config) as codex:
         thread = codex._client.thread_resume(session_id).thread
-    cwd = getattr(thread, "cwd", None)
-    if not isinstance(cwd, str) or not cwd:
+    cwd = _thread_cwd(thread)
+    if not cwd:
         return HttpResponseBadRequest("thread has no cwd")
     codex_pool.spawn_turn(thread_id=session_id, cwd=cwd, prompt=prompt)
     return redirect("session", session_id=session_id)
+
+
+def _thread_cwd(thread: Any) -> str | None:
+    raw = getattr(thread, "cwd", None)
+    if isinstance(raw, str):
+        return raw or None
+    root = getattr(raw, "root", None)
+    return root if isinstance(root, str) and root else None
 
 
 @require_http_methods(["POST"])
