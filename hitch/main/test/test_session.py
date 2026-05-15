@@ -797,6 +797,128 @@ class IntermediateCollapseTests(TestCase):
         self.assertContains(response, ">Agent (thinking)<")
 
 
+class FinalAgentMarkdownTests(TestCase):
+    """The turn's final agent reply is rendered as markdown when the body
+    contains a high-confidence markdown construct; thinking entries and user
+    messages always stay plain-text.
+    """
+
+    @patch("hitch.main.views.Codex")
+    def test_final_agent_markdown_is_rendered(self, mock_codex: MagicMock) -> None:
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message("Plan it"),
+                        _agent_message("# Plan\n\n- step one\n- step two"),
+                    ]
+                ),
+            ]
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "<h1>Plan</h1>", html=False)
+        self.assertContains(response, "<li>step one</li>", html=False)
+        self.assertContains(response, '<div class="body markdown">', html=False)
+
+    @patch("hitch.main.views.Codex")
+    def test_plain_final_agent_is_not_treated_as_markdown(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # No fenced code, headings, lists, links, or tables -- render as-is.
+        thread = _thread(
+            [_turn([_user_message("Hi"), _agent_message("Hello, friend.")])]
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Hello, friend.")
+        self.assertNotContains(response, '<div class="body markdown">')
+
+    @patch("hitch.main.views.Codex")
+    def test_intermediate_thinking_is_never_rendered_as_markdown(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # Mid-turn agent commentary that happens to look like markdown should
+        # collapse as plain text inside the <details> block; markdown styling
+        # is reserved for the final reply.
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message("Go"),
+                        _agent_message("# Thinking..."),
+                        _agent_message("Done."),
+                    ]
+                ),
+            ]
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        # The would-be heading appears literally, not as <h1>.
+        self.assertContains(response, "# Thinking...")
+        self.assertNotContains(response, "<h1>Thinking")
+
+    @patch("hitch.main.views.Codex")
+    def test_user_message_with_markdown_is_not_rendered(
+        self, mock_codex: MagicMock
+    ) -> None:
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message("# my heading"),
+                        _agent_message("ok"),
+                    ]
+                ),
+            ]
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "# my heading")
+        self.assertNotContains(response, "<h1>my heading</h1>")
+
+    @patch("hitch.main.views.Codex")
+    def test_agent_html_is_escaped(self, mock_codex: MagicMock) -> None:
+        # Even when the body is detected as markdown, raw HTML in the
+        # source is escaped, so an agent reply can't smuggle a <script> tag
+        # into the page.
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message("Q"),
+                        _agent_message("# Heading\n\n<script>alert(1)</script>"),
+                    ]
+                ),
+            ]
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_read.return_value.thread = thread
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode()
+        self.assertNotIn("<script>alert(1)</script>", body)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", body)
+
+
 class ToolCallDetailTests(TestCase):
     """Exercise every branch of _tool_call_detail so the per-type description
     surfaced in the UI stays stable.

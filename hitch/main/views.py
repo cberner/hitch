@@ -11,6 +11,7 @@ from django.views.decorators.http import require_http_methods
 from openai_codex import AppServerConfig, Codex
 
 from hitch.main import codex_pool, rollout
+from hitch.main.formatting import looks_like_markdown, render_markdown
 from hitch.main.repos import discover_repos
 
 logger = logging.getLogger(__name__)
@@ -230,7 +231,7 @@ def _emit_collapsed_turn(turn: list[dict[str, Any]]) -> Iterator[dict[str, Any]]
             if intermediate:
                 yield _make_intermediate_entry(intermediate)
                 intermediate = []
-            yield _strip_phase(entry)
+            yield _finalize_agent_entry(_strip_phase(entry))
         elif entry["kind"] == "user":
             # `_collapse_flat_entries` splits on every user past the first, so
             # any user reaching this branch is the leading entry of the turn
@@ -270,6 +271,20 @@ def _strip_phase(entry: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in entry.items() if k != "phase"}
 
 
+def _finalize_agent_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Annotate a turn's final agent entry with rendered-markdown HTML.
+
+    Only the final agent message of a turn is ever fed through this
+    function, so collapsed "thinking" messages stay plain-text. A failure
+    to recognise the text as markdown leaves the entry untouched, and the
+    template falls back to the plain-text body.
+    """
+    text = entry.get("text")
+    if isinstance(text, str) and looks_like_markdown(text):
+        entry["html"] = render_markdown(text)
+    return entry
+
+
 def _render_entries(thread: Any) -> Iterator[dict[str, Any]]:
     """Walk every turn's items in order, surfacing the user message and the
     final agent reply as top-level entries and folding everything else
@@ -294,7 +309,9 @@ def _render_entries(thread: Any) -> Iterator[dict[str, Any]]:
                 if intermediate:
                     yield _make_intermediate_entry(intermediate)
                     intermediate = []
-                yield {"kind": "agent", "text": item.text, "timestamp": timestamp}
+                yield _finalize_agent_entry(
+                    {"kind": "agent", "text": item.text, "timestamp": timestamp}
+                )
             elif item.type == "userMessage":
                 if intermediate:
                     yield _make_intermediate_entry(intermediate)

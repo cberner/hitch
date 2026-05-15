@@ -12,7 +12,11 @@ intermediate block, so the per-item layout stays identical in both contexts.
         {% endif %}
     </div>
     <div class="message {{ entry.kind }}">
+        {% if entry.html %}
+        <div class="body markdown">{{ entry.html }}</div>
+        {% else %}
         <div class="body">{{ entry.text }}</div>
+        {% endif %}
     </div>
 </div>
 {% elif entry.kind == "tool_call" %}
