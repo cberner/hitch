@@ -189,7 +189,7 @@ class SettingsDialogRenderTests(TestCase):
             rate_limits=_rate_limit_snapshot(
                 primary_used=30,
                 primary_resets_at=1_700_000_000,
-                primary_window_mins=60,
+                primary_window_mins=300,
                 secondary_used=80,
                 secondary_resets_at=1_700_010_000,
                 secondary_window_mins=10_080,
@@ -210,7 +210,9 @@ class SettingsDialogRenderTests(TestCase):
         # Window duration and reset timestamp are surfaced; the timestamp
         # is rendered into a <time> element so the client-side script can
         # format it relative to the viewer.
-        self.assertContains(response, "60-min window")
+        self.assertContains(response, "5-hour window")
+        self.assertContains(response, "7-day window")
+        self.assertNotContains(response, "-min window")
         self.assertContains(response, 'data-resets-at="1700000000"')
         # Plan label gives context for which plan the limits apply to.
         self.assertContains(response, "plus")
