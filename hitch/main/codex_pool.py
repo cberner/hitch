@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -175,6 +176,213 @@ def latest_id_for_thread(thread_id: str) -> int | None:
         .values_list("pk", flat=True)
         .first()
     )
+
+
+def interrupt_active(thread_id: str) -> CodexInstance | None:
+    """Stop the most recent active worker for ``thread_id``.
+
+    Fallback entry point for callers that only know a thread id (the
+    session page itself prefers ``interrupt_instance`` so each click
+    targets the exact worker the page is streaming, not "whichever
+    worker is latest at click time").
+    """
+    instance = latest_active_for_thread(thread_id)
+    if instance is None:
+        return None
+    return _interrupt_instance(instance)
+
+
+def interrupt_instance(
+    instance_id: int, *, expected_thread_id: str
+) -> CodexInstance | None:
+    """Stop a specific worker, identified by its primary key.
+
+    The session page renders the active worker's id into the Stop
+    button so each click targets that exact worker rather than
+    "latest active for this thread". This matters because
+    ``send_message`` can stack overlapping turns on the same thread:
+    a stale tab whose page was rendered before a newer turn started
+    would otherwise abort the newer worker the user can't even see.
+
+    ``expected_thread_id`` cross-checks the form value against the URL
+    so a tampered/stale post can't be used to stop a worker that
+    belongs to a different thread.
+
+    Returns None when the instance is unknown, belongs to a different
+    thread, has already reached a terminal status, is still launching
+    (pid unset), or could not be signaled.
+    """
+    try:
+        instance = CodexInstance.objects.get(pk=instance_id)
+    except CodexInstance.DoesNotExist:
+        return None
+    if instance.thread_id != expected_thread_id:
+        return None
+    if instance.status not in (
+        CodexInstance.STATUS_STARTING,
+        CodexInstance.STATUS_RUNNING,
+    ):
+        return None
+    return _interrupt_instance(instance)
+
+
+def _interrupt_instance(instance: CodexInstance) -> CodexInstance | None:
+    """Stop one worker, escalating SIGTERM → SIGKILL on a second click.
+
+    The first Stop request sends SIGTERM to the worker (not its group).
+    The worker's signal handler defers to a flag the stream loop checks
+    between events; on observing it, the loop calls the SDK's
+    ``turn.interrupt()`` — a graceful cancellation that lets the
+    app-server emit remaining events (notably a ``turn/completed`` with
+    status ``interrupted``) before the worker writes its own terminal
+    row status. The row's ``interrupt_requested_at`` is set so we can
+    tell, on a subsequent click, that polite cancellation was already
+    attempted.
+
+    A second click on the still-active row escalates: we send SIGKILL
+    to the process group, taking down both the worker and its codex
+    app-server child, and write a terminal status ourselves since the
+    worker no longer has the chance to.
+
+    PID safety (``_pid_is_our_worker``): every signaling path is gated
+    on the cmdline-verified identity check so a recycled pid never
+    receives a signal meant for our worker.
+
+    Returns the refreshed instance, or None when the worker is still
+    launching (pid unset), a non-ESRCH signal failure left it running,
+    or it raced us to a terminal status.
+    """
+    if instance.pid <= 0:
+        # Launch race: the parent has created the DB row but not yet
+        # written ``pid`` (Popen hasn't returned, or the row is fresh
+        # from spawn_new_session). The codex_worker subprocess's first
+        # action is to reset ``status`` to RUNNING, so flipping to
+        # FAILED here would be silently undone and the turn would
+        # continue running despite the user's stop click. Treat as
+        # not-yet-interruptible; the user can retry after a moment.
+        return None
+
+    if not _pid_is_our_worker(instance.pid, instance.pk):
+        # PID gone, recycled, or owned by an unrelated process. No safe
+        # target for either SIGTERM or SIGKILL, but the leftover row
+        # still has to be flipped to failed so the UI exits streaming
+        # mode rather than waiting on ``reconcile_dead``.
+        return _mark_failed(instance, "interrupted by user")
+
+    if instance.interrupt_requested_at is None:
+        # First click: polite interrupt. Signal only the worker (not
+        # the group) — the worker's handler turns this into an SDK
+        # ``turn.interrupt()`` and lets the app-server emit its
+        # remaining events. Status will be updated by the worker
+        # itself when the stream completes; if we wrote a terminal
+        # status now the worker's later save would silently overwrite
+        # it, so we leave the row alone except for the timestamp that
+        # marks "polite stop already issued" for the escalation path.
+        try:
+            os.kill(instance.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            # Worker exited between the identity check and the signal;
+            # treat as if it had finished on its own and let the row
+            # be reconciled to failed below.
+            return _mark_failed(instance, "interrupted by user")
+        except OSError:
+            # EPERM (or any other non-ESRCH failure): the worker is
+            # still alive but we could not signal it. Don't lie that
+            # we stopped the turn.
+            return None
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            interrupt_requested_at=timezone.now()
+        )
+        instance.refresh_from_db()
+        return instance
+
+    # Second click on a still-active row: the polite interrupt didn't
+    # take. Escalate to SIGKILL on the whole process group so the
+    # worker AND its in-process codex app-server child both die
+    # immediately, then write a terminal status ourselves — the
+    # worker no longer gets to run its end-of-turn save.
+    try:
+        os.killpg(instance.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    except OSError:
+        return None
+    return _mark_failed(instance, "forcibly stopped by user")
+
+
+def _mark_failed(instance: CodexInstance, error: str) -> CodexInstance | None:
+    """Conditionally flip a still-active row to FAILED with ``error``.
+
+    Atomic UPDATE keyed on the active statuses so a worker that
+    legitimately reached a terminal state in the gap between the row
+    read and this call is preserved — preventing a stop click from
+    retroactively rewriting a completed turn as failed.
+    """
+    updated = CodexInstance.objects.filter(
+        pk=instance.pk,
+        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+    ).update(
+        status=CodexInstance.STATUS_FAILED,
+        ended_at=timezone.now(),
+        error=error,
+    )
+    if updated == 0:
+        return None
+    instance.refresh_from_db()
+    return instance
+
+
+def _pid_is_our_worker(pid: int, instance_id: int) -> bool:
+    """Return whether ``pid`` is still *our* worker for ``instance_id``.
+
+    Two-layer identity check:
+
+    1. ``os.getsid(pid) == pid`` — workers are spawned with
+       ``start_new_session=True`` so the worker pid is by definition
+       its own session id. A recycled pid owned by a non-session-leader
+       fails this cheap check.
+
+    2. ``/proc/<pid>/cmdline`` must contain ``codex_worker
+       --instance-id <pk>`` — distinguishes our worker from any other
+       session leader (e.g. a shell, another tool's daemon) that
+       happens to inherit the recycled pid. Without this layer the
+       getsid check alone could match any session leader and the
+       signal would terminate an unrelated process group.
+
+    On systems without /proc (non-Linux), the cmdline layer is
+    unavailable; we fall back to trusting the getsid check. The
+    deployment target is Linux, so this is a best-effort branch for
+    local-dev on macOS where pid recycling within milliseconds is
+    rare in practice.
+    """
+    try:
+        if os.getsid(pid) != pid:
+            return False
+    except OSError:
+        return False
+    proc_root = Path("/proc")
+    try:
+        cmdline = (proc_root / str(pid) / "cmdline").read_bytes()
+    except FileNotFoundError:
+        # FileNotFoundError is ambiguous: it can mean ``/proc`` itself
+        # doesn't exist (non-Linux dev — fall back to trusting the
+        # session-leader check above) OR ``/proc/<pid>`` vanished
+        # between getsid() and now (Linux race: worker exited and the
+        # pid is at risk of being recycled — we MUST reject to avoid
+        # signaling whoever inherits the pid next). The presence of
+        # ``/proc`` itself disambiguates: on Linux we always have
+        # ``/proc`` even when a specific pid entry disappears.
+        return not proc_root.exists()
+    except OSError:
+        return False
+    parts = cmdline.split(b"\0")
+    if b"codex_worker" not in parts:
+        return False
+    try:
+        idx = parts.index(b"--instance-id")
+    except ValueError:
+        return False
+    return idx + 1 < len(parts) and parts[idx + 1] == str(instance_id).encode()
 
 
 def reconcile_dead() -> int:

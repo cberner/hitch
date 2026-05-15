@@ -683,6 +683,21 @@
             color: var(--text-faint);
             cursor: not-allowed;
         }
+        .composer button.stop {
+            background: var(--surface);
+            color: var(--status-error-fg);
+            border: 1px solid var(--status-error-fg);
+        }
+        .composer button.stop:hover {
+            background: var(--status-error-bg);
+            border-color: var(--status-error-fg);
+            color: var(--status-error-fg);
+        }
+        .composer button.stop:disabled {
+            background: var(--surface-3);
+            border-color: var(--border-strong);
+            color: var(--text-faint);
+        }
 
         .empty-thread {
             text-align: center;
@@ -805,6 +820,9 @@
         <div class="composer-inner">
             <textarea name="prompt" rows="1" required autocomplete="off" placeholder="Send a message…" aria-label="Send a message" data-composer-input></textarea>
             <button type="submit" data-composer-submit>Send</button>
+            {% if active_worker %}
+            <button type="submit" class="stop" formaction="{{ stop_url }}" formnovalidate name="instance" value="{{ active_instance.id }}" data-composer-stop aria-label="Stop the running turn">Stop</button>
+            {% endif %}
         </div>
     </form>
 
@@ -874,6 +892,7 @@
             if (composer) {
                 const input = composer.querySelector("[data-composer-input]");
                 const submit = composer.querySelector("[data-composer-submit]");
+                const stop = composer.querySelector("[data-composer-stop]");
                 const sync = () => {
                     input.style.height = "auto";
                     input.style.height = input.scrollHeight + "px";
@@ -882,7 +901,19 @@
                 sync();
                 input.addEventListener("input", sync);
                 composer.addEventListener("submit", () => {
-                    submit.disabled = true;
+                    // Defer the disable until after the form's entry
+                    // list has been serialized: the Stop button carries
+                    // the active worker's id as its name/value, and
+                    // disabling the submitter inside the submit handler
+                    // can strip that pair from the POST in browsers
+                    // that apply the disabled-state before serialization
+                    // — which would silently drop the instance id and
+                    // let `stop_session` fall back to "latest active",
+                    // potentially aborting the wrong overlapping worker.
+                    setTimeout(() => {
+                        submit.disabled = true;
+                        if (stop) stop.disabled = true;
+                    }, 0);
                 });
             }
         })();
