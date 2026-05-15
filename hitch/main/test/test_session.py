@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 from django.http import HttpResponse
 from django.test import Client, TestCase
 from django.urls import reverse
+from openai_codex.errors import AppServerError
 
 from hitch.main.models import CodexInstance
 from hitch.main.views import _tool_call_detail, _tool_call_status
@@ -140,9 +141,59 @@ class SessionViewTests(TestCase):
                     response,
                     reverse("set_session_name", kwargs={"session_id": "thread-1"}),
                 )
+                self.assertContains(
+                    response,
+                    reverse("set_session_archived", kwargs={"session_id": "thread-1"}),
+                )
                 self.assertContains(response, 'aria-label="Session actions"')
                 self.assertContains(response, 'role="menuitem" data-edit-title-open>Rename')
+                self.assertContains(response, 'name="archived" value="true"')
+                self.assertContains(response, 'role="menuitem">Archive</button>')
                 self.assertNotContains(response, ">Edit</button>")
+
+    @patch("hitch.main.views.Codex")
+    def test_archived_session_menu_offers_unarchive(self, mock_codex: MagicMock) -> None:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        rollout_path = (
+            Path(temp_dir.name)
+            / "archived_sessions"
+            / "2026"
+            / "05"
+            / "15"
+            / "rollout-thread-1.jsonl"
+        )
+        rollout_path.parent.mkdir(parents=True)
+        rollout_path.write_text(
+            _rollout_line("event_msg", {"type": "user_message", "message": "hi"}) + "\n"
+        )
+        thread = _thread(
+            [_turn([_user_message("hi")])],
+            path=str(rollout_path),
+        )
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'name="archived" value="false"')
+        self.assertContains(response, 'role="menuitem">Unarchive</button>')
+        self.assertNotContains(response, 'role="menuitem">Archive</button>')
+
+    @patch("hitch.main.views.Codex")
+    def test_archived_menu_label_does_not_depend_on_thread_list(
+        self, mock_codex: MagicMock
+    ) -> None:
+        thread = _thread([_turn([_user_message("hi")])])
+        _patch_thread(self, mock_codex, thread)
+        client = mock_codex.return_value.__enter__.return_value
+        client.thread_list.side_effect = AppServerError("archived list unavailable")
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'role="menuitem">Archive</button>')
+        client.thread_list.assert_not_called()
 
     @patch("hitch.main.views.Codex")
     def test_topbar_title_truncates_long_preview(self, mock_codex: MagicMock) -> None:

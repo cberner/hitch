@@ -16,6 +16,11 @@ urlpatterns = [
         name="set_session_name",
     ),
     path(
+        "sessions/<str:session_id>/archive/",
+        hitch.main.views.set_session_archived,
+        name="set_session_archived",
+    ),
+    path(
         "sessions/<str:session_id>/message/",
         hitch.main.views.send_message,
         name="send_message",
