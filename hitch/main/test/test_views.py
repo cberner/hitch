@@ -676,17 +676,16 @@ class SetSessionNameViewTests(TestCase):
 
 class SetSessionArchivedViewTests(TestCase):
     @patch("hitch.main.views.Codex")
-    def test_archives_session_and_redirects(self, mock_codex: MagicMock) -> None:
+    def test_archives_session_and_redirects_to_index(
+        self, mock_codex: MagicMock
+    ) -> None:
         response = self.client.post(
             reverse("set_session_archived", kwargs={"session_id": "abc"}),
             data={"archived": "true"},
         )
 
         self.assertEqual(response.status_code, 302)
-        self.assertEqual(
-            response.headers["Location"],
-            reverse("session", kwargs={"session_id": "abc"}),
-        )
+        self.assertEqual(response.headers["Location"], reverse("index"))
         client = mock_codex.return_value.__enter__.return_value
         client.thread_archive.assert_called_once_with("abc")
         client.thread_unarchive.assert_not_called()
@@ -705,7 +704,9 @@ class SetSessionArchivedViewTests(TestCase):
         client.thread_archive.assert_called_once_with("abc")
 
     @patch("hitch.main.views.Codex")
-    def test_unarchives_session_and_redirects(self, mock_codex: MagicMock) -> None:
+    def test_unarchives_session_and_redirects_to_session(
+        self, mock_codex: MagicMock
+    ) -> None:
         response = self.client.post(
             reverse("set_session_archived", kwargs={"session_id": "abc"}),
             data={"archived": "false"},
