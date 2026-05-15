@@ -232,11 +232,9 @@ class EventsDirTests(TestCase):
         ):
             self.assertEqual(codex_pool.events_dir(), Path(raw))
 
-    def test_falls_back_to_base_dir(self) -> None:
-        from django.conf import settings
-
+    def test_falls_back_to_home_dir(self) -> None:
         with override_settings(CODEX_EVENTS_DIR=None):
             self.assertEqual(
                 codex_pool.events_dir(),
-                Path(settings.BASE_DIR) / "codex_events",
+                Path.home() / ".hitch" / "codex_events",
             )

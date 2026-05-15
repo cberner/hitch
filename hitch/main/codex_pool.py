@@ -107,7 +107,7 @@ def events_dir() -> Path:
     configured = getattr(settings, "CODEX_EVENTS_DIR", None)
     if configured is not None:
         return Path(configured)
-    return Path(settings.BASE_DIR) / "codex_events"
+    return Path.home() / ".hitch" / "codex_events"
 
 
 def _codex_bin() -> str | None:

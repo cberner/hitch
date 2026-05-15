@@ -120,5 +120,6 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # Per-worker JSONL event logs (see hitch.main.codex_pool). Workers detach from
 # the Django process and write here; the dir must be writable by the user
-# running Django and live somewhere that survives restarts.
-CODEX_EVENTS_DIR = BASE_DIR / "codex_events"
+# running Django and live somewhere that survives restarts. Kept outside the
+# project tree so setuptools' flat-layout discovery doesn't pick it up.
+CODEX_EVENTS_DIR = Path.home() / ".hitch" / "codex_events"
