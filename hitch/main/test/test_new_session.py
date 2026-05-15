@@ -10,19 +10,15 @@ class NewSessionViewTests(TestCase):
     def _allowed_repo(self) -> str:
         return "/home/user/proj"
 
-    @patch("hitch.main.views._spawn_initial_turn")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.Codex")
-    def test_new_session_creates_thread_and_redirects(
+    def test_new_session_spawns_worker_and_redirects(
         self,
-        mock_codex: MagicMock,
         mock_discover: MagicMock,
         mock_spawn: MagicMock,
     ) -> None:
         mock_discover.return_value = [Path(self._allowed_repo())]
-        mock_codex.return_value.__enter__.return_value.thread_start.return_value = SimpleNamespace(
-            id="thread-xyz"
-        )
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
 
         response = self.client.post(
             reverse("new_session"),
@@ -34,17 +30,14 @@ class NewSessionViewTests(TestCase):
             response.headers["Location"],
             reverse("session", kwargs={"session_id": "thread-xyz"}),
         )
-        mock_codex.return_value.__enter__.return_value.thread_start.assert_called_once_with(
-            cwd=self._allowed_repo(),
+        mock_spawn.assert_called_once_with(
+            cwd=self._allowed_repo(), prompt="Refactor the login flow"
         )
-        mock_spawn.assert_called_once_with("thread-xyz", "Refactor the login flow")
 
-    @patch("hitch.main.views._spawn_initial_turn")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.Codex")
     def test_new_session_rejects_missing_prompt(
         self,
-        mock_codex: MagicMock,
         mock_discover: MagicMock,
         mock_spawn: MagicMock,
     ) -> None:
@@ -56,15 +49,12 @@ class NewSessionViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        mock_codex.assert_not_called()
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.views._spawn_initial_turn")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.Codex")
     def test_new_session_rejects_missing_cwd(
         self,
-        mock_codex: MagicMock,
         mock_discover: MagicMock,
         mock_spawn: MagicMock,
     ) -> None:
@@ -76,15 +66,12 @@ class NewSessionViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        mock_codex.assert_not_called()
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.views._spawn_initial_turn")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.Codex")
     def test_new_session_rejects_unknown_cwd(
         self,
-        mock_codex: MagicMock,
         mock_discover: MagicMock,
         mock_spawn: MagicMock,
     ) -> None:
@@ -96,7 +83,6 @@ class NewSessionViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        mock_codex.assert_not_called()
         mock_spawn.assert_not_called()
 
     @patch("hitch.main.views.discover_repos")
