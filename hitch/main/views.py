@@ -9,12 +9,31 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views.decorators.http import require_http_methods
 from openai_codex import AppServerConfig, Codex
+from openai_codex.generated.v2_all import ReasoningEffort
 
 from hitch.main import codex_pool, rollout
 from hitch.main.formatting import looks_like_markdown, render_markdown
 from hitch.main.repos import discover_repos
 
 logger = logging.getLogger(__name__)
+
+# Dedicated signed cookies for the settings dialog. Kept separate from
+# Django's session cookie so the (non-revocable, long-lived) settings
+# state never rides alongside an auth session — admin auth is allowed to
+# stay DB-backed and therefore revocable on logout.
+_MODEL_COOKIE = "hitch_model"
+_EFFORT_COOKIE = "hitch_reasoning_effort"
+
+# Roughly one year. Long enough that a user's pick survives across
+# sessions without ever needing a manual revisit; short enough that the
+# browser eventually evicts a stale value if the user stops using the app.
+_COOKIE_MAX_AGE = 60 * 60 * 24 * 365
+
+# Cap on the posted model id so a crafted oversized POST can't push the
+# cookie past the browser's 4KB limit (which would cause the browser to
+# silently drop the cookie). Real Codex model ids are tens of chars; 256
+# is comfortably more than that without leaving room for abuse.
+_MODEL_MAX_LEN = 256
 
 # Upper bound on what we render inline as a session's title. Codex does not
 # generate its own thread summaries, so for unnamed threads `Thread.preview`
@@ -54,7 +73,9 @@ def index(request: HttpRequest) -> HttpResponse:
     codex_pool.reconcile_dead()
     config = AppServerConfig(codex_bin=shutil.which("codex"))
     with Codex(config=config) as codex:
+        models_data = list(codex.models().data)
         threads = codex.thread_list().data
+    current_model, current_effort, cookie_updates = _resolved_settings(request, models_data)
     threads = sorted(threads, key=lambda s: s.updated_at, reverse=True)
     sessions = [
         {
@@ -66,11 +87,26 @@ def index(request: HttpRequest) -> HttpResponse:
         for t in threads
     ]
     repos = [str(p) for p in discover_repos()]
-    return render(
+    model_options = [
+        {"id": m.id, "display_name": m.display_name} for m in models_data
+    ]
+    effort_options = [effort.value for effort in ReasoningEffort]
+    response = render(
         request,
         "index.html",
-        {"sessions": sessions, "repos": repos, "new_session_url": reverse("new_session")},
+        {
+            "sessions": sessions,
+            "repos": repos,
+            "new_session_url": reverse("new_session"),
+            "settings_url": reverse("update_settings"),
+            "model_options": model_options,
+            "effort_options": effort_options,
+            "current_model": current_model,
+            "current_effort": current_effort,
+        },
     )
+    _apply_cookie_updates(response, cookie_updates)
+    return response
 
 
 def session(request: HttpRequest, session_id: str) -> HttpResponse:
@@ -177,6 +213,147 @@ def _entries_from_rollout(thread: Any) -> list[dict[str, Any]] | None:
     return entries
 
 
+def _resolved_settings(
+    request: HttpRequest, models_data: list[Any]
+) -> tuple[str, str, dict[str, str]]:
+    """Read the dialog state from cookies and reconcile against Codex.
+
+    Returns ``(model, effort, cookie_updates)``. ``cookie_updates`` is a
+    dict of cookie-name → new-value pairs the caller must persist on the
+    response (via ``_apply_cookie_updates``) so the corrected state takes
+    effect on the next request.
+
+    Two stale-state cases handled here:
+      1. The saved model id is no longer offered → snap to the provider's
+         default model *and* that model's default effort, since the
+         supported-effort set can differ between providers.
+      2. The model is still offered but its
+         ``supported_reasoning_efforts`` has narrowed under us so the
+         saved effort no longer fits → snap effort to that model's
+         default while leaving the model alone.
+
+    Empty ``models_data`` (transport hiccup, mock in tests) means we
+    can't validate; return the saved values untouched with no updates.
+    """
+    saved_model = _read_cookie(request, _MODEL_COOKIE)
+    saved_effort = _read_cookie(request, _EFFORT_COOKIE)
+    if not models_data:
+        return saved_model, saved_effort, {}
+
+    valid_ids = {m.id for m in models_data}
+    if saved_model and saved_model in valid_ids:
+        model_obj = next(m for m in models_data if m.id == saved_model)
+        if saved_effort:
+            supported = _supported_effort_values(model_obj)
+            if supported and saved_effort not in supported:
+                new_effort = _model_default_effort(model_obj)
+                return saved_model, new_effort, {_EFFORT_COOKIE: new_effort}
+        return saved_model, saved_effort, {}
+
+    default_model = next((m for m in models_data if m.is_default), models_data[0])
+    new_effort = _model_default_effort(default_model)
+    return (
+        default_model.id,
+        new_effort,
+        {_MODEL_COOKIE: default_model.id, _EFFORT_COOKIE: new_effort},
+    )
+
+
+def _read_cookie(request: HttpRequest, name: str) -> str:
+    """Read a signed cookie; return ``""`` on missing or tampered value.
+
+    ``request.get_signed_cookie`` raises on a missing/invalid signature;
+    we treat both as "no value" so a corrupt cookie just falls through to
+    the reconcile path instead of 500ing the index render.
+    """
+    try:
+        value = request.get_signed_cookie(name, default="")
+    except Exception:
+        return ""
+    return (value or "").strip()
+
+
+def _apply_cookie_updates(response: HttpResponse, updates: dict[str, str]) -> None:
+    for name, value in updates.items():
+        response.set_signed_cookie(
+            name, value, max_age=_COOKIE_MAX_AGE, samesite="Lax"
+        )
+
+
+def _supported_effort_values(model_obj: Any) -> set[str]:
+    """Return the set of effort enum string values ``model_obj`` accepts."""
+    return {
+        getattr(opt.reasoning_effort, "value", str(opt.reasoning_effort))
+        for opt in (getattr(model_obj, "supported_reasoning_efforts", None) or [])
+    }
+
+
+def _model_default_effort(model_obj: Any) -> str:
+    default = getattr(model_obj, "default_reasoning_effort", None)
+    if default is None:
+        return ""
+    return getattr(default, "value", str(default))
+
+
+@require_http_methods(["POST"])
+def update_settings(request: HttpRequest) -> HttpResponse:
+    model = request.POST.get("model", "").strip()
+    effort = request.POST.get("reasoning_effort", "").strip()
+    if len(model) > _MODEL_MAX_LEN:
+        return HttpResponseBadRequest("model id is too long")
+    valid_efforts = {e.value for e in ReasoningEffort}
+    if effort and effort not in valid_efforts:
+        return HttpResponseBadRequest("invalid reasoning effort")
+    if model or effort:
+        # Cross-check the posted (model, effort) pair against what Codex
+        # actually offers so a malformed POST (typo, stale model id, effort
+        # the chosen model doesn't support) gets a clean 400 instead of
+        # quietly poisoning every subsequent turn at runtime.
+        config = AppServerConfig(codex_bin=shutil.which("codex"))
+        with Codex(config=config) as codex:
+            models_data = list(codex.models().data)
+        compat_error = _validate_settings_against_models(model, effort, models_data)
+        if compat_error:
+            return HttpResponseBadRequest(compat_error)
+    response = redirect("index")
+    _apply_cookie_updates(response, {_MODEL_COOKIE: model, _EFFORT_COOKIE: effort})
+    return response
+
+
+def _validate_settings_against_models(
+    model: str, effort: str, models_data: list[Any]
+) -> str | None:
+    """Return an error message for an invalid (model, effort) pair, or None.
+
+    Empty ``models_data`` (transport hiccup, pre-provider state, mock in
+    tests) means we can't validate; trust the caller in that case so a
+    temporary Codex outage doesn't block the user from saving.
+
+    When ``model`` is blank the effort is checked against the provider's
+    default model — the one Codex will fall back to inside ``new_session``
+    — so an empty model can't quietly bypass the supported-effort check.
+    """
+    if not models_data:
+        return None
+    valid_ids = {m.id for m in models_data}
+    if model and model not in valid_ids:
+        return f"model {model!r} is not available"
+    if effort:
+        effective = (
+            next((m for m in models_data if m.id == model), None)
+            if model
+            else next((m for m in models_data if m.is_default), models_data[0])
+        )
+        if effective is not None:
+            supported = _supported_effort_values(effective)
+            if supported and effort not in supported:
+                return (
+                    f"reasoning effort {effort!r} is not supported by "
+                    f"model {effective.id!r}"
+                )
+    return None
+
+
 @require_http_methods(["POST"])
 def set_session_name(request: HttpRequest, session_id: str) -> HttpResponse:
     name = request.POST.get("name", "").strip()
@@ -236,11 +413,28 @@ def new_session(request: HttpRequest) -> HttpResponse:
     if cwd not in allowed:
         return HttpResponseBadRequest("cwd must be a discovered repository")
 
+    # Re-reconcile the cookies against Codex's current model list before
+    # spawning. A long-lived tab might still be carrying a model the index
+    # render would have snapped away from; without this, a stale value
+    # would ride straight into ``thread_start(model=...)`` and 500 the
+    # new-session click.
+    config = AppServerConfig(codex_bin=shutil.which("codex"))
+    with Codex(config=config) as codex:
+        models_data = list(codex.models().data)
+    model, reasoning_effort, cookie_updates = _resolved_settings(request, models_data)
+
     # Detach a worker subprocess so the initial turn keeps running past a
     # Django restart. The thread itself is created synchronously to give the
     # caller a stable id to redirect to.
-    instance = codex_pool.spawn_new_session(cwd=cwd, prompt=prompt)
-    return redirect("session", session_id=instance.thread_id)
+    instance = codex_pool.spawn_new_session(
+        cwd=cwd,
+        prompt=prompt,
+        model=model or None,
+        reasoning_effort=reasoning_effort or None,
+    )
+    response = redirect("session", session_id=instance.thread_id)
+    _apply_cookie_updates(response, cookie_updates)
+    return response
 
 
 def _collapse_flat_entries(flat: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:

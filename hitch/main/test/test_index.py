@@ -1,15 +1,34 @@
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 from django.test import TestCase
 from django.urls import reverse
 
 
+def _setup_codex(
+    mock_codex: MagicMock,
+    *,
+    threads: list[Any] | None = None,
+    models: list[Any] | None = None,
+) -> MagicMock:
+    """Configure the Codex mock with the calls the index view makes.
+
+    The view now reads both ``thread_list`` and ``models``; both attributes
+    must be set or the view's ``list(codex.models().data)`` will iterate a
+    bare MagicMock and explode.
+    """
+    ctx: MagicMock = mock_codex.return_value.__enter__.return_value
+    ctx.thread_list.return_value.data = threads or []
+    ctx.models.return_value.data = models or []
+    return ctx
+
+
 class IndexViewTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_index_renders_hitch(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
-        mock_codex.return_value.__enter__.return_value.thread_list.return_value.data = []
+        _setup_codex(mock_codex)
         mock_discover.return_value = []
         response = self.client.get(reverse("index"))
         self.assertEqual(response.status_code, 200)
@@ -27,7 +46,7 @@ class IndexViewTests(TestCase):
             cwd="/home/user/proj",
             updated_at=1234567890,
         )
-        mock_codex.return_value.__enter__.return_value.thread_list.return_value.data = [session]
+        _setup_codex(mock_codex, threads=[session])
         mock_discover.return_value = []
 
         response = self.client.get(reverse("index"))
@@ -64,11 +83,7 @@ class IndexViewTests(TestCase):
             cwd="/home/user/proj",
             updated_at=1500,
         )
-        mock_codex.return_value.__enter__.return_value.thread_list.return_value.data = [
-            older,
-            newer,
-            middle,
-        ]
+        _setup_codex(mock_codex, threads=[older, newer, middle])
         mock_discover.return_value = []
 
         response = self.client.get(reverse("index"))
@@ -88,7 +103,7 @@ class IndexViewTests(TestCase):
     ) -> None:
         from pathlib import Path
 
-        mock_codex.return_value.__enter__.return_value.thread_list.return_value.data = []
+        _setup_codex(mock_codex)
         mock_discover.return_value = [Path("/home/user/proj-a"), Path("/home/user/proj-b")]
 
         response = self.client.get(reverse("index"))
@@ -103,7 +118,7 @@ class IndexViewTests(TestCase):
     def test_index_shows_empty_repo_message(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        mock_codex.return_value.__enter__.return_value.thread_list.return_value.data = []
+        _setup_codex(mock_codex)
         mock_discover.return_value = []
 
         response = self.client.get(reverse("index"))
@@ -127,7 +142,7 @@ class IndexViewTests(TestCase):
             cwd="/repo",
             updated_at=1,
         )
-        mock_codex.return_value.__enter__.return_value.thread_list.return_value.data = [session]
+        _setup_codex(mock_codex, threads=[session])
         mock_discover.return_value = []
 
         response = self.client.get(reverse("index"))
@@ -149,7 +164,7 @@ class IndexViewTests(TestCase):
             cwd="/repo",
             updated_at=1,
         )
-        mock_codex.return_value.__enter__.return_value.thread_list.return_value.data = [session]
+        _setup_codex(mock_codex, threads=[session])
         mock_discover.return_value = []
 
         response = self.client.get(reverse("index"))
@@ -171,7 +186,7 @@ class IndexViewTests(TestCase):
             cwd="/repo",
             updated_at=1,
         )
-        mock_codex.return_value.__enter__.return_value.thread_list.return_value.data = [session]
+        _setup_codex(mock_codex, threads=[session])
         mock_discover.return_value = []
 
         response = self.client.get(reverse("index"))
@@ -192,7 +207,7 @@ class IndexViewTests(TestCase):
             cwd="/repo",
             updated_at=1,
         )
-        mock_codex.return_value.__enter__.return_value.thread_list.return_value.data = [session]
+        _setup_codex(mock_codex, threads=[session])
         mock_discover.return_value = []
 
         response = self.client.get(reverse("index"))

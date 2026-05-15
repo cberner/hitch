@@ -32,7 +32,9 @@ class SpawnNewSessionTests(TestCase):
         self.assertEqual(instance.pid, 4242)
         self.assertEqual(instance.status, CodexInstance.STATUS_STARTING)
         self.assertTrue(instance.events_path.endswith(f"{instance.pk}.jsonl"))
-        codex.thread_start.assert_called_once_with(cwd="/repo")
+        # ``model=None`` means "fall back to whatever Codex's config picks";
+        # the cookie-driven override path is exercised separately below.
+        codex.thread_start.assert_called_once_with(cwd="/repo", model=None)
         # ``thread/start`` defers writing the rollout file to disk, so the
         # cross-process ``thread/resume`` the worker and the session view both
         # rely on would fail with "no rollout found" without an explicit
@@ -40,9 +42,10 @@ class SpawnNewSessionTests(TestCase):
         # cheapest such write; it must happen inside the same Codex context as
         # ``thread/start`` so the in-memory thread is still loaded.
         codex._client.thread_set_name.assert_called_once_with("thread-abc", "hi")
-        # Worker subprocess only receives the row id; prompt is read from the
-        # row to avoid argparse misinterpreting prompts that begin with '-'.
-        mock_launch.assert_called_once_with(instance_id=instance.pk)
+        # Worker subprocess only receives the row id and (when set) the
+        # reasoning effort; the prompt is read from the row to avoid argparse
+        # misinterpreting prompts that begin with '-'.
+        mock_launch.assert_called_once_with(instance_id=instance.pk, reasoning_effort=None)
 
     @patch("hitch.main.codex_pool._launch_worker_process")
     @patch("hitch.main.codex_pool.Codex")
@@ -110,6 +113,50 @@ class SpawnNewSessionTests(TestCase):
 
         codex._client.thread_set_name.assert_called_once_with("t", "New session")
 
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.codex_pool.Codex")
+    def test_forwards_model_arg_to_thread_start(
+        self, mock_codex: MagicMock, mock_launch: MagicMock
+    ) -> None:
+        """The settings dialog's model selector flows in through ``model=``;
+        this test pins the wiring so a rename or refactor can't quietly drop
+        the connection between the cookie and the codex call."""
+        codex = mock_codex.return_value.__enter__.return_value
+        codex.thread_start.return_value = SimpleNamespace(id="t")
+        mock_launch.return_value = SimpleNamespace(pid=1)
+
+        with (
+            tempfile.TemporaryDirectory() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            codex_pool.spawn_new_session(cwd="/repo", prompt="hi", model="gpt-5")
+
+        codex.thread_start.assert_called_once_with(cwd="/repo", model="gpt-5")
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.codex_pool.Codex")
+    def test_forwards_reasoning_effort_to_worker_launch(
+        self, mock_codex: MagicMock, mock_launch: MagicMock
+    ) -> None:
+        """The effort cookie is forwarded to the detached worker as a CLI arg
+        — no DB lookup in the subprocess — so this test asserts on the launch
+        call rather than on stored state."""
+        codex = mock_codex.return_value.__enter__.return_value
+        codex.thread_start.return_value = SimpleNamespace(id="t")
+        mock_launch.return_value = SimpleNamespace(pid=1)
+
+        with (
+            tempfile.TemporaryDirectory() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_new_session(
+                cwd="/repo", prompt="hi", reasoning_effort="high"
+            )
+
+        mock_launch.assert_called_once_with(
+            instance_id=instance.pk, reasoning_effort="high"
+        )
+
 
 class SpawnLaunchFailureTests(TestCase):
     @patch("hitch.main.codex_pool._launch_worker_process")
@@ -155,7 +202,7 @@ class SpawnTurnTests(TestCase):
         self.assertEqual(instance.thread_id, "thread-xyz")
         self.assertEqual(instance.prompt, "follow-up")
         self.assertEqual(instance.pid, 1234)
-        mock_launch.assert_called_once_with(instance_id=instance.pk)
+        mock_launch.assert_called_once_with(instance_id=instance.pk, reasoning_effort=None)
 
 
 class LaunchWorkerProcessTests(TestCase):
@@ -189,6 +236,19 @@ class LaunchWorkerProcessTests(TestCase):
             kwargs["env"]["DJANGO_SETTINGS_MODULE"],
             "hitch.settings.dev",
         )
+        # No effort passed → no --reasoning-effort on the CLI; Codex's own
+        # default takes over inside the worker.
+        self.assertNotIn("--reasoning-effort", argv)
+
+    @patch("hitch.main.codex_pool.subprocess.Popen")
+    def test_forwards_reasoning_effort_as_cli_arg(self, mock_popen: MagicMock) -> None:
+        mock_popen.return_value = SimpleNamespace(pid=999)
+
+        codex_pool._launch_worker_process(instance_id=7, reasoning_effort="high")
+
+        argv = mock_popen.call_args.args[0]
+        self.assertIn("--reasoning-effort", argv)
+        self.assertEqual(argv[argv.index("--reasoning-effort") + 1], "high")
 
 
 class IsAliveTests(TestCase):

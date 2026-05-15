@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from django.core.management import call_command
 from django.test import TestCase
 from openai_codex.generated.v2_all import (
+    ReasoningEffort,
     Turn,
     TurnCompletedNotification,
     TurnError,
@@ -199,6 +200,67 @@ class CodexWorkerCommandTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertIn("boom", instance.error)
         self.assertIsNotNone(instance.ended_at)
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_passes_reasoning_effort_cli_arg_to_turn(
+        self, mock_codex: MagicMock
+    ) -> None:
+        """The effort value rides into the worker as a CLI arg (no DB or
+        cookie lookup in the subprocess); this test pins the contract from
+        ``manage.py codex_worker`` all the way through to ``turn(effort=)``."""
+        captured: dict[str, object] = {}
+
+        def _capture_turn(input_obj: object, **kwargs: object) -> object:
+            captured.update(kwargs)
+            return SimpleNamespace(
+                id="turn-1",
+                stream=lambda: iter([_completed_event("turn-1", TurnStatus.completed)]),
+            )
+
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.return_value = SimpleNamespace(turn=_capture_turn)
+
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(Path(raw))
+            call_command(
+                "codex_worker",
+                "--instance-id",
+                str(instance.pk),
+                "--reasoning-effort",
+                "high",
+            )
+
+        self.assertEqual(captured.get("effort"), ReasoningEffort.high)
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_unknown_reasoning_effort_is_silently_dropped(
+        self, mock_codex: MagicMock
+    ) -> None:
+        """A stale enum value (e.g. removed in an SDK upgrade) must not crash
+        the worker; Codex's own default takes over instead."""
+        captured: dict[str, object] = {}
+
+        def _capture_turn(input_obj: object, **kwargs: object) -> object:
+            captured.update(kwargs)
+            return SimpleNamespace(
+                id="turn-1",
+                stream=lambda: iter([_completed_event("turn-1", TurnStatus.completed)]),
+            )
+
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.return_value = SimpleNamespace(turn=_capture_turn)
+
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(Path(raw))
+            call_command(
+                "codex_worker",
+                "--instance-id",
+                str(instance.pk),
+                "--reasoning-effort",
+                "ludicrous",
+            )
+
+        self.assertNotIn("effort", captured)
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_marks_running_before_streaming(self, mock_codex: MagicMock) -> None:
