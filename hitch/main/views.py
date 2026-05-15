@@ -58,6 +58,8 @@ _MODEL_MAX_LEN = 256
 # (the full first user message) is what we get; that is often paragraphs
 # long and would overflow the list rows without a clip.
 _DISPLAY_TITLE_MAX_LEN = 80
+_MINUTES_PER_HOUR = 60
+_MINUTES_PER_DAY = 24 * _MINUTES_PER_HOUR
 
 # Server-side cap on user-supplied thread names. Matches the `maxlength` we
 # set on the edit form so a client without HTML validation cannot push an
@@ -359,7 +361,7 @@ def _format_rate_limit_snapshot(snapshot: RateLimitSnapshot) -> dict[str, Any] |
                 "used_percent": used,
                 "remaining_percent": 100 - used,
                 "resets_at": window.resets_at,
-                "window_duration_mins": window.window_duration_mins,
+                "window_duration_label": _format_window_duration(window.window_duration_mins),
             }
         )
     if not windows:
@@ -370,6 +372,18 @@ def _format_rate_limit_snapshot(snapshot: RateLimitSnapshot) -> dict[str, Any] |
         "limit_name": snapshot.limit_name,
         "plan_type": plan_type,
     }
+
+
+def _format_window_duration(window_duration_mins: int | None) -> str | None:
+    if window_duration_mins is None or window_duration_mins <= 0:
+        return None
+    if window_duration_mins % _MINUTES_PER_DAY == 0:
+        days = window_duration_mins // _MINUTES_PER_DAY
+        return f"{days}-day"
+    if window_duration_mins % _MINUTES_PER_HOUR == 0:
+        hours = window_duration_mins // _MINUTES_PER_HOUR
+        return f"{hours}-hour"
+    return f"{window_duration_mins}-min"
 
 
 def _supported_effort_values(model_obj: Any) -> set[str]:

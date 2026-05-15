@@ -518,8 +518,8 @@
                         <div class="rate-limit-bar-fill" style="width: {{ window.remaining_percent }}%"></div>
                     </div>
                     <div class="rate-limit-meta">
-                        {% if window.window_duration_mins %}{{ window.window_duration_mins }}-min window{% endif %}
-                        {% if window.window_duration_mins and window.resets_at %} · {% endif %}
+                        {% if window.window_duration_label %}{{ window.window_duration_label }} window{% endif %}
+                        {% if window.window_duration_label and window.resets_at %} · {% endif %}
                         {% if window.resets_at %}resets <time data-resets-at="{{ window.resets_at }}">{{ window.resets_at }}</time>{% endif %}
                     </div>
                 </div>
