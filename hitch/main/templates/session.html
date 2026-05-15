@@ -627,11 +627,9 @@
                 });
             }
 
-            // Composer: auto-grow the textarea up to its CSS max-height,
-            // disable submit when empty, and treat plain Enter as submit
-            // (Shift+Enter inserts a newline) so the form behaves like a
-            // chat box. The browser still falls back to a normal POST if
-            // JS is disabled.
+            // Composer: auto-grow the textarea up to its CSS max-height and
+            // disable submit when empty. Enter inserts a newline; the form
+            // only submits when the Send button is pressed.
             const composer = document.querySelector("[data-composer]");
             if (composer) {
                 const input = composer.querySelector("[data-composer-input]");
@@ -643,13 +641,6 @@
                 };
                 sync();
                 input.addEventListener("input", sync);
-                input.addEventListener("keydown", (event) => {
-                    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
-                        if (input.value.trim().length === 0) return;
-                        event.preventDefault();
-                        composer.requestSubmit();
-                    }
-                });
                 composer.addEventListener("submit", () => {
                     submit.disabled = true;
                 });
