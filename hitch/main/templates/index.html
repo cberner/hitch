@@ -2,38 +2,102 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#fafaf9" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#0f0f0e" media="(prefers-color-scheme: dark)">
     <title>HITCH</title>
     <style>
         :root {
             color-scheme: light dark;
+            --bg: #fafaf9;
+            --surface: #ffffff;
+            --surface-2: #f4f3f0;
+            --border: #e7e5e0;
+            --border-strong: #d6d3cd;
+            --text: #1a1a1a;
+            --text-muted: #6b6b66;
+            --text-faint: #8e8c85;
+            --accent: #c96442;
+            --accent-hover: #b35536;
+            --accent-soft: rgba(201, 100, 66, 0.08);
+            --danger: #b3261e;
+            --shadow: 0 1px 2px rgba(20, 20, 18, 0.04);
+            --shadow-lg: 0 8px 24px rgba(20, 20, 18, 0.08);
+            --radius: 12px;
+            --radius-sm: 8px;
+            --safe-top: env(safe-area-inset-top, 0px);
+            --safe-bottom: env(safe-area-inset-bottom, 0px);
         }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #1a1a18;
+                --surface: #242422;
+                --surface-2: #2e2e2b;
+                --border: #38382f;
+                --border-strong: #3f3f35;
+                --text: #f5f4ef;
+                --text-muted: #a8a59c;
+                --text-faint: #79766c;
+                --accent: #d97757;
+                --accent-hover: #e58a6c;
+                --accent-soft: rgba(217, 119, 87, 0.14);
+                --danger: #f08278;
+                --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+                --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
+            }
+        }
+        * { box-sizing: border-box; }
+        html, body { margin: 0; padding: 0; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            max-width: 900px;
-            margin: 2rem auto;
-            padding: 0 1rem 3rem;
-            color: #1f2328;
-            background: #f6f8fa;
-            line-height: 1.4;
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            color: var(--text);
+            background: var(--bg);
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            -webkit-tap-highlight-color: transparent;
+            min-height: 100vh;
+            padding-bottom: calc(5.5rem + var(--safe-bottom));
         }
-        h1 {
-            margin: 0 0 0.25rem;
-            font-size: 1.6rem;
+        .topbar {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            background: color-mix(in srgb, var(--bg) 88%, transparent);
+            backdrop-filter: saturate(180%) blur(14px);
+            -webkit-backdrop-filter: saturate(180%) blur(14px);
+            border-bottom: 1px solid var(--border);
+            padding-top: var(--safe-top);
         }
-        h2 {
-            margin: 1.5rem 0 0.75rem;
-            font-size: 1rem;
-            color: #57606a;
-            font-weight: 600;
-            text-transform: uppercase;
-            letter-spacing: 0.04em;
-        }
-        .header {
+        .topbar-inner {
+            max-width: 760px;
+            margin: 0 auto;
             display: flex;
-            align-items: baseline;
+            align-items: center;
             justify-content: space-between;
-            gap: 1rem;
-            flex-wrap: wrap;
+            gap: 0.75rem;
+            padding: 0.75rem 1rem;
+        }
+        .brand {
+            font-size: 1rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            margin: 0;
+            color: var(--text);
+        }
+        main {
+            max-width: 760px;
+            margin: 0 auto;
+            padding: 1.25rem 1rem 2rem;
+        }
+        .section-label {
+            font-size: 0.72rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            margin: 0 0 0.75rem;
+            padding: 0 0.25rem;
         }
         .session-list {
             list-style: none;
@@ -44,144 +108,261 @@
             gap: 0.5rem;
         }
         .session {
-            background: #fff;
-            border: 1px solid #d0d7de;
-            border-radius: 6px;
-            padding: 0.75rem 1rem;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            box-shadow: var(--shadow);
+            transition: transform 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+        }
+        .session:active { transform: scale(0.985); }
+        @media (hover: hover) {
+            .session:hover {
+                border-color: var(--border-strong);
+                box-shadow: var(--shadow-lg);
+            }
+        }
+        .session a.session-link {
+            display: block;
+            padding: 0.9rem 1rem;
+            color: inherit;
+            text-decoration: none;
         }
         .session-title {
             font-weight: 600;
-            margin: 0 0 0.35rem;
+            font-size: 0.98rem;
+            margin: 0 0 0.4rem;
+            color: var(--text);
             overflow: hidden;
             text-overflow: ellipsis;
             display: -webkit-box;
             -webkit-line-clamp: 2;
             -webkit-box-orient: vertical;
+            line-height: 1.35;
         }
         .session-meta {
-            color: #57606a;
-            font-size: 0.85rem;
             display: flex;
             flex-wrap: wrap;
-            gap: 0.25rem 1rem;
+            gap: 0.35rem 0.85rem;
+            font-size: 0.78rem;
+            color: var(--text-muted);
+            align-items: center;
+        }
+        .session-meta .meta-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            min-width: 0;
+        }
+        .session-meta .meta-item .meta-label {
+            color: var(--text-faint);
         }
         .session-meta code {
-            background: #eaeef2;
-            padding: 0 0.3rem;
-            border-radius: 3px;
-            font-size: 0.82rem;
+            background: var(--surface-2);
+            color: var(--text);
+            padding: 0.1rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.74rem;
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 18rem;
         }
         .session-meta time {
             font-variant-numeric: tabular-nums;
+            color: var(--text-faint);
         }
         .empty {
-            color: #57606a;
-            font-style: italic;
+            text-align: center;
+            padding: 3rem 1rem;
+            color: var(--text-muted);
+            border: 1px dashed var(--border-strong);
+            border-radius: var(--radius);
+            background: var(--surface);
         }
+        .empty p { margin: 0; font-size: 0.95rem; }
+        .empty .hint { font-size: 0.82rem; color: var(--text-faint); margin-top: 0.5rem; }
+
         .button {
             font: inherit;
-            background: #1f6feb;
+            font-weight: 500;
+            background: var(--accent);
             color: #fff;
-            border: 1px solid #1f6feb;
-            border-radius: 6px;
-            padding: 0.4rem 0.9rem;
+            border: 1px solid var(--accent);
+            border-radius: 999px;
+            padding: 0.5rem 1rem;
             cursor: pointer;
             text-decoration: none;
-            display: inline-block;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            min-height: 38px;
+            transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
+            font-size: 0.9rem;
         }
-        .button:hover {
-            background: #1858c4;
-            border-color: #1858c4;
+        .button:active { transform: scale(0.97); }
+        @media (hover: hover) {
+            .button:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
         }
         .button.secondary {
             background: transparent;
-            color: #1f2328;
-            border-color: #d0d7de;
+            color: var(--text);
+            border-color: var(--border-strong);
         }
-        .button.secondary:hover {
-            background: #eaeef2;
+        @media (hover: hover) {
+            .button.secondary:hover { background: var(--surface-2); }
         }
+        .button .plus {
+            font-size: 1.1rem;
+            line-height: 1;
+            font-weight: 400;
+            margin-right: -0.15rem;
+        }
+
+        .fab {
+            position: fixed;
+            right: calc(1rem + env(safe-area-inset-right, 0px));
+            bottom: calc(1.25rem + var(--safe-bottom));
+            z-index: 20;
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            border-radius: 999px;
+            padding: 0.85rem 1.25rem;
+            font: inherit;
+            font-weight: 600;
+            font-size: 0.95rem;
+            box-shadow: 0 6px 20px rgba(201, 100, 66, 0.35), 0 2px 6px rgba(0, 0, 0, 0.1);
+            cursor: pointer;
+            display: none;
+            align-items: center;
+            gap: 0.45rem;
+            transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+        }
+        .fab:active { transform: scale(0.96); }
+        @media (max-width: 640px) {
+            .fab { display: inline-flex; }
+            .topbar-action { display: none; }
+        }
+
         dialog.new-session {
-            border: 1px solid #d0d7de;
-            border-radius: 8px;
+            border: 1px solid var(--border);
+            border-radius: 16px;
             padding: 0;
-            background: #fff;
-            color: #1f2328;
-            max-width: min(560px, calc(100% - 2rem));
+            background: var(--surface);
+            color: var(--text);
+            box-shadow: var(--shadow-lg);
+            max-width: min(520px, calc(100% - 1.5rem));
             width: 100%;
         }
         dialog.new-session::backdrop {
-            background: rgba(15, 23, 42, 0.45);
+            background: rgba(15, 14, 12, 0.5);
+            backdrop-filter: blur(2px);
         }
         dialog.new-session form {
             display: flex;
             flex-direction: column;
-            gap: 0.85rem;
-            padding: 1.25rem 1.25rem 1rem;
+            gap: 1rem;
+            padding: 1.25rem;
         }
         dialog.new-session h2 {
             margin: 0;
-            font-size: 1.1rem;
-            color: #1f2328;
-            text-transform: none;
-            letter-spacing: 0;
+            font-size: 1.05rem;
+            font-weight: 600;
+            color: var(--text);
         }
         dialog.new-session label {
             display: flex;
             flex-direction: column;
-            gap: 0.3rem;
-            font-size: 0.9rem;
-            color: #57606a;
+            gap: 0.4rem;
+            font-size: 0.82rem;
+            font-weight: 500;
+            color: var(--text-muted);
         }
         dialog.new-session textarea,
         dialog.new-session select {
             font: inherit;
-            border: 1px solid #d0d7de;
-            border-radius: 6px;
-            padding: 0.5rem 0.6rem;
-            background: #fff;
-            color: #1f2328;
+            font-size: 0.95rem;
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 0.65rem 0.75rem;
+            background: var(--bg);
+            color: var(--text);
+            transition: border-color 0.12s ease, box-shadow 0.12s ease;
+        }
+        dialog.new-session textarea:focus,
+        dialog.new-session select:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-soft);
         }
         dialog.new-session textarea {
-            min-height: 8rem;
+            min-height: 9rem;
             resize: vertical;
+            line-height: 1.5;
         }
         dialog.new-session .actions {
             display: flex;
             justify-content: flex-end;
             gap: 0.5rem;
+            flex-wrap: wrap;
         }
         dialog.new-session .empty-repos {
-            color: #cf222e;
-            font-size: 0.85rem;
+            color: var(--danger);
+            font-size: 0.82rem;
             margin: 0;
+            font-weight: 400;
+        }
+        @media (max-width: 480px) {
+            dialog.new-session {
+                max-width: calc(100% - 1rem);
+                border-radius: 16px;
+            }
+            dialog.new-session form { padding: 1.1rem; }
+            dialog.new-session .actions { flex-direction: column-reverse; }
+            dialog.new-session .actions .button {
+                width: 100%;
+                justify-content: center;
+            }
         }
     </style>
 </head>
 <body>
-    <div class="header">
-        <h1>HITCH</h1>
-        <button type="button" class="button" data-new-session-open>New session</button>
-    </div>
-    <h2>Codex sessions</h2>
-    {% if sessions %}
-    <ul class="session-list">
-        {% for session in sessions %}
-        <li class="session">
-            <div class="session-title">
-                <a href="{% url 'session' session_id=session.id %}">{{ session.display_title }}</a>
-            </div>
-            <div class="session-meta">
-                <span>id: <code>{{ session.id }}</code></span>
-                <span>cwd: <code>{{ session.cwd }}</code></span>
-                <span>updated: <time data-updated-at="{{ session.updated_at }}">{{ session.updated_at }}</time></span>
-            </div>
-        </li>
-        {% endfor %}
-    </ul>
-    {% else %}
-    <p class="empty">No sessions found.</p>
-    {% endif %}
+    <header class="topbar">
+        <div class="topbar-inner">
+            <h1 class="brand">HITCH</h1>
+            <button type="button" class="button topbar-action" data-new-session-open>
+                <span class="plus">+</span>New session
+            </button>
+        </div>
+    </header>
+    <main>
+        <p class="section-label">Codex sessions</p>
+        {% if sessions %}
+        <ul class="session-list">
+            {% for session in sessions %}
+            <li class="session">
+                <a class="session-link" href="{% url 'session' session_id=session.id %}">
+                    <div class="session-title">{{ session.display_title }}</div>
+                    <div class="session-meta">
+                        <span class="meta-item"><span class="meta-label">cwd</span><code>{{ session.cwd }}</code></span>
+                        <span class="meta-item"><time data-updated-at="{{ session.updated_at }}">{{ session.updated_at }}</time></span>
+                    </div>
+                </a>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <div class="empty">
+            <p>No sessions found.</p>
+            <p class="hint">Tap “New session” to start your first one.</p>
+        </div>
+        {% endif %}
+    </main>
+
+    <button type="button" class="fab" data-new-session-open aria-label="New session">
+        <span class="plus" aria-hidden="true">+</span>New
+    </button>
 
     <dialog class="new-session" data-new-session-dialog aria-labelledby="new-session-title">
         <form method="post" action="{{ new_session_url }}">
@@ -245,28 +426,28 @@
             }
 
             const dialog = document.querySelector("[data-new-session-dialog]");
-            const openButton = document.querySelector("[data-new-session-open]");
+            const openButtons = document.querySelectorAll("[data-new-session-open]");
             const cancelButton = dialog && dialog.querySelector("[data-new-session-cancel]");
-            if (dialog && openButton) {
-                openButton.addEventListener("click", () => {
-                    if (typeof dialog.showModal === "function") {
-                        dialog.showModal();
-                    } else {
-                        dialog.setAttribute("open", "");
-                    }
-                    const textarea = dialog.querySelector("textarea[name='prompt']");
-                    if (textarea) textarea.focus();
-                });
+            function openDialog() {
+                if (!dialog) return;
+                if (typeof dialog.showModal === "function") {
+                    dialog.showModal();
+                } else {
+                    dialog.setAttribute("open", "");
+                }
+                const textarea = dialog.querySelector("textarea[name='prompt']");
+                if (textarea) textarea.focus();
             }
-            if (dialog && cancelButton) {
-                cancelButton.addEventListener("click", () => {
-                    if (typeof dialog.close === "function") {
-                        dialog.close();
-                    } else {
-                        dialog.removeAttribute("open");
-                    }
-                });
+            function closeDialog() {
+                if (!dialog) return;
+                if (typeof dialog.close === "function") {
+                    dialog.close();
+                } else {
+                    dialog.removeAttribute("open");
+                }
             }
+            openButtons.forEach((btn) => btn.addEventListener("click", openDialog));
+            if (cancelButton) cancelButton.addEventListener("click", closeDialog);
         })();
     </script>
 </body>

@@ -2,240 +2,522 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#fafaf9" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#0f0f0e" media="(prefers-color-scheme: dark)">
     <title>HITCH — {{ display_title }}</title>
     <style>
-        :root { color-scheme: light dark; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            max-width: 900px;
-            margin: 2rem auto;
-            padding: 0 1rem 3rem;
-            color: #1f2328;
-            background: #f6f8fa;
-            line-height: 1.45;
+        :root {
+            color-scheme: light dark;
+            --bg: #fafaf9;
+            --surface: #ffffff;
+            --surface-2: #f4f3f0;
+            --surface-3: #ecebe6;
+            --border: #e7e5e0;
+            --border-strong: #d6d3cd;
+            --text: #1a1a1a;
+            --text-muted: #6b6b66;
+            --text-faint: #8e8c85;
+            --accent: #c96442;
+            --accent-hover: #b35536;
+            --accent-soft: rgba(201, 100, 66, 0.08);
+            --user-bubble: #eef4ff;
+            --user-bubble-border: #d3e3fb;
+            --user-bubble-text: #0b3a8a;
+            --link: #1f6feb;
+            --code-bg: #f1efea;
+            --status-default-bg: #ecebe6;
+            --status-default-fg: #6b6b66;
+            --status-warn-bg: #fff4d6;
+            --status-warn-fg: #7a4f00;
+            --status-error-bg: #fbe7e4;
+            --status-error-fg: #8a1c1c;
+            --shadow: 0 1px 2px rgba(20, 20, 18, 0.04);
+            --shadow-lg: 0 8px 24px rgba(20, 20, 18, 0.08);
+            --radius: 12px;
+            --radius-sm: 8px;
+            --safe-top: env(safe-area-inset-top, 0px);
+            --safe-bottom: env(safe-area-inset-bottom, 0px);
         }
-        a { color: #0969da; }
-        h1 { margin: 0.5rem 0 0.25rem; font-size: 1.4rem; }
-        .meta { color: #57606a; font-size: 0.85rem; margin-bottom: 1.5rem; }
-        .meta code { background: #eaeef2; padding: 0 0.3rem; border-radius: 3px; font-size: 0.82rem; }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #1a1a18;
+                --surface: #242422;
+                --surface-2: #2e2e2b;
+                --surface-3: #36352f;
+                --border: #38382f;
+                --border-strong: #46453a;
+                --text: #f5f4ef;
+                --text-muted: #a8a59c;
+                --text-faint: #79766c;
+                --accent: #d97757;
+                --accent-hover: #e58a6c;
+                --accent-soft: rgba(217, 119, 87, 0.14);
+                --user-bubble: #1f2a3a;
+                --user-bubble-border: #2f4566;
+                --user-bubble-text: #b9d3ff;
+                --link: #79b8ff;
+                --code-bg: #2a2a26;
+                --status-default-bg: #2e2e2b;
+                --status-default-fg: #a8a59c;
+                --status-warn-bg: #3a2f10;
+                --status-warn-fg: #f5cf66;
+                --status-error-bg: #3a1f1c;
+                --status-error-fg: #f5a299;
+                --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+                --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
+            }
+        }
+        * { box-sizing: border-box; }
+        html, body { margin: 0; padding: 0; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            color: var(--text);
+            background: var(--bg);
+            line-height: 1.55;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            -webkit-tap-highlight-color: transparent;
+            min-height: 100vh;
+            padding-bottom: calc(2rem + var(--safe-bottom));
+        }
+        a { color: var(--link); text-decoration: none; }
+        a:hover { text-decoration: underline; }
 
-        .entry { margin: 0.75rem 0; }
+        .topbar {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            background: color-mix(in srgb, var(--bg) 88%, transparent);
+            backdrop-filter: saturate(180%) blur(14px);
+            -webkit-backdrop-filter: saturate(180%) blur(14px);
+            border-bottom: 1px solid var(--border);
+            padding-top: var(--safe-top);
+        }
+        .topbar-inner {
+            max-width: 820px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.6rem 0.85rem;
+            min-height: 48px;
+        }
+        .back-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            padding: 0.45rem 0.65rem 0.45rem 0.45rem;
+            margin-left: -0.45rem;
+            border-radius: 8px;
+            color: var(--text);
+            font-size: 0.92rem;
+            font-weight: 500;
+            text-decoration: none;
+            transition: background 0.12s ease;
+        }
+        .back-link:hover { background: var(--surface-2); text-decoration: none; }
+        .back-link .chev {
+            font-size: 1.1rem;
+            line-height: 1;
+            color: var(--accent);
+        }
+        .topbar-title {
+            flex: 1;
+            min-width: 0;
+            font-size: 0.95rem;
+            font-weight: 600;
+            color: var(--text);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            text-align: center;
+            padding: 0 0.25rem;
+        }
+        .topbar-action {
+            font: inherit;
+            font-size: 0.88rem;
+            background: transparent;
+            color: var(--link);
+            border: none;
+            border-radius: 8px;
+            padding: 0.45rem 0.6rem;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        .topbar-action:hover { background: var(--surface-2); }
+
+        main {
+            max-width: 820px;
+            margin: 0 auto;
+            padding: 1rem 1rem 2rem;
+        }
+
+        .session-head { margin: 0.25rem 0 1.25rem; }
+        .session-head h1 {
+            margin: 0 0 0.4rem;
+            font-size: 1.3rem;
+            font-weight: 600;
+            line-height: 1.3;
+            color: var(--text);
+            overflow-wrap: anywhere;
+        }
+        .meta {
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.3rem 0.8rem;
+            align-items: center;
+        }
+        .meta .meta-item { display: inline-flex; align-items: center; gap: 0.3rem; min-width: 0; }
+        .meta .meta-label { color: var(--text-faint); }
+        .meta code {
+            background: var(--surface-2);
+            color: var(--text);
+            padding: 0.1rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.74rem;
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 18rem;
+        }
+        .meta time { font-variant-numeric: tabular-nums; color: var(--text-faint); }
+
+        details.edit-title {
+            margin: 0 0 1rem;
+            font-size: 0.85rem;
+        }
+        details.edit-title > summary {
+            cursor: pointer;
+            color: var(--link);
+            user-select: none;
+            list-style: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.3rem;
+            padding: 0.3rem 0.55rem;
+            margin-left: -0.55rem;
+            border-radius: 8px;
+            font-weight: 500;
+        }
+        details.edit-title > summary:hover { background: var(--surface-2); }
+        details.edit-title > summary::-webkit-details-marker { display: none; }
+        details.edit-title form {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 0.6rem;
+            align-items: stretch;
+            flex-wrap: wrap;
+        }
+        details.edit-title input[name="name"] {
+            font: inherit;
+            font-size: 0.95rem;
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 0.55rem 0.7rem;
+            background: var(--surface);
+            color: var(--text);
+            flex: 1 1 15rem;
+            min-width: 0;
+        }
+        details.edit-title input[name="name"]:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-soft);
+        }
+        details.edit-title button {
+            font: inherit;
+            background: var(--accent);
+            color: #fff;
+            border: 1px solid var(--accent);
+            border-radius: var(--radius-sm);
+            padding: 0.55rem 1.1rem;
+            cursor: pointer;
+            font-weight: 500;
+            min-height: 40px;
+        }
+        details.edit-title button:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+
+        section.thread { display: flex; flex-direction: column; gap: 0.85rem; }
+        .entry { margin: 0; }
         .entry-header {
             display: flex;
             align-items: baseline;
             gap: 0.5rem;
-            font-size: 0.78rem;
-            color: #57606a;
-            margin-bottom: 0.2rem;
+            font-size: 0.72rem;
+            color: var(--text-faint);
+            margin-bottom: 0.3rem;
+            padding: 0 0.15rem;
         }
         .entry-header .role {
             font-weight: 600;
             text-transform: uppercase;
-            letter-spacing: 0.04em;
+            letter-spacing: 0.06em;
+            color: var(--text-muted);
         }
-        .entry-header time { font-variant-numeric: tabular-nums; }
+        .entry-header time {
+            font-variant-numeric: tabular-nums;
+        }
 
         .message {
-            padding: 0.6rem 0.9rem;
-            border-radius: 6px;
-            background: #fff;
-            border: 1px solid #d0d7de;
+            padding: 0.75rem 1rem;
+            border-radius: 14px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            box-shadow: var(--shadow);
+            overflow-wrap: anywhere;
+            word-break: break-word;
         }
-        .message.user { background: #ddf4ff; border-color: #b6e3ff; }
-        .message.agent { background: #fff; }
-        .message.thinking { background: #fff; color: #57606a; font-style: italic; }
-        .message .body { white-space: pre-wrap; word-wrap: break-word; }
+        .message.user {
+            background: var(--user-bubble);
+            border-color: var(--user-bubble-border);
+            color: var(--user-bubble-text);
+        }
+        .message.user .body { color: var(--user-bubble-text); }
+        .message.agent { background: var(--surface); }
+        .message.thinking {
+            background: transparent;
+            border: 1px dashed var(--border-strong);
+            color: var(--text-muted);
+            font-style: italic;
+            box-shadow: none;
+        }
+        .message .body {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-size: 0.95rem;
+        }
         .message .body.markdown { white-space: normal; }
         .message .body.markdown > :first-child { margin-top: 0; }
         .message .body.markdown > :last-child { margin-bottom: 0; }
-        .message .body.markdown p { margin: 0.5em 0; }
+        .message .body.markdown p { margin: 0.55em 0; }
         .message .body.markdown h1,
         .message .body.markdown h2,
         .message .body.markdown h3,
         .message .body.markdown h4,
         .message .body.markdown h5,
-        .message .body.markdown h6 { margin: 0.85em 0 0.3em; font-weight: 600; line-height: 1.25; }
-        .message .body.markdown h1 { font-size: 1.3rem; }
-        .message .body.markdown h2 { font-size: 1.15rem; }
-        .message .body.markdown h3 { font-size: 1.05rem; }
+        .message .body.markdown h6 { margin: 0.9em 0 0.35em; font-weight: 600; line-height: 1.25; }
+        .message .body.markdown h1 { font-size: 1.25rem; }
+        .message .body.markdown h2 { font-size: 1.1rem; }
+        .message .body.markdown h3 { font-size: 1rem; }
         .message .body.markdown h4,
         .message .body.markdown h5,
-        .message .body.markdown h6 { font-size: 1rem; }
+        .message .body.markdown h6 { font-size: 0.95rem; }
         .message .body.markdown ul,
-        .message .body.markdown ol { margin: 0.5em 0; padding-left: 1.5em; }
-        .message .body.markdown li { margin: 0.15em 0; }
-        .message .body.markdown li > p { margin: 0.15em 0; }
+        .message .body.markdown ol { margin: 0.5em 0; padding-left: 1.4em; }
+        .message .body.markdown li { margin: 0.2em 0; }
+        .message .body.markdown li > p { margin: 0.2em 0; }
         .message .body.markdown code {
-            background: #eaeef2;
-            padding: 0 0.3em;
-            border-radius: 3px;
-            font-size: 0.9em;
+            background: var(--code-bg);
+            padding: 0.05em 0.35em;
+            border-radius: 4px;
+            font-size: 0.88em;
             font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
         }
         .message .body.markdown pre {
-            background: #eaeef2;
-            padding: 0.6em 0.8em;
-            border-radius: 4px;
+            background: var(--code-bg);
+            padding: 0.7em 0.85em;
+            border-radius: 8px;
             overflow-x: auto;
-            margin: 0.5em 0;
+            margin: 0.6em 0;
+            -webkit-overflow-scrolling: touch;
+            border: 1px solid var(--border);
         }
         .message .body.markdown pre code {
             background: transparent;
             padding: 0;
-            font-size: 0.85em;
+            font-size: 0.82em;
+            line-height: 1.5;
         }
         .message .body.markdown blockquote {
-            margin: 0.5em 0;
-            padding: 0 0.8em;
-            border-left: 3px solid #d0d7de;
-            color: #57606a;
+            margin: 0.6em 0;
+            padding: 0.1em 0.9em;
+            border-left: 3px solid var(--border-strong);
+            color: var(--text-muted);
         }
-        .message .body.markdown table { border-collapse: collapse; margin: 0.5em 0; }
+        .message .body.markdown table {
+            border-collapse: collapse;
+            margin: 0.6em 0;
+            display: block;
+            overflow-x: auto;
+            -webkit-overflow-scrolling: touch;
+        }
         .message .body.markdown th,
-        .message .body.markdown td { padding: 0.3em 0.6em; border: 1px solid #d0d7de; }
-        .message .body.markdown th { background: #eaeef2; font-weight: 600; }
-        .message .body.markdown hr { border: 0; border-top: 1px solid #d0d7de; margin: 0.8em 0; }
+        .message .body.markdown td { padding: 0.35em 0.7em; border: 1px solid var(--border); }
+        .message .body.markdown th { background: var(--surface-2); font-weight: 600; }
+        .message .body.markdown hr { border: 0; border-top: 1px solid var(--border); margin: 0.9em 0; }
+        .message .body.markdown a { color: var(--link); }
+        .message.user .body.markdown a { color: var(--user-bubble-text); text-decoration: underline; }
 
         .tool-call {
             display: flex;
-            align-items: baseline;
-            gap: 0.5rem;
-            padding: 0.3rem 0.7rem;
-            background: #f6f8fa;
-            border-left: 3px solid #d0d7de;
-            border-radius: 0 4px 4px 0;
-            font-size: 0.88rem;
-            color: #57606a;
+            align-items: center;
+            gap: 0.55rem;
+            padding: 0.5rem 0.8rem;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--border-strong);
+            border-radius: 0 10px 10px 0;
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            flex-wrap: wrap;
         }
         .tool-call .label {
             font-weight: 600;
-            color: #57606a;
+            color: var(--text-muted);
             white-space: nowrap;
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
         }
         .tool-call .detail {
             font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
-            font-size: 0.85rem;
-            color: #1f2328;
+            font-size: 0.82rem;
+            color: var(--text);
             overflow-wrap: anywhere;
             white-space: pre-wrap;
+            flex: 1;
+            min-width: 0;
         }
         .tool-call .status {
             margin-left: auto;
             text-transform: uppercase;
-            letter-spacing: 0.04em;
-            font-size: 0.72rem;
-            padding: 0 0.4rem;
-            border-radius: 3px;
-            background: #eaeef2;
-            color: #57606a;
+            letter-spacing: 0.05em;
+            font-size: 0.66rem;
+            font-weight: 600;
+            padding: 0.15rem 0.45rem;
+            border-radius: 999px;
+            background: var(--status-default-bg);
+            color: var(--status-default-fg);
             white-space: nowrap;
         }
         .tool-call .status.failed,
-        .tool-call .status.declined { background: #ffebe9; color: #82071e; }
-        .tool-call .status.inProgress { background: #fff8c5; color: #7d4e00; }
+        .tool-call .status.declined { background: var(--status-error-bg); color: var(--status-error-fg); }
+        .tool-call .status.inProgress { background: var(--status-warn-bg); color: var(--status-warn-fg); }
         .tool-call .timestamp {
-            font-size: 0.72rem;
-            color: #8b949e;
+            font-size: 0.7rem;
+            color: var(--text-faint);
             font-variant-numeric: tabular-nums;
             white-space: nowrap;
         }
 
         details.intermediate {
-            margin: 0.75rem 0;
-            padding: 0.25rem 0.7rem;
-            border-left: 3px solid #d0d7de;
-            background: #f6f8fa;
-            border-radius: 0 4px 4px 0;
-            font-size: 0.85rem;
-            color: #57606a;
+            margin: 0;
+            padding: 0;
+            border: 1px solid var(--border);
+            background: var(--surface);
+            border-radius: var(--radius);
+            font-size: 0.88rem;
+            color: var(--text-muted);
+            overflow: hidden;
         }
         details.intermediate > summary {
             cursor: pointer;
             user-select: none;
-            padding: 0.25rem 0;
+            padding: 0.65rem 0.95rem;
+            list-style: none;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            background: var(--surface-2);
+            transition: background 0.12s ease;
         }
-        details.intermediate[open] > summary { margin-bottom: 0.5rem; }
+        details.intermediate > summary::-webkit-details-marker { display: none; }
+        details.intermediate > summary::before {
+            content: "›";
+            font-size: 1.1rem;
+            line-height: 1;
+            color: var(--text-faint);
+            transition: transform 0.15s ease;
+            display: inline-block;
+        }
+        details.intermediate[open] > summary::before { transform: rotate(90deg); }
+        details.intermediate > summary:hover { background: var(--surface-3); }
+        details.intermediate[open] > summary {
+            border-bottom: 1px solid var(--border);
+        }
+        details.intermediate .intermediate-body {
+            padding: 0.75rem 0.9rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.7rem;
+        }
         details.intermediate .intermediate-body > .entry:first-child { margin-top: 0; }
         details.intermediate .intermediate-body > .entry:last-child { margin-bottom: 0; }
 
-        details.edit-title {
-            margin: 0 0 0.5rem;
-            font-size: 0.85rem;
+        .empty-thread {
+            text-align: center;
+            padding: 3rem 1rem;
+            color: var(--text-muted);
+            border: 1px dashed var(--border-strong);
+            border-radius: var(--radius);
+            background: var(--surface);
         }
-        details.edit-title > summary {
-            cursor: pointer;
-            color: #0969da;
-            user-select: none;
-            list-style: none;
-            display: inline-block;
-        }
-        details.edit-title > summary::-webkit-details-marker { display: none; }
-        details.edit-title form {
-            display: flex;
-            gap: 0.5rem;
-            margin-top: 0.5rem;
-            align-items: center;
-            flex-wrap: wrap;
-        }
-        details.edit-title input[name="name"] {
-            font: inherit;
-            border: 1px solid #d0d7de;
-            border-radius: 6px;
-            padding: 0.35rem 0.5rem;
-            background: #fff;
-            color: #1f2328;
-            flex: 1;
-            min-width: 15rem;
-            max-width: 30rem;
-        }
-        details.edit-title button {
-            font: inherit;
-            background: #1f6feb;
-            color: #fff;
-            border: 1px solid #1f6feb;
-            border-radius: 6px;
-            padding: 0.35rem 0.9rem;
-            cursor: pointer;
-        }
-        details.edit-title button:hover {
-            background: #1858c4;
-            border-color: #1858c4;
+        .empty-thread p { margin: 0; }
+
+        @media (max-width: 480px) {
+            main { padding: 0.85rem 0.85rem 1.5rem; }
+            .session-head h1 { font-size: 1.15rem; }
+            .message { padding: 0.7rem 0.85rem; border-radius: 12px; }
+            .tool-call { padding: 0.45rem 0.65rem; }
+            details.intermediate > summary { padding: 0.6rem 0.85rem; }
+            details.intermediate .intermediate-body { padding: 0.65rem 0.75rem; }
+            .meta code { max-width: 12rem; }
         }
     </style>
 </head>
 <body>
-    <p><a href="{% url 'index' %}">&larr; Back to sessions</a></p>
-    <h1>{{ display_title }}</h1>
-    <details class="edit-title">
-        <summary>Edit title</summary>
-        <form method="post" action="{{ set_name_url }}">
-            {% csrf_token %}
-            <input type="text" name="name" value="{{ name_value }}" maxlength="{{ name_max_len }}" required autocomplete="off" placeholder="Session title">
-            <button type="submit">Save</button>
-        </form>
-    </details>
-    <p class="meta">
-        id: <code>{{ thread.id }}</code> &middot;
-        cwd: <code>{{ thread.cwd }}</code> &middot;
-        updated: <time data-ts="{{ thread.updated_at }}">{{ thread.updated_at }}</time>
-    </p>
-
-    {% if entries %}
-    <section>
-        {% for entry in entries %}
-            {% if entry.kind == "intermediate" %}
-            <details class="intermediate">
-                <summary>{% if entry.thinking_count and entry.tool_call_count %}{{ entry.thinking_count }} thinking message{{ entry.thinking_count|pluralize }} and {{ entry.tool_call_count }} tool call{{ entry.tool_call_count|pluralize }}{% elif entry.thinking_count %}{{ entry.thinking_count }} thinking message{{ entry.thinking_count|pluralize }}{% else %}{{ entry.tool_call_count }} tool call{{ entry.tool_call_count|pluralize }}{% endif %}</summary>
-                <div class="intermediate-body">
-                    {% for item in entry.items %}{% include "_session_entry.html" with entry=item %}{% endfor %}
-                </div>
+    <header class="topbar">
+        <div class="topbar-inner">
+            <a class="back-link" href="{% url 'index' %}" aria-label="Back to sessions">
+                <span class="chev" aria-hidden="true">‹</span>Back
+            </a>
+            <div class="topbar-title">{{ display_title }}</div>
+            <button type="button" class="topbar-action" data-edit-title-open>Edit</button>
+        </div>
+    </header>
+    <main>
+        <div class="session-head">
+            <h1>{{ display_title }}</h1>
+            <details class="edit-title" data-edit-title>
+                <summary>Edit title</summary>
+                <form method="post" action="{{ set_name_url }}">
+                    {% csrf_token %}
+                    <input type="text" name="name" value="{{ name_value }}" maxlength="{{ name_max_len }}" required autocomplete="off" placeholder="Session title">
+                    <button type="submit">Save</button>
+                </form>
             </details>
-            {% else %}{% include "_session_entry.html" with entry=entry %}{% endif %}
-        {% endfor %}
-    </section>
-    {% else %}
-    <p>No messages in this session yet.</p>
-    {% endif %}
+            <p class="meta">
+                <span class="meta-item"><span class="meta-label">id</span><code>{{ thread.id }}</code></span>
+                <span class="meta-item"><span class="meta-label">cwd</span><code>{{ thread.cwd }}</code></span>
+                <span class="meta-item"><span class="meta-label">updated</span><time data-ts="{{ thread.updated_at }}">{{ thread.updated_at }}</time></span>
+            </p>
+        </div>
+
+        {% if entries %}
+        <section class="thread">
+            {% for entry in entries %}
+                {% if entry.kind == "intermediate" %}
+                <details class="intermediate">
+                    <summary>{% if entry.thinking_count and entry.tool_call_count %}{{ entry.thinking_count }} thinking message{{ entry.thinking_count|pluralize }} and {{ entry.tool_call_count }} tool call{{ entry.tool_call_count|pluralize }}{% elif entry.thinking_count %}{{ entry.thinking_count }} thinking message{{ entry.thinking_count|pluralize }}{% else %}{{ entry.tool_call_count }} tool call{{ entry.tool_call_count|pluralize }}{% endif %}</summary>
+                    <div class="intermediate-body">
+                        {% for item in entry.items %}{% include "_session_entry.html" with entry=item %}{% endfor %}
+                    </div>
+                </details>
+                {% else %}{% include "_session_entry.html" with entry=entry %}{% endif %}
+            {% endfor %}
+        </section>
+        {% else %}
+        <div class="empty-thread">
+            <p>No messages in this session yet.</p>
+        </div>
+        {% endif %}
+    </main>
 
     <script>
         (function () {
@@ -254,6 +536,24 @@
                 el.title = date.toString();
                 const fmt = el.dataset.format === "time" ? timeOnly : dateTime;
                 el.textContent = fmt.format(date);
+            }
+
+            // Topbar "Edit" button toggles the inline edit-title details so
+            // it works as a single affordance on both mobile and desktop.
+            const editDetails = document.querySelector("[data-edit-title]");
+            const editButton = document.querySelector("[data-edit-title-open]");
+            if (editDetails && editButton) {
+                editButton.addEventListener("click", () => {
+                    editDetails.open = !editDetails.open;
+                    if (editDetails.open) {
+                        const input = editDetails.querySelector("input[name='name']");
+                        if (input) {
+                            input.focus();
+                            input.select();
+                        }
+                        editDetails.scrollIntoView({ behavior: "smooth", block: "center" });
+                    }
+                });
             }
         })();
     </script>
