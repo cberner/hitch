@@ -5,6 +5,7 @@ Shared helpers configure the Codex mock and seed signed cookies so each
 test stays focused on the behavior under examination.
 """
 
+import base64
 import json
 import tempfile
 from pathlib import Path
@@ -20,6 +21,7 @@ from openai_codex.errors import MethodNotFoundError
 from hitch.main.models import ApprovalRequest, CodexInstance
 
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
+_EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 
 
 def _setup_codex(
@@ -64,6 +66,10 @@ def _make_model(model_id: str, *, is_default: bool = False) -> SimpleNamespace:
 
 def _sign(name: str, value: str) -> str:
     return signing.get_cookie_signer(salt=name).sign(value)
+
+
+def _encode_extra_system_prompt(value: str) -> str:
+    return base64.urlsafe_b64encode(value.encode()).decode("ascii")
 
 
 def _seed_cookies(client: Client, **values: str) -> None:
@@ -263,6 +269,43 @@ class NewSessionViewTests(TestCase):
         mock_spawn.assert_called_once_with(
             cwd=self.REPO,
             prompt="Refactor the login flow",
+            developer_instructions=None,
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_forwards_extra_system_prompt_cookie_to_spawn(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+        _seed_cookies(
+            self.client,
+            **{
+                _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt(
+                    "  Always run focused tests.  "
+                )
+            },
+        )
+
+        self.client.post(
+            reverse("new_session"),
+            data={"prompt": "do thing", "cwd": self.REPO},
+        )
+
+        mock_spawn.assert_called_once_with(
+            cwd=self.REPO,
+            prompt="do thing",
+            developer_instructions="Always run focused tests.",
             model=None,
             reasoning_effort=None,
             sandbox_policy=None,
@@ -297,6 +340,7 @@ class NewSessionViewTests(TestCase):
         mock_spawn.assert_called_once_with(
             cwd=self.REPO,
             prompt="do thing",
+            developer_instructions=None,
             model="gpt-5",
             reasoning_effort="high",
             sandbox_policy="workspaceWrite",
@@ -328,6 +372,7 @@ class NewSessionViewTests(TestCase):
         mock_spawn.assert_called_once_with(
             cwd=self.REPO,
             prompt="do thing",
+            developer_instructions=None,
             model=None,
             reasoning_effort=None,
             sandbox_policy=None,
@@ -361,6 +406,7 @@ class NewSessionViewTests(TestCase):
         mock_spawn.assert_called_once_with(
             cwd=self.REPO,
             prompt="do thing",
+            developer_instructions=None,
             model="gpt-5",
             reasoning_effort="medium",
             sandbox_policy=None,

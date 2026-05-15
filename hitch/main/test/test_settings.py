@@ -1,3 +1,4 @@
+import base64
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -11,6 +12,7 @@ _MODEL_COOKIE = "hitch_model"
 _EFFORT_COOKIE = "hitch_reasoning_effort"
 _SANDBOX_COOKIE = "hitch_sandbox_policy"
 _APPROVAL_COOKIE = "hitch_approval_mode"
+_EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 
 # By default a test model accepts every enum value so tests that don't care
@@ -123,6 +125,15 @@ def _cookie_value(response: object, name: str) -> str:
     return _signer(name).unsign(raw)
 
 
+def _encode_extra_system_prompt(value: str) -> str:
+    return base64.urlsafe_b64encode(value.encode()).decode("ascii")
+
+
+def _extra_system_prompt_value(response: object) -> str:
+    raw = _cookie_value(response, _EXTRA_SYSTEM_PROMPT_COOKIE)
+    return base64.urlsafe_b64decode(raw.encode("ascii")).decode()
+
+
 class SettingsDialogRenderTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -166,8 +177,33 @@ class SettingsDialogRenderTests(TestCase):
         self.assertContains(response, 'value="auto_review" selected')
         self.assertContains(response, 'value="deny_all"')
         self.assertContains(response, 'value="approve_all"')
+        self.assertContains(response, 'name="extra_system_prompt"')
+        self.assertContains(response, 'maxlength="2500"')
         self.assertContains(response, 'name="show_archived_sessions"')
         self.assertContains(response, "Show archived sessions")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_saved_extra_system_prompt_renders_in_dialog(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _seed_cookies(
+            self.client,
+            **{
+                _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt(
+                    "Prefer small diffs."
+                )
+            },
+        )
+        _configure_codex(
+            mock_codex,
+            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+        )
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, "Prefer small diffs.")
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -580,6 +616,42 @@ class UpdateSettingsViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "")
         self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "")
+
+    def test_saves_extra_system_prompt_to_signed_cookie(self) -> None:
+        response = self.client.post(
+            reverse("update_settings"),
+            data={
+                "model": "",
+                "reasoning_effort": "",
+                "extra_system_prompt": "  Prefer focused tests.\nKeep diffs small.  ",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        raw_cookie_value = _cookie_value(response, _EXTRA_SYSTEM_PROMPT_COOKIE)
+        self.assertNotIn("\n", raw_cookie_value)
+        self.assertEqual(
+            _extra_system_prompt_value(response),
+            "Prefer focused tests.\nKeep diffs small.",
+        )
+
+    def test_rejects_oversized_extra_system_prompt(self) -> None:
+        _seed_cookies(
+            self.client,
+            **{_EXTRA_SYSTEM_PROMPT_COOKIE: "previous value"},
+        )
+
+        response = self.client.post(
+            reverse("update_settings"),
+            data={
+                "model": "",
+                "reasoning_effort": "",
+                "extra_system_prompt": "x" * 2501,
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn(_EXTRA_SYSTEM_PROMPT_COOKIE, response.cookies)
 
     def test_rejects_get(self) -> None:
         response = self.client.get(reverse("update_settings"))

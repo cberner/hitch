@@ -1,3 +1,5 @@
+import base64
+import binascii
 import logging
 import shutil
 from collections.abc import Iterator
@@ -70,6 +72,7 @@ _MODEL_COOKIE = "hitch_model"
 _EFFORT_COOKIE = "hitch_reasoning_effort"
 _SANDBOX_COOKIE = "hitch_sandbox_policy"
 _APPROVAL_COOKIE = "hitch_approval_mode"
+_EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 
 # Roughly one year. Long enough that a user's pick survives across
@@ -82,6 +85,10 @@ _COOKIE_MAX_AGE = 60 * 60 * 24 * 365
 # silently drop the cookie). Real Codex model ids are tens of chars; 256
 # is comfortably more than that without leaving room for abuse.
 _MODEL_MAX_LEN = 256
+
+# The prompt is base64-encoded inside a signed cookie, so keep enough room for
+# encoding/signing overhead and browser cookie limits.
+_EXTRA_SYSTEM_PROMPT_MAX_LEN = 2500
 
 # Upper bound on what we render inline as a session's title. Codex does not
 # generate its own thread summaries, so for unnamed threads `Thread.preview`
@@ -137,6 +144,7 @@ def index(request: HttpRequest) -> HttpResponse:
             current_effort,
             current_sandbox,
             current_approval,
+            current_extra_system_prompt,
             current_show_archived_sessions,
             cookie_updates,
         ) = _resolved_settings(request, models_data)
@@ -188,6 +196,8 @@ def index(request: HttpRequest) -> HttpResponse:
             "current_effort": current_effort,
             "current_sandbox": current_sandbox,
             "current_approval": current_approval,
+            "current_extra_system_prompt": current_extra_system_prompt,
+            "extra_system_prompt_max_len": _EXTRA_SYSTEM_PROMPT_MAX_LEN,
             "current_show_archived_sessions": current_show_archived_sessions,
             "rate_limits": rate_limits,
         },
@@ -492,14 +502,14 @@ def _entries_from_rollout(thread: Any) -> list[dict[str, Any]] | None:
 
 def _resolved_settings(
     request: HttpRequest, models_data: list[Any]
-) -> tuple[str, str, str, str, bool, dict[str, str]]:
+) -> tuple[str, str, str, str, str, bool, dict[str, str]]:
     """Read the dialog state from cookies and reconcile against Codex.
 
     Returns ``(model, effort, sandbox_policy, approval_mode,
-    show_archived_sessions, cookie_updates)``. ``cookie_updates`` is a dict
-    of cookie-name → new-value pairs the caller must persist on the response
-    (via ``_apply_cookie_updates``) so the corrected state takes effect on
-    the next request.
+    extra_system_prompt, show_archived_sessions, cookie_updates)``.
+    ``cookie_updates`` is a dict of cookie-name → new-value pairs the caller
+    must persist on the response (via ``_apply_cookie_updates``) so the
+    corrected state takes effect on the next request.
 
     Two stale-state cases handled here:
       1. The saved model id is no longer offered → snap to the provider's
@@ -526,6 +536,7 @@ def _resolved_settings(
     saved_effort = _read_cookie(request, _EFFORT_COOKIE)
     saved_sandbox = _read_cookie(request, _SANDBOX_COOKIE)
     saved_approval = _read_cookie(request, _APPROVAL_COOKIE)
+    saved_extra_system_prompt = _read_extra_system_prompt_cookie(request)
     show_archived_sessions = _read_cookie(request, _SHOW_ARCHIVED_COOKIE) == "true"
     if saved_sandbox and saved_sandbox not in _VALID_SANDBOX_POLICIES:
         saved_sandbox = ""
@@ -537,6 +548,7 @@ def _resolved_settings(
             saved_effort,
             saved_sandbox,
             saved_approval,
+            saved_extra_system_prompt,
             show_archived_sessions,
             {},
         )
@@ -553,6 +565,7 @@ def _resolved_settings(
                     new_effort,
                     saved_sandbox,
                     saved_approval,
+                    saved_extra_system_prompt,
                     show_archived_sessions,
                     {_EFFORT_COOKIE: new_effort},
                 )
@@ -561,6 +574,7 @@ def _resolved_settings(
             saved_effort,
             saved_sandbox,
             saved_approval,
+            saved_extra_system_prompt,
             show_archived_sessions,
             {},
         )
@@ -572,6 +586,7 @@ def _resolved_settings(
         new_effort,
         saved_sandbox,
         saved_approval,
+        saved_extra_system_prompt,
         show_archived_sessions,
         {_MODEL_COOKIE: default_model.id, _EFFORT_COOKIE: new_effort},
     )
@@ -589,6 +604,24 @@ def _read_cookie(request: HttpRequest, name: str) -> str:
     except Exception:
         return ""
     return (value or "").strip()
+
+
+def _read_extra_system_prompt_cookie(request: HttpRequest) -> str:
+    encoded = _read_cookie(request, _EXTRA_SYSTEM_PROMPT_COOKIE)
+    if not encoded:
+        return ""
+    try:
+        decoded = base64.urlsafe_b64decode(encoded.encode("ascii")).decode()
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        # Fallback for pre-encoding local cookies from development builds.
+        decoded = encoded
+    return decoded.strip()
+
+
+def _encode_extra_system_prompt_cookie(value: str) -> str:
+    if not value:
+        return ""
+    return base64.urlsafe_b64encode(value.encode()).decode("ascii")
 
 
 def _apply_cookie_updates(response: HttpResponse, updates: dict[str, str]) -> None:
@@ -687,9 +720,12 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     effort = request.POST.get("reasoning_effort", "").strip()
     sandbox = request.POST.get("sandbox_policy", "").strip()
     approval = request.POST.get("approval_mode", "").strip()
+    extra_system_prompt = request.POST.get("extra_system_prompt", "").strip()
     show_archived = request.POST.get("show_archived_sessions", "").strip()
     if len(model) > _MODEL_MAX_LEN:
         return HttpResponseBadRequest("model id is too long")
+    if len(extra_system_prompt) > _EXTRA_SYSTEM_PROMPT_MAX_LEN:
+        return HttpResponseBadRequest("extra system prompt is too long")
     valid_efforts = {e.value for e in ReasoningEffort}
     if effort and effort not in valid_efforts:
         return HttpResponseBadRequest("invalid reasoning effort")
@@ -725,6 +761,9 @@ def update_settings(request: HttpRequest) -> HttpResponse:
             _EFFORT_COOKIE: effort,
             _SANDBOX_COOKIE: sandbox,
             _APPROVAL_COOKIE: approval,
+            _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt_cookie(
+                extra_system_prompt
+            ),
             _SHOW_ARCHIVED_COOKIE: show_archived,
         },
     )
@@ -948,6 +987,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
         reasoning_effort,
         sandbox_policy,
         approval_mode,
+        extra_system_prompt,
         _show_archived_sessions,
         cookie_updates,
     ) = _resolved_settings(request, models_data)
@@ -958,6 +998,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
     instance = codex_pool.spawn_new_session(
         cwd=cwd,
         prompt=prompt,
+        developer_instructions=extra_system_prompt or None,
         model=model or None,
         reasoning_effort=reasoning_effort or None,
         sandbox_policy=sandbox_policy or None,
