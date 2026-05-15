@@ -224,6 +224,37 @@
         }
         .meta time { font-variant-numeric: tabular-nums; color: var(--text-faint); }
 
+        .usage {
+            margin: 0.4rem 0 0;
+            color: var(--text-muted);
+            font-size: 0.78rem;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.3rem 0.6rem;
+            align-items: center;
+        }
+        .usage .usage-item {
+            display: inline-flex;
+            align-items: baseline;
+            gap: 0.3rem;
+            padding: 0.15rem 0.5rem;
+            border-radius: 999px;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+        }
+        .usage .usage-label {
+            color: var(--text-faint);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-size: 0.66rem;
+            font-weight: 600;
+        }
+        .usage .usage-value {
+            color: var(--text);
+            font-variant-numeric: tabular-nums;
+            font-weight: 500;
+        }
+
         .edit-title {
             margin: 0 0 1rem;
             font-size: 0.85rem;
@@ -627,6 +658,13 @@
                 <span class="meta-item"><span class="meta-label">cwd</span><code>{{ thread.cwd }}</code></span>
                 <span class="meta-item"><span class="meta-label">updated</span><time data-ts="{{ thread.updated_at }}">{{ thread.updated_at }}</time></span>
             </p>
+            {% if token_usage %}
+            <p class="usage" aria-label="Token usage for this session">
+                <span class="usage-item"><span class="usage-label">in</span><span class="usage-value">{{ token_usage.input }}</span></span>
+                <span class="usage-item"><span class="usage-label">out</span><span class="usage-value">{{ token_usage.output }}</span></span>
+                <span class="usage-item"><span class="usage-label">cached</span><span class="usage-value">{{ token_usage.cached }}</span></span>
+            </p>
+            {% endif %}
         </div>
 
         {% if entries or pending_user_prompt or active_worker %}

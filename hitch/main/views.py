@@ -199,6 +199,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
     # double up every entry in the live DOM. The page reload on stream end
     # restores the canonical view.
     entries = _trim_in_progress_turn(entries, active_instance)
+    token_usage = _token_usage_for(thread)
     return render(
         request,
         "session.html",
@@ -216,8 +217,33 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             # user wouldn't see their own message at all without a pending
             # bubble while the stream catches up.
             "pending_user_prompt": _pending_user_prompt(active_instance),
+            "token_usage": token_usage,
         },
     )
+
+
+def _token_usage_for(thread: Any) -> dict[str, str] | None:
+    """Return formatted input/cached/output token counts, or None.
+
+    Token usage is only persisted in the on-disk rollout file (as
+    ``TokenCount`` event_msg entries); the SDK ``Thread`` does not carry it.
+    Returns None when the thread has no rollout path or the rollout contains
+    no token_count event yet — the template hides the section in that case.
+    """
+    path = getattr(thread, "path", None)
+    if not isinstance(path, str) or not path:
+        return None
+    rollout_path = Path(path)
+    if not rollout_path.is_file():
+        return None
+    usage = rollout.latest_token_usage(rollout_path)
+    if usage is None:
+        return None
+    return {
+        "input": f"{usage['input_tokens']:,}",
+        "cached": f"{usage['cached_input_tokens']:,}",
+        "output": f"{usage['output_tokens']:,}",
+    }
 
 
 def _active_instance_for(session_id: str) -> CodexInstance | None:

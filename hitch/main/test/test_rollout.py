@@ -430,6 +430,68 @@ class IterEntriesTests(TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["kind"], "user")
 
+    def test_latest_token_usage_picks_most_recent_total(self) -> None:
+        # Codex emits a token_count event per turn whose info.total_token_usage
+        # is the running session total. The last such event wins; earlier ones
+        # are obsolete. Non-token_count events and lines with malformed info
+        # blocks are ignored without raising.
+        path = self._make(
+            [
+                _line(
+                    "event_msg",
+                    {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 100,
+                                "cached_input_tokens": 20,
+                                "output_tokens": 50,
+                                "reasoning_output_tokens": 5,
+                                "total_tokens": 175,
+                            },
+                            "last_token_usage": {},
+                            "model_context_window": 200000,
+                        },
+                    },
+                ),
+                _line("event_msg", {"type": "user_message", "message": "x"}),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 300,
+                                "cached_input_tokens": 80,
+                                "output_tokens": 175,
+                                "reasoning_output_tokens": 10,
+                                "total_tokens": 565,
+                            },
+                            "last_token_usage": {},
+                            "model_context_window": 200000,
+                        },
+                    },
+                ),
+                # No info block — must be skipped without crashing.
+                _line("event_msg", {"type": "token_count"}),
+            ]
+        )
+        usage = rollout.latest_token_usage(path)
+        self.assertEqual(
+            usage,
+            {"input_tokens": 300, "cached_input_tokens": 80, "output_tokens": 175},
+        )
+
+    def test_latest_token_usage_returns_none_when_absent(self) -> None:
+        # Sessions without any token_count event (e.g. a freshly created
+        # thread or a model that never reported usage) should return None so
+        # the view can hide the section entirely.
+        path = self._make(
+            [_line("event_msg", {"type": "user_message", "message": "hi"})]
+        )
+        self.assertIsNone(rollout.latest_token_usage(path))
+        self.assertIsNone(rollout.latest_token_usage(Path("/nonexistent/rollout.jsonl")))
+
     def test_function_call_arguments_edge_cases(self) -> None:
         # Non-string arguments fall through as empty; malformed JSON falls
         # back to the raw string; a JSON literal that isn't a dict also falls

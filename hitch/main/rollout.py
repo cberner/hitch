@@ -49,7 +49,61 @@ def iter_entries(rollout_path: Path) -> Iterator[dict[str, Any]]:
     except OSError as exc:
         logger.warning("failed to read rollout %s: %s", rollout_path, exc)
         return
+    yield from _entries_from_text(text, rollout_path)
 
+
+def latest_token_usage(rollout_path: Path) -> dict[str, int] | None:
+    """Return cumulative input/cached/output token counts for a thread.
+
+    Codex emits a `TokenCount` event_msg after each turn whose
+    `info.total_token_usage` is the running session total. Only the most
+    recent such event is kept; earlier ones are obsoleted by it. Returns
+    None when the rollout is unreadable or contains no parseable
+    token_count event (e.g. a session that has yet to receive a response).
+    """
+    try:
+        text = rollout_path.read_text()
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning("failed to read rollout %s: %s", rollout_path, exc)
+        return None
+    latest: dict[str, Any] | None = None
+    for raw in text.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("type") != "event_msg":
+            continue
+        payload = entry.get("payload") or {}
+        if payload.get("type") != "token_count":
+            continue
+        info = payload.get("info")
+        if not isinstance(info, dict):
+            continue
+        total = info.get("total_token_usage")
+        if isinstance(total, dict):
+            latest = total
+    if latest is None:
+        return None
+    return {
+        "input_tokens": _coerce_int(latest.get("input_tokens")),
+        "cached_input_tokens": _coerce_int(latest.get("cached_input_tokens")),
+        "output_tokens": _coerce_int(latest.get("output_tokens")),
+    }
+
+
+def _coerce_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    return 0
+
+
+def _entries_from_text(text: str, rollout_path: Path) -> Iterator[dict[str, Any]]:
     lines: list[dict[str, Any]] = []
     for raw in text.splitlines():
         raw = raw.strip()
