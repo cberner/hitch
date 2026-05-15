@@ -7,7 +7,7 @@ name = "hitch"
 version = "0.1.0"
 description = "Human Interface for Taming Coding Helpers"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.13"
 license = { file = "LICENSE" }
 dependencies = [
     "Django>=6.0,<7.0",
@@ -38,7 +38,7 @@ dev = [
 ]
 
 [tool.mypy]
-python_version = "3.14"
+python_version = "3.13"
 warn_return_any = true
 warn_unused_configs = true
 warn_unused_ignores = true
@@ -61,7 +61,7 @@ ignore_errors = true
 
 [tool.ruff]
 line-length = 120
-target-version = "py314"
+target-version = "py313"
 lint.select = [
     "A",
     "B",
