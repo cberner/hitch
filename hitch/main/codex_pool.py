@@ -160,6 +160,23 @@ def latest_active_for_thread(thread_id: str) -> CodexInstance | None:
     )
 
 
+def latest_id_for_thread(thread_id: str) -> int | None:
+    """Return the highest ``CodexInstance.pk`` for ``thread_id``, or ``None``.
+
+    Used by the idle SSE stream as a baseline so it can detect *any* new
+    worker for the session — including one that started and completed
+    between two polls of ``latest_active_for_thread``. Without this, a
+    short-lived out-of-band turn would leave the open session page stale
+    until the next manual refresh.
+    """
+    return (
+        CodexInstance.objects.filter(thread_id=thread_id)
+        .order_by("-pk")
+        .values_list("pk", flat=True)
+        .first()
+    )
+
+
 def reconcile_dead() -> int:
     """Mark workers as failed whose PID is no longer alive.
 

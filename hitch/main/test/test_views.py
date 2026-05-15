@@ -616,44 +616,89 @@ class SessionStreamViewTests(TestCase):
         defaults.update(kwargs)
         return CodexInstance.objects.create(**defaults)
 
-    def test_returns_inactive_stream_when_no_worker(self) -> None:
-        response = self.client.get(
-            reverse("session_stream", kwargs={"session_id": "thread-1"})
+    def _stream_url(
+        self, session_id: str, *, baseline: str = "", active: str = ""
+    ) -> str:
+        # Helper that builds the SSE URL with the page-render-time state
+        # the view expects on every legitimate request. Tests that want
+        # to exercise the stale-reload path pass an empty/wrong value.
+        return (
+            reverse("session_stream", kwargs={"session_id": session_id})
+            + f"?baseline={baseline}&active={active}"
         )
+
+    @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
+    @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
+    def test_returns_idle_heartbeat_stream_when_no_worker(self) -> None:
+        # Without an active worker the SSE channel stays open emitting
+        # heartbeat events with ``working: false`` so the page's connection
+        # indicator can show ``connected, idle``. The cap is patched down
+        # so the test doesn't sit in the recycle loop.
+        response = self.client.get(self._stream_url("thread-1"))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "text/event-stream")
         body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
-        self.assertTrue(body.rstrip().endswith(b'data: {"status": "inactive"}'))
+        self.assertIn(b"event: heartbeat", body)
+        self.assertIn(b'"working": false', body)
 
-    def test_returns_inactive_when_worker_already_completed(self) -> None:
-        # Inactive applies just as much to a terminal worker as to "never
-        # existed". Without this, every session detail page load would tail
-        # the last worker's events file forever.
+    @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
+    @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
+    def test_idle_stream_when_only_completed_worker_exists(self) -> None:
+        # A terminal worker counts as ``no active worker`` for routing
+        # purposes — the idle heartbeat stream is what we serve so the
+        # connection indicator stays accurate without re-tailing the old
+        # events file. The baseline reflects the page's render-time view
+        # (the completed worker's pk, no active).
         with tempfile.TemporaryDirectory() as raw:
             events_path = str(Path(raw) / "events.jsonl")
             Path(events_path).touch()
-            self._make(
+            inst = self._make(
                 thread_id="thread-done",
                 status=CodexInstance.STATUS_COMPLETED,
                 events_path=events_path,
             )
 
             response = self.client.get(
-                reverse("session_stream", kwargs={"session_id": "thread-done"})
+                self._stream_url("thread-done", baseline=str(inst.pk))
             )
             body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
 
-        self.assertIn(b'"status": "inactive"', body)
+        self.assertIn(b"event: heartbeat", body)
+        self.assertIn(b'"working": false', body)
 
+    @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
+    @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
     def test_sets_no_buffering_headers(self) -> None:
         # SSE needs frame-by-frame delivery; proxies (and Django's own
         # middleware stack) honour these headers to disable coalescing.
-        response = self.client.get(
-            reverse("session_stream", kwargs={"session_id": "thread-1"})
-        )
+        response = self.client.get(self._stream_url("thread-1"))
         self.assertEqual(response["Cache-Control"], "no-cache")
         self.assertEqual(response["X-Accel-Buffering"], "no")
         b"".join(response.streaming_content)  # type: ignore[attr-defined]
+
+    def test_reloads_when_worker_appeared_after_page_render(self) -> None:
+        # The classic out-of-band-spawn race: page rendered with no
+        # worker (empty baseline / active), but by the time SSE opens a
+        # worker has shown up in the DB. The endpoint must reload the
+        # page so the DOM gets the live-streaming UI before any item
+        # events start arriving.
+        self._make(thread_id="thread-1", status=CodexInstance.STATUS_RUNNING)
+        response = self.client.get(self._stream_url("thread-1"))
+        body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
+        self.assertIn(b'"status": "stale"', body)
+
+    def test_reloads_when_active_worker_completed_before_sse_opens(self) -> None:
+        # Inverse race: page rendered expecting a live worker (passes
+        # ``active=N`` and ``baseline=N``) but by the time SSE opens the
+        # worker has gone terminal. Without the reload the page would
+        # show a permanent "Codex is working…" pill and a stale pending
+        # bubble for the just-completed turn.
+        inst = self._make(thread_id="thread-1", status=CodexInstance.STATUS_COMPLETED)
+        response = self.client.get(
+            self._stream_url("thread-1", baseline=str(inst.pk), active=str(inst.pk))
+        )
+        body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
+        self.assertIn(b'"status": "stale"', body)
 
     @patch("hitch.main.streaming._POLL_INTERVAL", 0.01)
     def test_forwards_worker_events_through_view(self) -> None:
@@ -673,7 +718,9 @@ class SessionStreamViewTests(TestCase):
                 events_path=events_path,
             )
             response = self.client.get(
-                reverse("session_stream", kwargs={"session_id": "thread-live"})
+                self._stream_url(
+                    "thread-live", baseline=str(instance.pk), active=str(instance.pk)
+                )
             )
             # Flip the row terminal before iterating so the generator's
             # _is_done() check exits the read loop cleanly.

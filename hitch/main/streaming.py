@@ -9,6 +9,12 @@ terminal status (or the worker process dies without reporting one).
 The generator is driven by a Django ``StreamingHttpResponse`` and intentionally
 blocks on a short sleep when the file has no new bytes — this is a single-user
 dev tool, so holding one request-handler thread per active turn is acceptable.
+
+The session page also subscribes to this stream when no worker is active so
+its connection indicator can show a live ``connected`` state. ``idle_stream``
+serves that case: it stays open emitting ``heartbeat`` events and ends with a
+reload signal as soon as a worker for the session shows up (e.g. spawned from
+another tab).
 """
 
 from __future__ import annotations
@@ -26,11 +32,27 @@ from hitch.main.models import CodexInstance
 # pin a CPU when a turn is mostly waiting on the model.
 _POLL_INTERVAL = 0.2
 
+# Cadence at which idle_stream re-checks the database for a newly-spawned
+# worker. Only used when no worker is active for the session, so it doesn't
+# need to be as snappy as ``_POLL_INTERVAL``.
+_IDLE_POLL_INTERVAL = 1.0
+
+# Cadence for the named ``heartbeat`` event the client uses to drive its
+# connection-status indicator. The indicator flips to "disconnected" if no
+# heartbeat (or other frame) lands within roughly two intervals, so this must
+# stay well under the user-visible 5-second liveness target.
+_HEARTBEAT_INTERVAL = 3.0
+
 # Hard ceiling on how long a single stream connection stays open. Without this
 # a hung worker (or a row stuck in ``running`` past reconciliation) would hold
 # a Django request-handler thread indefinitely. Browsers will reconnect via
 # EventSource if the user is still on the page.
 _MAX_STREAM_SECONDS = 60 * 30
+
+# Idle streams (no active worker) recycle more aggressively so a tab left open
+# for hours doesn't pin a request-handler thread for the full 30-minute cap.
+# EventSource transparently reconnects after the response closes.
+_IDLE_MAX_STREAM_SECONDS = 5 * 60
 
 # Upper bound on how long we wait for the events file to appear before giving
 # up. ``_spawn_worker`` creates the row before launching the subprocess, so on
@@ -46,9 +68,11 @@ def stream_for_instance(instance: CodexInstance) -> Iterator[bytes]:
     EventSource explicitly rather than relying on the connection close.
     """
     yield b"retry: 2000\n\n"
+    yield _heartbeat_frame(working=True)
 
     path = Path(instance.events_path)
     started = time.monotonic()
+    last_heartbeat = time.monotonic()
     while not path.exists():
         if _is_done(instance.pk):
             yield _end_frame(_current_status(instance.pk))
@@ -56,6 +80,9 @@ def stream_for_instance(instance: CodexInstance) -> Iterator[bytes]:
         if time.monotonic() - started > _FILE_APPEAR_TIMEOUT:
             yield _end_frame("missing")
             return
+        if time.monotonic() - last_heartbeat >= _HEARTBEAT_INTERVAL:
+            yield _heartbeat_frame(working=True)
+            last_heartbeat = time.monotonic()
         time.sleep(_POLL_INTERVAL)
 
     with path.open("r", encoding="utf-8") as fh:
@@ -84,17 +111,63 @@ def stream_for_instance(instance: CodexInstance) -> Iterator[bytes]:
                 yield _end_frame("timeout")
                 return
 
-            # SSE heartbeat: a comment line keeps the connection alive past
-            # idle proxies/load-balancers without surfacing as an event on
-            # the client side.
-            yield b": keepalive\n\n"
+            if time.monotonic() - last_heartbeat >= _HEARTBEAT_INTERVAL:
+                yield _heartbeat_frame(working=True)
+                last_heartbeat = time.monotonic()
             time.sleep(_POLL_INTERVAL)
 
 
-def empty_stream() -> Iterator[bytes]:
-    """Stream that immediately closes — used when there is no active worker."""
+def idle_stream(session_id: str, baseline_id: int | None) -> Iterator[bytes]:
+    """Long-running stream for a session with no active worker.
+
+    Keeps the SSE channel open so the page's connection indicator can show
+    a healthy ``connected, idle`` state, and watches for a new worker
+    spawned out-of-band (e.g. from another tab) so the page reloads itself
+    into the live-streaming UI as soon as one appears.
+
+    ``baseline_id`` is the highest ``CodexInstance.pk`` the page knew
+    about when it rendered (passed by the view, not resampled here). The
+    caller has already verified that the page-render state matches the
+    current DB state — so any later change to the latest pk is by
+    definition a new out-of-band turn that the page hasn't seen yet.
+    Keying off this baseline rather than "is anything currently active"
+    catches fast turns that start and complete between two polls.
+
+    Closes without an ``end`` event when the per-stream cap is hit so
+    EventSource transparently reconnects rather than triggering a page
+    reload on every recycle.
+    """
     yield b"retry: 2000\n\n"
-    yield _end_frame("inactive")
+    yield _heartbeat_frame(working=False)
+    deadline = time.monotonic() + _IDLE_MAX_STREAM_SECONDS
+    last_heartbeat = time.monotonic()
+    while True:
+        if codex_pool.latest_id_for_thread(session_id) != baseline_id:
+            # A worker showed up after the page rendered (still running,
+            # or already terminal from a fast turn). End the stream so the
+            # client reloads and re-renders with the live UI.
+            yield _end_frame("active")
+            return
+        if time.monotonic() > deadline:
+            return
+        if time.monotonic() - last_heartbeat >= _HEARTBEAT_INTERVAL:
+            yield _heartbeat_frame(working=False)
+            last_heartbeat = time.monotonic()
+        time.sleep(_IDLE_POLL_INTERVAL)
+
+
+def reload_stream() -> Iterator[bytes]:
+    """Immediate ``event: end`` so the client reloads.
+
+    Used when ``session_stream`` detects that the page was rendered
+    against a state that no longer matches the database — e.g. a worker
+    was spawned or completed between page render and SSE open. The
+    reload re-runs the session view so the DOM matches reality (live-
+    root present when needed, pending bubble cleared, etc.) before any
+    streamed item events start arriving.
+    """
+    yield b"retry: 2000\n\n"
+    yield _end_frame("stale")
 
 
 def _emit_complete_lines(buffer: str) -> Generator[bytes, None, str]:
@@ -112,6 +185,11 @@ def _emit_complete_lines(buffer: str) -> Generator[bytes, None, str]:
 
 def _end_frame(status: str) -> bytes:
     return b"event: end\ndata: " + json.dumps({"status": status}).encode("utf-8") + b"\n\n"
+
+
+def _heartbeat_frame(*, working: bool) -> bytes:
+    payload = json.dumps({"working": working}).encode("utf-8")
+    return b"event: heartbeat\ndata: " + payload + b"\n\n"
 
 
 def _is_done(instance_id: int) -> bool:

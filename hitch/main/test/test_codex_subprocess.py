@@ -404,6 +404,22 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(newer_terminal.status, CodexInstance.STATUS_FAILED)
 
 
+    def test_latest_id_for_thread(self) -> None:
+        # ``latest_id_for_thread`` is the baseline the idle SSE stream
+        # uses to spot any out-of-band turn — including fast turns that
+        # complete between two polls. It must return the highest pk for
+        # the thread regardless of status and ``None`` when the thread
+        # has never had a worker.
+        self.assertIsNone(codex_pool.latest_id_for_thread("never-existed"))
+        first = self._make(thread_id="t-id", status=CodexInstance.STATUS_RUNNING)
+        self.assertEqual(codex_pool.latest_id_for_thread("t-id"), first.pk)
+        second = self._make(thread_id="t-id", status=CodexInstance.STATUS_COMPLETED)
+        self.assertEqual(codex_pool.latest_id_for_thread("t-id"), second.pk)
+        # Workers on other threads must not bleed into this thread's pk.
+        self._make(thread_id="other", status=CodexInstance.STATUS_RUNNING)
+        self.assertEqual(codex_pool.latest_id_for_thread("t-id"), second.pk)
+
+
 class EventsDirTests(TestCase):
     def test_uses_setting_when_configured(self) -> None:
         with (
@@ -773,14 +789,83 @@ class StreamForInstanceTests(TestCase):
     frame. Pairs with ``streaming.stream_for_instance`` / ``empty_stream``.
     """
 
-    def test_empty_stream_yields_only_end(self) -> None:
-        # The "no active worker" path returns a fixed, immediately-closing
-        # stream so the JS client gets a deterministic shape regardless of
-        # whether a turn is currently running.
-        frames = list(streaming.empty_stream())
+    def test_idle_stream_emits_initial_heartbeat_and_recycles(self) -> None:
+        # The "no active worker" path keeps the SSE channel open so the
+        # session page's connection indicator can show ``connected, idle``.
+        # Force the cap down so the loop returns promptly without an end
+        # event — EventSource will reconnect transparently.
+        with (
+            patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.001),
+            patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001),
+        ):
+            frames = list(streaming.idle_stream("thread-none", baseline_id=None))
+        self.assertEqual(frames[0], b"retry: 2000\n\n")
+        heartbeats = [f for f in frames if f.startswith(b"event: heartbeat")]
+        self.assertGreaterEqual(len(heartbeats), 1)
+        self.assertIn(b'"working": false', heartbeats[0])
+        # No worker ever showed up, so the stream closes silently rather
+        # than firing an ``end`` event that would force a page reload.
+        self.assertFalse(any(f.startswith(b"event: end") for f in frames))
+
+    def test_idle_stream_ends_when_worker_appears(self) -> None:
+        # If a worker is spawned out-of-band (e.g. another tab), the idle
+        # stream should fire ``event: end`` so the client reloads into the
+        # live-streaming UI rather than waiting for the per-stream cap.
+        # The baseline (``None``) reflects what the page saw at render
+        # time; a fresh pk on the first poll proves an out-of-band turn
+        # has landed since then.
+        with (
+            patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001),
+            patch(
+                "hitch.main.streaming.codex_pool.latest_id_for_thread",
+                return_value=42,
+            ),
+        ):
+            frames = list(streaming.idle_stream("thread-active", baseline_id=None))
+        self.assertTrue(frames[-1].startswith(b"event: end"))
+        self.assertIn(b'"active"', frames[-1])
+
+    def test_idle_stream_ends_on_fast_completed_out_of_band_turn(self) -> None:
+        # Reload-detection has to fire even for an out-of-band turn that
+        # already finished by the time we look — pk tracking catches it
+        # where a "still active?" check would have missed it. Page saw
+        # baseline=7 at render; one poll later the DB shows pk=9 even
+        # though no row is currently active.
+        with (
+            patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001),
+            patch(
+                "hitch.main.streaming.codex_pool.latest_id_for_thread",
+                return_value=9,
+            ),
+        ):
+            frames = list(
+                streaming.idle_stream("thread-completed-fast", baseline_id=7)
+            )
+        self.assertTrue(frames[-1].startswith(b"event: end"))
+        self.assertIn(b'"active"', frames[-1])
+
+    @patch("hitch.main.streaming._HEARTBEAT_INTERVAL", 0.0)
+    @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
+    @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.005)
+    def test_idle_stream_resends_heartbeats_at_cadence(self) -> None:
+        # With the heartbeat cadence collapsed to zero we should observe
+        # multiple heartbeat frames before the per-stream cap closes the
+        # stream — confirming the periodic refresh path actually runs.
+        frames = list(streaming.idle_stream("thread-none", baseline_id=None))
+        heartbeats = [f for f in frames if f.startswith(b"event: heartbeat")]
+        self.assertGreater(len(heartbeats), 1)
+        for frame in heartbeats:
+            self.assertIn(b'"working": false', frame)
+
+    def test_reload_stream_yields_immediate_end(self) -> None:
+        # ``session_stream`` returns this when it detects the page is
+        # stale (worker spawned/completed between page render and SSE
+        # open). It needs to fire ``event: end`` immediately so the
+        # client reloads — no heartbeats, no waiting on a poll.
+        frames = list(streaming.reload_stream())
         self.assertEqual(frames[0], b"retry: 2000\n\n")
         self.assertTrue(frames[-1].startswith(b"event: end"))
-        self.assertIn(b'"inactive"', frames[-1])
+        self.assertIn(b'"stale"', frames[-1])
 
     def test_streams_existing_lines_and_terminates_when_done(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -864,6 +949,26 @@ class StreamForInstanceTests(TestCase):
         frames = list(streaming.stream_for_instance(instance))
         self.assertIn(b'"missing"', frames[-1])
 
+    @patch("hitch.main.streaming._POLL_INTERVAL", 0.001)
+    @patch("hitch.main.streaming._HEARTBEAT_INTERVAL", 0.0)
+    @patch("hitch.main.streaming._FILE_APPEAR_TIMEOUT", 0.02)
+    def test_heartbeat_yielded_while_waiting_for_events_file(self) -> None:
+        # The pre-file-open wait loop also has to refresh the heartbeat so
+        # the page's connection indicator stays green during a worker's
+        # startup latency, not just once the file is being tailed.
+        instance = _make_streaming_instance(
+            "/tmp/hitch-test-startup-heartbeat.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+            pid=_LIVE_PID,
+        )
+        frames = list(streaming.stream_for_instance(instance))
+        heartbeats = [f for f in frames if f.startswith(b"event: heartbeat")]
+        # One initial heartbeat plus at least one from the appearance wait.
+        self.assertGreaterEqual(len(heartbeats), 2)
+        for frame in heartbeats:
+            self.assertIn(b'"working": true', frame)
+        self.assertIn(b'"missing"', frames[-1])
+
     def test_emit_skips_blank_lines(self) -> None:
         # A stray blank line on the events file must not produce an empty
         # SSE ``data:`` frame.
@@ -894,11 +999,13 @@ class StreamForInstanceTests(TestCase):
         self.assertIn(b'"timeout"', frames[-1])
 
     @patch("hitch.main.streaming._POLL_INTERVAL", 0.001)
-    def test_keepalive_yielded_while_worker_is_idle(self) -> None:
-        # Idle SSE connections get keepalive comments so proxies don't drop
-        # them between turn deltas. Force _is_done False on the first poll
-        # and True on the second so we observe exactly one keepalive frame
-        # before the stream finishes cleanly.
+    @patch("hitch.main.streaming._HEARTBEAT_INTERVAL", 0.0)
+    def test_heartbeat_yielded_while_worker_is_idle(self) -> None:
+        # Idle SSE connections get periodic heartbeat events so the page's
+        # connection indicator can refresh and the channel stays open past
+        # idle proxies. Force _is_done False on the first poll and True on
+        # the second so we observe at least one heartbeat frame past the
+        # initial one before the stream finishes cleanly.
         with tempfile.TemporaryDirectory() as raw:
             events_path = str(Path(raw) / "events.jsonl")
             Path(events_path).touch()
@@ -915,8 +1022,11 @@ class StreamForInstanceTests(TestCase):
             with patch("hitch.main.streaming._is_done", side_effect=fake_is_done):
                 frames = list(streaming.stream_for_instance(instance))
 
-        keepalives = [f for f in frames if f.startswith(b": keepalive")]
-        self.assertEqual(len(keepalives), 1)
+        heartbeats = [f for f in frames if f.startswith(b"event: heartbeat")]
+        # One initial heartbeat plus at least one from the idle poll loop.
+        self.assertGreaterEqual(len(heartbeats), 2)
+        for frame in heartbeats:
+            self.assertIn(b'"working": true', frame)
         self.assertTrue(frames[-1].startswith(b"event: end"))
 
     def test_late_flush_after_status_flip_is_picked_up(self) -> None:
