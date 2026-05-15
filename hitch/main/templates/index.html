@@ -147,24 +147,64 @@
             gap: 0.5rem;
         }
         .session {
+            --swipe-x: 0px;
+            position: relative;
+            overflow: hidden;
+            max-height: 12rem;
             background: var(--surface);
             border: 1px solid var(--border);
             border-radius: var(--radius);
             box-shadow: var(--shadow);
-            transition: transform 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+            transition: transform 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease, opacity 0.18s ease, max-height 0.18s ease;
         }
-        .session:active { transform: scale(0.985); }
+        .session:not(.swiping):not(.pending-archive):active { transform: scale(0.985); }
         @media (hover: hover) {
             .session:hover {
                 border-color: var(--border-strong);
                 box-shadow: var(--shadow-lg);
             }
         }
+        .session.pending-archive {
+            opacity: 0;
+            max-height: 0;
+            pointer-events: none;
+        }
+        .session-swipe-action {
+            position: absolute;
+            inset: 0 auto 0 0;
+            z-index: 0;
+            width: min(8.5rem, 48%);
+            display: flex;
+            align-items: center;
+            padding-left: 1rem;
+            background: var(--accent);
+            color: var(--accent-fg);
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+        .session[data-session-archived="true"] .session-swipe-action {
+            display: none;
+        }
         .session a.session-link {
+            position: relative;
+            z-index: 1;
             display: block;
             padding: 0.9rem 1rem;
+            background: var(--surface);
             color: inherit;
             text-decoration: none;
+            transform: translateX(var(--swipe-x));
+            transition: transform 0.18s ease;
+            touch-action: pan-y;
+        }
+        .session.swiping a.session-link {
+            transition: none;
+        }
+        .session.swipe-ready .session-swipe-action {
+            background: var(--accent-hover);
+        }
+        .session.pending-archive a.session-link {
+            transform: translateX(100%);
         }
         .session-title {
             font-weight: 600;
@@ -228,6 +268,37 @@
         }
         .empty p { margin: 0; font-size: 0.95rem; }
         .empty .hint { font-size: 0.82rem; color: var(--text-faint); margin-top: 0.5rem; }
+
+        .archive-toast {
+            position: fixed;
+            left: 50%;
+            bottom: calc(1rem + var(--safe-bottom));
+            z-index: 30;
+            transform: translateX(-50%);
+            width: min(28rem, calc(100% - 2rem));
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+            padding: 0.65rem 0.75rem 0.65rem 1rem;
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            background: var(--surface);
+            color: var(--text);
+            box-shadow: var(--shadow-lg);
+            font-size: 0.9rem;
+        }
+        .archive-toast[hidden] { display: none; }
+        .archive-toast .button {
+            min-height: 34px;
+            padding: 0.35rem 0.8rem;
+            flex: 0 0 auto;
+        }
+        @media (max-width: 640px) {
+            .archive-toast {
+                bottom: calc(5rem + var(--safe-bottom));
+            }
+        }
 
         .button {
             font: inherit;
@@ -471,7 +542,8 @@
         {% if sessions %}
         <ul class="session-list">
             {% for session in sessions %}
-            <li class="session">
+            <li class="session" data-session-row data-session-archived="{{ session.is_archived|yesno:'true,false' }}" data-session-archive-url="{% url 'set_session_archived' session_id=session.id %}">
+                <div class="session-swipe-action" aria-hidden="true">Archive</div>
                 <a class="session-link" href="{% url 'session' session_id=session.id %}">
                     <div class="session-title">{{ session.display_title }}</div>
                     <div class="session-meta">
@@ -490,6 +562,11 @@
         </div>
         {% endif %}
     </main>
+
+    <div class="archive-toast" data-archive-toast hidden aria-live="polite">
+        <span data-archive-toast-text>Session archived</span>
+        <button type="button" class="button secondary" data-archive-undo>Undo</button>
+    </div>
 
     <button type="button" class="fab" data-new-session-open aria-label="New session">
         <span class="plus" aria-hidden="true">+</span>New
@@ -652,6 +729,158 @@
                 document.documentElement.classList.toggle(modalScrollLockClass, hasOpenDialog);
                 document.body.classList.toggle(modalScrollLockClass, hasOpenDialog);
             }
+
+            const csrfToken = (document.querySelector("input[name='csrfmiddlewaretoken']") || {}).value || "";
+            const archiveToast = document.querySelector("[data-archive-toast]");
+            const archiveUndo = document.querySelector("[data-archive-undo]");
+            const archiveToastText = document.querySelector("[data-archive-toast-text]");
+            const pendingArchives = new Map();
+            let undoRow = null;
+
+            function setSwipeDistance(row, distance) {
+                row.style.setProperty("--swipe-x", `${distance}px`);
+                row.classList.toggle("swipe-ready", distance >= 96);
+            }
+
+            function resetSwipe(row) {
+                row.style.removeProperty("--swipe-x");
+                row.classList.remove("swiping", "swipe-ready");
+            }
+
+            function postArchiveState(row, archived) {
+                const body = new URLSearchParams({ archived: archived ? "true" : "false" });
+                const headers = {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "X-Requested-With": "XMLHttpRequest",
+                };
+                if (csrfToken) headers["X-CSRFToken"] = csrfToken;
+                return fetch(row.dataset.sessionArchiveUrl, {
+                    method: "POST",
+                    headers,
+                    body: body.toString(),
+                    credentials: "same-origin",
+                }).then((response) => {
+                    if (!response.ok) throw new Error("archive request failed");
+                });
+            }
+
+            function hideArchiveToast(row) {
+                if (undoRow !== row) return;
+                undoRow = null;
+                if (archiveToast) archiveToast.hidden = true;
+            }
+
+            function showArchiveToast(row) {
+                undoRow = row;
+                if (archiveToastText) archiveToastText.textContent = "Session archived";
+                if (archiveUndo) archiveUndo.disabled = false;
+                if (archiveToast) archiveToast.hidden = false;
+            }
+
+            function finalizeArchive(row) {
+                const pending = pendingArchives.get(row);
+                if (pending) window.clearTimeout(pending);
+                pendingArchives.delete(row);
+                hideArchiveToast(row);
+                row.remove();
+            }
+
+            function archiveRow(row) {
+                if (!row.dataset.sessionArchiveUrl || row.dataset.pendingArchive === "true") return;
+                resetSwipe(row);
+                row.dataset.pendingArchive = "true";
+                row.classList.add("pending-archive");
+                postArchiveState(row, true).then(() => {
+                    const timeout = window.setTimeout(() => finalizeArchive(row), 5000);
+                    pendingArchives.set(row, timeout);
+                    showArchiveToast(row);
+                }).catch(() => {
+                    row.dataset.pendingArchive = "false";
+                    row.classList.remove("pending-archive");
+                });
+            }
+
+            function undoArchive() {
+                const row = undoRow;
+                if (!row) return;
+                const timeout = pendingArchives.get(row);
+                if (timeout) window.clearTimeout(timeout);
+                pendingArchives.delete(row);
+                if (archiveUndo) archiveUndo.disabled = true;
+                postArchiveState(row, false).then(() => {
+                    row.dataset.pendingArchive = "false";
+                    row.classList.remove("pending-archive");
+                    hideArchiveToast(row);
+                }).catch(() => {
+                    const retryTimeout = window.setTimeout(() => finalizeArchive(row), 5000);
+                    pendingArchives.set(row, retryTimeout);
+                    showArchiveToast(row);
+                });
+            }
+
+            if (archiveUndo) archiveUndo.addEventListener("click", undoArchive);
+
+            for (const row of document.querySelectorAll("[data-session-row][data-session-archived='false']")) {
+                let swipe = null;
+                row.addEventListener("pointerdown", (event) => {
+                    if (event.pointerType === "mouse" && event.button !== 0) return;
+                    if (row.dataset.pendingArchive === "true") return;
+                    swipe = {
+                        pointerId: event.pointerId,
+                        startX: event.clientX,
+                        startY: event.clientY,
+                        distance: 0,
+                        active: false,
+                    };
+                });
+                row.addEventListener("pointermove", (event) => {
+                    if (!swipe || swipe.pointerId !== event.pointerId) return;
+                    const dx = event.clientX - swipe.startX;
+                    const dy = event.clientY - swipe.startY;
+                    if (!swipe.active) {
+                        if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+                        if (dx <= 0 || Math.abs(dy) > Math.abs(dx)) {
+                            swipe = null;
+                            return;
+                        }
+                        swipe.active = true;
+                        row.classList.add("swiping");
+                        if (row.setPointerCapture) row.setPointerCapture(event.pointerId);
+                    }
+                    swipe.distance = Math.min(Math.max(dx, 0), 160);
+                    setSwipeDistance(row, swipe.distance);
+                    event.preventDefault();
+                });
+                function endSwipe(event) {
+                    if (!swipe || swipe.pointerId !== event.pointerId) return;
+                    const current = swipe;
+                    swipe = null;
+                    if (!current.active) return;
+                    if (row.releasePointerCapture) row.releasePointerCapture(event.pointerId);
+                    row.dataset.suppressClick = "true";
+                    window.setTimeout(() => {
+                        row.dataset.suppressClick = "false";
+                    }, 0);
+                    if (current.distance >= 96) {
+                        archiveRow(row);
+                    } else {
+                        resetSwipe(row);
+                    }
+                    event.preventDefault();
+                }
+                row.addEventListener("pointerup", endSwipe);
+                row.addEventListener("pointercancel", (event) => {
+                    if (!swipe || swipe.pointerId !== event.pointerId) return;
+                    swipe = null;
+                    resetSwipe(row);
+                });
+                row.addEventListener("click", (event) => {
+                    if (row.dataset.suppressClick !== "true") return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                }, true);
+            }
+
             function showDialog(dialog) {
                 if (!dialog) return;
                 if (typeof dialog.showModal === "function") {

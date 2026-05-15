@@ -789,6 +789,8 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
             codex.thread_archive(session_id)
         else:
             codex.thread_unarchive(session_id)
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return HttpResponse(status=204)
     return redirect("session", session_id=session_id)
 
 
