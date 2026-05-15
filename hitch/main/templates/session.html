@@ -81,7 +81,7 @@
             -moz-osx-font-smoothing: grayscale;
             -webkit-tap-highlight-color: transparent;
             min-height: 100vh;
-            padding-bottom: calc(2rem + var(--safe-bottom));
+            padding-bottom: calc(7rem + var(--safe-bottom));
         }
         a { color: var(--link); text-decoration: none; }
         a:hover { text-decoration: underline; }
@@ -452,6 +452,66 @@
         details.intermediate .intermediate-body > .entry:first-child { margin-top: 0; }
         details.intermediate .intermediate-body > .entry:last-child { margin-bottom: 0; }
 
+        .composer {
+            position: fixed;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 20;
+            background: color-mix(in srgb, var(--bg) 88%, transparent);
+            backdrop-filter: saturate(180%) blur(14px);
+            -webkit-backdrop-filter: saturate(180%) blur(14px);
+            border-top: 1px solid var(--border);
+            padding-bottom: var(--safe-bottom);
+        }
+        .composer-inner {
+            max-width: 820px;
+            margin: 0 auto;
+            padding: 0.75rem 0.85rem;
+            display: flex;
+            gap: 0.5rem;
+            align-items: flex-end;
+        }
+        .composer textarea {
+            flex: 1;
+            font: inherit;
+            font-size: 0.95rem;
+            line-height: 1.4;
+            background: var(--surface);
+            color: var(--text);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 0.6rem 0.75rem;
+            resize: none;
+            max-height: 9rem;
+            min-height: 2.6rem;
+            overflow-y: auto;
+            min-width: 0;
+        }
+        .composer textarea:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-soft);
+        }
+        .composer button {
+            font: inherit;
+            background: var(--accent);
+            color: #fff;
+            border: 1px solid var(--accent);
+            border-radius: var(--radius-sm);
+            padding: 0.6rem 1.1rem;
+            cursor: pointer;
+            font-weight: 500;
+            min-height: 40px;
+        }
+        .composer button:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+        .composer button:disabled {
+            background: var(--surface-3);
+            border-color: var(--border-strong);
+            color: var(--text-faint);
+            cursor: not-allowed;
+        }
+
         .empty-thread {
             text-align: center;
             padding: 3rem 1rem;
@@ -470,6 +530,7 @@
             details.intermediate > summary { padding: 0.6rem 0.85rem; }
             details.intermediate .intermediate-body { padding: 0.65rem 0.75rem; }
             .meta code { max-width: 12rem; }
+            .composer-inner { padding: 0.6rem 0.7rem; }
         }
     </style>
 </head>
@@ -521,6 +582,14 @@
         {% endif %}
     </main>
 
+    <form class="composer" method="post" action="{{ send_message_url }}" data-composer>
+        {% csrf_token %}
+        <div class="composer-inner">
+            <textarea name="prompt" rows="1" required autocomplete="off" placeholder="Send a message…" aria-label="Send a message" data-composer-input></textarea>
+            <button type="submit" data-composer-submit>Send</button>
+        </div>
+    </form>
+
     <script>
         (function () {
             const dateTime = new Intl.DateTimeFormat(undefined, {
@@ -555,6 +624,34 @@
                         }
                         editDetails.scrollIntoView({ behavior: "smooth", block: "center" });
                     }
+                });
+            }
+
+            // Composer: auto-grow the textarea up to its CSS max-height,
+            // disable submit when empty, and treat plain Enter as submit
+            // (Shift+Enter inserts a newline) so the form behaves like a
+            // chat box. The browser still falls back to a normal POST if
+            // JS is disabled.
+            const composer = document.querySelector("[data-composer]");
+            if (composer) {
+                const input = composer.querySelector("[data-composer-input]");
+                const submit = composer.querySelector("[data-composer-submit]");
+                const sync = () => {
+                    input.style.height = "auto";
+                    input.style.height = input.scrollHeight + "px";
+                    submit.disabled = input.value.trim().length === 0;
+                };
+                sync();
+                input.addEventListener("input", sync);
+                input.addEventListener("keydown", (event) => {
+                    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+                        if (input.value.trim().length === 0) return;
+                        event.preventDefault();
+                        composer.requestSubmit();
+                    }
+                });
+                composer.addEventListener("submit", () => {
+                    submit.disabled = true;
                 });
             }
         })();

@@ -95,6 +95,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             "name_value": name_value,
             "name_max_len": _NAME_MAX_LEN,
             "set_name_url": reverse("set_session_name", kwargs={"session_id": session_id}),
+            "send_message_url": reverse("send_message", kwargs={"session_id": session_id}),
         },
     )
 
@@ -186,6 +187,24 @@ def set_session_name(request: HttpRequest, session_id: str) -> HttpResponse:
     config = AppServerConfig(codex_bin=shutil.which("codex"))
     with Codex(config=config) as codex:
         codex._client.thread_set_name(session_id, name)
+    return redirect("session", session_id=session_id)
+
+
+@require_http_methods(["POST"])
+def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
+    prompt = request.POST.get("prompt", "").strip()
+    if not prompt:
+        return HttpResponseBadRequest("prompt is required")
+    # Resume the thread so we can reuse its existing cwd — the thread was
+    # already created against a discover_repos()-validated path, and the
+    # composer form intentionally does not expose cwd as a writable field.
+    config = AppServerConfig(codex_bin=shutil.which("codex"))
+    with Codex(config=config) as codex:
+        thread = codex._client.thread_resume(session_id).thread
+    cwd = getattr(thread, "cwd", None)
+    if not isinstance(cwd, str) or not cwd:
+        return HttpResponseBadRequest("thread has no cwd")
+    codex_pool.spawn_turn(thread_id=session_id, cwd=cwd, prompt=prompt)
     return redirect("session", session_id=session_id)
 
 
