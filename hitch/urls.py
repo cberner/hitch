@@ -30,5 +30,10 @@ urlpatterns = [
         hitch.main.views.session_stream,
         name="session_stream",
     ),
+    path(
+        "approval/<int:approval_id>/",
+        hitch.main.views.resolve_approval,
+        name="resolve_approval",
+    ),
     path("admin/", admin.site.urls),
 ]

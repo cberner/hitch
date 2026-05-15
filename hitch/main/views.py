@@ -13,6 +13,7 @@ from django.http import (
 )
 from django.shortcuts import redirect, render
 from django.urls import reverse
+from django.utils import timezone
 from django.views.decorators.http import require_http_methods
 from openai_codex import AppServerConfig, AppServerError, Codex
 from openai_codex.generated.v2_all import (
@@ -23,7 +24,7 @@ from openai_codex.generated.v2_all import (
 
 from hitch.main import codex_pool, rollout, streaming
 from hitch.main.formatting import looks_like_markdown, render_markdown
-from hitch.main.models import CodexInstance
+from hitch.main.models import ApprovalRequest, CodexInstance
 from hitch.main.repos import discover_repos
 
 logger = logging.getLogger(__name__)
@@ -229,6 +230,13 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             "is_archived": is_archived,
             "send_message_url": reverse("send_message", kwargs={"session_id": session_id}),
             "stream_url": _stream_url_for(session_id, active_instance),
+            # The JS swaps the trailing ``0`` for the real ApprovalRequest
+            # pk on each POST. Templating the URL server-side (rather than
+            # building it in JS from a base path) keeps Django's URL
+            # resolver authoritative even when the route changes.
+            "approval_url_template": reverse(
+                "resolve_approval", kwargs={"approval_id": 0}
+            ),
             "active_worker": active_instance is not None,
             # The in-progress turn is trimmed from ``entries`` above, so the
             # user wouldn't see their own message at all without a pending
@@ -814,6 +822,53 @@ def _thread_cwd(thread: Any) -> str | None:
         return raw or None
     root = getattr(raw, "root", None)
     return root if isinstance(root, str) and root else None
+
+
+# Decisions the approval endpoint accepts. The wire string the worker writes
+# back to codex's app-server is taken straight from this set, so the constants
+# must stay aligned with codex's ``ReviewDecision`` enum (``approved`` /
+# ``denied`` / ``abort``). UI labels live in the template; this layer only
+# validates the wire value.
+_VALID_APPROVAL_DECISIONS = frozenset(
+    {
+        ApprovalRequest.DECISION_APPROVED,
+        ApprovalRequest.DECISION_DENIED,
+        ApprovalRequest.DECISION_ABORT,
+    }
+)
+
+
+@require_http_methods(["POST"])
+def resolve_approval(request: HttpRequest, approval_id: int) -> HttpResponse:
+    """Record the user's decision on a pending command/file approval.
+
+    The worker's polling loop wakes on the row update and answers the
+    SDK's JSON-RPC request with the recorded ``decision``. The response is
+    intentionally minimal (200 with the recorded decision string) so the
+    browser-side fetch can surface success without parsing JSON.
+
+    Returns 409 if the approval has already been resolved — racing two
+    clicks shouldn't silently overwrite an earlier choice that the worker
+    has already returned to codex.
+    """
+    decision = request.POST.get("decision", "").strip()
+    if decision not in _VALID_APPROVAL_DECISIONS:
+        return HttpResponseBadRequest("invalid decision")
+    try:
+        approval = ApprovalRequest.objects.get(pk=approval_id)
+    except ApprovalRequest.DoesNotExist:
+        return HttpResponse("approval not found", status=404)
+    if approval.decision:
+        return HttpResponse("approval already resolved", status=409)
+    # Filter on ``decision=""`` so two concurrent POSTs can't both succeed
+    # in flipping the row away from pending.
+    updated = ApprovalRequest.objects.filter(pk=approval_id, decision="").update(
+        decision=decision,
+        decided_at=timezone.now(),
+    )
+    if not updated:
+        return HttpResponse("approval already resolved", status=409)
+    return HttpResponse(decision, content_type="text/plain")
 
 
 @require_http_methods(["POST"])
