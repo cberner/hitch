@@ -20,5 +20,10 @@ urlpatterns = [
         hitch.main.views.send_message,
         name="send_message",
     ),
+    path(
+        "sessions/<str:session_id>/stream/",
+        hitch.main.views.session_stream,
+        name="session_stream",
+    ),
     path("admin/", admin.site.urls),
 ]

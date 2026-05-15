@@ -137,6 +137,25 @@ def latest_for_thread(thread_id: str) -> CodexInstance | None:
     )
 
 
+def latest_active_for_thread(thread_id: str) -> CodexInstance | None:
+    """Return the most recent active CodexInstance for ``thread_id``, or None.
+
+    ``send_message`` can queue another turn before the previous one ends, so
+    a fast-failing newer worker would otherwise mask an older still-running
+    one if we filtered only by ``started_at``. Filter on active status first
+    so a session is treated as live whenever *any* worker for it is still
+    starting or running.
+    """
+    return (
+        CodexInstance.objects.filter(
+            thread_id=thread_id,
+            status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+        )
+        .order_by("-started_at")
+        .first()
+    )
+
+
 def reconcile_dead() -> int:
     """Mark workers as failed whose PID is no longer alive.
 

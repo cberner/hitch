@@ -26,7 +26,7 @@ from openai_codex.generated.v2_all import (
 )
 from pydantic import BaseModel
 
-from hitch.main import codex_pool
+from hitch.main import codex_pool, streaming
 from hitch.main.management.commands.codex_worker import _serialize_event
 from hitch.main.models import CodexInstance
 
@@ -352,6 +352,34 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(codex_pool.latest_for_thread("t1"), second)
         self.assertIsNone(codex_pool.latest_for_thread("nothing"))
 
+    def test_latest_active_for_thread(self) -> None:
+        # ``send_message`` can stack workers on a thread, so a newer
+        # terminal row must not mask an older still-running one — the
+        # streaming UI needs to stay up as long as *any* worker for the
+        # thread is in progress.
+        older = self._make(thread_id="t-active", status=CodexInstance.STATUS_RUNNING)
+        newer_terminal = self._make(
+            thread_id="t-active", status=CodexInstance.STATUS_FAILED
+        )
+        self.assertEqual(codex_pool.latest_active_for_thread("t-active"), older)
+
+        # When multiple actives exist, return the newest by started_at.
+        newer_active = self._make(
+            thread_id="t-active", status=CodexInstance.STATUS_STARTING
+        )
+        self.assertEqual(codex_pool.latest_active_for_thread("t-active"), newer_active)
+
+        # All terminal → None; never-existed thread → None.
+        older.status = CodexInstance.STATUS_COMPLETED
+        older.save(update_fields=["status"])
+        newer_active.status = CodexInstance.STATUS_COMPLETED
+        newer_active.save(update_fields=["status"])
+        self.assertIsNone(codex_pool.latest_active_for_thread("t-active"))
+        self.assertIsNone(codex_pool.latest_active_for_thread("never-existed"))
+        # newer_terminal was already terminal; referenced here so it isn't
+        # flagged as unused by future readers.
+        self.assertEqual(newer_terminal.status, CodexInstance.STATUS_FAILED)
+
 
 class EventsDirTests(TestCase):
     def test_uses_setting_when_configured(self) -> None:
@@ -596,3 +624,234 @@ class CodexWorkerCommandTests(TestCase):
             call_command("codex_worker", "--instance-id", str(instance.pk))
 
         self.assertEqual(observed_status["value"], CodexInstance.STATUS_RUNNING)
+
+
+# A pid we know is alive (this Python process) lets the streaming tests
+# create CodexInstance rows that survive ``reconcile_dead`` without faking
+# the ``is_alive`` helper.
+_LIVE_PID = os.getpid()
+
+
+def _make_streaming_instance(
+    events_path: str,
+    *,
+    thread_id: str = "thread-1",
+    status: str = CodexInstance.STATUS_RUNNING,
+    prompt: str = "do work",
+    pid: int = 0,
+) -> CodexInstance:
+    return CodexInstance.objects.create(
+        pid=pid,
+        thread_id=thread_id,
+        cwd="/repo",
+        prompt=prompt,
+        events_path=events_path,
+        status=status,
+    )
+
+
+class StreamForInstanceTests(TestCase):
+    """The SSE generator that re-emits a worker's JSONL events file frame-by-
+    frame. Pairs with ``streaming.stream_for_instance`` / ``empty_stream``.
+    """
+
+    def test_empty_stream_yields_only_end(self) -> None:
+        # The "no active worker" path returns a fixed, immediately-closing
+        # stream so the JS client gets a deterministic shape regardless of
+        # whether a turn is currently running.
+        frames = list(streaming.empty_stream())
+        self.assertEqual(frames[0], b"retry: 2000\n\n")
+        self.assertTrue(frames[-1].startswith(b"event: end"))
+        self.assertIn(b'"inactive"', frames[-1])
+
+    def test_streams_existing_lines_and_terminates_when_done(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            with open(events_path, "w", encoding="utf-8") as fh:
+                fh.write(
+                    json.dumps({"method": "item/started", "payload": {"item": {"id": "x"}}})
+                    + "\n"
+                )
+                fh.write(json.dumps({"method": "turn/completed", "payload": {}}) + "\n")
+
+            instance = _make_streaming_instance(events_path, status=CodexInstance.STATUS_COMPLETED)
+            frames = list(streaming.stream_for_instance(instance))
+
+        data_frames = [f for f in frames if f.startswith(b"data: ")]
+        self.assertEqual(len(data_frames), 2)
+        self.assertIn(b"item/started", data_frames[0])
+        self.assertIn(b"turn/completed", data_frames[1])
+        self.assertTrue(frames[-1].startswith(b"event: end"))
+        self.assertIn(b'"completed"', frames[-1])
+
+    def test_terminates_when_status_flips_to_failed(self) -> None:
+        # A worker that ended with a failure status still flushes its events
+        # file, but the end frame should carry the actual terminal status so
+        # the client can surface the failure UI.
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            with open(events_path, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({"method": "item/started", "payload": {}}) + "\n")
+
+            instance = _make_streaming_instance(events_path, status=CodexInstance.STATUS_FAILED)
+            frames = list(streaming.stream_for_instance(instance))
+
+        self.assertIn(b'"failed"', frames[-1])
+
+    def test_ignores_partial_trailing_line(self) -> None:
+        # The worker is line-buffered, so a tailer that opens the file at the
+        # exact moment a half-line is on disk must not emit a malformed JSON
+        # frame to the client.
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            with open(events_path, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({"method": "item/started", "payload": {}}) + "\n")
+                # Half a JSON object, no trailing newline.
+                fh.write('{"method":"item/partial')
+
+            instance = _make_streaming_instance(events_path, status=CodexInstance.STATUS_COMPLETED)
+            frames = list(streaming.stream_for_instance(instance))
+
+        data_frames = [f for f in frames if f.startswith(b"data: ")]
+        self.assertEqual(len(data_frames), 1)
+        self.assertIn(b"item/started", data_frames[0])
+        self.assertNotIn(b"item/partial", b"".join(frames))
+
+    @patch("hitch.main.streaming._POLL_INTERVAL", 0.01)
+    def test_missing_events_file_with_dead_worker_ends_promptly(self) -> None:
+        # If the events file never appears but the worker process is also
+        # gone, the tailer must bail rather than wait the full appearance
+        # timeout. ``pid=99999999`` is well above the kernel's pid_max so
+        # ``os.kill(pid, 0)`` raises ProcessLookupError → is_alive False.
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "never-created.jsonl")
+            instance = _make_streaming_instance(
+                events_path, status=CodexInstance.STATUS_RUNNING, pid=99999999
+            )
+            frames = list(streaming.stream_for_instance(instance))
+
+        self.assertTrue(frames[-1].startswith(b"event: end"))
+        self.assertNotIn(b'"missing"', frames[-1])
+
+    @patch("hitch.main.streaming._POLL_INTERVAL", 0.005)
+    @patch("hitch.main.streaming._FILE_APPEAR_TIMEOUT", 0.001)
+    def test_appearance_timeout_when_file_never_arrives(self) -> None:
+        # A live worker that's stuck before its first write should bail via
+        # the appearance timeout rather than hanging the request handler.
+        instance = _make_streaming_instance(
+            "/tmp/hitch-test-never-created.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+            pid=_LIVE_PID,
+        )
+        frames = list(streaming.stream_for_instance(instance))
+        self.assertIn(b'"missing"', frames[-1])
+
+    def test_emit_skips_blank_lines(self) -> None:
+        # A stray blank line on the events file must not produce an empty
+        # SSE ``data:`` frame.
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            with open(events_path, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({"method": "a", "payload": {}}) + "\n")
+                fh.write("\n")
+                fh.write(json.dumps({"method": "b", "payload": {}}) + "\n")
+            instance = _make_streaming_instance(events_path, status=CodexInstance.STATUS_COMPLETED)
+            frames = list(streaming.stream_for_instance(instance))
+        data_frames = [f for f in frames if f.startswith(b"data: ")]
+        self.assertEqual(len(data_frames), 2)
+
+    @patch("hitch.main.streaming._POLL_INTERVAL", 0.005)
+    @patch("hitch.main.streaming._MAX_STREAM_SECONDS", 0.001)
+    def test_read_loop_hits_stream_timeout(self) -> None:
+        # A live worker that goes silent for longer than the per-stream cap
+        # must release the request thread; the browser's EventSource will
+        # reconnect if the user is still on the page.
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            Path(events_path).touch()
+            instance = _make_streaming_instance(
+                events_path, status=CodexInstance.STATUS_RUNNING, pid=_LIVE_PID
+            )
+            frames = list(streaming.stream_for_instance(instance))
+        self.assertIn(b'"timeout"', frames[-1])
+
+    @patch("hitch.main.streaming._POLL_INTERVAL", 0.001)
+    def test_keepalive_yielded_while_worker_is_idle(self) -> None:
+        # Idle SSE connections get keepalive comments so proxies don't drop
+        # them between turn deltas. Force _is_done False on the first poll
+        # and True on the second so we observe exactly one keepalive frame
+        # before the stream finishes cleanly.
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            Path(events_path).touch()
+            instance = _make_streaming_instance(
+                events_path, status=CodexInstance.STATUS_RUNNING, pid=_LIVE_PID
+            )
+
+            done_calls = [0]
+
+            def fake_is_done(_pk: int) -> bool:
+                done_calls[0] += 1
+                return done_calls[0] >= 2
+
+            with patch("hitch.main.streaming._is_done", side_effect=fake_is_done):
+                frames = list(streaming.stream_for_instance(instance))
+
+        keepalives = [f for f in frames if f.startswith(b": keepalive")]
+        self.assertEqual(len(keepalives), 1)
+        self.assertTrue(frames[-1].startswith(b"event: end"))
+
+    def test_late_flush_after_status_flip_is_picked_up(self) -> None:
+        # The worker's status transition and its final file write are not
+        # atomic: a turn/completed event can land on disk *after* the row
+        # already shows COMPLETED. The post-done re-read catches that line.
+        fake_file = MagicMock()
+        fake_file.__enter__.return_value = fake_file
+        fake_file.__exit__.return_value = False
+        fake_file.read.side_effect = [
+            "",
+            json.dumps({"method": "turn/completed", "payload": {}}) + "\n",
+            "",
+        ]
+
+        instance = _make_streaming_instance(
+            "/tmp/hitch-test-late.jsonl", status=CodexInstance.STATUS_COMPLETED
+        )
+
+        with (
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "open", return_value=fake_file),
+        ):
+            frames = list(streaming.stream_for_instance(instance))
+
+        data_frames = [f for f in frames if f.startswith(b"data: ")]
+        self.assertEqual(len(data_frames), 1)
+        self.assertIn(b"turn/completed", data_frames[0])
+
+    def test_is_done_treats_missing_instance_as_terminal(self) -> None:
+        # A row deleted out from under the tailer (cleanup race) ends the
+        # stream rather than crashing the generator with DoesNotExist.
+        self.assertTrue(streaming._is_done(99999999))
+
+    def test_current_status_returns_unknown_for_missing_instance(self) -> None:
+        # Symmetric to _is_done: the end-frame status falls back to a
+        # stable sentinel when the row is gone.
+        self.assertEqual(streaming._current_status(99999999), "unknown")
+
+    @patch("hitch.main.streaming._POLL_INTERVAL", 0.01)
+    def test_running_instance_with_dead_pid_terminates(self) -> None:
+        # The events file exists but the worker died before flipping its
+        # status; ``is_alive`` short-circuits the otherwise-infinite read.
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            with open(events_path, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps({"method": "item/started", "payload": {}}) + "\n")
+
+            instance = _make_streaming_instance(
+                events_path, status=CodexInstance.STATUS_RUNNING, pid=99999999
+            )
+            frames = list(streaming.stream_for_instance(instance))
+
+        data_frames = [f for f in frames if f.startswith(b"data: ")]
+        self.assertEqual(len(data_frames), 1)
+        self.assertTrue(frames[-1].startswith(b"event: end"))
