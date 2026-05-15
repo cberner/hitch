@@ -50,6 +50,10 @@
         }
         * { box-sizing: border-box; }
         html, body { margin: 0; padding: 0; }
+        html.modal-scroll-locked,
+        body.modal-scroll-locked {
+            overflow: hidden;
+        }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             color: var(--text);
@@ -295,7 +299,12 @@
             color: var(--text);
             box-shadow: var(--shadow-lg);
             max-width: min(520px, calc(100% - 1.5rem));
+            max-height: calc(100vh - 2rem - var(--safe-top) - var(--safe-bottom));
+            max-height: calc(100dvh - 2rem - var(--safe-top) - var(--safe-bottom));
             width: 100%;
+            overflow-y: auto;
+            overscroll-behavior: contain;
+            -webkit-overflow-scrolling: touch;
         }
         dialog.new-session::backdrop {
             background: rgba(15, 14, 12, 0.5);
@@ -637,6 +646,12 @@
                 el.textContent = relativeFromNow(date);
             }
 
+            const modalScrollLockClass = "modal-scroll-locked";
+            function syncModalScrollLock() {
+                const hasOpenDialog = Boolean(document.querySelector("dialog[open]"));
+                document.documentElement.classList.toggle(modalScrollLockClass, hasOpenDialog);
+                document.body.classList.toggle(modalScrollLockClass, hasOpenDialog);
+            }
             function showDialog(dialog) {
                 if (!dialog) return;
                 if (typeof dialog.showModal === "function") {
@@ -644,6 +659,7 @@
                 } else {
                     dialog.setAttribute("open", "");
                 }
+                syncModalScrollLock();
             }
             function hideDialog(dialog) {
                 if (!dialog) return;
@@ -652,6 +668,10 @@
                 } else {
                     dialog.removeAttribute("open");
                 }
+                syncModalScrollLock();
+            }
+            for (const dialog of document.querySelectorAll("dialog")) {
+                dialog.addEventListener("close", syncModalScrollLock);
             }
 
             const newSessionDialog = document.querySelector("[data-new-session-dialog]");

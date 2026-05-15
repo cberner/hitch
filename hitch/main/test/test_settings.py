@@ -208,6 +208,24 @@ class SettingsDialogRenderTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    def test_dialog_captures_scroll_without_scrolling_session_list(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _configure_codex(
+            mock_codex,
+            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+        )
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, "overscroll-behavior: contain")
+        self.assertContains(response, "overflow-y: auto")
+        self.assertContains(response, "modal-scroll-locked")
+        self.assertContains(response, 'document.querySelector("dialog[open]")')
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
     def test_dialog_renders_rate_limit_windows(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
