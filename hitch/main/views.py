@@ -86,6 +86,7 @@ _MODEL_MAX_LEN = 256
 # (the full first user message) is what we get; that is often paragraphs
 # long and would overflow the list rows without a clip.
 _DISPLAY_TITLE_MAX_LEN = 80
+_ARCHIVED_SESSIONS_DIR = "archived_sessions"
 _MINUTES_PER_HOUR = 60
 _MINUTES_PER_DAY = 24 * _MINUTES_PER_HOUR
 
@@ -191,6 +192,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
         # The resume response already carries the full thread including turns,
         # so a follow-up ``thread/read`` would just be a redundant round-trip.
         thread = codex._client.thread_resume(session_id).thread
+    is_archived = _thread_is_archived(thread)
     entries = list(_entries_for(thread))
     name_value = getattr(thread, "name", None) or ""
     active_instance = _active_instance_for(session_id)
@@ -211,6 +213,10 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             "name_value": name_value,
             "name_max_len": _NAME_MAX_LEN,
             "set_name_url": reverse("set_session_name", kwargs={"session_id": session_id}),
+            "set_archived_url": reverse(
+                "set_session_archived", kwargs={"session_id": session_id}
+            ),
+            "is_archived": is_archived,
             "send_message_url": reverse("send_message", kwargs={"session_id": session_id}),
             "stream_url": _stream_url_for(session_id, active_instance),
             "active_worker": active_instance is not None,
@@ -221,6 +227,14 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             "token_usage": token_usage,
         },
     )
+
+
+def _thread_is_archived(thread: Any) -> bool:
+    """Return whether Codex resumed this thread from archived rollout storage."""
+    path = getattr(thread, "path", None)
+    if not isinstance(path, str) or not path:
+        return False
+    return _ARCHIVED_SESSIONS_DIR in Path(path).parts
 
 
 def _token_usage_for(thread: Any) -> dict[str, str] | None:
@@ -703,6 +717,20 @@ def set_session_name(request: HttpRequest, session_id: str) -> HttpResponse:
     config = AppServerConfig(codex_bin=shutil.which("codex"))
     with Codex(config=config) as codex:
         codex._client.thread_set_name(session_id, name)
+    return redirect("session", session_id=session_id)
+
+
+@require_http_methods(["POST"])
+def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
+    archived = request.POST.get("archived", "").strip()
+    if archived not in {"true", "false"}:
+        return HttpResponseBadRequest("archived must be true or false")
+    config = AppServerConfig(codex_bin=shutil.which("codex"))
+    with Codex(config=config) as codex:
+        if archived == "true":
+            codex.thread_archive(session_id)
+        else:
+            codex.thread_unarchive(session_id)
     return redirect("session", session_id=session_id)
 
 

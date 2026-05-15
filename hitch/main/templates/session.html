@@ -179,6 +179,7 @@
             box-shadow: var(--shadow-lg);
         }
         .session-menu[hidden] { display: none; }
+        .session-menu form { margin: 0; }
         .session-menu button {
             width: 100%;
             font: inherit;
@@ -658,6 +659,11 @@
                 <button type="button" class="topbar-action" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false" data-session-menu-open>...</button>
                 <div class="session-menu" role="menu" data-session-menu-panel hidden>
                     <button type="button" role="menuitem" data-edit-title-open>Rename</button>
+                    <form method="post" action="{{ set_archived_url }}" role="none">
+                        {% csrf_token %}
+                        <input type="hidden" name="archived" value="{% if is_archived %}false{% else %}true{% endif %}">
+                        <button type="submit" role="menuitem">{% if is_archived %}Unarchive{% else %}Archive{% endif %}</button>
+                    </form>
                 </div>
             </div>
         </div>

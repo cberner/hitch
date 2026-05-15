@@ -601,6 +601,60 @@ class SetSessionNameViewTests(TestCase):
         mock_codex.assert_not_called()
 
 
+class SetSessionArchivedViewTests(TestCase):
+    @patch("hitch.main.views.Codex")
+    def test_archives_session_and_redirects(self, mock_codex: MagicMock) -> None:
+        response = self.client.post(
+            reverse("set_session_archived", kwargs={"session_id": "abc"}),
+            data={"archived": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.headers["Location"],
+            reverse("session", kwargs={"session_id": "abc"}),
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client.thread_archive.assert_called_once_with("abc")
+        client.thread_unarchive.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    def test_unarchives_session_and_redirects(self, mock_codex: MagicMock) -> None:
+        response = self.client.post(
+            reverse("set_session_archived", kwargs={"session_id": "abc"}),
+            data={"archived": "false"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.headers["Location"],
+            reverse("session", kwargs={"session_id": "abc"}),
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client.thread_unarchive.assert_called_once_with("abc")
+        client.thread_archive.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    def test_rejects_invalid_input(self, mock_codex: MagicMock) -> None:
+        for data in ({}, {"archived": ""}, {"archived": "yes"}):
+            with self.subTest(data=data):
+                response = self.client.post(
+                    reverse("set_session_archived", kwargs={"session_id": "abc"}),
+                    data=data,
+                )
+                self.assertEqual(response.status_code, 400)
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    def test_rejects_get(self, mock_codex: MagicMock) -> None:
+        response = self.client.get(
+            reverse("set_session_archived", kwargs={"session_id": "abc"})
+        )
+
+        self.assertEqual(response.status_code, 405)
+        mock_codex.assert_not_called()
+
+
 class SessionStreamViewTests(TestCase):
     """The SSE endpoint that mirrors a worker's events file to the browser."""
 
