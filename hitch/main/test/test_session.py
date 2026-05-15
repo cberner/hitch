@@ -98,7 +98,7 @@ class SessionViewTests(TestCase):
         # can revise it rather than retype from scratch.
         thread = _thread([_turn([_user_message("hi")])], name="Custom title")
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -115,7 +115,7 @@ class SessionViewTests(TestCase):
     ) -> None:
         thread = _thread([_turn([_user_message("hello world")])], name=None)
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -128,7 +128,7 @@ class SessionViewTests(TestCase):
         # an unnamed thread with a long preview gets clipped here too.
         thread = _thread([_turn([_user_message("x" * 200)])], name=None, preview="x" * 200)
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
         body = response.content.decode()
@@ -150,12 +150,16 @@ class SessionViewTests(TestCase):
             ]
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
         self.assertEqual(response.status_code, 200)
-        client._client.thread_read.assert_called_once_with("thread-1", include_turns=True)
+        # ``thread/read`` requires the thread to already be loaded into the
+        # codex app-server; the view uses ``thread/resume`` so a brand-new
+        # session (or any thread the request's app-server hasn't seen) can be
+        # loaded from disk in the same call that fetches the turns.
+        client._client.thread_resume.assert_called_once_with("thread-1")
         self.assertContains(response, "Demo session")
         self.assertContains(response, "Refactor the login flow")
         self.assertContains(response, "Sure, here is the plan.")
@@ -178,7 +182,7 @@ class SessionViewTests(TestCase):
             ]
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -204,7 +208,7 @@ class SessionViewTests(TestCase):
             ]
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -225,7 +229,7 @@ class SessionViewTests(TestCase):
             ]
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -246,7 +250,7 @@ class SessionViewTests(TestCase):
             ]
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -267,7 +271,7 @@ class SessionViewTests(TestCase):
             ]
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -278,7 +282,7 @@ class SessionViewTests(TestCase):
     def test_empty_session_shows_placeholder(self, mock_codex: MagicMock) -> None:
         thread = _thread([])
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -323,7 +327,7 @@ class SessionViewTests(TestCase):
 
         thread = _thread([], path=str(rollout_path))
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -343,7 +347,7 @@ class SessionViewTests(TestCase):
             path="/nonexistent/rollout.jsonl",
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -368,7 +372,7 @@ class SessionViewTests(TestCase):
             path=str(rollout_path),
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -402,7 +406,7 @@ class SessionViewTests(TestCase):
             path=str(rollout_path),
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -429,7 +433,7 @@ class SessionViewTests(TestCase):
             path=str(rollout_path),
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -452,7 +456,7 @@ class SessionViewTests(TestCase):
 
         thread = _thread([], path=str(rollout_path))
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -492,7 +496,7 @@ class SessionViewTests(TestCase):
 
         thread = _thread([], path=str(rollout_path))
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -523,7 +527,7 @@ class SessionViewTests(TestCase):
 
         thread = _thread([], path=str(rollout_path))
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -566,7 +570,7 @@ class SessionViewTests(TestCase):
 
         thread = _thread([], path=str(rollout_path))
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -601,7 +605,7 @@ class SessionViewTests(TestCase):
 
         thread = _thread([], path=str(rollout_path))
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
         body = response.content.decode()
@@ -638,7 +642,7 @@ class IntermediateCollapseTests(TestCase):
             ]
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
         body = response.content.decode()
@@ -662,7 +666,7 @@ class IntermediateCollapseTests(TestCase):
             [_turn([_user_message("Hi"), _agent_message("Hello.")])]
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -683,7 +687,7 @@ class IntermediateCollapseTests(TestCase):
             ]
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -705,7 +709,7 @@ class IntermediateCollapseTests(TestCase):
             ]
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -730,7 +734,7 @@ class IntermediateCollapseTests(TestCase):
             ]
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
         body = response.content.decode()
@@ -761,7 +765,7 @@ class IntermediateCollapseTests(TestCase):
             ]
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -785,7 +789,7 @@ class IntermediateCollapseTests(TestCase):
             [_turn([_user_message("Q"), commentary, final])]
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
         body = response.content.decode()
@@ -816,7 +820,7 @@ class FinalAgentMarkdownTests(TestCase):
             ]
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -834,7 +838,7 @@ class FinalAgentMarkdownTests(TestCase):
             [_turn([_user_message("Hi"), _agent_message("Hello, friend.")])]
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -861,7 +865,7 @@ class FinalAgentMarkdownTests(TestCase):
             ]
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -885,7 +889,7 @@ class FinalAgentMarkdownTests(TestCase):
             ]
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
@@ -909,7 +913,7 @@ class FinalAgentMarkdownTests(TestCase):
             ]
         )
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_read.return_value.thread = thread
+        client._client.thread_resume.return_value.thread = thread
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
