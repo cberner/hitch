@@ -181,6 +181,7 @@ class NewSessionViewTests(TestCase):
             prompt="Refactor the login flow",
             model=None,
             reasoning_effort=None,
+            sandbox_policy=None,
         )
 
     @patch("hitch.main.views.Codex")
@@ -192,12 +193,15 @@ class NewSessionViewTests(TestCase):
         mock_spawn: MagicMock,
         mock_codex: MagicMock,
     ) -> None:
-        """Cookie-driven model/effort flow into ``spawn_new_session``."""
+        """Cookie-driven model/effort/sandbox flow into ``spawn_new_session``."""
         mock_discover.return_value = [Path(self.REPO)]
         mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
         _setup_codex(mock_codex, models=[_make_model("gpt-5", is_default=True)])
         _seed_cookies(
-            self.client, hitch_model="gpt-5", hitch_reasoning_effort="high"
+            self.client,
+            hitch_model="gpt-5",
+            hitch_reasoning_effort="high",
+            hitch_sandbox_policy="workspaceWrite",
         )
 
         self.client.post(
@@ -210,6 +214,7 @@ class NewSessionViewTests(TestCase):
             prompt="do thing",
             model="gpt-5",
             reasoning_effort="high",
+            sandbox_policy="workspaceWrite",
         )
 
     @patch("hitch.main.views.Codex")
@@ -241,6 +246,7 @@ class NewSessionViewTests(TestCase):
             prompt="do thing",
             model="gpt-5",
             reasoning_effort="medium",
+            sandbox_policy=None,
         )
 
     @patch("hitch.main.views.codex_pool.spawn_new_session")
@@ -300,7 +306,10 @@ class SendMessageViewTests(TestCase):
         )
         # Whitespace is trimmed before forwarding.
         mock_spawn.assert_called_once_with(
-            thread_id="abc", cwd="/repo", prompt="follow-up question"
+            thread_id="abc",
+            cwd="/repo",
+            prompt="follow-up question",
+            sandbox_policy=None,
         )
 
     @patch("hitch.main.views.discover_repos")
@@ -323,7 +332,67 @@ class SendMessageViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_called_once_with(thread_id="abc", cwd="/repo", prompt="hi")
+        mock_spawn.assert_called_once_with(
+            thread_id="abc", cwd="/repo", prompt="hi", sandbox_policy=None
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_forwards_sandbox_policy_cookie_to_spawn_turn(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        """Sandbox policy is applied per-turn, not persisted on the thread,
+        so follow-up messages must re-forward the cookie or every turn
+        after the first silently reverts to Codex defaults — which breaks
+        multi-turn workflows that depend on elevated permissions."""
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        _seed_cookies(self.client, hitch_sandbox_policy="workspaceWrite")
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="follow-up",
+            sandbox_policy="workspaceWrite",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_invalid_sandbox_cookie_is_treated_as_empty(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        """A tampered or post-SDK-upgrade cookie value must fall through to
+        ``None`` rather than ride a bogus string into the worker."""
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        _seed_cookies(self.client, hitch_sandbox_policy="phantomPolicy")
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="follow-up",
+            sandbox_policy=None,
+        )
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
