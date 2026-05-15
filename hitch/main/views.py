@@ -15,6 +15,17 @@ from hitch.main.repos import discover_repos
 
 logger = logging.getLogger(__name__)
 
+# Upper bound on what we render inline as a session's title. Codex does not
+# generate its own thread summaries, so for unnamed threads `Thread.preview`
+# (the full first user message) is what we get; that is often paragraphs
+# long and would overflow the list rows without a clip.
+_DISPLAY_TITLE_MAX_LEN = 80
+
+# Server-side cap on user-supplied thread names. Matches the `maxlength` we
+# set on the edit form so a client without HTML validation cannot push an
+# unbounded blob through.
+_NAME_MAX_LEN = 200
+
 # Friendly labels for non-message thread item types. Anything not in this map
 # falls back to the raw type tag so we never silently drop an item from the UI.
 _NON_MESSAGE_LABELS = {
@@ -42,8 +53,17 @@ def index(request: HttpRequest) -> HttpResponse:
     codex_pool.reconcile_dead()
     config = AppServerConfig(codex_bin=shutil.which("codex"))
     with Codex(config=config) as codex:
-        sessions = codex.thread_list().data
-    sessions = sorted(sessions, key=lambda s: s.updated_at, reverse=True)
+        threads = codex.thread_list().data
+    threads = sorted(threads, key=lambda s: s.updated_at, reverse=True)
+    sessions = [
+        {
+            "id": t.id,
+            "cwd": t.cwd,
+            "updated_at": t.updated_at,
+            "display_title": _display_title(t),
+        }
+        for t in threads
+    ]
     repos = [str(p) for p in discover_repos()]
     return render(
         request,
@@ -57,7 +77,39 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
     with Codex(config=config) as codex:
         thread = codex._client.thread_read(session_id, include_turns=True).thread
     entries = list(_entries_for(thread))
-    return render(request, "session.html", {"thread": thread, "entries": entries})
+    name_value = getattr(thread, "name", None) or ""
+    return render(
+        request,
+        "session.html",
+        {
+            "thread": thread,
+            "entries": entries,
+            "display_title": _display_title(thread),
+            "name_value": name_value,
+            "name_max_len": _NAME_MAX_LEN,
+            "set_name_url": reverse("set_session_name", kwargs={"session_id": session_id}),
+        },
+    )
+
+
+def _display_title(thread: Any) -> str:
+    """Return a short, single-line title for a thread.
+
+    Falls back through `name` -> first line of `preview` -> `id`, clipping
+    to ``_DISPLAY_TITLE_MAX_LEN`` so a long auto-fallback preview cannot
+    overflow the row. Threads without any usable text degrade to the id
+    rather than to a blank link.
+    """
+    name = getattr(thread, "name", None)
+    candidate = name.strip() if isinstance(name, str) else ""
+    if not candidate:
+        preview = getattr(thread, "preview", None) or ""
+        candidate = preview.split("\n", 1)[0].strip()
+    if not candidate:
+        return getattr(thread, "id", "") or ""
+    if len(candidate) > _DISPLAY_TITLE_MAX_LEN:
+        return candidate[:_DISPLAY_TITLE_MAX_LEN].rstrip() + "..."
+    return candidate
 
 
 def _entries_for(thread: Any) -> Iterator[dict[str, Any]]:
@@ -115,6 +167,19 @@ def _entries_from_rollout(thread: Any) -> list[dict[str, Any]] | None:
         )
         return None
     return entries
+
+
+@require_http_methods(["POST"])
+def set_session_name(request: HttpRequest, session_id: str) -> HttpResponse:
+    name = request.POST.get("name", "").strip()
+    if not name:
+        return HttpResponseBadRequest("name is required")
+    if len(name) > _NAME_MAX_LEN:
+        return HttpResponseBadRequest("name is too long")
+    config = AppServerConfig(codex_bin=shutil.which("codex"))
+    with Codex(config=config) as codex:
+        codex._client.thread_set_name(session_id, name)
+    return redirect("session", session_id=session_id)
 
 
 @require_http_methods(["POST"])

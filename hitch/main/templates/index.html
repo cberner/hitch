@@ -169,7 +169,7 @@
         {% for session in sessions %}
         <li class="session">
             <div class="session-title">
-                <a href="{% url 'session' session_id=session.id %}">{{ session.name|default:session.preview|default:session.id }}</a>
+                <a href="{% url 'session' session_id=session.id %}">{{ session.display_title }}</a>
             </div>
             <div class="session-meta">
                 <span>id: <code>{{ session.id }}</code></span>
