@@ -374,6 +374,55 @@ class RolloutFileViewTests(TestCase):
         self.assertContains(response, "No messages in this session yet.")
 
     @patch("hitch.main.views.Codex")
+    def test_token_usage_renders_under_title(self, mock_codex: MagicMock) -> None:
+        # The most recent token_count event's cumulative total surfaces under
+        # the session title with thousands separators; threads with no
+        # token_count event in their rollout hide the section entirely.
+        rollout_lines = [
+            _rollout_line("event_msg", {"type": "user_message", "message": "go"}),
+            _rollout_line(
+                "event_msg",
+                {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 12345,
+                            "cached_input_tokens": 678,
+                            "output_tokens": 9012,
+                            "reasoning_output_tokens": 3,
+                            "total_tokens": 22038,
+                        },
+                        "last_token_usage": {},
+                        "model_context_window": 200000,
+                    },
+                },
+            ),
+        ]
+        path = _make_rollout(self, rollout_lines)
+        _patch_thread(self, mock_codex, _thread([], path=str(path)))
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'class="usage"')
+        self.assertContains(response, ">in<")
+        self.assertContains(response, ">out<")
+        self.assertContains(response, ">cached<")
+        self.assertContains(response, "12,345")
+        self.assertContains(response, "9,012")
+        self.assertContains(response, "678")
+
+        # Same view with no token_count events: usage row is omitted.
+        empty_path = _make_rollout(
+            self,
+            [_rollout_line("event_msg", {"type": "user_message", "message": "hi"})],
+        )
+        _patch_thread(self, mock_codex, _thread([], path=str(empty_path)))
+        response = _get_session(self.client)
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, 'class="usage"')
+
+    @patch("hitch.main.views.Codex")
     def test_rollout_groups_multiple_turns_separately(self, mock_codex: MagicMock) -> None:
         # Two user messages in the rollout should produce two independent
         # intermediate blocks — one per turn — rather than one giant block.
