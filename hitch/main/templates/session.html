@@ -197,6 +197,14 @@
             outline: none;
             background: var(--surface-2);
         }
+        .session-menu button:disabled {
+            color: var(--text-faint);
+            cursor: not-allowed;
+        }
+        .session-menu button:disabled:hover,
+        .session-menu button:disabled:focus {
+            background: transparent;
+        }
 
         main {
             max-width: 820px;
@@ -709,6 +717,297 @@
         }
         .empty-thread p { margin: 0; }
 
+        .diff-fab {
+            position: fixed;
+            right: max(1rem, env(safe-area-inset-right, 0px));
+            bottom: calc(5.9rem + var(--safe-bottom));
+            z-index: 25;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            min-height: 2.55rem;
+            padding: 0.55rem 0.85rem;
+            border: 1px solid var(--accent);
+            border-radius: 999px;
+            background: var(--accent);
+            color: var(--accent-fg);
+            box-shadow: var(--shadow-lg);
+            font: inherit;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .diff-fab:hover {
+            background: var(--accent-hover);
+            border-color: var(--accent-hover);
+        }
+        .diff-fab .diff-fab-count {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 1.45rem;
+            height: 1.45rem;
+            padding: 0 0.35rem;
+            border-radius: 999px;
+            background: color-mix(in srgb, var(--accent-fg) 20%, transparent);
+            font-size: 0.74rem;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .diff-modal {
+            width: min(1120px, calc(100vw - 1.5rem));
+            max-height: calc(100dvh - 1.5rem);
+            padding: 0;
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius);
+            background: var(--surface);
+            color: var(--text);
+            box-shadow: var(--shadow-lg);
+        }
+        .diff-modal::backdrop {
+            background: color-mix(in srgb, #000 42%, transparent);
+            backdrop-filter: blur(2px);
+        }
+        .diff-shell {
+            display: flex;
+            flex-direction: column;
+            max-height: calc(100dvh - 1.5rem);
+            min-height: min(42rem, calc(100dvh - 1.5rem));
+        }
+        .diff-modal-header {
+            flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            padding: 0.85rem 1rem;
+            border-bottom: 1px solid var(--border);
+            background: var(--surface);
+        }
+        .diff-modal-title {
+            margin: 0;
+            flex: 1;
+            min-width: 0;
+            font-size: 1rem;
+            font-weight: 650;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .diff-summary {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.35rem;
+            align-items: center;
+            color: var(--text-muted);
+            font-size: 0.82rem;
+            font-variant-numeric: tabular-nums;
+        }
+        .diff-stat {
+            display: inline-flex;
+            align-items: center;
+            min-height: 1.45rem;
+            padding: 0.1rem 0.45rem;
+            border-radius: 999px;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            font-weight: 600;
+        }
+        .diff-stat.add { color: var(--accent); }
+        .diff-stat.remove { color: var(--danger); }
+        .diff-close {
+            flex: 0 0 auto;
+            width: 2rem;
+            height: 2rem;
+            border: 0;
+            border-radius: 8px;
+            background: transparent;
+            color: var(--text-muted);
+            font: inherit;
+            font-size: 1.25rem;
+            line-height: 1;
+            cursor: pointer;
+        }
+        .diff-close:hover { background: var(--surface-2); color: var(--text); }
+        .diff-warning {
+            flex: 0 0 auto;
+            margin: 0;
+            padding: 0.55rem 1rem;
+            border-bottom: 1px solid var(--border);
+            background: var(--status-warn-bg);
+            color: var(--status-warn-fg);
+            font-size: 0.85rem;
+        }
+        .diff-layout {
+            flex: 1 1 auto;
+            min-height: 0;
+            display: grid;
+            grid-template-columns: minmax(11rem, 16rem) minmax(0, 1fr);
+        }
+        .diff-file-nav {
+            overflow: auto;
+            border-right: 1px solid var(--border);
+            background: var(--surface-2);
+            padding: 0.55rem;
+        }
+        .diff-file-nav a {
+            display: block;
+            padding: 0.45rem 0.5rem;
+            border-radius: 6px;
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            line-height: 1.25;
+            overflow-wrap: anywhere;
+        }
+        .diff-file-nav a:hover {
+            background: var(--surface);
+            color: var(--text);
+            text-decoration: none;
+        }
+        .diff-content {
+            overflow: auto;
+            background: var(--surface);
+        }
+        .diff-file {
+            border-bottom: 1px solid var(--border);
+            min-width: max-content;
+        }
+        .diff-file:last-child { border-bottom: 0; }
+        .diff-file-header {
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            display: flex;
+            align-items: center;
+            gap: 0.65rem;
+            padding: 0.55rem 0.75rem;
+            border-bottom: 1px solid var(--border);
+            background: color-mix(in srgb, var(--surface) 94%, transparent);
+            backdrop-filter: saturate(180%) blur(10px);
+            -webkit-backdrop-filter: saturate(180%) blur(10px);
+        }
+        .diff-file-name {
+            flex: 1;
+            min-width: 16rem;
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+            font-size: 0.82rem;
+            font-weight: 650;
+            color: var(--text);
+            overflow-wrap: anywhere;
+        }
+        .diff-file-status {
+            flex: 0 0 auto;
+            color: var(--text-muted);
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }
+        .diff-file-counts {
+            flex: 0 0 auto;
+            display: inline-flex;
+            gap: 0.35rem;
+            font-size: 0.78rem;
+            font-variant-numeric: tabular-nums;
+        }
+        .diff-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+            font-size: 0.78rem;
+            line-height: 1.45;
+        }
+        .diff-line td {
+            padding: 0;
+            vertical-align: top;
+            border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent);
+        }
+        .diff-lineno {
+            width: 3.6rem;
+            min-width: 3.6rem;
+            padding: 0.08rem 0.5rem 0.08rem 0.35rem;
+            color: var(--text-faint);
+            background: var(--surface-2);
+            text-align: right;
+            user-select: none;
+            font-variant-numeric: tabular-nums;
+        }
+        .diff-marker {
+            width: 1.4rem;
+            min-width: 1.4rem;
+            padding: 0.08rem 0.2rem;
+            color: var(--text-faint);
+            text-align: center;
+            user-select: none;
+        }
+        .diff-code {
+            min-width: 38rem;
+            padding: 0.08rem 0.85rem 0.08rem 0.1rem;
+            white-space: pre;
+            color: var(--text);
+        }
+        .diff-line-add td { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+        .diff-line-add .diff-marker { color: var(--accent); font-weight: 700; }
+        .diff-line-remove td { background: var(--danger-soft); }
+        .diff-line-remove .diff-marker { color: var(--danger); font-weight: 700; }
+        .diff-line-hunk td {
+            background: var(--surface-3);
+            color: var(--text-muted);
+            font-weight: 650;
+        }
+        .diff-line-meta td {
+            background: var(--surface-2);
+            color: var(--text-faint);
+        }
+        .diff-code .c,
+        .diff-code .c1,
+        .diff-code .cm { color: #6b7f76; font-style: italic; }
+        .diff-code .k,
+        .diff-code .kd,
+        .diff-code .kn,
+        .diff-code .kr { color: #8b5cf6; font-weight: 650; }
+        .diff-code .s,
+        .diff-code .s1,
+        .diff-code .s2,
+        .diff-code .sb,
+        .diff-code .sx { color: #a45f22; }
+        .diff-code .m,
+        .diff-code .mi,
+        .diff-code .mf { color: #2f7d8a; }
+        .diff-code .nc,
+        .diff-code .nf,
+        .diff-code .na,
+        .diff-code .nt { color: #2f7148; font-weight: 650; }
+        .diff-code .o,
+        .diff-code .ow { color: #7a5a12; }
+        .diff-code .err {
+            color: var(--status-error-fg);
+            background: transparent;
+        }
+        @media (prefers-color-scheme: dark) {
+            .diff-code .c,
+            .diff-code .c1,
+            .diff-code .cm { color: #8fa197; }
+            .diff-code .k,
+            .diff-code .kd,
+            .diff-code .kn,
+            .diff-code .kr { color: #b79cff; }
+            .diff-code .s,
+            .diff-code .s1,
+            .diff-code .s2,
+            .diff-code .sb,
+            .diff-code .sx { color: #e4a15f; }
+            .diff-code .m,
+            .diff-code .mi,
+            .diff-code .mf { color: #6fc2d0; }
+            .diff-code .nc,
+            .diff-code .nf,
+            .diff-code .na,
+            .diff-code .nt { color: #84c49a; }
+            .diff-code .o,
+            .diff-code .ow { color: #e8c57a; }
+        }
+
         .message.pending {
             opacity: 0.85;
         }
@@ -732,6 +1031,28 @@
             details.intermediate .intermediate-body { padding: 0.65rem 0.75rem; }
             .meta code { max-width: 12rem; }
             .composer-inner { padding: 0.6rem 0.7rem; }
+            .diff-fab {
+                right: 0.75rem;
+                bottom: calc(5.4rem + var(--safe-bottom));
+            }
+            .diff-modal { width: calc(100vw - 0.75rem); }
+            .diff-layout { grid-template-columns: 1fr; }
+            .diff-file-nav {
+                display: flex;
+                gap: 0.35rem;
+                overflow-x: auto;
+                border-right: 0;
+                border-bottom: 1px solid var(--border);
+            }
+            .diff-file-nav a {
+                flex: 0 0 auto;
+                max-width: 14rem;
+                white-space: nowrap;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+            .diff-modal-header { padding: 0.75rem; }
+            .diff-file-header { padding: 0.5rem 0.65rem; }
         }
     </style>
     <noscript>
@@ -749,6 +1070,7 @@
                 <button type="button" class="topbar-action" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false" data-session-menu-open>...</button>
                 <div class="session-menu" role="menu" data-session-menu-panel hidden>
                     <button type="button" role="menuitem" data-edit-title-open>Rename</button>
+                    <button type="button" role="menuitem" data-diff-open {% if not diff_view.has_changes %}disabled{% endif %}>View diff</button>
                     <form method="post" action="{{ set_archived_url }}" role="none">
                         {% csrf_token %}
                         <input type="hidden" name="archived" value="{% if is_archived %}false{% else %}true{% endif %}">
@@ -814,6 +1136,65 @@
         {% endif %}
         <span class="live-status" data-live-status data-state="{% if active_worker %}working{% else %}idle{% endif %}" role="status" aria-live="polite">{% if active_worker %}Codex is working…{% else %}Connected{% endif %}</span>
     </main>
+
+    {% if diff_view.has_changes and not active_worker %}
+    <button type="button" class="diff-fab" data-diff-open aria-label="View diff">
+        <span>Diff</span>
+        <span class="diff-fab-count">{{ diff_view.file_count }}</span>
+    </button>
+    {% endif %}
+
+    {% if diff_view.has_changes %}
+    <dialog class="diff-modal" data-diff-modal aria-labelledby="diff-modal-title">
+        <div class="diff-shell">
+            <header class="diff-modal-header">
+                <h2 class="diff-modal-title" id="diff-modal-title">Working tree diff</h2>
+                <div class="diff-summary" aria-label="Diff summary">
+                    <span>{{ diff_view.file_count }} file{{ diff_view.file_count|pluralize }}</span>
+                    <span class="diff-stat add">+{{ diff_view.additions }}</span>
+                    <span class="diff-stat remove">-{{ diff_view.deletions }}</span>
+                </div>
+                <button type="button" class="diff-close" data-diff-close aria-label="Close diff">×</button>
+            </header>
+            {% if diff_view.truncated %}
+            <p class="diff-warning">Diff preview truncated.</p>
+            {% endif %}
+            <div class="diff-layout">
+                <nav class="diff-file-nav" aria-label="Changed files">
+                    {% for file in diff_view.files %}
+                    <a href="#diff-file-{{ forloop.counter }}">{{ file.path }}</a>
+                    {% endfor %}
+                </nav>
+                <div class="diff-content">
+                    {% for file in diff_view.files %}
+                    <section class="diff-file" id="diff-file-{{ forloop.counter }}">
+                        <div class="diff-file-header">
+                            <span class="diff-file-status">{{ file.status }}</span>
+                            <span class="diff-file-name">{{ file.path }}</span>
+                            <span class="diff-file-counts" aria-label="File change counts">
+                                <span class="diff-stat add">+{{ file.additions }}</span>
+                                <span class="diff-stat remove">-{{ file.deletions }}</span>
+                            </span>
+                        </div>
+                        <table class="diff-table" aria-label="Diff for {{ file.path }}">
+                            <tbody>
+                                {% for line in file.lines %}
+                                <tr class="diff-line diff-line-{{ line.kind }}">
+                                    <td class="diff-lineno">{% if line.old_lineno %}{{ line.old_lineno }}{% endif %}</td>
+                                    <td class="diff-lineno">{% if line.new_lineno %}{{ line.new_lineno }}{% endif %}</td>
+                                    <td class="diff-marker">{% if line.kind == "add" %}+{% elif line.kind == "remove" %}-{% endif %}</td>
+                                    <td class="diff-code">{{ line.html|safe }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </section>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </dialog>
+    {% endif %}
 
     <form class="composer" method="post" action="{{ send_message_url }}" data-composer data-stream-url="{{ stream_url }}">
         {% csrf_token %}
@@ -882,6 +1263,40 @@
                         input.select();
                     }
                     editPanel.scrollIntoView({ behavior: "smooth", block: "center" });
+                });
+            }
+
+            const diffModal = document.querySelector("[data-diff-modal]");
+            const diffOpeners = document.querySelectorAll("[data-diff-open]");
+            const diffClose = document.querySelector("[data-diff-close]");
+            const openDiff = () => {
+                if (!diffModal) return;
+                if (diffModal.open) return;
+                closeMenu();
+                if (typeof diffModal.showModal === "function") {
+                    diffModal.showModal();
+                } else {
+                    diffModal.setAttribute("open", "");
+                }
+            };
+            const closeDiff = () => {
+                if (!diffModal) return;
+                if (typeof diffModal.close === "function") {
+                    diffModal.close();
+                } else {
+                    diffModal.removeAttribute("open");
+                }
+            };
+            for (const opener of diffOpeners) {
+                opener.addEventListener("click", () => {
+                    if (opener.disabled) return;
+                    openDiff();
+                });
+            }
+            if (diffClose) diffClose.addEventListener("click", closeDiff);
+            if (diffModal) {
+                diffModal.addEventListener("click", (event) => {
+                    if (event.target === diffModal) closeDiff();
                 });
             }
 

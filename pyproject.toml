@@ -13,6 +13,7 @@ dependencies = [
     "Django>=6.0,<7.0",
     "markdown-it-py>=4.0,<5.0",
     "openai-codex",
+    "Pygments==2.20.0",
 ]
 
 [tool.uv.sources]
@@ -59,6 +60,10 @@ django_settings_module = "hitch.settings.dev"
 [[tool.mypy.overrides]]
 module = ["*.migrations.*"]
 ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["pygments", "pygments.*"]
+ignore_missing_imports = true
 
 [tool.ruff]
 line-length = 120

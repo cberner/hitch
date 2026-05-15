@@ -11,6 +11,7 @@ from django.test import Client, TestCase
 from django.urls import reverse
 from openai_codex.errors import AppServerError
 
+from hitch.main.diffs import DiffFile, DiffLine, DiffView
 from hitch.main.models import CodexInstance
 from hitch.main.views import _tool_call_detail, _tool_call_status
 
@@ -124,6 +125,27 @@ def _get_session(client: Client, session_id: str = "thread-1") -> HttpResponse:
     return response
 
 
+def _diff_view() -> DiffView:
+    return DiffView(
+        files=[
+            DiffFile(
+                path="hitch/main/views.py",
+                old_path="hitch/main/views.py",
+                status="Modified",
+                additions=1,
+                deletions=1,
+                lines=[
+                    DiffLine("hunk", None, None, "@@ -1 +1 @@"),
+                    DiffLine("remove", 1, None, '<span class="k">return</span> 1'),
+                    DiffLine("add", None, 1, '<span class="k">return</span> 2'),
+                ],
+            )
+        ],
+        additions=1,
+        deletions=1,
+    )
+
+
 class SessionViewTests(TestCase):
     @patch("hitch.main.views.Codex")
     def test_renders_edit_title_form(self, mock_codex: MagicMock) -> None:
@@ -150,6 +172,38 @@ class SessionViewTests(TestCase):
                 self.assertContains(response, 'name="archived" value="true"')
                 self.assertContains(response, 'role="menuitem">Archive</button>')
                 self.assertNotContains(response, ">Edit</button>")
+
+    @patch("hitch.main.views.build_worktree_diff")
+    @patch("hitch.main.views.Codex")
+    def test_renders_diff_viewer_entry_points_and_modal(
+        self, mock_codex: MagicMock, mock_diff: MagicMock
+    ) -> None:
+        mock_diff.return_value = _diff_view()
+        _patch_thread(self, mock_codex, _thread([_turn([_user_message("hi")])]))
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'role="menuitem" data-diff-open')
+        self.assertContains(response, 'class="diff-fab"')
+        self.assertContains(response, '<dialog class="diff-modal"', html=False)
+        self.assertContains(response, "Working tree diff")
+        self.assertContains(response, "hitch/main/views.py")
+        self.assertContains(response, '<span class="k">return</span> 2', html=False)
+
+    @patch("hitch.main.views.build_worktree_diff")
+    @patch("hitch.main.views.Codex")
+    def test_diff_menu_item_is_disabled_without_changes(
+        self, mock_codex: MagicMock, mock_diff: MagicMock
+    ) -> None:
+        mock_diff.return_value = DiffView(files=[])
+        _patch_thread(self, mock_codex, _thread([_turn([_user_message("hi")])]))
+
+        response = _get_session(self.client)
+
+        self.assertContains(response, "data-diff-open disabled")
+        self.assertNotContains(response, 'class="diff-fab"')
+        self.assertNotContains(response, '<dialog class="diff-modal"', html=False)
 
     @patch("hitch.main.views.Codex")
     def test_archived_session_menu_offers_unarchive(self, mock_codex: MagicMock) -> None:
@@ -991,13 +1045,15 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, ">Connected</span>")
         self.assertNotContains(response, ">Codex is working")
 
+    @patch("hitch.main.views.build_worktree_diff")
     @patch("hitch.main.views.Codex")
     def test_active_worker_renders_status_pill_working(
-        self, mock_codex: MagicMock
+        self, mock_codex: MagicMock, mock_diff: MagicMock
     ) -> None:
         # With an active worker the pill renders in its "working" state
         # so the user sees the pulsing-green indicator immediately, even
         # before the first heartbeat lands.
+        mock_diff.return_value = _diff_view()
         _patch_thread(self, mock_codex, _thread([]))
         _make_codex_instance(
             thread_id="thread-1",
@@ -1011,6 +1067,8 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "data-live-status")
         self.assertContains(response, 'data-state="working"')
         self.assertContains(response, ">Codex is working")
+        self.assertContains(response, '<dialog class="diff-modal"', html=False)
+        self.assertNotContains(response, 'class="diff-fab"')
 
     @patch("hitch.main.views.Codex")
     def test_active_worker_renders_live_section_and_stream_url(
