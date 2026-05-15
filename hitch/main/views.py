@@ -97,6 +97,13 @@ _MINUTES_PER_DAY = 24 * _MINUTES_PER_HOUR
 # unbounded blob through.
 _NAME_MAX_LEN = 200
 
+# Upper bound for ``CodexInstance.pk`` validation. The project sets
+# ``DEFAULT_AUTO_FIELD = BigAutoField``, which is a signed 64-bit
+# integer column. A POST'd value larger than this otherwise reaches
+# the ORM and surfaces as a backend-specific OverflowError/DataError
+# from ``objects.get`` — a 500 for what should be a clean 400.
+_MAX_BIGAUTOFIELD = 2**63 - 1
+
 # Friendly labels for non-message thread item types. Anything not in this map
 # falls back to the raw type tag so we never silently drop an item from the UI.
 _NON_MESSAGE_LABELS = {
@@ -229,6 +236,11 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             ),
             "is_archived": is_archived,
             "send_message_url": reverse("send_message", kwargs={"session_id": session_id}),
+            "stop_url": reverse("stop_session", kwargs={"session_id": session_id}),
+            # Pin the stream to the specific worker shown on this page
+            # so a newer turn starting between render and EventSource
+            # connect can't divert the live view away from the worker
+            # the Stop button is wired to.
             "stream_url": _stream_url_for(session_id, active_instance),
             # The JS swaps the trailing ``0`` for the real ApprovalRequest
             # pk on each POST. Templating the URL server-side (rather than
@@ -238,6 +250,11 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
                 "resolve_approval", kwargs={"approval_id": 0}
             ),
             "active_worker": active_instance is not None,
+            # Carried into the Stop button so the click targets the
+            # specific worker the page is streaming, not "whichever
+            # worker is latest at click time" — overlapping turns can
+            # stack two active workers on the same thread.
+            "active_instance": active_instance,
             # The in-progress turn is trimmed from ``entries`` above, so the
             # user wouldn't see their own message at all without a pending
             # bubble while the stream catches up.
@@ -869,6 +886,35 @@ def resolve_approval(request: HttpRequest, approval_id: int) -> HttpResponse:
     if not updated:
         return HttpResponse("approval already resolved", status=409)
     return HttpResponse(decision, content_type="text/plain")
+
+
+@require_http_methods(["POST"])
+def stop_session(request: HttpRequest, session_id: str) -> HttpResponse:
+    """Interrupt the in-progress turn for ``session_id``.
+
+    The Stop button posts the active worker's id (as ``instance``) so a
+    stale tab can't accidentally abort a newer overlapping worker the
+    user can't see. When the form value is missing (older cached page,
+    direct POST) we fall back to "latest active worker for this thread".
+
+    No-ops cleanly when no worker is active so a double-click after the
+    turn already finished still lands on the session page rather than 404.
+    """
+    raw = request.POST.get("instance", "").strip()
+    if raw:
+        try:
+            instance_id = int(raw)
+        except ValueError:
+            return HttpResponseBadRequest("invalid instance id")
+        # Cross-check against the column type up front so a tampered
+        # value past the BigAutoField range can't leak a backend
+        # OverflowError/DataError out as a 500 from ``objects.get``.
+        if instance_id < 1 or instance_id > _MAX_BIGAUTOFIELD:
+            return HttpResponseBadRequest("instance id out of range")
+        codex_pool.interrupt_instance(instance_id, expected_thread_id=session_id)
+    else:
+        codex_pool.interrupt_active(session_id)
+    return redirect("session", session_id=session_id)
 
 
 @require_http_methods(["POST"])

@@ -1028,6 +1028,7 @@ class SessionViewActiveWorkerTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "data-live-root")
+        instance = CodexInstance.objects.get(thread_id="thread-1")
         self.assertContains(
             response, reverse("session_stream", kwargs={"session_id": "thread-1"})
         )
@@ -1036,6 +1037,29 @@ class SessionViewActiveWorkerTests(TestCase):
         # worker's user_message event reaches the rollout.
         self.assertContains(response, "please refactor")
         self.assertContains(response, "data-pending-user>")
+        # Stop button is wired to the interrupt endpoint via formaction so
+        # the user can abort an in-progress turn without leaving the page.
+        # The button's name/value carries the *specific* worker the page
+        # is showing — clicking Stop on a stale tab must not accidentally
+        # abort a newer overlapping worker the user can't see.
+        stop_url = reverse("stop_session", kwargs={"session_id": "thread-1"})
+        self.assertContains(response, f'formaction="{stop_url}"')
+        self.assertContains(response, f'name="instance" value="{instance.id}"')
+
+    @patch("hitch.main.views.Codex")
+    def test_inactive_thread_omits_stop_button(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # Stop is only meaningful while a turn is in progress; otherwise it
+        # would just be dead chrome cluttering the composer.
+        _patch_thread(self, mock_codex, _thread([]))
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(
+            response, reverse("stop_session", kwargs={"session_id": "thread-1"})
+        )
 
     @patch("hitch.main.views.Codex")
     def test_indicator_stream_url_lives_on_composer_form(

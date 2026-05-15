@@ -719,6 +719,106 @@ class SetSessionArchivedViewTests(TestCase):
         mock_codex.assert_not_called()
 
 
+class StopSessionViewTests(TestCase):
+    @patch("hitch.main.views.codex_pool.interrupt_instance")
+    @patch("hitch.main.views.codex_pool.interrupt_active")
+    def test_targets_instance_from_form_value(
+        self,
+        mock_interrupt_active: MagicMock,
+        mock_interrupt_instance: MagicMock,
+    ) -> None:
+        # The Stop button posts the active worker's pk so a stale tab
+        # cannot accidentally abort a newer overlapping worker. The
+        # view forwards the id (and the URL's session id, as a
+        # cross-thread guard) to ``interrupt_instance``.
+        response = self.client.post(
+            reverse("stop_session", kwargs={"session_id": "abc"}),
+            data={"instance": "42"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.headers["Location"],
+            reverse("session", kwargs={"session_id": "abc"}),
+        )
+        mock_interrupt_instance.assert_called_once_with(42, expected_thread_id="abc")
+        mock_interrupt_active.assert_not_called()
+
+    @patch("hitch.main.views.codex_pool.interrupt_instance")
+    @patch("hitch.main.views.codex_pool.interrupt_active")
+    def test_falls_back_to_latest_active_without_instance(
+        self,
+        mock_interrupt_active: MagicMock,
+        mock_interrupt_instance: MagicMock,
+    ) -> None:
+        # Older cached page (or a direct curl POST) won't carry the
+        # instance field; fall back to "latest active worker for this
+        # thread" so the stop click still has a chance to do something.
+        response = self.client.post(
+            reverse("stop_session", kwargs={"session_id": "abc"})
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_interrupt_active.assert_called_once_with("abc")
+        mock_interrupt_instance.assert_not_called()
+
+    @patch("hitch.main.views.codex_pool.interrupt_instance")
+    def test_rejects_non_integer_instance(
+        self, mock_interrupt_instance: MagicMock
+    ) -> None:
+        response = self.client.post(
+            reverse("stop_session", kwargs={"session_id": "abc"}),
+            data={"instance": "not-a-number"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        mock_interrupt_instance.assert_not_called()
+
+    @patch("hitch.main.views.codex_pool.interrupt_instance")
+    def test_rejects_out_of_range_instance(
+        self, mock_interrupt_instance: MagicMock
+    ) -> None:
+        # Tampered/oversized values must be rejected at the view
+        # boundary so they never reach ``objects.get`` (which would
+        # raise backend-specific OverflowError/DataError and surface
+        # as a 500 instead of a clean 400).
+        cases = [
+            ("0", "zero"),
+            ("-1", "negative"),
+            (str(2**63), "above BigAutoField max"),
+        ]
+        for value, label in cases:
+            with self.subTest(label=label):
+                response = self.client.post(
+                    reverse("stop_session", kwargs={"session_id": "abc"}),
+                    data={"instance": value},
+                )
+                self.assertEqual(response.status_code, 400)
+        mock_interrupt_instance.assert_not_called()
+
+    @patch("hitch.main.views.codex_pool.interrupt_active")
+    def test_no_active_worker_still_redirects(
+        self, mock_interrupt: MagicMock
+    ) -> None:
+        # A double-click after the agent already finished must not 500.
+        mock_interrupt.return_value = None
+
+        response = self.client.post(
+            reverse("stop_session", kwargs={"session_id": "abc"})
+        )
+
+        self.assertEqual(response.status_code, 302)
+
+    @patch("hitch.main.views.codex_pool.interrupt_active")
+    def test_rejects_get(self, mock_interrupt: MagicMock) -> None:
+        response = self.client.get(
+            reverse("stop_session", kwargs={"session_id": "abc"})
+        )
+
+        self.assertEqual(response.status_code, 405)
+        mock_interrupt.assert_not_called()
+
+
 class SessionStreamViewTests(TestCase):
     """The SSE endpoint that mirrors a worker's events file to the browser."""
 

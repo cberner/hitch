@@ -53,6 +53,10 @@ class CodexInstance(models.Model):
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_STARTING)
     started_at = models.DateTimeField(auto_now_add=True)
     ended_at = models.DateTimeField(null=True, blank=True)
+    # Set the first time a Stop click delivers SIGTERM to the worker so a
+    # second click on the still-active row knows to escalate from "polite
+    # SDK interrupt" to SIGKILL. Null means no Stop has been issued yet.
+    interrupt_requested_at = models.DateTimeField(null=True, blank=True)
     error = models.TextField(blank=True, default="")
 
     class Meta:

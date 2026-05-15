@@ -6,15 +6,18 @@ the CodexInstance row in sync with the OS process.
 import dataclasses
 import json
 import os
+import signal
 import tempfile
+from collections.abc import Iterator
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, override
 from unittest.mock import MagicMock, patch
 
 from django.core.management import call_command
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from openai_codex import ApprovalMode
 from openai_codex.generated.v2_all import (
     ApprovalsReviewer,
@@ -32,6 +35,7 @@ from openai_codex.generated.v2_all import (
 from pydantic import BaseModel
 
 from hitch.main import codex_pool, streaming
+from hitch.main.management.commands import codex_worker as codex_worker_module
 from hitch.main.management.commands.codex_worker import (
     _make_approval_handler,
     _serialize_event,
@@ -448,6 +452,488 @@ class ReconcileAndLookupTests(TestCase):
         # Workers on other threads must not bleed into this thread's pk.
         self._make(thread_id="other", status=CodexInstance.STATUS_RUNNING)
         self.assertEqual(codex_pool.latest_id_for_thread("t-id"), second.pk)
+
+
+class InterruptActiveTests(TestCase):
+    def _make(
+        self,
+        *,
+        pid: int = 1,
+        thread_id: str = "t",
+        status: str = CodexInstance.STATUS_RUNNING,
+    ) -> CodexInstance:
+        return CodexInstance.objects.create(
+            pid=pid,
+            thread_id=thread_id,
+            cwd="/r",
+            events_path="/dev/null",
+            status=status,
+        )
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_first_stop_sends_sigterm_and_records_timestamp(
+        self,
+        mock_kill: MagicMock,
+        mock_killpg: MagicMock,
+        mock_identity: MagicMock,
+    ) -> None:
+        # Polite interrupt: SIGTERM is sent to the worker pid alone (not
+        # the group) so the worker's handler can call the SDK's
+        # ``turn.interrupt()``. The row's status is left for the worker
+        # to update — flipping it here would be overwritten when the
+        # worker's stream loop finishes and saves its own terminal state.
+        instance = self._make(pid=4321, status=CodexInstance.STATUS_RUNNING)
+
+        result = codex_pool.interrupt_active("t")
+
+        self.assertIsNotNone(result)
+        mock_kill.assert_called_once_with(4321, signal.SIGTERM)
+        mock_killpg.assert_not_called()
+        mock_identity.assert_called_once_with(4321, instance.pk)
+        instance.refresh_from_db()
+        # Status untouched — worker writes it when the SDK interrupt
+        # surfaces as a turn/completed event with status=interrupted.
+        self.assertEqual(instance.status, CodexInstance.STATUS_RUNNING)
+        self.assertEqual(instance.error, "")
+        # Timestamp recorded so the next click can detect "polite
+        # already issued" and escalate to SIGKILL.
+        self.assertIsNotNone(instance.interrupt_requested_at)
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_second_stop_escalates_to_sigkill(
+        self,
+        mock_kill: MagicMock,
+        mock_killpg: MagicMock,
+        mock_identity: MagicMock,
+    ) -> None:
+        # Worker didn't honour the polite stop; user clicks again.
+        # Escalate to SIGKILL on the whole process group (so the codex
+        # app-server child dies with the worker) and write status
+        # ourselves since the worker no longer has the chance to.
+        instance = self._make(pid=4321, status=CodexInstance.STATUS_RUNNING)
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            interrupt_requested_at=timezone.now()
+        )
+
+        result = codex_pool.interrupt_active("t")
+
+        self.assertIsNotNone(result)
+        mock_kill.assert_not_called()
+        mock_killpg.assert_called_once_with(4321, signal.SIGKILL)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertEqual(instance.error, "forcibly stopped by user")
+        self.assertIsNotNone(instance.ended_at)
+
+    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.codex_pool.os.killpg")
+    def test_no_active_worker_is_a_noop(
+        self, mock_killpg: MagicMock, mock_kill: MagicMock
+    ) -> None:
+        # An already-completed turn must not 500 the stop endpoint; the user
+        # may have raced the agent finishing.
+        self._make(pid=99, status=CodexInstance.STATUS_COMPLETED)
+
+        self.assertIsNone(codex_pool.interrupt_active("t"))
+        mock_kill.assert_not_called()
+        mock_killpg.assert_not_called()
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=False)
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_dead_or_recycled_pid_skips_signal_but_marks_row_failed(
+        self,
+        mock_kill: MagicMock,
+        mock_killpg: MagicMock,
+        mock_identity: MagicMock,
+    ) -> None:
+        # Identity check rejects the pid: no safe target for SIGTERM or
+        # SIGKILL, but the leftover RUNNING row is still flipped to
+        # failed so the UI exits streaming mode.
+        instance = self._make(pid=12345, status=CodexInstance.STATUS_RUNNING)
+
+        result = codex_pool.interrupt_active("t")
+
+        self.assertIsNotNone(result)
+        mock_kill.assert_not_called()
+        mock_killpg.assert_not_called()
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertEqual(instance.error, "interrupted by user")
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_worker_exit_between_identity_and_sigterm_marks_failed(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        # TOCTOU: worker exited between the cmdline check and the signal.
+        # ESRCH is tolerated and the leftover row is flipped to failed.
+        mock_kill.side_effect = ProcessLookupError
+        instance = self._make(pid=4321, status=CodexInstance.STATUS_RUNNING)
+
+        result = codex_pool.interrupt_active("t")
+
+        self.assertIsNotNone(result)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_eperm_from_sigterm_leaves_row_active(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        # Real signal failure: the worker is still running. Don't claim
+        # the turn was stopped — leave the row active so the user can
+        # retry rather than seeing a phantom "failed" state.
+        mock_kill.side_effect = PermissionError
+        instance = self._make(pid=4321, status=CodexInstance.STATUS_RUNNING)
+
+        result = codex_pool.interrupt_active("t")
+
+        self.assertIsNone(result)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_RUNNING)
+        self.assertEqual(instance.error, "")
+        self.assertIsNone(instance.interrupt_requested_at)
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.killpg")
+    def test_worker_exit_between_identity_and_sigkill_marks_failed(
+        self, mock_killpg: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        # Same TOCTOU as the SIGTERM case, but on the escalation path:
+        # ESRCH from SIGKILL is tolerated and we still flip the row.
+        mock_killpg.side_effect = ProcessLookupError
+        instance = self._make(pid=4321, status=CodexInstance.STATUS_RUNNING)
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            interrupt_requested_at=timezone.now()
+        )
+
+        result = codex_pool.interrupt_active("t")
+
+        self.assertIsNotNone(result)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertEqual(instance.error, "forcibly stopped by user")
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.killpg")
+    def test_completed_status_under_race_is_preserved_on_sigkill(
+        self, mock_killpg: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        # Escalation path: worker raced to completion between the row
+        # read and the killpg. ``_mark_failed`` uses a conditional
+        # UPDATE so the genuine completed status is preserved and the
+        # helper returns None rather than rewriting it.
+        instance = self._make(pid=4321, status=CodexInstance.STATUS_RUNNING)
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            interrupt_requested_at=timezone.now()
+        )
+
+        def flip_to_completed(*_args: object, **_kwargs: object) -> None:
+            CodexInstance.objects.filter(pk=instance.pk).update(
+                status=CodexInstance.STATUS_COMPLETED
+            )
+
+        mock_killpg.side_effect = flip_to_completed
+
+        result = codex_pool.interrupt_active("t")
+
+        self.assertIsNone(result)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.killpg")
+    def test_eperm_from_sigkill_leaves_row_active(
+        self, mock_killpg: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        # Same as above, but on the escalation path (second click): a
+        # SIGKILL that we can't deliver must not flip the row to
+        # failed, because the worker is still running.
+        mock_killpg.side_effect = PermissionError
+        instance = self._make(pid=4321, status=CodexInstance.STATUS_RUNNING)
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            interrupt_requested_at=timezone.now()
+        )
+
+        result = codex_pool.interrupt_active("t")
+
+        self.assertIsNone(result)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_RUNNING)
+        self.assertEqual(instance.error, "")
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_completed_status_under_race_is_preserved_on_first_stop(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        # The worker can legitimately finish in the window between the
+        # row read and the signal. The first-click path no longer
+        # writes a terminal status, but it does record a timestamp;
+        # the timestamp write must not resurrect an already-terminal
+        # row by re-enabling the Stop button.
+        instance = self._make(pid=4321, status=CodexInstance.STATUS_RUNNING)
+
+        def flip_to_completed(*_args: object, **_kwargs: object) -> None:
+            CodexInstance.objects.filter(pk=instance.pk).update(
+                status=CodexInstance.STATUS_COMPLETED
+            )
+
+        mock_kill.side_effect = flip_to_completed
+
+        result = codex_pool.interrupt_active("t")
+
+        # Helper returns the refreshed instance (with whatever state
+        # the DB now reflects); the test cares that ``status`` is
+        # preserved.
+        self.assertIsNotNone(result)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
+        self.assertEqual(instance.error, "")
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker")
+    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.codex_pool.os.killpg")
+    def test_unset_pid_is_noop(
+        self,
+        mock_killpg: MagicMock,
+        mock_kill: MagicMock,
+        mock_identity: MagicMock,
+    ) -> None:
+        # The codex_worker subprocess may already be alive and will set
+        # status=RUNNING any moment now. Flipping the row to failed
+        # here would be silently undone, so the helper refuses.
+        instance = self._make(pid=0, status=CodexInstance.STATUS_STARTING)
+
+        result = codex_pool.interrupt_active("t")
+
+        self.assertIsNone(result)
+        mock_kill.assert_not_called()
+        mock_killpg.assert_not_called()
+        mock_identity.assert_not_called()
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_STARTING)
+        self.assertEqual(instance.error, "")
+
+
+class InterruptInstanceTests(TestCase):
+    """Targeted-interrupt entry point used by the Stop button.
+
+    ``interrupt_instance`` differs from ``interrupt_active`` by stopping
+    the *specific* worker the page is showing, not "whichever worker is
+    latest at click time" — protecting against a stale tab aborting an
+    overlapping newer turn.
+    """
+
+    def _make(
+        self,
+        *,
+        pid: int = 1,
+        thread_id: str = "t",
+        status: str = CodexInstance.STATUS_RUNNING,
+    ) -> CodexInstance:
+        return CodexInstance.objects.create(
+            pid=pid,
+            thread_id=thread_id,
+            cwd="/r",
+            events_path="/dev/null",
+            status=status,
+        )
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_stops_specific_instance(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        target = self._make(pid=4321, status=CodexInstance.STATUS_RUNNING)
+        # A second, newer active worker that would be picked by
+        # ``latest_active_for_thread`` is left untouched: the targeted
+        # entry point must hit the exact instance the page asked for.
+        bystander = self._make(pid=9999, status=CodexInstance.STATUS_RUNNING)
+
+        result = codex_pool.interrupt_instance(target.pk, expected_thread_id="t")
+
+        self.assertIsNotNone(result)
+        # First-click path: polite SIGTERM to the worker pid only.
+        mock_kill.assert_called_once_with(4321, signal.SIGTERM)
+        target.refresh_from_db()
+        bystander.refresh_from_db()
+        # Status is left for the worker to update; the timestamp marks
+        # that polite interrupt was issued so a re-click can escalate.
+        self.assertIsNotNone(target.interrupt_requested_at)
+        self.assertIsNone(bystander.interrupt_requested_at)
+        self.assertEqual(bystander.status, CodexInstance.STATUS_RUNNING)
+
+    def test_unknown_instance_returns_none(self) -> None:
+        # A stale form value for a row that's been deleted (or never
+        # existed) must not 500 the stop endpoint.
+        self.assertIsNone(
+            codex_pool.interrupt_instance(99999, expected_thread_id="t")
+        )
+
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_thread_id_mismatch_refuses(
+        self, mock_kill: MagicMock, mock_killpg: MagicMock
+    ) -> None:
+        # A tampered/stale form post that targets a worker belonging to
+        # a different thread must not stop it.
+        instance = self._make(thread_id="other", status=CodexInstance.STATUS_RUNNING)
+
+        result = codex_pool.interrupt_instance(instance.pk, expected_thread_id="t")
+
+        self.assertIsNone(result)
+        mock_kill.assert_not_called()
+        mock_killpg.assert_not_called()
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_RUNNING)
+
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_already_terminal_returns_none(
+        self, mock_kill: MagicMock, mock_killpg: MagicMock
+    ) -> None:
+        # The page may be stale; clicking Stop on a worker that already
+        # finished must be a clean no-op, not an overwrite.
+        instance = self._make(
+            pid=4321, thread_id="t", status=CodexInstance.STATUS_COMPLETED
+        )
+
+        result = codex_pool.interrupt_instance(instance.pk, expected_thread_id="t")
+
+        self.assertIsNone(result)
+        mock_kill.assert_not_called()
+        mock_killpg.assert_not_called()
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
+
+
+class PidIsOurWorkerTests(TestCase):
+    """The cmdline-based identity guard that protects against PID reuse."""
+
+    @patch("hitch.main.codex_pool.Path")
+    @patch("hitch.main.codex_pool.os.getsid")
+    def test_matches_when_cmdline_carries_instance_id(
+        self, mock_getsid: MagicMock, mock_path: MagicMock
+    ) -> None:
+        mock_getsid.return_value = 4321
+        cmdline = b"/usr/bin/python\x00manage.py\x00codex_worker\x00--instance-id\x0042\x00"
+        mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.return_value = cmdline
+
+        self.assertTrue(codex_pool._pid_is_our_worker(4321, 42))
+
+    @patch("hitch.main.codex_pool.Path")
+    @patch("hitch.main.codex_pool.os.getsid")
+    def test_rejects_when_cmdline_lacks_codex_worker(
+        self, mock_getsid: MagicMock, mock_path: MagicMock
+    ) -> None:
+        # An unrelated session leader has inherited the recycled pid:
+        # session-leader check passes, cmdline check rules it out.
+        mock_getsid.return_value = 4321
+        mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.return_value = (
+            b"/usr/bin/bash\x00-l\x00"
+        )
+
+        self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
+
+    @patch("hitch.main.codex_pool.Path")
+    @patch("hitch.main.codex_pool.os.getsid")
+    def test_rejects_when_instance_id_flag_missing(
+        self, mock_getsid: MagicMock, mock_path: MagicMock
+    ) -> None:
+        # Defensive: ``codex_worker`` is always invoked with
+        # ``--instance-id`` today, but a malformed cmdline (truncated,
+        # different worker variant) must not pass identity.
+        mock_getsid.return_value = 4321
+        mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.return_value = (
+            b"python\x00manage.py\x00codex_worker\x00"
+        )
+
+        self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
+
+    @patch("hitch.main.codex_pool.Path")
+    @patch("hitch.main.codex_pool.os.getsid")
+    def test_rejects_wrong_instance_id(
+        self, mock_getsid: MagicMock, mock_path: MagicMock
+    ) -> None:
+        # cmdline names a codex_worker but for a different instance —
+        # another worker, not ours.
+        mock_getsid.return_value = 4321
+        mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.return_value = (
+            b"python\x00manage.py\x00codex_worker\x00--instance-id\x0099\x00"
+        )
+
+        self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
+
+    @patch("hitch.main.codex_pool.os.getsid")
+    def test_rejects_when_not_session_leader(
+        self, mock_getsid: MagicMock
+    ) -> None:
+        mock_getsid.return_value = 999  # different from pid
+
+        self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
+
+    @patch("hitch.main.codex_pool.os.getsid")
+    def test_rejects_when_pid_gone(self, mock_getsid: MagicMock) -> None:
+        mock_getsid.side_effect = ProcessLookupError
+
+        self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
+
+    @patch("hitch.main.codex_pool.Path")
+    @patch("hitch.main.codex_pool.os.getsid")
+    def test_falls_back_to_getsid_when_proc_missing(
+        self, mock_getsid: MagicMock, mock_path: MagicMock
+    ) -> None:
+        # macOS dev: /proc doesn't exist. Cmdline layer is unavailable;
+        # trust the session-leader check rather than refuse to stop.
+        mock_getsid.return_value = 4321
+        mock_path.return_value.exists.return_value = False
+        mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.side_effect = (
+            FileNotFoundError
+        )
+
+        self.assertTrue(codex_pool._pid_is_our_worker(4321, 42))
+
+    @patch("hitch.main.codex_pool.Path")
+    @patch("hitch.main.codex_pool.os.getsid")
+    def test_rejects_when_pid_vanishes_between_getsid_and_cmdline(
+        self, mock_getsid: MagicMock, mock_path: MagicMock
+    ) -> None:
+        # Linux TOCTOU: getsid says the pid is a session leader, but
+        # ``/proc/<pid>/cmdline`` is gone moments later because the
+        # worker exited. The pid is now at risk of being recycled to an
+        # unrelated process; falling back to the session-leader check
+        # could let us signal a stranger's group. ``/proc`` itself
+        # still exists, so we must refuse rather than trust the cheap
+        # check that's no longer authoritative.
+        mock_getsid.return_value = 4321
+        mock_path.return_value.exists.return_value = True
+        mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.side_effect = (
+            FileNotFoundError
+        )
+
+        self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
+
+    @patch("hitch.main.codex_pool.Path")
+    @patch("hitch.main.codex_pool.os.getsid")
+    def test_rejects_on_other_cmdline_read_error(
+        self, mock_getsid: MagicMock, mock_path: MagicMock
+    ) -> None:
+        # Permission error or any other non-ENOENT failure: be
+        # conservative — refuse rather than signaling something we
+        # could not identify.
+        mock_getsid.return_value = 4321
+        mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.side_effect = (
+            PermissionError
+        )
+
+        self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
 
 
 class EventsDirTests(TestCase):
@@ -1029,6 +1515,179 @@ class ApprovalHandlerTests(TestCase):
         self.assertEqual(handler("custom/escalation", None), {})
         self.assertFalse(ApprovalRequest.objects.exists())
         self.assertEqual(events, [])
+
+
+class WorkerCancellationTests(TestCase):
+    """The worker's graceful-stop path: SIGTERM handler + SDK interrupt.
+
+    The stop endpoint signals the worker with SIGTERM; the worker turns
+    that into the SDK's ``turn.interrupt()`` between stream events
+    rather than dying abruptly. We test the handler (sets the flag),
+    the interrupt helper (calls SDK, swallows errors), and the
+    integration where a flag set during streaming triggers exactly one
+    SDK interrupt.
+    """
+
+    @override
+    def setUp(self) -> None:
+        # Module-level flag persists across tests; reset to a known
+        # state so previous tests don't bleed into this one.
+        codex_worker_module._cancel_requested = False
+
+    @override
+    def tearDown(self) -> None:
+        codex_worker_module._cancel_requested = False
+
+    def test_sigterm_handler_sets_flag(self) -> None:
+        self.assertFalse(codex_worker_module._cancel_requested)
+        codex_worker_module._on_sigterm(15, None)
+        self.assertTrue(codex_worker_module._cancel_requested)
+
+    def test_try_interrupt_calls_sdk_and_reports_sent(self) -> None:
+        turn = MagicMock()
+
+        sent = codex_worker_module._try_interrupt(turn)
+
+        self.assertTrue(sent)
+        turn.interrupt.assert_called_once_with()
+
+    def test_try_interrupt_swallows_sdk_errors(self) -> None:
+        # A failed SDK call (turn already done, transport hiccup) must
+        # still report "sent" so the loop doesn't retry forever — the
+        # user's escalation is SIGKILL via a second click, not a retry.
+        turn = MagicMock()
+        turn.interrupt.side_effect = RuntimeError("turn already terminated")
+
+        sent = codex_worker_module._try_interrupt(turn)
+
+        self.assertTrue(sent)
+        turn.interrupt.assert_called_once_with()
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_interrupt_fires_when_flag_set_during_stream(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # Drive the stream loop through a flag-set transition: yield
+        # one event, then arrange for the cancel flag to be observed
+        # on the next iteration, then yield the turn/completed.
+        # Verify exactly one ``turn.interrupt()`` call.
+        first_event = SimpleNamespace(
+            method="item/agentMessage/delta",
+            payload=_FakePayload(detail="chunk"),
+        )
+        completion = _completed_event("turn-1", TurnStatus.completed)
+
+        def gen() -> Iterator[Any]:
+            yield first_event
+            codex_worker_module._cancel_requested = True
+            yield completion
+
+        captured: dict[str, Any] = {}
+
+        def thread_resume_side_effect(*_args: object, **_kwargs: object) -> object:
+            turn_mock = MagicMock()
+            turn_mock.id = "turn-1"
+            turn_mock.stream.return_value = gen()
+            captured["turn"] = turn_mock
+            return SimpleNamespace(turn=lambda _input: turn_mock)
+
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.side_effect = thread_resume_side_effect
+
+        with tempfile.TemporaryDirectory() as raw:
+            instance = CodexInstance.objects.create(
+                pid=12345,
+                thread_id="thread-1",
+                cwd="/repo",
+                prompt="hi",
+                events_path=str(Path(raw) / "events.jsonl"),
+                status=CodexInstance.STATUS_STARTING,
+            )
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+
+        captured["turn"].interrupt.assert_called_once_with()
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_interrupt_called_exactly_once_when_flag_stays_set(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # If multiple SIGTERMs arrive (or the flag was never cleared),
+        # the loop must not re-send ``turn.interrupt()`` on every event.
+        # The escalation lever is SIGKILL via a fresh click, not
+        # spamming the SDK with cancellation requests.
+        events = [
+            SimpleNamespace(
+                method="item/agentMessage/delta",
+                payload=_FakePayload(detail="a"),
+            ),
+            SimpleNamespace(
+                method="item/agentMessage/delta",
+                payload=_FakePayload(detail="b"),
+            ),
+            _completed_event("turn-1", TurnStatus.completed),
+        ]
+
+        # Set the flag before the worker starts so it observes on the
+        # initial pre-loop check; then more events arrive — interrupt
+        # must not be re-called on each.
+        codex_worker_module._cancel_requested = True
+
+        captured: dict[str, Any] = {}
+
+        def thread_resume_side_effect(*_args: object, **_kwargs: object) -> object:
+            turn_mock = MagicMock()
+            turn_mock.id = "turn-1"
+            turn_mock.stream.return_value = iter(events)
+            captured["turn"] = turn_mock
+            return SimpleNamespace(turn=lambda _input: turn_mock)
+
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.side_effect = thread_resume_side_effect
+
+        with tempfile.TemporaryDirectory() as raw:
+            instance = CodexInstance.objects.create(
+                pid=12345,
+                thread_id="thread-1",
+                cwd="/repo",
+                prompt="hi",
+                events_path=str(Path(raw) / "events.jsonl"),
+                status=CodexInstance.STATUS_STARTING,
+            )
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+
+        captured["turn"].interrupt.assert_called_once_with()
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_no_interrupt_when_flag_never_set(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # Sanity check: the normal turn flow doesn't call interrupt.
+        completion = _completed_event("turn-1", TurnStatus.completed)
+
+        captured: dict[str, Any] = {}
+
+        def thread_resume_side_effect(*_args: object, **_kwargs: object) -> object:
+            turn_mock = MagicMock()
+            turn_mock.id = "turn-1"
+            turn_mock.stream.return_value = iter([completion])
+            captured["turn"] = turn_mock
+            return SimpleNamespace(turn=lambda _input: turn_mock)
+
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.side_effect = thread_resume_side_effect
+
+        with tempfile.TemporaryDirectory() as raw:
+            instance = CodexInstance.objects.create(
+                pid=12345,
+                thread_id="thread-1",
+                cwd="/repo",
+                prompt="hi",
+                events_path=str(Path(raw) / "events.jsonl"),
+                status=CodexInstance.STATUS_STARTING,
+            )
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+
+        captured["turn"].interrupt.assert_not_called()
 
 
 # A pid we know is alive (this Python process) lets the streaming tests

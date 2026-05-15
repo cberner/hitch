@@ -32,6 +32,7 @@ import contextlib
 import dataclasses
 import json
 import shutil
+import signal
 import threading
 import time
 from collections.abc import Callable
@@ -98,6 +99,27 @@ _APPROVAL_POLL_INTERVAL = 0.2
 # handler answers every escalation unconditionally.
 _APPROVE_ALL = "approve_all"
 
+# Set by the SIGTERM handler so the stream loop knows to call
+# ``turn.interrupt()`` between events. Plain module-level bool is fine —
+# CPython makes single-attribute reads/writes atomic, and the signal
+# handler is intentionally minimal (it must avoid blocking JSON-RPC
+# calls that would race the main loop's read on the response pipe).
+_cancel_requested = False
+
+
+def _on_sigterm(_signum: int, _frame: Any) -> None:
+    """Mark the active turn for graceful cancellation.
+
+    Defers the actual SDK ``turn.interrupt()`` call to the main loop so
+    we don't issue a blocking JSON-RPC request from inside a signal
+    handler — that would contend with the loop's read on the same
+    response pipe and could deadlock. The Django stop endpoint sends
+    SIGTERM here; a follow-up click escalates to SIGKILL, which has
+    no Python-level handler and tears the worker down immediately.
+    """
+    global _cancel_requested
+    _cancel_requested = True
+
 # Map the cookie/CLI policy strings onto factories for the discriminated
 # SandboxPolicy variants the SDK expects. Lookup misses (unknown / stale
 # value) are treated as "no override" by ``_build_sandbox_policy``.
@@ -132,6 +154,11 @@ class Command(BaseCommand):
         sandbox_policy: str | None = options.get("sandbox_policy")
         approval_mode: str | None = options.get("approval_mode")
         instance = CodexInstance.objects.get(pk=instance_id)
+
+        # Install the cancel handler before flipping to RUNNING so a Stop
+        # click that lands the instant we transition can still be observed
+        # by the stream loop (it'll see the flag on the first iteration).
+        signal.signal(signal.SIGTERM, _on_sigterm)
 
         instance.status = CodexInstance.STATUS_RUNNING
         instance.save(update_fields=["status"])
@@ -203,6 +230,7 @@ def _run_turn(
             events_file.write(line)
 
     final_turn: Turn | None = None
+    interrupt_sent = False
     with Codex(config=config) as codex:
         # The Codex top-level class instantiates its own AppServerClient
         # without an ``approval_handler`` argument, so the only way to wire
@@ -227,12 +255,37 @@ def _run_turn(
             sandbox_policy=policy,
             approval_mode=approval_mode,
         )
+        # A Stop click that landed before the turn handle existed sets the
+        # flag without us being able to call interrupt yet; act on it now
+        # that the handle is ready.
+        if _cancel_requested and not interrupt_sent:
+            interrupt_sent = _try_interrupt(turn)
         for event in turn.stream():
             _write_event(event.method, event.payload)
             payload = event.payload
             if isinstance(payload, TurnCompletedNotification) and payload.turn.id == turn.id:
                 final_turn = payload.turn
+            if _cancel_requested and not interrupt_sent:
+                # SDK-level interrupt is the graceful cancellation path:
+                # the app-server stops the model, emits the remaining
+                # events (including a turn/completed with status=interrupted),
+                # and the worker's normal status-update code at the end
+                # records that as a failed turn. SIGKILL is the next
+                # escalation if the user clicks Stop again.
+                interrupt_sent = _try_interrupt(turn)
     return final_turn
+
+
+def _try_interrupt(turn: TurnHandle) -> bool:
+    """Send a single SDK-level interrupt; report whether it was sent.
+
+    Returning True even on SDK errors prevents a re-attempt loop when
+    the turn has already ended (or the app-server rejected the call) —
+    a hard-kill via SIGKILL is the user's next lever, not retries.
+    """
+    with contextlib.suppress(Exception):
+        turn.interrupt()
+    return True
 
 
 def _start_turn(
