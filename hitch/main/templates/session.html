@@ -33,6 +33,8 @@
             --status-warn-fg: #7a5a12;
             --status-error-bg: #f3d8d2;
             --status-error-fg: #7a2d22;
+            --danger: #c54a3a;
+            --danger-soft: rgba(197, 74, 58, 0.15);
             --shadow: 0 1px 2px rgba(28, 37, 46, 0.05);
             --shadow-lg: 0 8px 24px rgba(28, 37, 46, 0.10);
             --radius: 12px;
@@ -66,6 +68,8 @@
                 --status-warn-fg: #e8c57a;
                 --status-error-bg: #3a1f1c;
                 --status-error-fg: #e89a8a;
+                --danger: #e07365;
+                --danger-soft: rgba(224, 115, 101, 0.20);
                 --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
                 --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
             }
@@ -523,6 +527,47 @@
             gap: 0.5rem;
             align-items: flex-end;
         }
+        .live-status {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.45rem;
+            margin-top: 0.5rem;
+            padding: 0.35rem 0.65rem;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            font-size: 0.78rem;
+            color: var(--text-muted);
+            font-weight: 500;
+            transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
+        }
+        .live-status::before {
+            content: "";
+            width: 0.55rem;
+            height: 0.55rem;
+            border-radius: 50%;
+            background: var(--accent);
+            box-shadow: 0 0 0 0 var(--accent-soft);
+        }
+        .live-status[data-state="idle"] { display: none; }
+        .live-status[data-state="working"]::before {
+            animation: live-pulse 1.6s ease-out infinite;
+        }
+        .live-status[data-state="disconnected"] {
+            background: var(--status-error-bg);
+            border-color: var(--status-error-bg);
+            color: var(--status-error-fg);
+        }
+        .live-status[data-state="disconnected"]::before {
+            background: var(--danger);
+            box-shadow: none;
+            animation: none;
+        }
+        @keyframes live-pulse {
+            0% { box-shadow: 0 0 0 0 var(--accent-soft); }
+            70% { box-shadow: 0 0 0 8px transparent; }
+            100% { box-shadow: 0 0 0 0 transparent; }
+        }
         .composer textarea {
             flex: 1;
             font: inherit;
@@ -573,33 +618,6 @@
         }
         .empty-thread p { margin: 0; }
 
-        .live-status {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.45rem;
-            margin: 0.5rem 0 0;
-            padding: 0.35rem 0.65rem;
-            background: var(--surface-2);
-            border: 1px solid var(--border);
-            border-radius: 999px;
-            font-size: 0.78rem;
-            color: var(--text-muted);
-            font-weight: 500;
-        }
-        .live-status::before {
-            content: "";
-            width: 0.55rem;
-            height: 0.55rem;
-            border-radius: 50%;
-            background: var(--accent);
-            box-shadow: 0 0 0 0 var(--accent-soft);
-            animation: live-pulse 1.6s ease-out infinite;
-        }
-        @keyframes live-pulse {
-            0% { box-shadow: 0 0 0 0 var(--accent-soft); }
-            70% { box-shadow: 0 0 0 8px transparent; }
-            100% { box-shadow: 0 0 0 0 transparent; }
-        }
         .message.pending {
             opacity: 0.85;
         }
@@ -688,9 +706,7 @@
             </div>
             {% endif %}
             {% if active_worker %}
-            <div class="entry" data-live-root data-stream-url="{{ stream_url }}">
-                <div class="live-status" data-live-status>Codex is working…</div>
-            </div>
+            <div class="entry" data-live-root></div>
             {% endif %}
         </section>
         {% else %}
@@ -698,9 +714,10 @@
             <p>No messages in this session yet.</p>
         </div>
         {% endif %}
+        <span class="live-status" data-live-status data-state="{% if active_worker %}working{% else %}idle{% endif %}" role="status" aria-live="polite">{% if active_worker %}Codex is working…{% else %}Connected{% endif %}</span>
     </main>
 
-    <form class="composer" method="post" action="{{ send_message_url }}" data-composer>
+    <form class="composer" method="post" action="{{ send_message_url }}" data-composer data-stream-url="{{ stream_url }}">
         {% csrf_token %}
         <div class="composer-inner">
             <textarea name="prompt" rows="1" required autocomplete="off" placeholder="Send a message…" aria-label="Send a message" data-composer-input></textarea>
@@ -788,22 +805,60 @@
         })();
     </script>
 
-    {% if active_worker %}
     <script>
-        // Subscribe to the worker's SSE feed and progressively render items.
+        // Subscribe to the session SSE feed.
         //
-        // We intentionally only render the parts that change visibly during a
-        // turn (agent message deltas + per-item status updates for tool
-        // calls); when the stream ends we reload the page so the canonical
-        // rollout-based render replaces our scratch UI in one step. That
-        // keeps the streaming layer thin and avoids re-implementing the
-        // collapsing/markdown rules the server already applies.
+        // The live-status pill (always rendered above the composer) shows
+        // the live stream's state: pulsing green "Codex is working…" while
+        // a turn is in progress, hidden when connected and idle, red
+        // "Connection lost" if heartbeats stop arriving. The server emits
+        // a named ``heartbeat`` event every few seconds carrying
+        // ``{working: bool}`` so the pill can stay accurate without
+        // inferring state from item events alone, and a JS-side timer
+        // flips the pill to "Connection lost" if no frame lands in time.
+        //
+        // When a live worker is rendering we also progressively project
+        // its item events into the DOM (agent deltas, tool-call status);
+        // when the stream ends we reload so the canonical rollout-based
+        // render replaces the scratch UI in one step.
         (function () {
+            const composer = document.querySelector("[data-composer]");
+            const indicator = document.querySelector("[data-live-status]");
+            const streamUrl = composer && composer.dataset.streamUrl;
+            if (!streamUrl || !indicator) return;
+
+            const STATE_TEXT = {
+                disconnected: "Connection lost",
+                idle: "Connected",
+                working: "Codex is working…",
+            };
+            // Liveness budget: heartbeats arrive ~3s apart, so two missed
+            // intervals plus a margin give us ~8s before flipping red.
+            const STALE_MS = 8000;
+            // Initial state matches what the server rendered so the pill
+            // doesn't flash through "disconnected" before the first
+            // heartbeat arrives. The setState gate below treats this
+            // initial sync as a no-op.
+            let connState = indicator.dataset.state || "disconnected";
+            let lastFrame = Date.now();
+            const setState = (state) => {
+                if (state === connState) return;
+                connState = state;
+                indicator.dataset.state = state;
+                indicator.textContent = STATE_TEXT[state];
+            };
+            const bump = () => { lastFrame = Date.now(); };
+            // Periodically re-check liveness so a silent connection (no
+            // heartbeats arriving despite the EventSource still believing
+            // it's open) flips the pill to "Connection lost" without the
+            // user having to refresh.
+            setInterval(() => {
+                if (connState !== "disconnected" && Date.now() - lastFrame > STALE_MS) {
+                    setState("disconnected");
+                }
+            }, 1000);
+
             const liveRoot = document.querySelector("[data-live-root]");
-            const liveStatus = document.querySelector("[data-live-status]");
-            if (!liveRoot) return;
-            const streamUrl = liveRoot.dataset.streamUrl;
-            if (!streamUrl) return;
             const empty = document.querySelector(".empty-thread");
 
             // Per-item DOM trackers. Items are keyed by the server-assigned
@@ -837,6 +892,7 @@
             }
 
             function insertBeforeLive(node) {
+                if (!liveRoot || !liveRoot.parentNode) return;
                 liveRoot.parentNode.insertBefore(node, liveRoot);
             }
 
@@ -998,7 +1054,14 @@
             }
 
             const source = new EventSource(streamUrl);
+            source.addEventListener("heartbeat", (event) => {
+                bump();
+                let payload;
+                try { payload = JSON.parse(event.data); } catch { payload = {}; }
+                setState(payload && payload.working ? "working" : "idle");
+            });
             source.addEventListener("message", (event) => {
+                bump();
                 let parsed;
                 try { parsed = JSON.parse(event.data); } catch { return; }
                 const method = parsed.method;
@@ -1012,14 +1075,14 @@
             source.addEventListener("end", () => {
                 source.close();
                 // Reload so the rollout-based render replaces the live DOM
-                // (markdown rendering, intermediate collapsing, etc.).
+                // (markdown rendering, intermediate collapsing, etc.) and the
+                // page picks up any newly-spawned worker.
                 window.location.reload();
             });
-            source.addEventListener("error", () => {
-                if (liveStatus) liveStatus.textContent = "Reconnecting…";
-            });
+            // EventSource auto-retries on transport errors; the staleness
+            // check above flips the indicator red if the retry doesn't
+            // produce fresh frames in time.
         })();
     </script>
-    {% endif %}
 </body>
 </html>

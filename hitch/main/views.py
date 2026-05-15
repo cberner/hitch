@@ -3,6 +3,7 @@ import shutil
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from django.http import (
     HttpRequest,
@@ -211,7 +212,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             "name_max_len": _NAME_MAX_LEN,
             "set_name_url": reverse("set_session_name", kwargs={"session_id": session_id}),
             "send_message_url": reverse("send_message", kwargs={"session_id": session_id}),
-            "stream_url": reverse("session_stream", kwargs={"session_id": session_id}),
+            "stream_url": _stream_url_for(session_id, active_instance),
             "active_worker": active_instance is not None,
             # The in-progress turn is trimmed from ``entries`` above, so the
             # user wouldn't see their own message at all without a pending
@@ -302,14 +303,33 @@ def _pending_user_prompt(active: CodexInstance | None) -> str:
 def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpResponse:
     """SSE endpoint that mirrors the active worker's events file to the browser.
 
-    Returns immediately with an ``end`` event when no worker is active for the
-    given session, so the client can rely on the response shape regardless of
-    whether a turn is in progress.
+    When no worker is active the connection stays open emitting heartbeat
+    frames so the page's connection indicator can show ``connected, idle``,
+    and reloads itself when a worker is later spawned out-of-band.
+
+    The page passes its render-time view of the session state on the URL
+    (``baseline`` = latest ``CodexInstance.pk``, ``active`` = the active
+    worker's pk if any). If either differs from what the database shows
+    when SSE opens, the page is by definition stale (e.g. a worker was
+    spawned/completed in the gap, or has already finished by the time
+    the browser opens SSE) — we force an immediate reload so the DOM
+    matches reality before any item events start flowing.
     """
+    baseline_param = request.GET.get("baseline", "")
+    active_param = request.GET.get("active", "")
+    current_latest = codex_pool.latest_id_for_thread(session_id)
+    current_latest_str = str(current_latest) if current_latest is not None else ""
     active = _active_instance_for(session_id)
-    if active is None:
+    current_active_str = str(active.pk) if active is not None else ""
+
+    if baseline_param != current_latest_str or active_param != current_active_str:
         response = StreamingHttpResponse(
-            streaming.empty_stream(), content_type="text/event-stream"
+            streaming.reload_stream(), content_type="text/event-stream"
+        )
+    elif active is None:
+        response = StreamingHttpResponse(
+            streaming.idle_stream(session_id, current_latest),
+            content_type="text/event-stream",
         )
     else:
         response = StreamingHttpResponse(
@@ -320,6 +340,28 @@ def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpRespon
     response["Cache-Control"] = "no-cache"
     response["X-Accel-Buffering"] = "no"
     return response
+
+
+def _stream_url_for(session_id: str, active_instance: CodexInstance | None) -> str:
+    """Build the SSE URL for the session view, tagging it with the page's
+    render-time view of the session state.
+
+    Pairs with ``session_stream``: those query params are how the SSE
+    endpoint detects that the page was rendered against a stale DB view
+    (worker spawned/completed in the gap) and forces a reload. The
+    params are always emitted (even when empty) so a malformed direct
+    hit without them is treated as ``no state known`` and routes to the
+    reload path on any non-empty DB state.
+    """
+    baseline_id = codex_pool.latest_id_for_thread(session_id)
+    active_id = active_instance.pk if active_instance is not None else None
+    qs = urlencode(
+        {
+            "baseline": str(baseline_id) if baseline_id is not None else "",
+            "active": str(active_id) if active_id is not None else "",
+        }
+    )
+    return f"{reverse('session_stream', kwargs={'session_id': session_id})}?{qs}"
 
 
 def _display_title(thread: Any) -> str:

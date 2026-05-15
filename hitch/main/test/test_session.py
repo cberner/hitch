@@ -610,16 +610,20 @@ class IntermediateCollapseTests(TestCase):
     def test_summary_pluralization(self, mock_codex: MagicMock) -> None:
         """The summary shows just the relevant kind(s) and pluralizes
         correctly: 1 tool call, 1 thinking message, etc."""
+        # The "must_not_contain" pattern is anchored to ``</summary>`` so it
+        # matches only the rendered summary text — the streaming script
+        # also mentions ``tool call`` and ``thinking`` in its tool-label
+        # map and would otherwise trigger a false positive.
         cases: list[tuple[list[SimpleNamespace], str, str]] = [
             (
                 [_user_message("Run it"), _command("./scripts/run.sh"), _agent_message("Done.")],
                 "<summary>1 tool call</summary>",
-                "thinking message",
+                "thinking message</summary>",
             ),
             (
                 [_user_message("Think it through"), _agent_message("Step 1."), _agent_message("Final.")],
                 "<summary>1 thinking message</summary>",
-                "tool call",
+                "tool call</summary>",
             ),
         ]
         for items, expected, must_not_contain in cases:
@@ -915,19 +919,47 @@ class SessionViewActiveWorkerTests(TestCase):
     """
 
     @patch("hitch.main.views.Codex")
-    def test_inactive_thread_does_not_emit_streaming_script(
+    def test_inactive_thread_renders_status_pill_idle_with_no_live_root(
         self, mock_codex: MagicMock
     ) -> None:
-        # The streaming UI lives behind an ``active_worker`` template guard;
-        # without an active CodexInstance row the page must not open an
-        # EventSource (would just hold a Django thread for no reason).
+        # Without an active worker the live-streaming insertion anchor
+        # (``data-live-root``) must not be in the DOM, so streamed item
+        # events have nowhere to land — but the live-status pill still
+        # renders (in its hidden idle state) so the JS heartbeat handler
+        # can flip it to "Connection lost" if frames stop arriving.
+        # The pill-text checks use the ``>...</span`` anchor so they
+        # don't false-match the same string literal inside the JS map.
         _patch_thread(self, mock_codex, _thread([]))
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
         self.assertEqual(response.status_code, 200)
-        self.assertNotContains(response, "data-live-root")
-        self.assertNotContains(response, "EventSource")
+        self.assertNotContains(response, "data-live-root></div>")
+        self.assertContains(response, "data-live-status")
+        self.assertContains(response, 'data-state="idle"')
+        self.assertContains(response, ">Connected</span>")
+        self.assertNotContains(response, ">Codex is working")
+
+    @patch("hitch.main.views.Codex")
+    def test_active_worker_renders_status_pill_working(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # With an active worker the pill renders in its "working" state
+        # so the user sees the pulsing-green indicator immediately, even
+        # before the first heartbeat lands.
+        _patch_thread(self, mock_codex, _thread([]))
+        _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_RUNNING,
+            prompt="warming up",
+            pid=_LIVE_PID,
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertContains(response, "data-live-status")
+        self.assertContains(response, 'data-state="working"')
+        self.assertContains(response, ">Codex is working")
 
     @patch("hitch.main.views.Codex")
     def test_active_worker_renders_live_section_and_stream_url(
@@ -953,6 +985,50 @@ class SessionViewActiveWorkerTests(TestCase):
         # worker's user_message event reaches the rollout.
         self.assertContains(response, "please refactor")
         self.assertContains(response, "data-pending-user>")
+
+    @patch("hitch.main.views.Codex")
+    def test_indicator_stream_url_lives_on_composer_form(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # The connection indicator's EventSource reads ``data-stream-url``
+        # off the composer form so it works whether or not a live worker
+        # is active. The URL is tagged with the page's render-time view
+        # of the session state so the SSE endpoint can detect a stale
+        # render and force a reload before any item events flow.
+        _patch_thread(self, mock_codex, _thread([]))
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        stream_path = reverse("session_stream", kwargs={"session_id": "thread-1"})
+        # No workers exist for this session, so both query params are
+        # empty — empty is the canonical encoding of "page knows of no
+        # prior state".
+        self.assertContains(
+            response,
+            f'data-composer data-stream-url="{stream_path}?baseline=&amp;active="',
+        )
+
+    @patch("hitch.main.views.Codex")
+    def test_stream_url_carries_baseline_and_active_when_worker_present(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # When a worker is running, the page emits its pk on both query
+        # params so ``session_stream`` can confirm the SSE-time DB state
+        # still matches what was rendered. A mismatch on either param
+        # is the trigger for the reload path.
+        _patch_thread(self, mock_codex, _thread([]))
+        instance = _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_RUNNING,
+            prompt="warming up",
+            pid=_LIVE_PID,
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        stream_path = reverse("session_stream", kwargs={"session_id": "thread-1"})
+        self.assertContains(
+            response,
+            f'data-stream-url="{stream_path}?baseline={instance.pk}&amp;active={instance.pk}"',
+        )
 
     @patch("hitch.main.views.Codex")
     def test_in_progress_turn_is_trimmed_when_worker_active(
@@ -1053,4 +1129,4 @@ class SessionViewActiveWorkerTests(TestCase):
         instance.refresh_from_db()
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertEqual(response.status_code, 200)
-        self.assertNotContains(response, "data-live-root")
+        self.assertNotContains(response, "data-live-root></div>")
