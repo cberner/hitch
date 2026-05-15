@@ -101,7 +101,11 @@ class SpawnNewSessionTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_STARTING)
         self.assertTrue(instance.events_path.endswith(f"{instance.pk}.jsonl"))
         # ``model=None`` means "fall back to whatever Codex's config picks".
-        codex.thread_start.assert_called_once_with(cwd="/repo", model=None)
+        codex.thread_start.assert_called_once_with(
+            cwd="/repo",
+            developer_instructions=None,
+            model=None,
+        )
         # ``thread/start`` defers writing the rollout file to disk, so the
         # cross-process ``thread/resume`` the worker and the session view both
         # rely on would fail with "no rollout found" without an explicit
@@ -167,13 +171,18 @@ class SpawnNewSessionTests(TestCase):
             instance = codex_pool.spawn_new_session(
                 cwd="/repo",
                 prompt="hi",
+                developer_instructions="Prefer small, typed changes.",
                 model="gpt-5",
                 reasoning_effort="high",
                 sandbox_policy="workspaceWrite",
                 approval_mode="deny_all",
             )
 
-        codex.thread_start.assert_called_once_with(cwd="/repo", model="gpt-5")
+        codex.thread_start.assert_called_once_with(
+            cwd="/repo",
+            developer_instructions="Prefer small, typed changes.",
+            model="gpt-5",
+        )
         mock_launch.assert_called_once_with(
             instance_id=instance.pk,
             reasoning_effort="high",

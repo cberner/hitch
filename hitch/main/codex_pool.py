@@ -33,6 +33,7 @@ def spawn_new_session(
     *,
     cwd: str,
     prompt: str,
+    developer_instructions: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
@@ -40,15 +41,20 @@ def spawn_new_session(
 ) -> CodexInstance:
     """Create a fresh Codex thread and detach a worker to run the initial prompt.
 
-    ``model``, ``reasoning_effort``, ``sandbox_policy`` and ``approval_mode``
-    come from the settings cookies the request handler reads; ``None`` means
-    "let Codex apply its own default." The thread is created synchronously
-    (so the caller has an id to redirect to immediately); the prompt itself
-    is run by the detached worker.
+    ``developer_instructions`` maps to the Codex SDK's per-thread
+    ``developerInstructions`` field; the remaining overrides come from the
+    settings cookies the request handler reads. ``None`` means "let Codex
+    apply its own default." The thread is created synchronously (so the caller
+    has an id to redirect to immediately); the prompt itself is run by the
+    detached worker.
     """
     config = AppServerConfig(codex_bin=_codex_bin())
     with Codex(config=config) as codex:
-        thread = codex.thread_start(cwd=cwd, model=model)
+        thread = codex.thread_start(
+            cwd=cwd,
+            developer_instructions=developer_instructions,
+            model=model,
+        )
         thread_id = thread.id
         # ``thread/start`` only creates the thread in the app-server's
         # in-memory map; the rollout file on disk is not written until

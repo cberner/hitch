@@ -438,6 +438,9 @@
             resize: vertical;
             line-height: 1.5;
         }
+        dialog.new-session textarea.extra-system-prompt {
+            min-height: 5rem;
+        }
         dialog.new-session .actions {
             display: flex;
             justify-content: flex-end;
@@ -613,6 +616,10 @@
                     <option value="{{ option.id }}" {% if option.id == current_approval %}selected{% endif %}>{{ option.display_name }}</option>
                     {% endfor %}
                 </select>
+            </label>
+            <label>
+                Extra system prompt
+                <textarea class="extra-system-prompt" name="extra_system_prompt" maxlength="{{ extra_system_prompt_max_len }}" autocomplete="off" placeholder="Optional instructions for new sessions">{{ current_extra_system_prompt }}</textarea>
             </label>
             <label class="checkbox-label">
                 <span>Show archived sessions</span>
