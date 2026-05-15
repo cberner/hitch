@@ -17,6 +17,7 @@ stdout/stderr are redirected to /dev/null by the parent.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import shutil
@@ -26,6 +27,7 @@ from django.core.management.base import BaseCommand, CommandParser
 from django.utils import timezone
 from openai_codex import AppServerConfig, Codex, TextInput
 from openai_codex.generated.v2_all import (
+    ReasoningEffort,
     Turn,
     TurnCompletedNotification,
     TurnStatus,
@@ -41,10 +43,15 @@ class Command(BaseCommand):
     @override
     def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument("--instance-id", type=int, required=True)
+        # The settings dialog stores reasoning effort in a cookie; the spawner
+        # forwards it here so the detached worker doesn't have to reach back
+        # into the parent process or any shared store.
+        parser.add_argument("--reasoning-effort", type=str, default=None)
 
     @override
     def handle(self, *args: Any, **options: Any) -> None:
         instance_id: int = options["instance_id"]
+        reasoning_effort: str | None = options.get("reasoning_effort")
         instance = CodexInstance.objects.get(pk=instance_id)
 
         instance.status = CodexInstance.STATUS_RUNNING
@@ -56,6 +63,7 @@ class Command(BaseCommand):
                     thread_id=instance.thread_id,
                     prompt=instance.prompt,
                     events_file=events_file,
+                    reasoning_effort=reasoning_effort,
                 )
         except Exception as exc:  # noqa: BLE001 - record any failure, then re-raise
             instance.status = CodexInstance.STATUS_FAILED
@@ -84,12 +92,25 @@ class Command(BaseCommand):
         instance.save(update_fields=["status", "ended_at", "error"])
 
 
-def _run_turn(*, thread_id: str, prompt: str, events_file: IO[str]) -> Turn | None:
+def _run_turn(
+    *,
+    thread_id: str,
+    prompt: str,
+    events_file: IO[str],
+    reasoning_effort: str | None = None,
+) -> Turn | None:
     config = AppServerConfig(codex_bin=shutil.which("codex"))
+    turn_kwargs: dict[str, Any] = {}
+    if reasoning_effort:
+        # Unknown strings are ignored rather than crashing the worker — Codex
+        # will fall back to the model's default effort in that case, which is
+        # preferable to losing the whole turn over a stale enum value.
+        with contextlib.suppress(ValueError):
+            turn_kwargs["effort"] = ReasoningEffort(reasoning_effort)
     final_turn: Turn | None = None
     with Codex(config=config) as codex:
         thread = codex.thread_resume(thread_id)
-        turn = thread.turn(TextInput(prompt))
+        turn = thread.turn(TextInput(prompt), **turn_kwargs)
         for event in turn.stream():
             events_file.write(_serialize_event(event.method, event.payload) + "\n")
             payload = event.payload

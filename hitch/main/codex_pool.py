@@ -28,15 +28,23 @@ from openai_codex import AppServerConfig, Codex
 from hitch.main.models import CodexInstance
 
 
-def spawn_new_session(*, cwd: str, prompt: str) -> CodexInstance:
+def spawn_new_session(
+    *,
+    cwd: str,
+    prompt: str,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+) -> CodexInstance:
     """Create a fresh Codex thread and detach a worker to run the initial prompt.
 
+    ``model`` and ``reasoning_effort`` come from the settings cookies the
+    request handler reads; ``None`` means "let Codex apply its own default."
     The thread is created synchronously (so the caller has an id to redirect
     to immediately); the prompt itself is run by the detached worker.
     """
     config = AppServerConfig(codex_bin=_codex_bin())
     with Codex(config=config) as codex:
-        thread = codex.thread_start(cwd=cwd)
+        thread = codex.thread_start(cwd=cwd, model=model)
         thread_id = thread.id
         # ``thread/start`` only creates the thread in the app-server's
         # in-memory map; the rollout file on disk is not written until
@@ -50,7 +58,9 @@ def spawn_new_session(*, cwd: str, prompt: str) -> CodexInstance:
         # title the session list would otherwise compute from ``preview``
         # once the first turn streams in, so this is invisible in the UI.
         codex._client.thread_set_name(thread_id, _initial_thread_name(prompt))
-    return _spawn_worker(thread_id=thread_id, cwd=cwd, prompt=prompt)
+    return _spawn_worker(
+        thread_id=thread_id, cwd=cwd, prompt=prompt, reasoning_effort=reasoning_effort
+    )
 
 
 # Upper bound for the auto-derived thread name. Matches the
@@ -71,9 +81,17 @@ def _initial_thread_name(prompt: str) -> str:
     return first_line or "New session"
 
 
-def spawn_turn(*, thread_id: str, cwd: str, prompt: str) -> CodexInstance:
+def spawn_turn(
+    *,
+    thread_id: str,
+    cwd: str,
+    prompt: str,
+    reasoning_effort: str | None = None,
+) -> CodexInstance:
     """Detach a worker that resumes an existing thread to run one prompt."""
-    return _spawn_worker(thread_id=thread_id, cwd=cwd, prompt=prompt)
+    return _spawn_worker(
+        thread_id=thread_id, cwd=cwd, prompt=prompt, reasoning_effort=reasoning_effort
+    )
 
 
 def is_alive(pid: int) -> bool:
@@ -150,7 +168,13 @@ def _codex_bin() -> str | None:
     return shutil.which("codex")
 
 
-def _spawn_worker(*, thread_id: str, cwd: str, prompt: str) -> CodexInstance:
+def _spawn_worker(
+    *,
+    thread_id: str,
+    cwd: str,
+    prompt: str,
+    reasoning_effort: str | None = None,
+) -> CodexInstance:
     target_dir = events_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -167,7 +191,9 @@ def _spawn_worker(*, thread_id: str, cwd: str, prompt: str) -> CodexInstance:
         instance.save(update_fields=["events_path"])
 
     try:
-        proc = _launch_worker_process(instance_id=instance.pk)
+        proc = _launch_worker_process(
+            instance_id=instance.pk, reasoning_effort=reasoning_effort
+        )
     except Exception as exc:
         # Without this, a Popen failure (e.g. ENOMEM, E2BIG, missing python)
         # would leave the row stuck in ``starting`` with pid=0 and no
@@ -182,7 +208,9 @@ def _spawn_worker(*, thread_id: str, cwd: str, prompt: str) -> CodexInstance:
     return instance
 
 
-def _launch_worker_process(*, instance_id: int) -> subprocess.Popen[bytes]:
+def _launch_worker_process(
+    *, instance_id: int, reasoning_effort: str | None = None
+) -> subprocess.Popen[bytes]:
     manage_py = str(Path(settings.BASE_DIR) / "manage.py")
     env = os.environ.copy()
     # Django needs an explicit settings module since hitch ships per-env
@@ -190,14 +218,21 @@ def _launch_worker_process(*, instance_id: int) -> subprocess.Popen[bytes]:
     if settings.SETTINGS_MODULE:
         env["DJANGO_SETTINGS_MODULE"] = settings.SETTINGS_MODULE
 
+    argv = [
+        sys.executable,
+        manage_py,
+        "codex_worker",
+        "--instance-id",
+        str(instance_id),
+    ]
+    if reasoning_effort:
+        # Passed as a CLI arg rather than read from a request-side store so
+        # the worker stays self-contained: the parent dies, the worker
+        # already has every input it needs to finish the turn.
+        argv.extend(["--reasoning-effort", reasoning_effort])
+
     return subprocess.Popen(
-        [
-            sys.executable,
-            manage_py,
-            "codex_worker",
-            "--instance-id",
-            str(instance_id),
-        ],
+        argv,
         start_new_session=True,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
