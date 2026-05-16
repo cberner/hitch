@@ -453,6 +453,19 @@
             margin: 0;
             font-weight: 400;
         }
+        @media (max-width: 640px) {
+            dialog.new-session.keyboard-adjusted {
+                position: fixed;
+                top: var(--dialog-keyboard-top, 0.5rem);
+                left: var(--dialog-keyboard-left, 50%);
+                right: auto;
+                bottom: auto;
+                width: min(520px, calc(var(--dialog-keyboard-width, 100vw) - 1rem));
+                max-height: var(--dialog-keyboard-max-height, calc(100dvh - 1rem));
+                margin: 0;
+                transform: translateX(-50%);
+            }
+        }
         .rate-limits {
             display: flex;
             flex-direction: column;
@@ -911,13 +924,59 @@
             }
 
             const newSessionDialog = document.querySelector("[data-new-session-dialog]");
+            const keyboardAdjustedClass = "keyboard-adjusted";
+            const mobileDialogQuery = window.matchMedia("(max-width: 640px)");
+            let keyboardAdjustmentFrame = 0;
+            function clearKeyboardAdjustedDialog(dialog) {
+                if (!dialog) return;
+                dialog.classList.remove(keyboardAdjustedClass);
+                dialog.style.removeProperty("--dialog-keyboard-top");
+                dialog.style.removeProperty("--dialog-keyboard-left");
+                dialog.style.removeProperty("--dialog-keyboard-width");
+                dialog.style.removeProperty("--dialog-keyboard-max-height");
+            }
+            function updateKeyboardAdjustedDialog() {
+                keyboardAdjustmentFrame = 0;
+                if (!newSessionDialog || !newSessionDialog.open) return;
+                const viewport = window.visualViewport;
+                if (!viewport || !mobileDialogQuery.matches) {
+                    clearKeyboardAdjustedDialog(newSessionDialog);
+                    return;
+                }
+                const margin = 8;
+                const maxHeight = Math.max(1, Math.floor(viewport.height - margin * 2));
+                newSessionDialog.classList.add(keyboardAdjustedClass);
+                newSessionDialog.style.setProperty(
+                    "--dialog-keyboard-left",
+                    `${Math.round(viewport.offsetLeft + viewport.width / 2)}px`,
+                );
+                newSessionDialog.style.setProperty("--dialog-keyboard-width", `${Math.floor(viewport.width)}px`);
+                newSessionDialog.style.setProperty("--dialog-keyboard-max-height", `${maxHeight}px`);
+                const height = Math.min(newSessionDialog.getBoundingClientRect().height || maxHeight, maxHeight);
+                const top = viewport.offsetTop + Math.max(margin, Math.floor((viewport.height - height) / 2));
+                newSessionDialog.style.setProperty("--dialog-keyboard-top", `${Math.round(top)}px`);
+            }
+            function scheduleKeyboardAdjustedDialog() {
+                if (keyboardAdjustmentFrame) return;
+                keyboardAdjustmentFrame = window.requestAnimationFrame(updateKeyboardAdjustedDialog);
+            }
+            if (window.visualViewport) {
+                window.visualViewport.addEventListener("resize", scheduleKeyboardAdjustedDialog);
+                window.visualViewport.addEventListener("scroll", scheduleKeyboardAdjustedDialog);
+            }
+            window.addEventListener("resize", scheduleKeyboardAdjustedDialog);
             const newSessionOpenButtons = document.querySelectorAll("[data-new-session-open]");
             const newSessionCancel = newSessionDialog && newSessionDialog.querySelector("[data-new-session-cancel]");
             newSessionOpenButtons.forEach((btn) => btn.addEventListener("click", () => {
                 showDialog(newSessionDialog);
+                scheduleKeyboardAdjustedDialog();
                 const textarea = newSessionDialog && newSessionDialog.querySelector("textarea[name='prompt']");
                 if (textarea) textarea.focus();
+                scheduleKeyboardAdjustedDialog();
             }));
+            if (newSessionDialog) {
+                newSessionDialog.addEventListener("close", () => clearKeyboardAdjustedDialog(newSessionDialog));
+            }
             if (newSessionCancel) newSessionCancel.addEventListener("click", () => hideDialog(newSessionDialog));
 
             const settingsDialog = document.querySelector("[data-settings-dialog]");
