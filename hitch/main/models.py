@@ -49,6 +49,11 @@ class CodexInstance(models.Model):
     # beginning with a dash can't be reinterpreted as argparse options and
     # so a worker can be re-spawned from this row alone if needed.
     prompt = models.TextField(blank=True, default="")
+    # Thread-scoped developer instructions from the settings dialog. Each
+    # detached worker re-supplies them on resume so the turn does not rely on
+    # app-server in-memory state from the request process that created the
+    # thread.
+    developer_instructions = models.TextField(blank=True, default="")
     events_path = models.CharField(max_length=4096)
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_STARTING)
     started_at = models.DateTimeField(auto_now_add=True)

@@ -177,6 +177,7 @@ class SettingsDialogRenderTests(TestCase):
         self.assertContains(response, 'value="auto_review" selected')
         self.assertContains(response, 'value="deny_all"')
         self.assertContains(response, 'value="approve_all"')
+        self.assertContains(response, "Extra developer prompt")
         self.assertContains(response, 'name="extra_system_prompt"')
         self.assertContains(response, 'maxlength="2500"')
         self.assertContains(response, 'name="show_archived_sessions"')

@@ -246,7 +246,10 @@ def _run_turn(
             write_event=_write_event,
             approval_mode=approval_mode,
         )
-        thread = codex.thread_resume(instance.thread_id)
+        resume_kwargs: dict[str, Any] = {}
+        if instance.developer_instructions:
+            resume_kwargs["developer_instructions"] = instance.developer_instructions
+        thread = codex.thread_resume(instance.thread_id, **resume_kwargs)
         turn = _start_turn(
             codex,
             thread,
