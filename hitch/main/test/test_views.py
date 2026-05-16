@@ -19,9 +19,15 @@ from django.urls import reverse
 from openai_codex.errors import MethodNotFoundError
 
 from hitch.main.models import ApprovalRequest, CodexInstance
+from hitch.main.worktrees import (
+    ManagedWorktree,
+    WorktreeCleanupError,
+    WorktreeCreationError,
+)
 
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
+_USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 
 
 def _setup_codex(
@@ -446,6 +452,139 @@ class NewSessionViewTests(TestCase):
             approval_mode="auto_review",
         )
 
+    @patch("hitch.main.views.create_worktree_for_session")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_uses_managed_worktree_when_setting_enabled(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+        mock_create_worktree: MagicMock,
+    ) -> None:
+        worktree = Path("/home/user/.hitch/worktrees/proj/20260516120000-abcdef12")
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_create_worktree.return_value = ManagedWorktree(
+            path=worktree,
+            branch="hitch/proj/20260516120000-abcdef12",
+            source_repo=Path(self.REPO),
+        )
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+        _seed_cookies(self.client, **{_USE_WORKTREES_COOKIE: "true"})
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "do thing", "cwd": self.REPO},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_create_worktree.assert_called_once_with(self.REPO)
+        mock_spawn.assert_called_once_with(
+            cwd=str(worktree),
+            prompt="do thing",
+            developer_instructions=None,
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
+
+    @patch("hitch.main.views.cleanup_worktree")
+    @patch("hitch.main.views.create_worktree_for_session")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_cleans_up_managed_worktree_when_spawn_fails(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+        mock_create_worktree: MagicMock,
+        mock_cleanup: MagicMock,
+    ) -> None:
+        worktree = ManagedWorktree(
+            path=Path("/home/user/.hitch/worktrees/proj/20260516120000-abcdef12"),
+            branch="hitch/proj/20260516120000-abcdef12",
+            source_repo=Path(self.REPO),
+        )
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_create_worktree.return_value = worktree
+        mock_spawn.side_effect = RuntimeError("spawn failed")
+        _setup_codex(mock_codex, models=[])
+        _seed_cookies(self.client, **{_USE_WORKTREES_COOKIE: "true"})
+
+        with self.assertRaisesRegex(RuntimeError, "spawn failed"):
+            self.client.post(
+                reverse("new_session"),
+                data={"prompt": "do thing", "cwd": self.REPO},
+            )
+
+        mock_cleanup.assert_called_once_with(worktree)
+
+    @patch("hitch.main.views.cleanup_worktree")
+    @patch("hitch.main.views.create_worktree_for_session")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_preserves_spawn_error_when_managed_worktree_cleanup_fails(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+        mock_create_worktree: MagicMock,
+        mock_cleanup: MagicMock,
+    ) -> None:
+        worktree = ManagedWorktree(
+            path=Path("/home/user/.hitch/worktrees/proj/20260516120000-abcdef12"),
+            branch="hitch/proj/20260516120000-abcdef12",
+            source_repo=Path(self.REPO),
+        )
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_create_worktree.return_value = worktree
+        mock_spawn.side_effect = RuntimeError("spawn failed")
+        mock_cleanup.side_effect = WorktreeCleanupError("cleanup failed")
+        _setup_codex(mock_codex, models=[])
+        _seed_cookies(self.client, **{_USE_WORKTREES_COOKIE: "true"})
+
+        with (
+            self.assertLogs("hitch.main.views", level="ERROR") as logs,
+            self.assertRaisesRegex(RuntimeError, "spawn failed"),
+        ):
+            self.client.post(
+                reverse("new_session"),
+                data={"prompt": "do thing", "cwd": self.REPO},
+            )
+
+        mock_cleanup.assert_called_once_with(worktree)
+        self.assertIn("failed to clean up managed worktree", logs.output[0])
+
+    @patch("hitch.main.views.create_worktree_for_session")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_reports_worktree_creation_failure(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+        mock_create_worktree: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_create_worktree.side_effect = WorktreeCreationError("boom")
+        _setup_codex(mock_codex, models=[])
+        _seed_cookies(self.client, **{_USE_WORKTREES_COOKIE: "true"})
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "do thing", "cwd": self.REPO},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"boom")
+        mock_spawn.assert_not_called()
+
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
     def test_rejects_invalid_input(
@@ -533,6 +672,36 @@ class SendMessageViewTests(TestCase):
         mock_spawn.assert_called_once_with(
             thread_id="abc",
             cwd="/repo",
+            prompt="hi",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
+
+    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_allows_follow_up_turns_in_managed_worktrees(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+        mock_managed_worktrees: MagicMock,
+    ) -> None:
+        worktree = "/home/user/.hitch/worktrees/proj/20260516120000-abcdef12"
+        self._patch_codex(mock_codex, cwd=worktree)
+        mock_discover.return_value = [Path("/repo")]
+        mock_managed_worktrees.return_value = [Path(worktree)]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "hi"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd=worktree,
             prompt="hi",
             sandbox_policy=None,
             approval_mode="auto_review",

@@ -17,6 +17,7 @@ _EFFORT_COOKIE = "hitch_reasoning_effort"
 _SANDBOX_COOKIE = "hitch_sandbox_policy"
 _APPROVAL_COOKIE = "hitch_approval_mode"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
+_USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 
 
@@ -99,6 +100,7 @@ class AuthViewTests(TestCase):
                 _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt(
                     "Prefer focused tests."
                 ),
+                _USE_WORKTREES_COOKIE: "true",
                 _SHOW_ARCHIVED_COOKIE: "true",
             },
         )
@@ -115,8 +117,10 @@ class AuthViewTests(TestCase):
         self.assertEqual(settings.sandbox_policy, "workspaceWrite")
         self.assertEqual(settings.approval_mode, "deny_all")
         self.assertEqual(settings.extra_system_prompt, "Prefer focused tests.")
+        self.assertTrue(settings.use_worktrees)
         self.assertTrue(settings.show_archived_sessions)
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
+        self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
         self.assertEqual(
             _decode_extra_system_prompt(
                 _cookie_value(response, _EXTRA_SYSTEM_PROMPT_COOKIE)
@@ -133,6 +137,7 @@ class AuthViewTests(TestCase):
             sandbox_policy="readOnly",
             approval_mode="deny_all",
             extra_system_prompt="Stored prompt.",
+            use_worktrees=True,
             show_archived_sessions=True,
         )
 
@@ -145,8 +150,10 @@ class AuthViewTests(TestCase):
         self.assertEqual(settings.model, "stored-model")
         self.assertEqual(settings.reasoning_effort, "low")
         self.assertEqual(settings.sandbox_policy, "readOnly")
+        self.assertTrue(settings.use_worktrees)
         self.assertTrue(settings.show_archived_sessions)
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "stored-model")
+        self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
         self.assertEqual(_cookie_value(response, _SHOW_ARCHIVED_COOKIE), "true")
 
     def test_logout_mirrors_account_settings_to_cookies_for_guest_mode(self) -> None:
@@ -156,6 +163,7 @@ class AuthViewTests(TestCase):
             model="stored-model",
             sandbox_policy="workspaceWrite",
             approval_mode="deny_all",
+            use_worktrees=True,
         )
         self.client.force_login(user)
 
@@ -166,6 +174,7 @@ class AuthViewTests(TestCase):
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "stored-model")
         self.assertEqual(_cookie_value(response, _SANDBOX_COOKIE), "workspaceWrite")
         self.assertEqual(_cookie_value(response, _APPROVAL_COOKIE), "deny_all")
+        self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
 
 
 class AuthenticatedSettingsTests(TestCase):
@@ -181,6 +190,7 @@ class AuthenticatedSettingsTests(TestCase):
                 "sandbox_policy": "readOnly",
                 "approval_mode": "deny_all",
                 "extra_system_prompt": "  Keep it small.  ",
+                "use_worktrees": "true",
                 "show_archived_sessions": "true",
             },
         )
@@ -190,9 +200,11 @@ class AuthenticatedSettingsTests(TestCase):
         self.assertEqual(settings.sandbox_policy, "readOnly")
         self.assertEqual(settings.approval_mode, "deny_all")
         self.assertEqual(settings.extra_system_prompt, "Keep it small.")
+        self.assertTrue(settings.use_worktrees)
         self.assertTrue(settings.show_archived_sessions)
         self.assertEqual(_cookie_value(response, _SANDBOX_COOKIE), "readOnly")
         self.assertEqual(_cookie_value(response, _APPROVAL_COOKIE), "deny_all")
+        self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -206,6 +218,7 @@ class AuthenticatedSettingsTests(TestCase):
             reasoning_effort="high",
             sandbox_policy="dangerFullAccess",
             approval_mode="deny_all",
+            use_worktrees=True,
         )
         self.client.force_login(user)
         _seed_cookies(
@@ -215,6 +228,7 @@ class AuthenticatedSettingsTests(TestCase):
                 _EFFORT_COOKIE: "low",
                 _SANDBOX_COOKIE: "workspaceWrite",
                 _APPROVAL_COOKIE: "approve_all",
+                _USE_WORKTREES_COOKIE: "false",
             },
         )
         _setup_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
@@ -226,8 +240,10 @@ class AuthenticatedSettingsTests(TestCase):
         self.assertContains(response, 'value="high" selected')
         self.assertContains(response, 'value="dangerFullAccess" selected')
         self.assertContains(response, 'value="deny_all" selected')
+        self.assertContains(response, 'name="use_worktrees" value="true" checked')
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
         self.assertEqual(_cookie_value(response, _SANDBOX_COOKIE), "dangerFullAccess")
+        self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")

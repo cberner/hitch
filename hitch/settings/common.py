@@ -123,3 +123,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # running Django and live somewhere that survives restarts. Kept outside the
 # project tree so setuptools' flat-layout discovery doesn't pick it up.
 CODEX_EVENTS_DIR = Path.home() / ".hitch" / "codex_events"
+
+# Managed git worktrees for new Codex sessions when the user opts into
+# isolating agent changes from the source checkout selected in the UI.
+HITCH_WORKTREES_DIR = Path.home() / ".hitch" / "worktrees"
