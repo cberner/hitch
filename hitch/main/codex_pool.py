@@ -72,6 +72,7 @@ def spawn_new_session(
         thread_id=thread_id,
         cwd=cwd,
         prompt=prompt,
+        developer_instructions=developer_instructions,
         reasoning_effort=reasoning_effort,
         sandbox_policy=sandbox_policy,
         approval_mode=approval_mode,
@@ -106,10 +107,15 @@ def spawn_turn(
     approval_mode: str | None = None,
 ) -> CodexInstance:
     """Detach a worker that resumes an existing thread to run one prompt."""
+    previous = latest_for_thread(thread_id)
+    developer_instructions = (
+        previous.developer_instructions if previous is not None else None
+    )
     return _spawn_worker(
         thread_id=thread_id,
         cwd=cwd,
         prompt=prompt,
+        developer_instructions=developer_instructions or None,
         reasoning_effort=reasoning_effort,
         sandbox_policy=sandbox_policy,
         approval_mode=approval_mode,
@@ -438,6 +444,7 @@ def _spawn_worker(
     thread_id: str,
     cwd: str,
     prompt: str,
+    developer_instructions: str | None = None,
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
@@ -450,6 +457,7 @@ def _spawn_worker(
             thread_id=thread_id,
             cwd=cwd,
             prompt=prompt,
+            developer_instructions=developer_instructions or "",
             events_path="",
             status=CodexInstance.STATUS_STARTING,
             pid=0,

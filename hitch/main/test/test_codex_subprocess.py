@@ -97,6 +97,7 @@ class SpawnNewSessionTests(TestCase):
         self.assertEqual(instance.thread_id, "thread-abc")
         self.assertEqual(instance.cwd, "/repo")
         self.assertEqual(instance.prompt, "hi")
+        self.assertEqual(instance.developer_instructions, "")
         self.assertEqual(instance.pid, 4242)
         self.assertEqual(instance.status, CodexInstance.STATUS_STARTING)
         self.assertTrue(instance.events_path.endswith(f"{instance.pk}.jsonl"))
@@ -183,6 +184,7 @@ class SpawnNewSessionTests(TestCase):
             developer_instructions="Prefer small, typed changes.",
             model="gpt-5",
         )
+        self.assertEqual(instance.developer_instructions, "Prefer small, typed changes.")
         mock_launch.assert_called_once_with(
             instance_id=instance.pk,
             reasoning_effort="high",
@@ -234,6 +236,7 @@ class SpawnTurnTests(TestCase):
 
         self.assertEqual(instance.thread_id, "thread-xyz")
         self.assertEqual(instance.prompt, "follow-up")
+        self.assertEqual(instance.developer_instructions, "")
         self.assertEqual(instance.pid, 1234)
         mock_launch.assert_called_once_with(
             instance_id=instance.pk,
@@ -241,6 +244,34 @@ class SpawnTurnTests(TestCase):
             sandbox_policy=None,
             approval_mode=None,
         )
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    def test_copies_developer_instructions_from_previous_turn(
+        self, mock_launch: MagicMock
+    ) -> None:
+        """Follow-up workers have to re-supply the thread's developer
+        instructions on resume; copy them from the latest known row so
+        they are not lost when each turn runs in a fresh process."""
+        mock_launch.return_value = SimpleNamespace(pid=1234)
+        CodexInstance.objects.create(
+            pid=999,
+            thread_id="thread-xyz",
+            cwd="/repo",
+            prompt="first",
+            developer_instructions="Prefer small, typed changes.",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_turn(
+                thread_id="thread-xyz", cwd="/repo", prompt="follow-up"
+            )
+
+        self.assertEqual(instance.developer_instructions, "Prefer small, typed changes.")
 
 
 class LaunchWorkerProcessTests(TestCase):
@@ -986,12 +1017,19 @@ class SerializeEventTests(TestCase):
 
 
 class CodexWorkerCommandTests(TestCase):
-    def _make_instance(self, events_dir: Path, *, prompt: str = "hi") -> CodexInstance:
+    def _make_instance(
+        self,
+        events_dir: Path,
+        *,
+        prompt: str = "hi",
+        developer_instructions: str = "",
+    ) -> CodexInstance:
         return CodexInstance.objects.create(
             pid=12345,
             thread_id="thread-1",
             cwd="/repo",
             prompt=prompt,
+            developer_instructions=developer_instructions,
             events_path=str(events_dir / "events.jsonl"),
             status=CodexInstance.STATUS_STARTING,
         )
@@ -1025,6 +1063,29 @@ class CodexWorkerCommandTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
         self.assertIsNotNone(instance.ended_at)
         self.assertEqual(instance.error, "")
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_forwards_developer_instructions_on_resume(
+        self, mock_codex: MagicMock
+    ) -> None:
+        """Developer instructions originate at thread creation, but each
+        worker starts from a fresh app-server and must re-supply them when
+        resuming the thread before the turn starts."""
+        events = [_completed_event("turn-1", TurnStatus.completed)]
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.return_value = _stub_thread_resume(events)
+
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(
+                Path(raw),
+                developer_instructions="Prefer small, typed changes.",
+            )
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+
+        codex_ctx.thread_resume.assert_called_once_with(
+            "thread-1",
+            developer_instructions="Prefer small, typed changes.",
+        )
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_reads_prompt_from_instance_row(self, mock_codex: MagicMock) -> None:
