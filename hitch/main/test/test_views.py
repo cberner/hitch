@@ -113,6 +113,22 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    def test_new_session_dialog_adjusts_for_mobile_keyboard(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex)
+        mock_discover.return_value = ["/repo"]
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, "keyboard-adjusted")
+        self.assertContains(response, "--dialog-keyboard-top")
+        self.assertContains(response, "window.visualViewport")
+        self.assertContains(response, 'window.matchMedia("(max-width: 640px)")')
+        self.assertContains(response, "scheduleKeyboardAdjustedDialog();")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
     def test_lists_sessions_sorted_descending(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
