@@ -21,6 +21,7 @@ _MAX_UNTRACKED_FILES = 25
 _MAX_UNTRACKED_FILE_BYTES = 200_000
 _HUNK_RE = re.compile(r"^@@ -(?P<old>\d+)(?:,\d+)? \+(?P<new>\d+)(?:,\d+)? @@")
 _FORMATTER = HtmlFormatter(nowrap=True)
+_BRANCH_DIFF_BASE_REF = "refs/remotes/origin/master"
 _DIFF_ARGS = [
     "diff",
     "--no-color",
@@ -78,7 +79,7 @@ class DiffView:
 
 
 def build_worktree_diff(cwd: str | None) -> DiffView:
-    """Return the current git worktree diff for ``cwd``.
+    """Return the current git session diff for ``cwd``.
 
     The viewer is informational, so git failures degrade to an empty/error
     state instead of blocking the session page render.
@@ -89,7 +90,12 @@ def build_worktree_diff(cwd: str | None) -> DiffView:
     if repo is None:
         return DiffView(files=[])
 
-    raw_diff = _git_output(repo, [*_DIFF_ARGS, "HEAD", "--"])
+    diff_base = _branch_diff_base_ref(repo)
+    raw_diff = None
+    if diff_base is not None:
+        raw_diff = _git_output(repo, [*_DIFF_ARGS, diff_base, "--"])
+    if raw_diff is None:
+        raw_diff = _git_output(repo, [*_DIFF_ARGS, "HEAD", "--"])
     if raw_diff is None:
         raw_diff = _git_output(repo, [*_DIFF_ARGS, "--"]) or ""
 
@@ -102,6 +108,11 @@ def build_worktree_diff(cwd: str | None) -> DiffView:
     if truncated:
         text = text[:_MAX_DIFF_CHARS]
     return _parse_unified_diff(text, truncated=truncated)
+
+
+def _branch_diff_base_ref(repo: Path) -> str | None:
+    output = _git_output(repo, ["rev-parse", "--verify", "--quiet", _BRANCH_DIFF_BASE_REF])
+    return _BRANCH_DIFF_BASE_REF if output and output.strip() else None
 
 
 def _repo_root(cwd: Path) -> Path | None:
