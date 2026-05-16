@@ -224,6 +224,23 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    def test_new_session_dialog_supports_super_enter_submit(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex)
+        mock_discover.return_value = [Path("/home/user/proj")]
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, "data-new-session-submit")
+        self.assertContains(response, "event.metaKey")
+        self.assertContains(response, 'event.key === "Enter"')
+        self.assertContains(response, 'event.getModifierState("Meta")')
+        self.assertContains(response, 'event.getModifierState("OS")')
+        self.assertContains(response, "requestSubmit(newSessionForm, newSessionSubmit)")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
     def test_title_rendering(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:

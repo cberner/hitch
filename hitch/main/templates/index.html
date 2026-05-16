@@ -697,7 +697,7 @@
             </label>
             <div class="actions">
                 <button type="button" class="button secondary" data-new-session-cancel>Cancel</button>
-                <button type="submit" class="button" {% if not repos %}disabled{% endif %}>Start session</button>
+                <button type="submit" class="button" data-new-session-submit {% if not repos %}disabled{% endif %}>Start session</button>
             </div>
         </form>
     </dialog>
@@ -967,6 +967,22 @@
             window.addEventListener("resize", scheduleKeyboardAdjustedDialog);
             const newSessionOpenButtons = document.querySelectorAll("[data-new-session-open]");
             const newSessionCancel = newSessionDialog && newSessionDialog.querySelector("[data-new-session-cancel]");
+            const newSessionForm = newSessionDialog && newSessionDialog.querySelector("form");
+            const newSessionSubmit = newSessionDialog && newSessionDialog.querySelector("[data-new-session-submit]");
+            function isSuperEnter(event) {
+                const hasSuper = event.metaKey
+                    || (event.getModifierState && event.getModifierState("Meta"))
+                    || (event.getModifierState && event.getModifierState("OS"));
+                return event.key === "Enter" && hasSuper;
+            }
+            function requestSubmit(form, submitter) {
+                if (!form || !submitter || submitter.disabled) return;
+                if (typeof form.requestSubmit === "function") {
+                    form.requestSubmit(submitter);
+                } else {
+                    submitter.click();
+                }
+            }
             newSessionOpenButtons.forEach((btn) => btn.addEventListener("click", () => {
                 showDialog(newSessionDialog);
                 scheduleKeyboardAdjustedDialog();
@@ -978,6 +994,13 @@
                 newSessionDialog.addEventListener("close", () => clearKeyboardAdjustedDialog(newSessionDialog));
             }
             if (newSessionCancel) newSessionCancel.addEventListener("click", () => hideDialog(newSessionDialog));
+            if (newSessionForm) {
+                newSessionForm.addEventListener("keydown", (event) => {
+                    if (!isSuperEnter(event)) return;
+                    event.preventDefault();
+                    requestSubmit(newSessionForm, newSessionSubmit);
+                });
+            }
 
             const settingsDialog = document.querySelector("[data-settings-dialog]");
             const settingsOpenButtons = document.querySelectorAll("[data-settings-open]");
