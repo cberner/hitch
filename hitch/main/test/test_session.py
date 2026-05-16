@@ -11,6 +11,7 @@ from django.test import Client, TestCase
 from django.urls import reverse
 from openai_codex.errors import AppServerError
 
+from hitch.main import codex_events
 from hitch.main.diffs import DiffFile, DiffLine, DiffView
 from hitch.main.models import CodexInstance
 from hitch.main.views import _tool_call_detail, _tool_call_status
@@ -1072,6 +1073,43 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, 'aria-label="Jump to latest message"')
         self.assertContains(response, '<dialog class="diff-modal"', html=False)
         self.assertNotContains(response, 'class="diff-fab"')
+
+    @patch("hitch.main.views.build_worktree_diff")
+    @patch("hitch.main.views.Codex")
+    def test_active_worker_renders_latest_goal_near_status_pill(
+        self, mock_codex: MagicMock, mock_diff: MagicMock
+    ) -> None:
+        mock_diff.return_value = _diff_view()
+        _patch_thread(self, mock_codex, _thread([]))
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "method": codex_events.GOAL_UPDATED_METHOD,
+                        "payload": {
+                            "threadId": "thread-1",
+                            "goal": {"objective": "Keep the live goal visible"},
+                        },
+                    }
+                )
+                + "\n"
+            )
+            events_path = fh.name
+        self.addCleanup(Path(events_path).unlink, missing_ok=True)
+        _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_RUNNING,
+            prompt="warming up",
+            pid=_LIVE_PID,
+            events_path=events_path,
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertContains(response, 'data-live-work data-state="working"')
+        self.assertContains(response, 'data-live-goal')
+        self.assertContains(response, ">Goal<")
+        self.assertContains(response, "Keep the live goal visible")
 
     @patch("hitch.main.views.Codex")
     def test_active_worker_renders_live_section_and_stream_url(

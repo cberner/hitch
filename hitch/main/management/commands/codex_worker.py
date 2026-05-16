@@ -30,13 +30,14 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import itertools
 import json
 import shutil
 import signal
 import threading
 import time
 from collections.abc import Callable
-from typing import IO, Any, override
+from typing import IO, Any, Protocol, override
 
 from django.core.management.base import BaseCommand, CommandParser
 from django.utils import timezone
@@ -64,8 +65,10 @@ from openai_codex.generated.v2_all import (
     UserInput,
     WorkspaceWriteSandboxPolicy,
 )
+from openai_codex.models import Notification
 from pydantic import BaseModel
 
+from hitch.main.codex_events import GOAL_METHODS
 from hitch.main.models import ApprovalRequest, CodexInstance
 
 # JSON-RPC method names the SDK invokes on the client transport when codex's
@@ -224,58 +227,97 @@ def _run_turn(
     # lines into the events file.
     write_lock = threading.Lock()
 
-    def _write_event(method: str, payload: Any) -> None:
-        line = _serialize_event(method, payload) + "\n"
+    def _write_event(
+        method: str,
+        payload: Any,
+        *,
+        recorded_at: int | None = None,
+        event_seq: int | None = None,
+    ) -> None:
+        line = (
+            _serialize_event(
+                method,
+                payload,
+                recorded_at=recorded_at,
+                event_seq=event_seq,
+            )
+            + "\n"
+        )
         with write_lock:
             events_file.write(line)
 
+    def _write_notification(event: Notification) -> None:
+        recorded_at, event_seq = notification_order(event)
+        _write_event(
+            event.method,
+            event.payload,
+            recorded_at=recorded_at,
+            event_seq=event_seq,
+        )
+
+    def _discard_notification(event: Notification) -> None:
+        notification_order(event)
+
     final_turn: Turn | None = None
     interrupt_sent = False
-    with Codex(config=config) as codex:
-        # The Codex top-level class instantiates its own AppServerClient
-        # without an ``approval_handler`` argument, so the only way to wire
-        # an interactive callback is to swap the bound method on the client
-        # after construction. The SDK's default handler unconditionally
-        # rubber-stamps (and emits a wire string codex's ``ReviewDecision``
-        # enum no longer accepts), so we always install our own — either
-        # the interactive one that opens an ``ApprovalRequest`` row, or
-        # (only under ``approve_all``) a rubber-stamp that uses the
-        # correct ``approved`` wire value.
-        codex._client._approval_handler = _make_approval_handler(
-            instance=instance,
-            write_event=_write_event,
-            approval_mode=approval_mode,
-        )
-        resume_kwargs: dict[str, Any] = {}
-        if instance.developer_instructions:
-            resume_kwargs["developer_instructions"] = instance.developer_instructions
-        thread = codex.thread_resume(instance.thread_id, **resume_kwargs)
-        turn = _start_turn(
-            codex,
-            thread,
-            prompt=prompt,
-            effort=effort,
-            sandbox_policy=policy,
-            approval_mode=approval_mode,
-        )
-        # A Stop click that landed before the turn handle existed sets the
-        # flag without us being able to call interrupt yet; act on it now
-        # that the handle is ready.
-        if _cancel_requested and not interrupt_sent:
-            interrupt_sent = _try_interrupt(turn)
-        for event in turn.stream():
-            _write_event(event.method, event.payload)
-            payload = event.payload
-            if isinstance(payload, TurnCompletedNotification) and payload.turn.id == turn.id:
-                final_turn = payload.turn
+    goal_forwarder: threading.Thread | None = None
+    notification_order: NotificationOrdering = _fallback_notification_order
+    try:
+        with Codex(config=config) as codex:
+            notification_order = _install_notification_sequencer(codex)
+            # The Codex top-level class instantiates its own AppServerClient
+            # without an ``approval_handler`` argument, so the only way to wire
+            # an interactive callback is to swap the bound method on the client
+            # after construction. The SDK's default handler unconditionally
+            # rubber-stamps (and emits a wire string codex's ``ReviewDecision``
+            # enum no longer accepts), so we always install our own — either
+            # the interactive one that opens an ``ApprovalRequest`` row, or
+            # (only under ``approve_all``) a rubber-stamp that uses the
+            # correct ``approved`` wire value.
+            codex._client._approval_handler = _make_approval_handler(
+                instance=instance,
+                write_event=_write_event,
+                approval_mode=approval_mode,
+            )
+            goal_forwarder = _start_goal_event_forwarder(
+                codex._client,
+                thread_id=instance.thread_id,
+                write_notification=_write_notification,
+                discard_notification=_discard_notification,
+            )
+            resume_kwargs: dict[str, Any] = {}
+            if instance.developer_instructions:
+                resume_kwargs["developer_instructions"] = instance.developer_instructions
+            thread = codex.thread_resume(instance.thread_id, **resume_kwargs)
+            turn = _start_turn(
+                codex,
+                thread,
+                prompt=prompt,
+                effort=effort,
+                sandbox_policy=policy,
+                approval_mode=approval_mode,
+            )
+            # A Stop click that landed before the turn handle existed sets the
+            # flag without us being able to call interrupt yet; act on it now
+            # that the handle is ready.
             if _cancel_requested and not interrupt_sent:
-                # SDK-level interrupt is the graceful cancellation path:
-                # the app-server stops the model, emits the remaining
-                # events (including a turn/completed with status=interrupted),
-                # and the worker's normal status-update code at the end
-                # records that as a failed turn. SIGKILL is the next
-                # escalation if the user clicks Stop again.
                 interrupt_sent = _try_interrupt(turn)
+            for event in turn.stream():
+                _write_notification(event)
+                payload = event.payload
+                if isinstance(payload, TurnCompletedNotification) and payload.turn.id == turn.id:
+                    final_turn = payload.turn
+                if _cancel_requested and not interrupt_sent:
+                    # SDK-level interrupt is the graceful cancellation path:
+                    # the app-server stops the model, emits the remaining
+                    # events (including a turn/completed with status=interrupted),
+                    # and the worker's normal status-update code at the end
+                    # records that as a failed turn. SIGKILL is the next
+                    # escalation if the user clicks Stop again.
+                    interrupt_sent = _try_interrupt(turn)
+    finally:
+        if goal_forwarder is not None:
+            goal_forwarder.join(timeout=0.5)
     return final_turn
 
 
@@ -372,17 +414,140 @@ def _build_approval_mode(value: str | None) -> ApprovalMode | None:
         return None
 
 
-def _serialize_event(method: str, payload: Any) -> str:
+def _serialize_event(
+    method: str,
+    payload: Any,
+    *,
+    recorded_at: int | None = None,
+    event_seq: int | None = None,
+) -> str:
     if isinstance(payload, BaseModel):
         payload_data: Any = payload.model_dump(mode="json", by_alias=True)
     elif dataclasses.is_dataclass(payload) and not isinstance(payload, type):
         payload_data = dataclasses.asdict(payload)
     else:
         payload_data = payload
-    return json.dumps({"method": method, "payload": payload_data})
+    event: dict[str, Any] = {"method": method, "payload": payload_data}
+    if recorded_at is not None:
+        event["recordedAt"] = recorded_at
+    if event_seq is not None:
+        event["eventSeq"] = event_seq
+    return json.dumps(event)
 
 
 WriteEvent = Callable[[str, Any], None]
+WriteNotification = Callable[[Notification], None]
+DiscardNotification = Callable[[Notification], None]
+NotificationOrder = tuple[int, int]
+NotificationOrdering = Callable[[Notification], NotificationOrder]
+
+
+class _NotificationSource(Protocol):
+    def next_notification(self) -> Notification: ...
+
+
+def _fallback_notification_order(_event: Notification) -> NotificationOrder:
+    return (time.time_ns() // 1_000, 0)
+
+
+def _install_notification_sequencer(codex: Codex) -> NotificationOrdering:
+    """Tag SDK notifications in reader-thread arrival order before routing.
+
+    The SDK splits notifications into turn-specific and global queues. Hitch
+    consumes those queues from separate threads, so write time cannot be used
+    to recover the original arrival order later. Recording the timestamp and
+    sequence at the router boundary preserves that order across the split.
+    """
+    lock = threading.Lock()
+    counter = itertools.count(1)
+    order_by_id: dict[int, NotificationOrder] = {}
+    last_recorded_at = 0
+    router = codex._client._router
+    route_notification = router.route_notification
+
+    def next_order() -> NotificationOrder:
+        nonlocal last_recorded_at
+        recorded_at = max(time.time_ns() // 1_000, last_recorded_at)
+        last_recorded_at = recorded_at
+        return (recorded_at, next(counter))
+
+    def ordered_route(notification: Notification) -> None:
+        with lock:
+            order_by_id[id(notification)] = next_order()
+        route_notification(notification)
+
+    def notification_order(notification: Notification) -> NotificationOrder:
+        with lock:
+            order = order_by_id.pop(id(notification), None)
+            if order is None:
+                order = next_order()
+        return order
+
+    router.route_notification = ordered_route  # type: ignore[method-assign]
+    return notification_order
+
+
+def _start_goal_event_forwarder(
+    source: _NotificationSource,
+    *,
+    thread_id: str,
+    write_notification: WriteNotification,
+    discard_notification: DiscardNotification,
+) -> threading.Thread:
+    """Forward global thread-goal notifications into the worker event log."""
+    thread = threading.Thread(
+        target=_forward_goal_notifications,
+        kwargs={
+            "source": source,
+            "thread_id": thread_id,
+            "write_notification": write_notification,
+            "discard_notification": discard_notification,
+        },
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def _forward_goal_notifications(
+    *,
+    source: _NotificationSource,
+    thread_id: str,
+    write_notification: WriteNotification,
+    discard_notification: DiscardNotification,
+) -> None:
+    """Drain global notifications until the SDK transport closes.
+
+    ``TurnHandle.stream()`` only yields notifications routed to the active
+    turn. ``thread/goal/cleared`` has no turn id, and ``thread/goal/updated``
+    may also be global, so those events need this side drain to reach the
+    same SSE log as turn-scoped events.
+    """
+    while True:
+        try:
+            event = source.next_notification()
+        except Exception:
+            return
+        if not isinstance(event, Notification):
+            return
+        if event.method not in GOAL_METHODS:
+            discard_notification(event)
+            continue
+        if _notification_thread_id(event.payload) != thread_id:
+            discard_notification(event)
+            continue
+        write_notification(event)
+
+
+def _notification_thread_id(payload: Any) -> str | None:
+    thread_id = getattr(payload, "thread_id", None)
+    if isinstance(thread_id, str):
+        return thread_id
+    if isinstance(payload, dict):
+        raw = payload.get("threadId") or payload.get("thread_id")
+        if isinstance(raw, str):
+            return raw
+    return None
 
 
 def _make_approval_handler(

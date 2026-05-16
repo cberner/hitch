@@ -611,11 +611,23 @@
             gap: 0.5rem;
             align-items: flex-end;
         }
+        .live-work {
+            position: fixed;
+            left: 50%;
+            bottom: calc(5rem + var(--safe-bottom));
+            transform: translateX(-50%);
+            z-index: 24;
+            width: min(820px, calc(100vw - 2rem));
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            pointer-events: none;
+        }
+        .live-work[data-state="idle"] { display: none; }
         .live-status {
             display: inline-flex;
             align-items: center;
             gap: 0.45rem;
-            margin-top: 0.5rem;
             padding: 0.35rem 0.65rem;
             background: var(--surface-2);
             border: 1px solid var(--border);
@@ -623,6 +635,8 @@
             font-size: 0.78rem;
             color: var(--text-muted);
             font-weight: 500;
+            flex: 0 0 auto;
+            pointer-events: auto;
             transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
         }
         .live-status::before {
@@ -646,6 +660,37 @@
             background: var(--danger);
             box-shadow: none;
             animation: none;
+        }
+        .live-goal {
+            min-width: 0;
+            max-width: 100%;
+            display: inline-flex;
+            align-items: baseline;
+            gap: 0.4rem;
+            padding: 0.35rem 0.65rem;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            background: color-mix(in srgb, var(--surface-2) 92%, transparent);
+            color: var(--text-muted);
+            font-size: 0.78rem;
+            box-shadow: var(--shadow);
+            flex: 1 1 auto;
+            pointer-events: auto;
+        }
+        .live-goal[hidden] { display: none; }
+        .live-goal-label {
+            color: var(--text-faint);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-size: 0.66rem;
+            font-weight: 700;
+            flex: 0 0 auto;
+        }
+        .live-goal-text {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
         @keyframes live-pulse {
             0% { box-shadow: 0 0 0 0 var(--accent-soft); }
@@ -1055,6 +1100,14 @@
             details.intermediate > summary { padding: 0.6rem 0.85rem; }
             details.intermediate .intermediate-body { padding: 0.65rem 0.75rem; }
             .meta code { max-width: 12rem; }
+            .live-work {
+                bottom: calc(4.8rem + var(--safe-bottom));
+                width: calc(100vw - 1rem);
+                flex-wrap: wrap;
+            }
+            .live-goal {
+                flex: 1 1 100%;
+            }
             .composer-inner { padding: 0.6rem 0.7rem; }
             .diff-fab {
                 right: 0.75rem;
@@ -1163,7 +1216,13 @@
             <p>No messages in this session yet.</p>
         </div>
         {% endif %}
-        <span class="live-status" data-live-status data-state="{% if active_worker %}working{% else %}idle{% endif %}" role="status" aria-live="polite">{% if active_worker %}Codex is working…{% else %}Connected{% endif %}</span>
+        <div class="live-work" data-live-work data-state="{% if active_worker %}working{% else %}idle{% endif %}">
+            <span class="live-status" data-live-status data-state="{% if active_worker %}working{% else %}idle{% endif %}" role="status" aria-live="polite">{% if active_worker %}Codex is working…{% else %}Connected{% endif %}</span>
+            <span class="live-goal" data-live-goal {% if not active_worker or not goal_objective %}hidden{% endif %}>
+                <span class="live-goal-label">Goal</span>
+                <span class="live-goal-text" data-live-goal-text>{{ goal_objective }}</span>
+            </span>
+        </div>
     </main>
 
     {% if diff_view.has_changes and not active_worker %}
@@ -1390,10 +1449,11 @@
     <script>
         // Subscribe to the session SSE feed.
         //
-        // The live-status pill (always rendered above the composer) shows
-        // the live stream's state: pulsing green "Codex is working…" while
-        // a turn is in progress, hidden when connected and idle, red
-        // "Connection lost" if heartbeats stop arriving. The server emits
+        // The live work strip (fixed above the composer) shows the live
+        // stream's state: pulsing green "Codex is working…" while a turn is
+        // in progress, hidden when connected and idle, red "Connection lost"
+        // if heartbeats stop arriving. Goal notifications update the adjacent
+        // chip with Codex's current high-level objective. The server emits
         // a named ``heartbeat`` event every few seconds carrying
         // ``{working: bool}`` so the pill can stay accurate without
         // inferring state from item events alone, and a JS-side timer
@@ -1406,6 +1466,9 @@
         (function () {
             const composer = document.querySelector("[data-composer]");
             const indicator = document.querySelector("[data-live-status]");
+            const liveWork = document.querySelector("[data-live-work]");
+            const liveGoal = document.querySelector("[data-live-goal]");
+            const liveGoalText = document.querySelector("[data-live-goal-text]");
             const streamUrl = composer && composer.dataset.streamUrl;
             if (!streamUrl || !indicator) return;
 
@@ -1427,6 +1490,7 @@
                 if (state === connState) return;
                 connState = state;
                 indicator.dataset.state = state;
+                if (liveWork) liveWork.dataset.state = state;
                 indicator.textContent = STATE_TEXT[state];
             };
             const bump = () => { lastFrame = Date.now(); };
@@ -1542,6 +1606,7 @@
             // ``approval/resolved`` event can find and finalize the matching
             // node without re-rendering the whole turn.
             const approvals = new Map();
+            let latestGoalOrder = [0, 0];
 
             const APPROVAL_LABELS = {
                 "item/commandExecution/requestApproval": "Run command?",
@@ -1737,6 +1802,42 @@
                 return null;
             }
 
+            function setGoal(objective) {
+                if (!liveGoal || !liveGoalText) return;
+                const text = typeof objective === "string" ? objective.trim() : "";
+                liveGoalText.textContent = text;
+                liveGoal.hidden = !text;
+            }
+
+            function eventOrder(event) {
+                return [
+                    Number.isSafeInteger(event.recordedAt) ? event.recordedAt : 0,
+                    Number.isSafeInteger(event.eventSeq) ? event.eventSeq : 0,
+                ];
+            }
+
+            function applyGoalOrder(order) {
+                if (
+                    order[0] < latestGoalOrder[0]
+                    || (order[0] === latestGoalOrder[0] && order[1] < latestGoalOrder[1])
+                ) {
+                    return false;
+                }
+                latestGoalOrder = order;
+                return true;
+            }
+
+            function handleGoalUpdated(payload, order) {
+                if (!applyGoalOrder(order)) return;
+                const goal = (payload && payload.goal) || {};
+                setGoal(goal.objective || "");
+            }
+
+            function handleGoalCleared(order) {
+                if (!applyGoalOrder(order)) return;
+                setGoal("");
+            }
+
             function handleApprovalRequested(payload) {
                 ensureNoEmpty();
                 const id = payload.id;
@@ -1846,10 +1947,13 @@
                 try { parsed = JSON.parse(event.data); } catch { return; }
                 const method = parsed.method;
                 const payload = parsed.payload || {};
+                const order = eventOrder(parsed);
                 switch (method) {
                     case "item/started": handleItemStarted(payload); break;
                     case "item/agentMessage/delta": handleAgentDelta(payload); break;
                     case "item/completed": handleItemCompleted(payload); break;
+                    case "thread/goal/updated": handleGoalUpdated(payload, order); break;
+                    case "thread/goal/cleared": handleGoalCleared(order); break;
                     case "approval/requested": handleApprovalRequested(payload); break;
                     case "approval/resolved": handleApprovalResolved(payload); break;
                 }
