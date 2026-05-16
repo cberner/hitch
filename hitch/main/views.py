@@ -4,9 +4,12 @@ import logging
 import shutil
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urlencode
 
+from django.contrib.auth import login as auth_login
+from django.contrib.auth import logout as auth_logout
+from django.contrib.auth.forms import AuthenticationForm, UserCreationForm
 from django.http import (
     HttpRequest,
     HttpResponse,
@@ -16,6 +19,7 @@ from django.http import (
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_http_methods
 from openai_codex import AppServerConfig, AppServerError, Codex
 from openai_codex.generated.v2_all import (
@@ -27,10 +31,19 @@ from openai_codex.generated.v2_all import (
 from hitch.main import codex_pool, rollout, streaming
 from hitch.main.diffs import build_worktree_diff
 from hitch.main.formatting import looks_like_markdown, render_markdown
-from hitch.main.models import ApprovalRequest, CodexInstance
+from hitch.main.models import ApprovalRequest, CodexInstance, UserSettings
 from hitch.main.repos import discover_repos
 
 logger = logging.getLogger(__name__)
+
+
+class SettingsValues(NamedTuple):
+    model: str
+    reasoning_effort: str
+    sandbox_policy: str
+    approval_mode: str
+    extra_system_prompt: str
+    show_archived_sessions: bool
 
 # Sandbox-policy variants offered in the settings dialog. Stored as the
 # SandboxPolicy ``type`` discriminator string so the cookie value can map
@@ -189,6 +202,9 @@ def index(request: HttpRequest) -> HttpResponse:
             "repos": repos,
             "new_session_url": reverse("new_session"),
             "settings_url": reverse("update_settings"),
+            "login_url": reverse("login"),
+            "logout_url": reverse("logout"),
+            "register_url": reverse("register"),
             "model_options": model_options,
             "effort_options": effort_options,
             "sandbox_options": sandbox_options,
@@ -275,6 +291,71 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             "diff_view": diff_view,
         },
     )
+
+
+@require_http_methods(["GET", "POST"])
+def register(request: HttpRequest) -> HttpResponse:
+    if _authenticated_user(request) is not None:
+        return redirect("index")
+    form: Any
+    if request.method == "POST":
+        form = UserCreationForm(request.POST)
+        if form.is_valid():
+            user = form.save()
+            _import_cookie_settings_to_user(request, user)
+            auth_login(request, user)
+            response = redirect("index")
+            _apply_cookie_updates(
+                response, _settings_cookie_updates(_stored_settings(request))
+            )
+            return response
+    else:
+        form = UserCreationForm()
+    return render(
+        request,
+        "register.html",
+        {"form": form, "login_url": reverse("login")},
+    )
+
+
+@require_http_methods(["GET", "POST"])
+def login(request: HttpRequest) -> HttpResponse:
+    if _authenticated_user(request) is not None:
+        return redirect("index")
+    next_url = _safe_next_url(request)
+    form: Any
+    if request.method == "POST":
+        form = AuthenticationForm(request, data=request.POST)
+        if form.is_valid():
+            user = form.get_user()
+            _import_cookie_settings_to_user(request, user)
+            auth_login(request, user)
+            response = redirect(next_url or "index")
+            _apply_cookie_updates(
+                response, _settings_cookie_updates(_stored_settings(request))
+            )
+            return response
+    else:
+        form = AuthenticationForm(request)
+    return render(
+        request,
+        "login.html",
+        {
+            "form": form,
+            "next": next_url,
+            "register_url": reverse("register"),
+        },
+    )
+
+
+@require_http_methods(["POST"])
+def logout(request: HttpRequest) -> HttpResponse:
+    values = _stored_settings(request) if _authenticated_user(request) is not None else None
+    auth_logout(request)
+    response = redirect("index")
+    if values is not None:
+        _apply_cookie_updates(response, _settings_cookie_updates(values))
+    return response
 
 
 def _thread_is_archived(thread: Any) -> bool:
@@ -506,7 +587,7 @@ def _entries_from_rollout(thread: Any) -> list[dict[str, Any]] | None:
 def _resolved_settings(
     request: HttpRequest, models_data: list[Any]
 ) -> tuple[str, str, str, str, str, bool, dict[str, str]]:
-    """Read the dialog state from cookies and reconcile against Codex.
+    """Read the dialog state from storage and reconcile against Codex.
 
     Returns ``(model, effort, sandbox_policy, approval_mode,
     extra_system_prompt, show_archived_sessions, cookie_updates)``.
@@ -523,8 +604,12 @@ def _resolved_settings(
          saved effort no longer fits → snap effort to that model's
          default while leaving the model alone.
 
-    Empty ``models_data`` (transport hiccup, mock in tests) means we
-    can't validate; return the saved values untouched with no updates.
+    Authenticated users read from ``UserSettings`` and get a full cookie
+    mirror back on each resolution. Anonymous users continue to read and
+    write the signed cookies directly.
+
+    Empty ``models_data`` (transport hiccup, mock in tests) means we can't
+    validate model compatibility; return the saved values untouched.
 
     Sandbox is validated against our own static enum rather than Codex's
     model list (it's not a model-scoped setting), so a tampered/legacy
@@ -535,64 +620,175 @@ def _resolved_settings(
     reviewer in the loop) when the cookie is missing or invalid, so the
     UI is never left in an ambiguous "no policy picked" state.
     """
-    saved_model = _read_cookie(request, _MODEL_COOKIE)
-    saved_effort = _read_cookie(request, _EFFORT_COOKIE)
-    saved_sandbox = _read_cookie(request, _SANDBOX_COOKIE)
-    saved_approval = _read_cookie(request, _APPROVAL_COOKIE)
-    saved_extra_system_prompt = _read_extra_system_prompt_cookie(request)
-    show_archived_sessions = _read_cookie(request, _SHOW_ARCHIVED_COOKIE) == "true"
+    saved = _stored_settings(request)
+    saved_sandbox = saved.sandbox_policy
+    saved_approval = saved.approval_mode
     if saved_sandbox and saved_sandbox not in _VALID_SANDBOX_POLICIES:
         saved_sandbox = ""
     if saved_approval not in _VALID_APPROVAL_MODES:
         saved_approval = _DEFAULT_APPROVAL_MODE
+    saved = saved._replace(
+        sandbox_policy=saved_sandbox,
+        approval_mode=saved_approval,
+    )
     if not models_data:
-        return (
-            saved_model,
-            saved_effort,
-            saved_sandbox,
-            saved_approval,
-            saved_extra_system_prompt,
-            show_archived_sessions,
-            {},
-        )
+        return _resolved_settings_result(request, saved, {})
 
     valid_ids = {m.id for m in models_data}
-    if saved_model and saved_model in valid_ids:
-        model_obj = next(m for m in models_data if m.id == saved_model)
-        if saved_effort:
+    if saved.model and saved.model in valid_ids:
+        model_obj = next(m for m in models_data if m.id == saved.model)
+        if saved.reasoning_effort:
             supported = _supported_effort_values(model_obj)
-            if supported and saved_effort not in supported:
+            if supported and saved.reasoning_effort not in supported:
                 new_effort = _model_default_effort(model_obj)
-                return (
-                    saved_model,
-                    new_effort,
-                    saved_sandbox,
-                    saved_approval,
-                    saved_extra_system_prompt,
-                    show_archived_sessions,
+                return _resolved_settings_result(
+                    request,
+                    saved._replace(reasoning_effort=new_effort),
                     {_EFFORT_COOKIE: new_effort},
                 )
-        return (
-            saved_model,
-            saved_effort,
-            saved_sandbox,
-            saved_approval,
-            saved_extra_system_prompt,
-            show_archived_sessions,
-            {},
-        )
+        return _resolved_settings_result(request, saved, {})
 
     default_model = next((m for m in models_data if m.is_default), models_data[0])
     new_effort = _model_default_effort(default_model)
-    return (
-        default_model.id,
-        new_effort,
-        saved_sandbox,
-        saved_approval,
-        saved_extra_system_prompt,
-        show_archived_sessions,
+    return _resolved_settings_result(
+        request,
+        saved._replace(model=default_model.id, reasoning_effort=new_effort),
         {_MODEL_COOKIE: default_model.id, _EFFORT_COOKIE: new_effort},
     )
+
+
+def _resolved_settings_result(
+    request: HttpRequest, values: SettingsValues, cookie_updates: dict[str, str]
+) -> tuple[str, str, str, str, str, bool, dict[str, str]]:
+    user = _authenticated_user(request)
+    if user is not None:
+        _save_user_settings(user, values)
+        cookie_updates = _settings_cookie_updates(values)
+    return (
+        values.model,
+        values.reasoning_effort,
+        values.sandbox_policy,
+        values.approval_mode,
+        values.extra_system_prompt,
+        values.show_archived_sessions,
+        cookie_updates,
+    )
+
+
+def _authenticated_user(request: HttpRequest) -> Any | None:
+    user = request.user
+    return user if user.is_authenticated else None
+
+
+def _stored_settings(request: HttpRequest) -> SettingsValues:
+    user = _authenticated_user(request)
+    if user is not None:
+        return _settings_values_for_user(_settings_for_user(user))
+    return SettingsValues(
+        model=_read_cookie(request, _MODEL_COOKIE),
+        reasoning_effort=_read_cookie(request, _EFFORT_COOKIE),
+        sandbox_policy=_read_cookie(request, _SANDBOX_COOKIE),
+        approval_mode=_read_cookie(request, _APPROVAL_COOKIE),
+        extra_system_prompt=_read_extra_system_prompt_cookie(request),
+        show_archived_sessions=_read_cookie(request, _SHOW_ARCHIVED_COOKIE) == "true",
+    )
+
+
+def _settings_for_user(user: Any) -> UserSettings:
+    settings, _created = UserSettings.objects.get_or_create(user=user)
+    return settings
+
+
+def _settings_values_for_user(settings: UserSettings) -> SettingsValues:
+    return SettingsValues(
+        model=settings.model,
+        reasoning_effort=settings.reasoning_effort,
+        sandbox_policy=settings.sandbox_policy,
+        approval_mode=settings.approval_mode,
+        extra_system_prompt=settings.extra_system_prompt,
+        show_archived_sessions=settings.show_archived_sessions,
+    )
+
+
+def _save_user_settings(user: Any, values: SettingsValues) -> UserSettings:
+    settings = _settings_for_user(user)
+    updates: list[str] = []
+    for field, value in (
+        ("model", values.model),
+        ("reasoning_effort", values.reasoning_effort),
+        ("sandbox_policy", values.sandbox_policy),
+        ("approval_mode", values.approval_mode),
+        ("extra_system_prompt", values.extra_system_prompt),
+        ("show_archived_sessions", values.show_archived_sessions),
+    ):
+        if getattr(settings, field) != value:
+            setattr(settings, field, value)
+            updates.append(field)
+    if updates:
+        settings.save(update_fields=[*updates, "updated_at"])
+    return settings
+
+
+def _settings_cookie_updates(values: SettingsValues) -> dict[str, str]:
+    return {
+        _MODEL_COOKIE: values.model,
+        _EFFORT_COOKIE: values.reasoning_effort,
+        _SANDBOX_COOKIE: values.sandbox_policy,
+        _APPROVAL_COOKIE: values.approval_mode,
+        _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt_cookie(
+            values.extra_system_prompt
+        ),
+        _SHOW_ARCHIVED_COOKIE: "true" if values.show_archived_sessions else "false",
+    }
+
+
+def _import_cookie_settings_to_user(request: HttpRequest, user: Any) -> UserSettings:
+    settings = _settings_for_user(user)
+    updates: list[str] = []
+    for field, value in _valid_cookie_setting_updates(request).items():
+        if getattr(settings, field) != value:
+            setattr(settings, field, value)
+            updates.append(field)
+    if updates:
+        settings.save(update_fields=[*updates, "updated_at"])
+    return settings
+
+
+def _valid_cookie_setting_updates(request: HttpRequest) -> dict[str, str | bool]:
+    updates: dict[str, str | bool] = {}
+    model = _read_signed_cookie_if_present(request, _MODEL_COOKIE)
+    if model is not None and len(model) <= _MODEL_MAX_LEN:
+        updates["model"] = model
+    effort = _read_signed_cookie_if_present(request, _EFFORT_COOKIE)
+    if effort is not None and (not effort or effort in {e.value for e in ReasoningEffort}):
+        updates["reasoning_effort"] = effort
+    sandbox = _read_signed_cookie_if_present(request, _SANDBOX_COOKIE)
+    if sandbox is not None:
+        updates["sandbox_policy"] = sandbox if sandbox in _VALID_SANDBOX_POLICIES else ""
+    approval = _read_signed_cookie_if_present(request, _APPROVAL_COOKIE)
+    if approval is not None:
+        updates["approval_mode"] = (
+            approval if approval in _VALID_APPROVAL_MODES else _DEFAULT_APPROVAL_MODE
+        )
+    extra_prompt = _read_signed_cookie_if_present(request, _EXTRA_SYSTEM_PROMPT_COOKIE)
+    if extra_prompt is not None:
+        decoded = _decode_extra_system_prompt_value(extra_prompt)
+        if len(decoded) <= _EXTRA_SYSTEM_PROMPT_MAX_LEN:
+            updates["extra_system_prompt"] = decoded
+    show_archived = _read_signed_cookie_if_present(request, _SHOW_ARCHIVED_COOKIE)
+    if show_archived in {"true", "false"}:
+        updates["show_archived_sessions"] = show_archived == "true"
+    return updates
+
+
+def _read_signed_cookie_if_present(request: HttpRequest, name: str) -> str | None:
+    if name not in request.COOKIES:
+        return None
+    try:
+        value = request.get_signed_cookie(name)
+    except Exception:
+        return None
+    return (value or "").strip()
 
 
 def _read_cookie(request: HttpRequest, name: str) -> str:
@@ -613,6 +809,10 @@ def _read_extra_system_prompt_cookie(request: HttpRequest) -> str:
     encoded = _read_cookie(request, _EXTRA_SYSTEM_PROMPT_COOKIE)
     if not encoded:
         return ""
+    return _decode_extra_system_prompt_value(encoded)
+
+
+def _decode_extra_system_prompt_value(encoded: str) -> str:
     try:
         decoded = base64.urlsafe_b64decode(encoded.encode("ascii")).decode()
     except (binascii.Error, UnicodeDecodeError, ValueError):
@@ -632,6 +832,21 @@ def _apply_cookie_updates(response: HttpResponse, updates: dict[str, str]) -> No
         response.set_signed_cookie(
             name, value, max_age=_COOKIE_MAX_AGE, samesite="Lax"
         )
+
+
+def _safe_next_url(request: HttpRequest) -> str:
+    candidate = request.POST.get("next", "").strip() or request.GET.get(
+        "next", ""
+    ).strip()
+    if not candidate:
+        return ""
+    if url_has_allowed_host_and_scheme(
+        candidate,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure(),
+    ):
+        return candidate
+    return ""
 
 
 def _fetch_rate_limits(codex: Codex) -> dict[str, Any] | None:
@@ -756,20 +971,19 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         compat_error = _validate_settings_against_models(model, effort, models_data)
         if compat_error:
             return HttpResponseBadRequest(compat_error)
-    response = redirect("index")
-    _apply_cookie_updates(
-        response,
-        {
-            _MODEL_COOKIE: model,
-            _EFFORT_COOKIE: effort,
-            _SANDBOX_COOKIE: sandbox,
-            _APPROVAL_COOKIE: approval,
-            _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt_cookie(
-                extra_system_prompt
-            ),
-            _SHOW_ARCHIVED_COOKIE: show_archived,
-        },
+    values = SettingsValues(
+        model=model,
+        reasoning_effort=effort,
+        sandbox_policy=sandbox,
+        approval_mode=approval,
+        extra_system_prompt=extra_system_prompt,
+        show_archived_sessions=show_archived == "true",
     )
+    user = _authenticated_user(request)
+    if user is not None:
+        _save_user_settings(user, values)
+    response = redirect("index")
+    _apply_cookie_updates(response, _settings_cookie_updates(values))
     return response
 
 
@@ -863,10 +1077,11 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     # the cookies or every turn after the first silently reverts to Codex
     # defaults — which breaks multi-turn workflows that depend on
     # elevated permissions or stricter escalation handling.
-    sandbox_policy = _read_cookie(request, _SANDBOX_COOKIE)
+    settings = _stored_settings(request)
+    sandbox_policy = settings.sandbox_policy
     if sandbox_policy and sandbox_policy not in _VALID_SANDBOX_POLICIES:
         sandbox_policy = ""
-    approval_mode = _read_cookie(request, _APPROVAL_COOKIE)
+    approval_mode = settings.approval_mode
     if approval_mode not in _VALID_APPROVAL_MODES:
         approval_mode = _DEFAULT_APPROVAL_MODE
     codex_pool.spawn_turn(
