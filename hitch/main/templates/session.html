@@ -652,6 +652,31 @@
             70% { box-shadow: 0 0 0 8px transparent; }
             100% { box-shadow: 0 0 0 0 transparent; }
         }
+        .jump-latest {
+            position: fixed;
+            right: max(1rem, env(safe-area-inset-right, 0px));
+            bottom: calc(5.9rem + var(--safe-bottom));
+            z-index: 25;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 2.65rem;
+            height: 2.65rem;
+            border: 1px solid var(--accent);
+            border-radius: 999px;
+            background: var(--accent);
+            color: var(--accent-fg);
+            box-shadow: var(--shadow-lg);
+            font: inherit;
+            font-size: 1.25rem;
+            line-height: 1;
+            cursor: pointer;
+        }
+        .jump-latest:hover {
+            background: var(--accent-hover);
+            border-color: var(--accent-hover);
+        }
+        .jump-latest[hidden] { display: none; }
         .composer textarea {
             flex: 1;
             font: inherit;
@@ -1035,6 +1060,10 @@
                 right: 0.75rem;
                 bottom: calc(5.4rem + var(--safe-bottom));
             }
+            .jump-latest {
+                right: 0.75rem;
+                bottom: calc(5.4rem + var(--safe-bottom));
+            }
             .diff-modal { width: calc(100vw - 0.75rem); }
             .diff-layout { grid-template-columns: 1fr; }
             .diff-file-nav {
@@ -1142,6 +1171,10 @@
         <span>Diff</span>
         <span class="diff-fab-count">{{ diff_view.file_count }}</span>
     </button>
+    {% endif %}
+
+    {% if active_worker %}
+    <button type="button" class="jump-latest" data-jump-latest aria-label="Jump to latest message" hidden>↓</button>
     {% endif %}
 
     {% if diff_view.has_changes %}
@@ -1395,6 +1428,69 @@
                 ? liveRoot.dataset.approvalUrlTemplate || ""
                 : "";
             const empty = document.querySelector(".empty-thread");
+            const jumpLatest = document.querySelector("[data-jump-latest]");
+            const scrollRoot = document.scrollingElement || document.documentElement;
+            const FOLLOW_MARGIN = 96;
+            let followLatest = !!liveRoot;
+            let lastScrollY = window.scrollY;
+            let followFrame = 0;
+
+            function distanceFromBottom() {
+                return scrollRoot.scrollHeight - window.innerHeight - window.scrollY;
+            }
+
+            function nearBottom() {
+                return distanceFromBottom() <= FOLLOW_MARGIN;
+            }
+
+            function syncJumpButton() {
+                if (!jumpLatest) return;
+                jumpLatest.hidden = followLatest;
+            }
+
+            function scrollToLatest(smooth) {
+                window.scrollTo({
+                    top: scrollRoot.scrollHeight,
+                    behavior: smooth ? "smooth" : "auto",
+                });
+                syncJumpButton();
+            }
+
+            function followRenderedContent() {
+                if (!followLatest || !liveRoot) {
+                    syncJumpButton();
+                    return;
+                }
+                if (followFrame) cancelAnimationFrame(followFrame);
+                followFrame = requestAnimationFrame(() => {
+                    followFrame = 0;
+                    if (followLatest) {
+                        scrollToLatest(false);
+                    } else {
+                        syncJumpButton();
+                    }
+                });
+            }
+
+            if (liveRoot) {
+                requestAnimationFrame(() => scrollToLatest(false));
+            }
+            window.addEventListener("scroll", () => {
+                const currentY = window.scrollY;
+                if (currentY < lastScrollY - 4) {
+                    followLatest = false;
+                } else if (nearBottom()) {
+                    followLatest = true;
+                }
+                lastScrollY = currentY;
+                syncJumpButton();
+            }, { passive: true });
+            if (jumpLatest) {
+                jumpLatest.addEventListener("click", () => {
+                    followLatest = true;
+                    scrollToLatest(true);
+                });
+            }
 
             // Per-item DOM trackers. Items are keyed by the server-assigned
             // item id; for agent messages we keep a reference to the body
@@ -1479,6 +1575,7 @@
                 wrap.appendChild(msg);
                 insertBeforeLive(wrap);
                 items.set(item.id, { kind: "user", node: wrap });
+                followRenderedContent();
             }
 
             function userMessageText(item) {
@@ -1516,6 +1613,7 @@
                 wrap.appendChild(msg);
                 insertBeforeLive(wrap);
                 items.set(item.id, { kind: "agent", node: wrap, body, message: msg });
+                followRenderedContent();
             }
 
             function renderToolCallItem(item) {
@@ -1539,6 +1637,7 @@
                 wrap.appendChild(row);
                 insertBeforeLive(wrap);
                 items.set(item.id, { kind: "tool", node: wrap, statusNode: status, detail });
+                followRenderedContent();
             }
 
             function toolDetail(item) {
@@ -1572,6 +1671,7 @@
                 const entry = items.get(payload.itemId);
                 if (!entry || entry.kind !== "agent") return;
                 entry.body.textContent += payload.delta || "";
+                followRenderedContent();
             }
 
             function handleItemCompleted(payload) {
@@ -1592,6 +1692,7 @@
                         const role = entry.node.querySelector(".role");
                         if (role) role.textContent = "Agent (thinking)";
                     }
+                    followRenderedContent();
                     return;
                 }
                 if (entry.kind === "tool" && entry.statusNode) {
@@ -1607,6 +1708,7 @@
                     const detail = toolDetail(item);
                     if (detail && entry.detail) entry.detail.textContent = detail;
                 }
+                followRenderedContent();
             }
 
             function readStatus(item) {
@@ -1651,6 +1753,7 @@
                 wrap.appendChild(box);
                 insertBeforeLive(wrap);
                 approvals.set(id, { node: wrap, box, actions });
+                followRenderedContent();
             }
 
             function submitApproval(id, decision) {
@@ -1707,6 +1810,7 @@
                 note.className = "approval-resolution";
                 note.textContent = "Decision: " + (payload.decision || "denied");
                 entry.box.appendChild(note);
+                followRenderedContent();
             }
 
             const source = new EventSource(streamUrl);

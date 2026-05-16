@@ -1044,6 +1044,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, 'data-state="idle"')
         self.assertContains(response, ">Connected</span>")
         self.assertNotContains(response, ">Codex is working")
+        self.assertNotContains(response, 'class="jump-latest" data-jump-latest')
 
     @patch("hitch.main.views.build_worktree_diff")
     @patch("hitch.main.views.Codex")
@@ -1067,6 +1068,8 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "data-live-status")
         self.assertContains(response, 'data-state="working"')
         self.assertContains(response, ">Codex is working")
+        self.assertContains(response, 'class="jump-latest" data-jump-latest')
+        self.assertContains(response, 'aria-label="Jump to latest message"')
         self.assertContains(response, '<dialog class="diff-modal"', html=False)
         self.assertNotContains(response, 'class="diff-fab"')
 
