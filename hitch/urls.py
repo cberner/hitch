@@ -7,6 +7,9 @@ import hitch.main.views
 
 urlpatterns = [
     path("", hitch.main.views.index, name="index"),
+    path("register/", hitch.main.views.register, name="register"),
+    path("login/", hitch.main.views.login, name="login"),
+    path("logout/", hitch.main.views.logout, name="logout"),
     path("settings/", hitch.main.views.update_settings, name="update_settings"),
     path("sessions/new/", hitch.main.views.new_session, name="new_session"),
     path("sessions/<str:session_id>/", hitch.main.views.session, name="session"),

@@ -89,6 +89,18 @@
             align-items: center;
             gap: 0.5rem;
         }
+        .logout-form {
+            margin: 0;
+            display: inline-flex;
+        }
+        .account-label {
+            max-width: 12rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 0.82rem;
+            color: var(--text-muted);
+        }
         .icon-button {
             font: inherit;
             background: transparent;
@@ -360,6 +372,12 @@
         @media (max-width: 640px) {
             .fab { display: inline-flex; }
             .topbar-action { display: none; }
+            .account-label { display: none; }
+            .account-action {
+                min-height: 34px;
+                padding: 0.35rem 0.7rem;
+                font-size: 0.82rem;
+            }
         }
 
         dialog.new-session {
@@ -541,6 +559,16 @@
         <div class="topbar-inner">
             <h1 class="brand">HITCH</h1>
             <div class="topbar-actions">
+                {% if user.is_authenticated %}
+                <span class="account-label" title="{{ user.get_username }}">{{ user.get_username }}</span>
+                <form class="logout-form" method="post" action="{{ logout_url }}">
+                    {% csrf_token %}
+                    <button type="submit" class="button secondary account-action">Log out</button>
+                </form>
+                {% else %}
+                <a class="button secondary account-action" href="{{ login_url }}">Log in</a>
+                <a class="button account-action" href="{{ register_url }}">Register</a>
+                {% endif %}
                 <button type="button" class="button topbar-action" data-new-session-open>
                     <span class="plus">+</span>New session
                 </button>

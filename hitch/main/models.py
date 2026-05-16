@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from typing import override
 
+from django.conf import settings
 from django.db import models
 
 
@@ -132,3 +133,22 @@ class ApprovalRequest(models.Model):
             f"ApprovalRequest(pk={self.pk}, instance={self.instance_id}, "
             f"method={self.method}, decision={decision})"
         )
+
+
+class UserSettings(models.Model):
+    """Per-account mirror of the settings that guests keep in signed cookies."""
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="hitch_settings"
+    )
+    model = models.CharField(max_length=256, blank=True, default="")
+    reasoning_effort = models.CharField(max_length=32, blank=True, default="")
+    sandbox_policy = models.CharField(max_length=32, blank=True, default="")
+    approval_mode = models.CharField(max_length=32, blank=True, default="auto_review")
+    extra_system_prompt = models.TextField(blank=True, default="")
+    show_archived_sessions = models.BooleanField(default=False)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @override
+    def __str__(self) -> str:
+        return f"UserSettings(user={self.user_id})"
