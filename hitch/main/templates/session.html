@@ -1300,9 +1300,24 @@
                 });
             }
 
+            function isSuperEnter(event) {
+                const hasSuper = event.metaKey
+                    || (event.getModifierState && event.getModifierState("Meta"))
+                    || (event.getModifierState && event.getModifierState("OS"));
+                return event.key === "Enter" && hasSuper;
+            }
+            function requestSubmit(form, submitter) {
+                if (!form || !submitter || submitter.disabled) return;
+                if (typeof form.requestSubmit === "function") {
+                    form.requestSubmit(submitter);
+                } else {
+                    submitter.click();
+                }
+            }
+
             // Composer: auto-grow the textarea up to its CSS max-height and
-            // disable submit when empty. Enter inserts a newline; the form
-            // only submits when the Send button is pressed.
+            // disable submit when empty. Enter inserts a newline; Super+Enter
+            // submits the send button.
             const composer = document.querySelector("[data-composer]");
             if (composer) {
                 const input = composer.querySelector("[data-composer-input]");
@@ -1315,6 +1330,11 @@
                 };
                 sync();
                 input.addEventListener("input", sync);
+                input.addEventListener("keydown", (event) => {
+                    if (!isSuperEnter(event)) return;
+                    event.preventDefault();
+                    requestSubmit(composer, submit);
+                });
                 composer.addEventListener("submit", () => {
                     // Defer the disable until after the form's entry
                     // list has been serialized: the Stop button carries
