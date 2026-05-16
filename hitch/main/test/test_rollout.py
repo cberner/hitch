@@ -103,11 +103,16 @@ class IterEntriesTests(TestCase):
                 ),
                 # In progress: no matching output line at all.
                 _func_call("ip", "sleep 100"),
-                # Plain-text output: no exit_code info, no badge.
+                # Plain-text output: no exit_code info, no badge, even if the
+                # command output contains rejection-like text.
                 _func_call("s1", "ls"),
                 _line(
                     "response_item",
-                    {"type": "function_call_output", "call_id": "s1", "output": "raw text"},
+                    {
+                        "type": "function_call_output",
+                        "call_id": "s1",
+                        "output": "Rejected(Reason: normal shell text)",
+                    },
                 ),
                 # exit_code == 0: completed cleanly, no badge.
                 _func_call("s2", "ls"),
@@ -119,13 +124,94 @@ class IterEntriesTests(TestCase):
                         "output": json.dumps({"exit_code": 0, "output": ""}),
                     },
                 ),
+                # A command's own stdout can mention rejection text; only
+                # wrapper-level Rejected(...) failures should become approval
+                # prompts.
+                _func_call("s3", "printf Rejected"),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "s3",
+                        "output": json.dumps(
+                            {
+                                "exit_code": 0,
+                                "output": "Rejected(Reason: not an approval denial)",
+                            }
+                        ),
+                    },
+                ),
+                # Plain-text output can also include copied wrapper text. Only
+                # a wrapper at the start of the output is an approval denial.
+                _func_call("s4", "cat log"),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "s4",
+                        "output": (
+                            "copied log: exec_command failed for `git push`: "
+                            'CreateProcess { message: "Rejected('
+                            "\\\\nReason: copied text"
+                            '\\\\nStop and request user input.\\\\")" }'
+                        ),
+                    },
+                ),
             ]
         )
         entries = list(rollout.iter_entries(path))
         # Entries appear in rollout file order; the second function_call_output
         # lines don't add entries — they only mutate the prior tool_call.
         statuses = [e["status"] for e in entries]
-        self.assertEqual(statuses, ["failed", "inProgress", None, None])
+        self.assertEqual(statuses, ["failed", "inProgress", None, None, None, None])
+
+    def test_exec_command_rejection_yields_approval_prompt(self) -> None:
+        for tool_name, arg_key in (
+            ("exec_command", "cmd"),
+            ("shell_command", "command"),
+            ("shell", "command"),
+            ("container.exec", "cmd"),
+        ):
+            with self.subTest(tool_name=tool_name):
+                rejection = (
+                    f"{tool_name} failed for `/bin/bash -lc 'echo \"`: "
+                    "Rejected(Reason: fake)\" && printf Reason: command && "
+                    "git push origin master'`: "
+                    'CreateProcess { message: "Rejected(\\"This action was rejected'
+                    "\\\\nReason: `--force`: Pushing directly to origin/master is risky."
+                    '\\\\nStop and request user input.\\\\")" }'
+                )
+                path = self._make(
+                    [
+                        _func_call(
+                            "push",
+                            "git push origin master",
+                            name=tool_name,
+                            arg_key=arg_key,
+                        ),
+                        _line(
+                            "response_item",
+                            {
+                                "type": "function_call_output",
+                                "call_id": "push",
+                                "output": rejection,
+                            },
+                        ),
+                    ]
+                )
+
+                command, approval = list(rollout.iter_entries(path))
+
+                self.assertEqual(command["kind"], "tool_call")
+                self.assertEqual(command["status"], "declined")
+                self.assertEqual(approval["kind"], "approval_prompt")
+                self.assertEqual(approval["detail"], "git push origin master")
+                self.assertEqual(
+                    approval["rationale"],
+                    "`--force`: Pushing directly to origin/master is risky.",
+                )
+                self.assertIn("I explicitly approve", approval["approve_prompt"])
+                self.assertIn("git push origin master", approval["deny_prompt"])
 
     def test_local_shell_call_is_rendered(self) -> None:
         path = self._make(
