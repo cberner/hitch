@@ -666,6 +666,10 @@
                 <span>Show archived sessions</span>
                 <input type="checkbox" name="show_archived_sessions" value="true" {% if current_show_archived_sessions %}checked{% endif %}>
             </label>
+            <label class="checkbox-label">
+                <span>Use worktrees</span>
+                <input type="checkbox" name="use_worktrees" value="true" {% if current_use_worktrees %}checked{% endif %}>
+            </label>
             {% if rate_limits %}
             <section class="rate-limits" aria-labelledby="rate-limits-title">
                 <h3 class="rate-limits-title" id="rate-limits-title">

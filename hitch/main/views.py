@@ -33,6 +33,13 @@ from hitch.main.diffs import build_worktree_diff
 from hitch.main.formatting import looks_like_markdown, render_markdown
 from hitch.main.models import ApprovalRequest, CodexInstance, UserSettings
 from hitch.main.repos import discover_repos
+from hitch.main.worktrees import (
+    WorktreeCleanupError,
+    WorktreeCreationError,
+    cleanup_worktree,
+    create_worktree_for_session,
+    discover_managed_worktrees,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +50,7 @@ class SettingsValues(NamedTuple):
     sandbox_policy: str
     approval_mode: str
     extra_system_prompt: str
+    use_worktrees: bool
     show_archived_sessions: bool
 
 # Sandbox-policy variants offered in the settings dialog. Stored as the
@@ -87,6 +95,7 @@ _EFFORT_COOKIE = "hitch_reasoning_effort"
 _SANDBOX_COOKIE = "hitch_sandbox_policy"
 _APPROVAL_COOKIE = "hitch_approval_mode"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
+_USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 
 # Roughly one year. Long enough that a user's pick survives across
@@ -159,6 +168,7 @@ def index(request: HttpRequest) -> HttpResponse:
             current_sandbox,
             current_approval,
             current_extra_system_prompt,
+            current_use_worktrees,
             current_show_archived_sessions,
             cookie_updates,
         ) = _resolved_settings(request, models_data)
@@ -215,6 +225,7 @@ def index(request: HttpRequest) -> HttpResponse:
             "current_approval": current_approval,
             "current_extra_system_prompt": current_extra_system_prompt,
             "extra_system_prompt_max_len": _EXTRA_SYSTEM_PROMPT_MAX_LEN,
+            "current_use_worktrees": current_use_worktrees,
             "current_show_archived_sessions": current_show_archived_sessions,
             "rate_limits": rate_limits,
         },
@@ -586,11 +597,12 @@ def _entries_from_rollout(thread: Any) -> list[dict[str, Any]] | None:
 
 def _resolved_settings(
     request: HttpRequest, models_data: list[Any]
-) -> tuple[str, str, str, str, str, bool, dict[str, str]]:
+) -> tuple[str, str, str, str, str, bool, bool, dict[str, str]]:
     """Read the dialog state from storage and reconcile against Codex.
 
     Returns ``(model, effort, sandbox_policy, approval_mode,
-    extra_system_prompt, show_archived_sessions, cookie_updates)``.
+    extra_system_prompt, use_worktrees, show_archived_sessions,
+    cookie_updates)``.
     ``cookie_updates`` is a dict of cookie-name → new-value pairs the caller
     must persist on the response (via ``_apply_cookie_updates``) so the
     corrected state takes effect on the next request.
@@ -659,7 +671,7 @@ def _resolved_settings(
 
 def _resolved_settings_result(
     request: HttpRequest, values: SettingsValues, cookie_updates: dict[str, str]
-) -> tuple[str, str, str, str, str, bool, dict[str, str]]:
+) -> tuple[str, str, str, str, str, bool, bool, dict[str, str]]:
     user = _authenticated_user(request)
     if user is not None:
         _save_user_settings(user, values)
@@ -670,6 +682,7 @@ def _resolved_settings_result(
         values.sandbox_policy,
         values.approval_mode,
         values.extra_system_prompt,
+        values.use_worktrees,
         values.show_archived_sessions,
         cookie_updates,
     )
@@ -690,6 +703,7 @@ def _stored_settings(request: HttpRequest) -> SettingsValues:
         sandbox_policy=_read_cookie(request, _SANDBOX_COOKIE),
         approval_mode=_read_cookie(request, _APPROVAL_COOKIE),
         extra_system_prompt=_read_extra_system_prompt_cookie(request),
+        use_worktrees=_read_cookie(request, _USE_WORKTREES_COOKIE) == "true",
         show_archived_sessions=_read_cookie(request, _SHOW_ARCHIVED_COOKIE) == "true",
     )
 
@@ -706,6 +720,7 @@ def _settings_values_for_user(settings: UserSettings) -> SettingsValues:
         sandbox_policy=settings.sandbox_policy,
         approval_mode=settings.approval_mode,
         extra_system_prompt=settings.extra_system_prompt,
+        use_worktrees=settings.use_worktrees,
         show_archived_sessions=settings.show_archived_sessions,
     )
 
@@ -719,6 +734,7 @@ def _save_user_settings(user: Any, values: SettingsValues) -> UserSettings:
         ("sandbox_policy", values.sandbox_policy),
         ("approval_mode", values.approval_mode),
         ("extra_system_prompt", values.extra_system_prompt),
+        ("use_worktrees", values.use_worktrees),
         ("show_archived_sessions", values.show_archived_sessions),
     ):
         if getattr(settings, field) != value:
@@ -738,6 +754,7 @@ def _settings_cookie_updates(values: SettingsValues) -> dict[str, str]:
         _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt_cookie(
             values.extra_system_prompt
         ),
+        _USE_WORKTREES_COOKIE: "true" if values.use_worktrees else "false",
         _SHOW_ARCHIVED_COOKIE: "true" if values.show_archived_sessions else "false",
     }
 
@@ -778,6 +795,9 @@ def _valid_cookie_setting_updates(request: HttpRequest) -> dict[str, str | bool]
     show_archived = _read_signed_cookie_if_present(request, _SHOW_ARCHIVED_COOKIE)
     if show_archived in {"true", "false"}:
         updates["show_archived_sessions"] = show_archived == "true"
+    use_worktrees = _read_signed_cookie_if_present(request, _USE_WORKTREES_COOKIE)
+    if use_worktrees in {"true", "false"}:
+        updates["use_worktrees"] = use_worktrees == "true"
     return updates
 
 
@@ -939,6 +959,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     sandbox = request.POST.get("sandbox_policy", "").strip()
     approval = request.POST.get("approval_mode", "").strip()
     extra_system_prompt = request.POST.get("extra_system_prompt", "").strip()
+    use_worktrees = request.POST.get("use_worktrees", "").strip()
     show_archived = request.POST.get("show_archived_sessions", "").strip()
     if len(model) > _MODEL_MAX_LEN:
         return HttpResponseBadRequest("model id is too long")
@@ -957,6 +978,9 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest("invalid approval mode")
     if not approval:
         approval = _DEFAULT_APPROVAL_MODE
+    if use_worktrees not in {"", "true"}:
+        return HttpResponseBadRequest("invalid worktree setting")
+    use_worktrees = "true" if use_worktrees == "true" else "false"
     if show_archived not in {"", "true"}:
         return HttpResponseBadRequest("invalid archived sessions visibility")
     show_archived = "true" if show_archived == "true" else "false"
@@ -977,6 +1001,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         sandbox_policy=sandbox,
         approval_mode=approval,
         extra_system_prompt=extra_system_prompt,
+        use_worktrees=use_worktrees == "true",
         show_archived_sessions=show_archived == "true",
     )
     user = _authenticated_user(request)
@@ -1070,8 +1095,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     # just those created via ``new_session``, so the resumed ``cwd`` is not
     # automatically inside the discover_repos() allowlist. Re-validate before
     # spawning so a follow-up cannot run a worker in an unintended directory.
-    if cwd not in {str(p) for p in discover_repos()}:
-        return HttpResponseBadRequest("thread cwd is not a discovered repository")
+    if cwd not in _allowed_session_cwds():
+        return HttpResponseBadRequest("thread cwd is not an allowed repository")
     # Sandbox policy and approval mode are applied per-turn rather than
     # persisted on the thread, so follow-up messages have to re-forward
     # the cookies or every turn after the first silently reverts to Codex
@@ -1100,6 +1125,10 @@ def _thread_cwd(thread: Any) -> str | None:
         return raw or None
     root = getattr(raw, "root", None)
     return root if isinstance(root, str) and root else None
+
+
+def _allowed_session_cwds() -> set[str]:
+    return {str(p) for p in [*discover_repos(), *discover_managed_worktrees()]}
 
 
 # Decisions the approval endpoint accepts. The wire string the worker writes
@@ -1206,22 +1235,42 @@ def new_session(request: HttpRequest) -> HttpResponse:
         sandbox_policy,
         approval_mode,
         extra_system_prompt,
+        use_worktrees,
         _show_archived_sessions,
         cookie_updates,
     ) = _resolved_settings(request, models_data)
 
+    session_cwd = cwd
+    managed_worktree = None
+    if use_worktrees:
+        try:
+            managed_worktree = create_worktree_for_session(cwd)
+        except WorktreeCreationError as exc:
+            return HttpResponseBadRequest(str(exc))
+        session_cwd = str(managed_worktree.path)
+
     # Detach a worker subprocess so the initial turn keeps running past a
     # Django restart. The thread itself is created synchronously to give the
     # caller a stable id to redirect to.
-    instance = codex_pool.spawn_new_session(
-        cwd=cwd,
-        prompt=prompt,
-        developer_instructions=extra_system_prompt or None,
-        model=model or None,
-        reasoning_effort=reasoning_effort or None,
-        sandbox_policy=sandbox_policy or None,
-        approval_mode=approval_mode,
-    )
+    try:
+        instance = codex_pool.spawn_new_session(
+            cwd=session_cwd,
+            prompt=prompt,
+            developer_instructions=extra_system_prompt or None,
+            model=model or None,
+            reasoning_effort=reasoning_effort or None,
+            sandbox_policy=sandbox_policy or None,
+            approval_mode=approval_mode,
+        )
+    except Exception:
+        if managed_worktree is not None:
+            try:
+                cleanup_worktree(managed_worktree)
+            except WorktreeCleanupError:
+                logger.exception(
+                    "failed to clean up managed worktree %s", managed_worktree.path
+                )
+        raise
     response = redirect("session", session_id=instance.thread_id)
     _apply_cookie_updates(response, cookie_updates)
     return response

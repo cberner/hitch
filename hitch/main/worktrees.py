@@ -1,0 +1,160 @@
+"""Create and discover Hitch-managed git worktrees."""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import uuid
+from collections.abc import Iterator
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+
+from django.conf import settings
+
+_GIT_TIMEOUT_SECONDS = 10
+_SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_MAX_REPO_SLUG_LEN = 48
+
+
+class WorktreeCreationError(Exception):
+    """Raised when a managed worktree cannot be created."""
+
+
+class WorktreeCleanupError(Exception):
+    """Raised when a managed worktree cannot be removed."""
+
+
+@dataclass(frozen=True)
+class ManagedWorktree:
+    path: Path
+    branch: str
+    source_repo: Path
+
+
+def create_worktree_for_session(source_cwd: str) -> ManagedWorktree:
+    """Create a new branch and worktree for a Codex session."""
+    repo = _repo_root(Path(source_cwd))
+    if repo is None:
+        raise WorktreeCreationError("source cwd is not a git repository")
+
+    repo_slug = _safe_slug(repo.name) or "repo"
+    suffix = f"{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    branch = f"hitch/{repo_slug}/{suffix}"
+    path = Path(settings.HITCH_WORKTREES_DIR).expanduser() / repo_slug / suffix
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise WorktreeCreationError(str(exc)) from exc
+    if _has_head_commit(repo):
+        _git(repo, ["worktree", "add", "-b", branch, str(path), "HEAD"])
+    else:
+        _git(repo, ["worktree", "add", "--orphan", "-b", branch, str(path)])
+    return ManagedWorktree(path=path, branch=branch, source_repo=repo)
+
+
+def cleanup_worktree(worktree: ManagedWorktree) -> None:
+    """Remove a just-created managed worktree and its branch."""
+    _git(
+        worktree.source_repo,
+        ["worktree", "remove", "--force", str(worktree.path)],
+        error_cls=WorktreeCleanupError,
+    )
+    if _branch_exists(worktree.source_repo, worktree.branch):
+        _git(
+            worktree.source_repo,
+            ["branch", "-D", worktree.branch],
+            error_cls=WorktreeCleanupError,
+        )
+
+
+def discover_managed_worktrees() -> list[Path]:
+    """Return Hitch-managed worktree roots."""
+    base = Path(settings.HITCH_WORKTREES_DIR).expanduser()
+    if not base.is_dir():
+        return []
+    roots: dict[Path, Path] = {}
+    for repo_dir in _child_dirs(base):
+        for worktree in _child_dirs(repo_dir):
+            if not (worktree / ".git").exists():
+                continue
+            key = _resolved_path(worktree)
+            roots.setdefault(key, worktree)
+    return sorted(roots.values())
+
+
+def _child_dirs(path: Path) -> Iterator[Path]:
+    try:
+        for child in path.iterdir():
+            try:
+                if child.is_dir():
+                    yield child
+            except OSError:
+                continue
+    except OSError:
+        return
+
+
+def _resolved_path(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except OSError:
+        return path
+
+
+def _has_head_commit(repo: Path) -> bool:
+    return _git(repo, ["rev-parse", "--verify", "HEAD"], raise_on_error=False) is not None
+
+
+def _branch_exists(repo: Path, branch: str) -> bool:
+    return (
+        _git(
+            repo,
+            ["show-ref", "--verify", f"refs/heads/{branch}"],
+            raise_on_error=False,
+        )
+        is not None
+    )
+
+
+def _repo_root(cwd: Path) -> Path | None:
+    output = _git(cwd, ["rev-parse", "--show-toplevel"], raise_on_error=False)
+    if not output:
+        return None
+    root = output.strip()
+    return Path(root) if root else None
+
+
+def _git(
+    cwd: Path,
+    args: list[str],
+    *,
+    raise_on_error: bool = True,
+    error_cls: type[Exception] = WorktreeCreationError,
+) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(cwd), *args],
+            capture_output=True,
+            check=False,
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        if raise_on_error:
+            raise error_cls(str(exc)) from exc
+        return None
+    if result.returncode != 0:
+        if raise_on_error:
+            stderr = result.stderr.decode("utf-8", errors="replace").strip()
+            raise error_cls(stderr or "git worktree command failed")
+        return None
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def _safe_slug(value: str) -> str:
+    slug = _SLUG_RE.sub("-", value.strip())
+    slug = re.sub(r"\.{2,}", "-", slug).strip(".-")
+    slug = slug[:_MAX_REPO_SLUG_LEN].strip(".-")
+    while slug.endswith(".lock"):
+        slug = slug[: -len(".lock")].strip(".-")
+    return slug
