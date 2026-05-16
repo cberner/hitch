@@ -35,6 +35,7 @@ _SHELL_TOOL_NAMES = frozenset(
         "container.exec",
     }
 )
+_SHELL_FAILURE_PREFIXES = tuple(f"{name} failed for `" for name in sorted(_SHELL_TOOL_NAMES))
 
 
 def iter_entries(rollout_path: Path) -> Iterator[dict[str, Any]]:
@@ -103,6 +104,10 @@ def _coerce_int(value: Any) -> int:
     return 0
 
 
+Entry = dict[str, Any]
+EntryResult = Entry | list[Entry] | None
+
+
 def _entries_from_text(text: str, rollout_path: Path) -> Iterator[dict[str, Any]]:
     lines: list[dict[str, Any]] = []
     for raw in text.splitlines():
@@ -129,14 +134,16 @@ def _entries_from_text(text: str, rollout_path: Path) -> Iterator[dict[str, Any]
 
     for entry in lines:
         result = _entry_for_rollout_line(entry, outputs)
-        if result is not None:
+        if isinstance(result, list):
+            yield from result
+        elif result is not None:
             yield result
 
 
 def _entry_for_rollout_line(
     line: dict[str, Any],
     outputs: dict[str, dict[str, Any]],
-) -> dict[str, Any] | None:
+) -> EntryResult:
     line_type = line.get("type")
     payload = line.get("payload") or {}
     timestamp = _iso_to_unix_seconds(line.get("timestamp"))
@@ -221,7 +228,7 @@ def _entry_from_response_item(
     payload: dict[str, Any],
     timestamp: int | None,
     outputs: dict[str, dict[str, Any]],
-) -> dict[str, Any] | None:
+) -> EntryResult:
     item_type = payload.get("type")
     if item_type == "function_call":
         name = payload.get("name") or ""
@@ -230,13 +237,18 @@ def _entry_from_response_item(
         command = _extract_command(payload.get("arguments"))
         call_id = payload.get("call_id")
         output_payload = outputs.get(call_id) if isinstance(call_id, str) else None
-        return _tool_call(
+        status = _function_call_status(output_payload)
+        tool_entry = _tool_call(
             "commandExecution",
             "Command",
             command,
-            _function_call_status(output_payload),
+            status,
             timestamp,
         )
+        approval_entry = _approval_prompt(command, output_payload, timestamp)
+        if approval_entry is not None:
+            return [tool_entry, approval_entry]
+        return tool_entry
     if item_type == "local_shell_call":
         action = payload.get("action") or {}
         if action.get("type") != "exec":
@@ -270,6 +282,24 @@ def _tool_call(
     }
 
 
+def _approval_prompt(
+    command: str,
+    output_payload: dict[str, Any] | None,
+    timestamp: int | None,
+) -> dict[str, Any] | None:
+    reason = _approval_rejection_reason(output_payload)
+    if reason is None or not command:
+        return None
+    return {
+        "kind": "approval_prompt",
+        "detail": command,
+        "rationale": reason,
+        "approve_prompt": f"Yes, I explicitly approve running this command:\n\n{command}",
+        "deny_prompt": f"No, do not run this command:\n\n{command}",
+        "timestamp": timestamp,
+    }
+
+
 def _extract_command(arguments: Any) -> str:
     if not isinstance(arguments, str) or not arguments:
         return ""
@@ -288,6 +318,8 @@ def _extract_command(arguments: Any) -> str:
 def _function_call_status(output_payload: dict[str, Any] | None) -> str | None:
     if output_payload is None:
         return "inProgress"
+    if _approval_rejection_reason(output_payload) is not None:
+        return "declined"
     output = output_payload.get("output")
     # `exec_command` returns a JSON string matching `unified_exec_output_schema`
     # in shell_spec.rs; a non-zero `exit_code` surfaces as a failure badge.
@@ -301,6 +333,45 @@ def _function_call_status(output_payload: dict[str, Any] | None) -> str | None:
             if isinstance(exit_code, int) and exit_code != 0:
                 return "failed"
     return None
+
+
+def _approval_rejection_reason(output_payload: dict[str, Any] | None) -> str | None:
+    if output_payload is None:
+        return None
+    output = output_payload.get("output")
+    if not isinstance(output, str):
+        return None
+    try:
+        parsed = json.loads(output)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict) and "exit_code" in parsed:
+        return None
+    wrapper_prefix = next(
+        (prefix for prefix in _SHELL_FAILURE_PREFIXES if output.startswith(prefix)),
+        None,
+    )
+    if wrapper_prefix is None:
+        return None
+    wrapper_end = output.find("`: CreateProcess", len(wrapper_prefix))
+    if wrapper_end == -1:
+        return None
+    rejection_scope = output[wrapper_end + len("`: ") :]
+    rejection_start = rejection_scope.find("Rejected(")
+    if rejection_start == -1:
+        rejection_start = rejection_scope.find("This action was rejected")
+    if rejection_start == -1:
+        return None
+    rejection = rejection_scope[rejection_start:]
+    marker = "Reason:"
+    if marker not in rejection:
+        return "Action was rejected by the approval policy."
+    reason = rejection.split(marker, 1)[1].lstrip()
+    for separator in ("\\\\n", "\\n", "\n"):
+        if separator in reason:
+            reason = reason.split(separator, 1)[0]
+            break
+    return reason.strip().strip('"')
 
 
 def _non_completed_status(value: Any) -> str | None:

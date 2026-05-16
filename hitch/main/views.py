@@ -1047,6 +1047,11 @@ def _emit_collapsed_turn(turn: list[dict[str, Any]]) -> Iterator[dict[str, Any]]
             yield entry
         elif entry["kind"] == "agent":
             intermediate.append({**_strip_phase(entry), "kind": "thinking"})
+        elif entry["kind"] == "approval_prompt":
+            if intermediate:
+                yield _make_intermediate_entry(intermediate)
+                intermediate = []
+            yield entry
         else:
             intermediate.append(entry)
     if intermediate:

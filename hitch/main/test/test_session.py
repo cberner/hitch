@@ -414,6 +414,58 @@ class RolloutFileViewTests(TestCase):
         self.assertContains(response, "1 thinking message and 1 tool call")
 
     @patch("hitch.main.views.Codex")
+    def test_rejected_command_renders_approval_choice(self, mock_codex: MagicMock) -> None:
+        rejection = (
+            "exec_command failed for `/bin/bash -lc 'printf Reason: command && git push origin master'`: "
+            'CreateProcess { message: "Rejected(\\"This action was rejected'
+            "\\\\nReason: Pushing directly to origin/master is risky."
+            '\\\\nStop and request user input.\\\\")" }'
+        )
+        rollout_lines = [
+            _rollout_line("event_msg", {"type": "user_message", "message": "push it"}),
+            _rollout_line(
+                "response_item",
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": json.dumps({"cmd": "git push origin master"}),
+                    "call_id": "push",
+                },
+            ),
+            _rollout_line(
+                "response_item",
+                {
+                    "type": "function_call_output",
+                    "call_id": "push",
+                    "output": rejection,
+                },
+            ),
+            _rollout_line(
+                "event_msg",
+                {
+                    "type": "agent_message",
+                    "message": "Please confirm explicitly.",
+                    "phase": "final_answer",
+                },
+            ),
+        ]
+        rollout_path = _make_rollout(self, rollout_lines)
+        _patch_thread(self, mock_codex, _thread([], path=str(rollout_path)))
+
+        response = _get_session(self.client)
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Approval requested")
+        self.assertContains(response, "git push origin master")
+        self.assertContains(response, "Pushing directly to origin/master is risky.")
+        self.assertContains(response, "I explicitly approve")
+        self.assertContains(response, "No, do not run this command")
+        self.assertContains(response, reverse("send_message", kwargs={"session_id": "thread-1"}))
+        self.assertLess(body.index("</details>"), body.index("Approval requested"))
+        self.assertLess(body.index("Approval requested"), body.index("Please confirm explicitly."))
+
+    @patch("hitch.main.views.Codex")
     def test_falls_back_to_sdk_on_rollout_failure_modes(
         self, mock_codex: MagicMock
     ) -> None:
