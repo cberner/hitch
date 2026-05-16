@@ -45,6 +45,69 @@ class WorktreeDiffTests(SimpleTestCase):
         rendered = "\n".join(line.html for file in diff.files for line in file.lines)
         self.assertIn('<span class="k">return</span>', rendered)
 
+    def test_builds_diff_for_committed_branch_changes_against_origin_master(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            worktree = root / "feature-worktree"
+            subprocess.run(["git", "init", "--initial-branch=master", str(repo)], check=True, capture_output=True)
+            tracked = repo / "example.py"
+            tracked.write_text("def answer():\n    return 1\n")
+            _git(repo, "add", "example.py")
+            _git(repo, "commit", "-m", "initial")
+            _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
+            _git(repo, "worktree", "add", "-b", "feature", str(worktree), "master")
+
+            branch_file = worktree / "example.py"
+            branch_file.write_text("def answer():\n    return 2\n")
+            _git(worktree, "commit", "-am", "feature change")
+
+            diff = build_worktree_diff(str(worktree))
+
+        self.assertTrue(diff.has_changes)
+        self.assertEqual(diff.file_count, 1)
+        self.assertEqual(diff.files[0].path, "example.py")
+        self.assertEqual(diff.additions, 1)
+        self.assertEqual(diff.deletions, 1)
+
+    def test_origin_master_diff_does_not_require_local_master_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            worktree = root / "feature-worktree"
+            subprocess.run(["git", "init", "--initial-branch=main", str(repo)], check=True, capture_output=True)
+            tracked = repo / "example.py"
+            tracked.write_text("def answer():\n    return 1\n")
+            _git(repo, "add", "example.py")
+            _git(repo, "commit", "-m", "initial")
+            _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
+            _git(repo, "worktree", "add", "-b", "feature", str(worktree), "main")
+
+            branch_file = worktree / "example.py"
+            branch_file.write_text("def answer():\n    return 2\n")
+            _git(worktree, "commit", "-am", "feature change")
+
+            diff = build_worktree_diff(str(worktree))
+
+        self.assertTrue(diff.has_changes)
+        self.assertEqual(diff.files[0].path, "example.py")
+
+    def test_committed_branch_changes_fall_back_to_head_without_origin_master(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", "--initial-branch=master", str(repo)], check=True, capture_output=True)
+            tracked = repo / "example.py"
+            tracked.write_text("def answer():\n    return 1\n")
+            _git(repo, "add", "example.py")
+            _git(repo, "commit", "-m", "initial")
+            _git(repo, "checkout", "-b", "feature")
+            tracked.write_text("def answer():\n    return 2\n")
+            _git(repo, "commit", "-am", "feature change")
+
+            diff = build_worktree_diff(str(repo))
+
+        self.assertFalse(diff.has_changes)
+
     def test_hunk_lines_that_look_like_file_headers_stay_in_hunk(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = Path(raw)
