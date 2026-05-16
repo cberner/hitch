@@ -28,7 +28,7 @@ from openai_codex.generated.v2_all import (
     ReasoningEffort,
 )
 
-from hitch.main import codex_pool, rollout, streaming
+from hitch.main import codex_events, codex_pool, rollout, streaming
 from hitch.main.diffs import build_worktree_diff
 from hitch.main.formatting import looks_like_markdown, render_markdown
 from hitch.main.models import ApprovalRequest, CodexInstance, UserSettings
@@ -248,6 +248,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
     # restores the canonical view.
     entries = _trim_in_progress_turn(entries, active_instance)
     token_usage = _token_usage_for(thread)
+    goal_objective = codex_events.latest_goal_for_thread(session_id)
     diff_view = build_worktree_diff(_thread_cwd(thread))
     return render(
         request,
@@ -288,6 +289,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             # bubble while the stream catches up.
             "pending_user_prompt": _pending_user_prompt(active_instance),
             "token_usage": token_usage,
+            "goal_objective": goal_objective,
             "diff_view": diff_view,
         },
     )

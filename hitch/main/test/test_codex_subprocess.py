@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, override
+from typing import Any, cast, override
 from unittest.mock import MagicMock, patch
 
 from django.core.management import call_command
@@ -25,6 +25,10 @@ from openai_codex.generated.v2_all import (
     DangerFullAccessSandboxPolicy,
     ReasoningEffort,
     SandboxPolicy,
+    ThreadGoal,
+    ThreadGoalClearedNotification,
+    ThreadGoalStatus,
+    ThreadGoalUpdatedNotification,
     Turn,
     TurnCompletedNotification,
     TurnError,
@@ -32,13 +36,17 @@ from openai_codex.generated.v2_all import (
     TurnStatus,
     WorkspaceWriteSandboxPolicy,
 )
+from openai_codex.models import Notification
 from pydantic import BaseModel
 
-from hitch.main import codex_pool, streaming
+from hitch.main import codex_events, codex_pool, streaming
 from hitch.main.management.commands import codex_worker as codex_worker_module
 from hitch.main.management.commands.codex_worker import (
+    _forward_goal_notifications,
+    _install_notification_sequencer,
     _make_approval_handler,
     _serialize_event,
+    _start_goal_event_forwarder,
 )
 from hitch.main.models import ApprovalRequest, CodexInstance
 
@@ -1011,9 +1019,204 @@ class SerializeEventTests(TestCase):
         ]
         for payload, expected in cases:
             with self.subTest(payload=type(payload).__name__):
-                parsed = json.loads(_serialize_event("m", payload))
+                parsed = json.loads(
+                    _serialize_event("m", payload, recorded_at=11, event_seq=7)
+                )
+                self.assertEqual(parsed["recordedAt"], 11)
+                self.assertEqual(parsed["eventSeq"], 7)
                 self.assertEqual(parsed["method"], "m")
                 self.assertEqual(parsed["payload"], expected)
+
+    def test_omits_order_metadata_when_absent(self) -> None:
+        parsed = json.loads(_serialize_event("m", {"k": 1}))
+
+        self.assertNotIn("recordedAt", parsed)
+        self.assertNotIn("eventSeq", parsed)
+
+
+class _FakeNotificationSource:
+    def __init__(self, events: list[Any]) -> None:
+        self.events = events
+
+    def next_notification(self) -> Any:
+        if not self.events:
+            raise RuntimeError("transport closed")
+        return self.events.pop(0)
+
+
+class GoalNotificationForwarderTests(TestCase):
+    def test_forwards_only_goal_notifications_for_current_thread(self) -> None:
+        written: list[tuple[str, object]] = []
+        discarded: list[Notification] = []
+        matching_update = Notification(
+            method=codex_events.GOAL_UPDATED_METHOD,
+            payload=cast(
+                Any,
+                ThreadGoalUpdatedNotification(
+                    thread_id="thread-1",
+                    turn_id=None,
+                    goal=ThreadGoal(
+                        thread_id="thread-1",
+                        objective="Implement goal status",
+                        status=ThreadGoalStatus.active,
+                        token_budget=None,
+                        tokens_used=10,
+                        time_used_seconds=2,
+                        created_at=1,
+                        updated_at=2,
+                    ),
+                ),
+            ),
+        )
+        account_updated = Notification(
+            method="account/updated",
+            payload=cast(Any, _FakePayload(detail="x")),
+        )
+        other_thread_clear = Notification(
+            method=codex_events.GOAL_CLEARED_METHOD,
+            payload=cast(
+                Any,
+                ThreadGoalClearedNotification(thread_id="other-thread"),
+            ),
+        )
+        matching_clear = Notification(
+            method=codex_events.GOAL_CLEARED_METHOD,
+            payload=cast(Any, ThreadGoalClearedNotification(thread_id="thread-1")),
+        )
+
+        _forward_goal_notifications(
+            source=_FakeNotificationSource(
+                [
+                    matching_update,
+                    account_updated,
+                    other_thread_clear,
+                    matching_clear,
+                ]
+            ),
+            thread_id="thread-1",
+            write_notification=lambda event: written.append((event.method, event.payload)),
+            discard_notification=discarded.append,
+        )
+
+        self.assertEqual(
+            [method for method, _payload in written],
+            [codex_events.GOAL_UPDATED_METHOD, codex_events.GOAL_CLEARED_METHOD],
+        )
+        self.assertEqual(discarded, [account_updated, other_thread_clear])
+
+    def test_exits_on_unexpected_notification_shape(self) -> None:
+        written: list[tuple[str, object]] = []
+        discarded: list[Notification] = []
+
+        _forward_goal_notifications(
+            source=_FakeNotificationSource([object()]),
+            thread_id="thread-1",
+            write_notification=lambda event: written.append((event.method, event.payload)),
+            discard_notification=discarded.append,
+        )
+
+        self.assertEqual(written, [])
+        self.assertEqual(discarded, [])
+
+    def test_start_goal_event_forwarder_runs_in_background(self) -> None:
+        written: list[tuple[str, object]] = []
+        discarded: list[Notification] = []
+
+        thread = _start_goal_event_forwarder(
+            _FakeNotificationSource(
+                [
+                    Notification(
+                        method=codex_events.GOAL_CLEARED_METHOD,
+                        payload=cast(
+                            Any,
+                            ThreadGoalClearedNotification(thread_id="thread-1"),
+                        ),
+                    )
+                ]
+            ),
+            thread_id="thread-1",
+            write_notification=lambda event: written.append((event.method, event.payload)),
+            discard_notification=discarded.append,
+        )
+        thread.join(timeout=1)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(discarded, [])
+        self.assertEqual(
+            [method for method, _payload in written],
+            [codex_events.GOAL_CLEARED_METHOD],
+        )
+
+    def test_notification_sequencer_preserves_router_arrival_order(self) -> None:
+        class Router:
+            def __init__(self) -> None:
+                self.routed: list[Notification] = []
+
+            def route_notification(self, notification: Notification) -> None:
+                self.routed.append(notification)
+
+        router = Router()
+        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
+        with patch(
+            "hitch.main.management.commands.codex_worker.time.time_ns",
+            side_effect=[2_000_000, 1_000_000, 3_000_000],
+        ):
+            order_for = _install_notification_sequencer(cast(Any, codex))
+            first = Notification(
+                method=codex_events.GOAL_CLEARED_METHOD,
+                payload=cast(Any, ThreadGoalClearedNotification(thread_id="thread-1")),
+            )
+            second = Notification(
+                method=codex_events.GOAL_CLEARED_METHOD,
+                payload=cast(Any, ThreadGoalClearedNotification(thread_id="thread-1")),
+            )
+            unrouted = Notification(
+                method=codex_events.GOAL_CLEARED_METHOD,
+                payload=cast(Any, ThreadGoalClearedNotification(thread_id="thread-1")),
+            )
+
+            router.route_notification(first)
+            router.route_notification(second)
+
+            self.assertEqual(router.routed, [first, second])
+            self.assertEqual(order_for(second), (2_000, 2))
+            self.assertEqual(order_for(first), (2_000, 1))
+            self.assertEqual(order_for(unrouted), (3_000, 3))
+
+    def test_forwarder_discards_order_for_skipped_notifications(self) -> None:
+        class Router:
+            def __init__(self) -> None:
+                self.routed: list[Notification] = []
+
+            def route_notification(self, notification: Notification) -> None:
+                self.routed.append(notification)
+
+        router = Router()
+        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
+        skipped = Notification(
+            method="account/updated",
+            payload=cast(Any, _FakePayload(detail="x")),
+        )
+        written: list[Notification] = []
+        discarded_orders: list[tuple[int, int]] = []
+
+        with patch(
+            "hitch.main.management.commands.codex_worker.time.time_ns",
+            side_effect=[2_000_000, 3_000_000],
+        ):
+            order_for = _install_notification_sequencer(cast(Any, codex))
+            router.route_notification(skipped)
+
+            _forward_goal_notifications(
+                source=_FakeNotificationSource([skipped]),
+                thread_id="thread-1",
+                write_notification=written.append,
+                discard_notification=lambda event: discarded_orders.append(order_for(event)),
+            )
+
+            self.assertEqual(written, [])
+            self.assertEqual(discarded_orders, [(2_000, 1)])
+            self.assertEqual(order_for(skipped), (3_000, 2))
 
 
 class CodexWorkerCommandTests(TestCase):
