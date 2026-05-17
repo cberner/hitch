@@ -1086,6 +1086,31 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     if not prompt:
         return HttpResponseBadRequest("prompt is required")
     settings = _stored_settings(request)
+    raw_active = request.POST.get("active_instance", "").strip()
+    if raw_active:
+        instance_id, error = _parse_instance_id(raw_active)
+        if error is not None or instance_id is None:
+            return HttpResponseBadRequest(error or "invalid instance id")
+        steered = codex_pool.steer_instance(
+            instance_id,
+            expected_thread_id=session_id,
+            prompt=prompt,
+        )
+        if steered is not None:
+            return redirect("session", session_id=session_id)
+    else:
+        active_instance = codex_pool.latest_active_for_thread(session_id)
+        if active_instance is not None:
+            steered = codex_pool.steer_instance(
+                active_instance.pk,
+                expected_thread_id=session_id,
+                prompt=prompt,
+            )
+            if steered is not None:
+                return redirect("session", session_id=session_id)
+    # If steering is unavailable or races a terminal worker, preserve the
+    # submitted prompt by treating it as an ordinary follow-up turn.
+    # ``raw_active`` posts still do not retarget a different active worker.
     # ``Thread.cwd`` is an ``AbsolutePathBuf`` pydantic RootModel, so unwrap
     # ``.root`` to get the underlying string the worker subprocess expects;
     # also accept a plain str so a future SDK schema change does not break us.
@@ -1175,6 +1200,19 @@ def _allowed_session_cwds() -> set[str]:
     return {str(p) for p in [*discover_repos(), *discover_managed_worktrees()]}
 
 
+def _parse_instance_id(raw: str) -> tuple[int | None, str | None]:
+    try:
+        instance_id = int(raw)
+    except ValueError:
+        return None, "invalid instance id"
+    # Cross-check against the column type up front so a tampered value past
+    # the BigAutoField range can't leak a backend-specific OverflowError or
+    # DataError out as a 500 from ``objects.get``.
+    if instance_id < 1 or instance_id > _MAX_BIGAUTOFIELD:
+        return None, "instance id out of range"
+    return instance_id, None
+
+
 # Decisions the approval endpoint accepts. The wire string the worker writes
 # back to codex's app-server is taken straight from this set, so the constants
 # must stay aligned with codex's ``ReviewDecision`` enum (``approved`` /
@@ -1236,15 +1274,9 @@ def stop_session(request: HttpRequest, session_id: str) -> HttpResponse:
     """
     raw = request.POST.get("instance", "").strip()
     if raw:
-        try:
-            instance_id = int(raw)
-        except ValueError:
-            return HttpResponseBadRequest("invalid instance id")
-        # Cross-check against the column type up front so a tampered
-        # value past the BigAutoField range can't leak a backend
-        # OverflowError/DataError out as a 500 from ``objects.get``.
-        if instance_id < 1 or instance_id > _MAX_BIGAUTOFIELD:
-            return HttpResponseBadRequest("instance id out of range")
+        instance_id, error = _parse_instance_id(raw)
+        if error is not None or instance_id is None:
+            return HttpResponseBadRequest(error or "invalid instance id")
         codex_pool.interrupt_instance(instance_id, expected_thread_id=session_id)
     else:
         codex_pool.interrupt_active(session_id)

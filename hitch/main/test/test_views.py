@@ -628,6 +628,199 @@ class SendMessageViewTests(TestCase):
         client._client.thread_resume.return_value = resumed
         client.models.return_value.data = models or []
 
+    @patch("hitch.main.views.codex_pool.steer_instance")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_steers_posted_active_instance_without_spawning(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_steer: MagicMock,
+    ) -> None:
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "  also update docs  ", "active_instance": "42"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.headers["Location"],
+            reverse("session", kwargs={"session_id": "abc"}),
+        )
+        mock_steer.assert_called_once_with(
+            42,
+            expected_thread_id="abc",
+            prompt="also update docs",
+        )
+        mock_spawn.assert_not_called()
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views.codex_pool.steer_instance")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_steers_latest_active_when_form_has_no_instance(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_steer: MagicMock,
+    ) -> None:
+        instance = CodexInstance.objects.create(
+            pid=123,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="already running",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "also lint"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_steer.assert_called_once_with(
+            instance.pk,
+            expected_thread_id="abc",
+            prompt="also lint",
+        )
+        mock_spawn.assert_not_called()
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views.codex_pool.steer_instance")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_rejects_invalid_active_instance(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_steer: MagicMock,
+    ) -> None:
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "also lint", "active_instance": "not-a-number"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        mock_steer.assert_not_called()
+        mock_spawn.assert_not_called()
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.steer_instance", return_value=None)
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_stale_finished_active_instance_falls_back_to_spawn(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_steer: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow up", "active_instance": "42"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_steer.assert_called_once_with(
+            42,
+            expected_thread_id="abc",
+            prompt="follow up",
+        )
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="follow up",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.steer_instance", return_value=None)
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_stale_active_instance_failed_steer_falls_back_to_spawn(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_steer: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        CodexInstance.objects.create(
+            pid=123,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="newer work",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow up", "active_instance": "42"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_steer.assert_called_once_with(
+            42,
+            expected_thread_id="abc",
+            prompt="follow up",
+        )
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="follow up",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.steer_instance", return_value=None)
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_latest_active_failed_steer_falls_back_to_spawn(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_steer: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        instance = CodexInstance.objects.create(
+            pid=0,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="launching",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_STARTING,
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "also lint"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_steer.assert_called_once_with(
+            instance.pk,
+            expected_thread_id="abc",
+            prompt="also lint",
+        )
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="also lint",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
+
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")

@@ -1450,8 +1450,17 @@
                     </button>
                 </div>
             </div>
-            <textarea name="prompt" rows="1" required autocomplete="off" placeholder="Send a message…" aria-label="Send a message" data-composer-input></textarea>
-            <button type="submit" data-composer-submit>Send</button>
+            {% if active_worker %}
+            <input type="hidden" name="active_instance" value="{{ active_instance.id }}">
+            {% endif %}
+            <textarea name="prompt"
+                      rows="1"
+                      required
+                      autocomplete="off"
+                      placeholder="{% if active_worker %}Add instructions…{% else %}Send a message…{% endif %}"
+                      aria-label="{% if active_worker %}Add instructions{% else %}Send a message{% endif %}"
+                      data-composer-input></textarea>
+            <button type="submit" data-composer-submit>{% if active_worker %}Steer{% else %}Send{% endif %}</button>
             {% if active_worker %}
             <button type="submit" class="stop" formaction="{{ stop_url }}" formnovalidate name="instance" value="{{ active_instance.id }}" data-composer-stop aria-label="Stop the running turn">Stop</button>
             {% endif %}

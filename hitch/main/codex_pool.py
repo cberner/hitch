@@ -4,8 +4,9 @@ Each worker runs a single turn for one Codex thread and then exits. Workers
 are spawned with ``start_new_session=True`` (a fresh process group) so they
 survive a Django restart: the parent's stdin/stdout/stderr are redirected to
 ``/dev/null`` and the child no longer inherits the parent's controlling
-terminal. The CodexInstance row + JSONL events file on disk are the only
-post-spawn link back to a worker.
+terminal. The CodexInstance row + JSONL events file on disk are the durable
+post-spawn links back to a worker; a sibling control JSONL file carries
+mid-turn requests such as steer payloads into the detached process.
 
 The worker is the ``codex_worker`` management command in this app; running it
 as a Django command lets it use the same ORM/settings as the parent without
@@ -14,6 +15,7 @@ re-implementing Django bootstrap.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import signal
@@ -240,6 +242,103 @@ def interrupt_instance(
     ):
         return None
     return _interrupt_instance(instance)
+
+
+def steer_active(thread_id: str, *, prompt: str) -> CodexInstance | None:
+    """Inject ``prompt`` into the most recent active worker for ``thread_id``."""
+    instance = latest_active_for_thread(thread_id)
+    if instance is None:
+        return None
+    return _steer_instance(instance, prompt=prompt)
+
+
+def steer_instance(
+    instance_id: int, *, expected_thread_id: str, prompt: str
+) -> CodexInstance | None:
+    """Steer a specific active worker, identified by its primary key.
+
+    Mirrors ``interrupt_instance``'s stale-tab protection: the posted worker
+    id must still belong to the URL's thread and must still be active. The
+    worker reads the payload from its control JSONL file and calls
+    ``TurnHandle.steer(...)`` on the in-process handle, so the SDK supplies
+    the currently running turn id as the expected turn id.
+    """
+    try:
+        instance = CodexInstance.objects.get(pk=instance_id)
+    except CodexInstance.DoesNotExist:
+        return None
+    if instance.thread_id != expected_thread_id:
+        return None
+    if instance.status not in (
+        CodexInstance.STATUS_STARTING,
+        CodexInstance.STATUS_RUNNING,
+    ):
+        return None
+    return _steer_instance(instance, prompt=prompt)
+
+
+def control_path_for(instance: CodexInstance) -> Path:
+    """Return the per-worker control JSONL path next to its events log."""
+    events_path = Path(instance.events_path)
+    return events_path.with_name(f"{events_path.stem}.control.jsonl")
+
+
+def _steer_instance(instance: CodexInstance, *, prompt: str) -> CodexInstance | None:
+    """Queue one steer request for ``instance`` and nudge its worker.
+
+    The payload is appended before the signal so the worker never wakes up to
+    an empty control channel. If the worker is still in ``starting`` we skip
+    SIGUSR1: the handler may not be installed yet, and the worker drains the
+    file once the ``TurnHandle`` exists.
+    """
+    if instance.pid <= 0:
+        return None
+    if not prompt.strip():
+        return None
+    if not _pid_is_our_worker(instance.pid, instance.pk):
+        _mark_failed(instance, "worker process unavailable for steer")
+        return None
+
+    try:
+        _append_control_request(
+            instance,
+            {
+                "op": "steer",
+                "input": prompt,
+            },
+        )
+    except OSError:
+        return None
+    if instance.status != CodexInstance.STATUS_RUNNING:
+        instance.refresh_from_db()
+        if instance.status not in (
+            CodexInstance.STATUS_STARTING,
+            CodexInstance.STATUS_RUNNING,
+        ):
+            return None
+        return instance
+    try:
+        os.kill(instance.pid, signal.SIGUSR1)
+    except ProcessLookupError:
+        _mark_failed(instance, "worker process exited before steer")
+        return None
+    except OSError:
+        return None
+    instance.refresh_from_db()
+    if instance.status not in (
+        CodexInstance.STATUS_STARTING,
+        CodexInstance.STATUS_RUNNING,
+    ):
+        return None
+    return instance
+
+
+def _append_control_request(instance: CodexInstance, payload: dict[str, str]) -> None:
+    path = control_path_for(instance)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = json.dumps(payload, separators=(",", ":")) + "\n"
+    with path.open("ab") as fh:
+        fh.write(line.encode("utf-8"))
 
 
 def _interrupt_instance(instance: CodexInstance) -> CodexInstance | None:
