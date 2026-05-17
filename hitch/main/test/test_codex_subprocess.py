@@ -203,6 +203,39 @@ class SpawnNewSessionTests(TestCase):
             approval_mode="deny_all",
         )
 
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.codex_pool.Codex")
+    def test_plan_mode_forwards_model_to_worker(
+        self, mock_codex: MagicMock, mock_launch: MagicMock
+    ) -> None:
+        codex = _stub_codex_thread_start(mock_codex)
+        mock_launch.return_value = SimpleNamespace(pid=1)
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_new_session(
+                cwd="/repo",
+                prompt="hi",
+                model="gpt-5.4",
+                plan_mode=True,
+            )
+
+        codex.thread_start.assert_called_once_with(
+            cwd="/repo",
+            developer_instructions=None,
+            model="gpt-5.4",
+        )
+        mock_launch.assert_called_once_with(
+            instance_id=instance.pk,
+            model="gpt-5.4",
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode=None,
+            plan_mode=True,
+        )
+
 
 class SpawnFailureTests(TestCase):
     @patch("hitch.main.codex_pool._launch_worker_process")

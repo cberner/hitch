@@ -459,6 +459,94 @@
         dialog.new-session textarea.extra-system-prompt {
             min-height: 5rem;
         }
+        dialog.new-session .new-session-field {
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+        }
+        dialog.new-session .new-session-prompt-row {
+            display: grid;
+            grid-template-columns: 2.6rem minmax(0, 1fr);
+            align-items: start;
+            gap: 0.5rem;
+        }
+        dialog.new-session .new-session-prompt-row textarea {
+            width: 100%;
+        }
+        dialog.new-session .new-session-command {
+            position: relative;
+        }
+        dialog.new-session .slash-trigger {
+            width: 2.6rem;
+            min-width: 2.6rem;
+            height: 2.6rem;
+            padding: 0;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--surface);
+            color: var(--text-muted);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            font: inherit;
+            font-size: 1.1rem;
+            font-weight: 700;
+            line-height: 1;
+            cursor: pointer;
+            transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+        }
+        dialog.new-session .slash-trigger:hover,
+        dialog.new-session .slash-trigger[aria-expanded="true"] {
+            background: var(--surface-2);
+            border-color: var(--accent);
+            color: var(--text);
+        }
+        dialog.new-session form[data-plan-mode="true"] .slash-trigger {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: var(--accent-fg);
+        }
+        dialog.new-session .slash-menu {
+            position: absolute;
+            left: 0;
+            top: calc(100% + 0.4rem);
+            z-index: 35;
+            width: min(18rem, calc(100vw - 2rem));
+            padding: 0.35rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--surface);
+            box-shadow: var(--shadow-lg);
+        }
+        dialog.new-session .slash-menu[hidden] { display: none; }
+        dialog.new-session .slash-menu button {
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 0.15rem;
+            min-height: 0;
+            padding: 0.55rem 0.65rem;
+            border: 0;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text);
+            text-align: left;
+            font: inherit;
+            cursor: pointer;
+        }
+        dialog.new-session .slash-menu button:hover,
+        dialog.new-session .slash-menu button:focus {
+            outline: none;
+            background: var(--surface-2);
+        }
+        dialog.new-session .slash-menu button[aria-checked="true"] {
+            background: var(--accent-soft);
+        }
+        dialog.new-session .slash-menu-title {
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
         dialog.new-session .actions {
             display: flex;
             justify-content: flex-end;
@@ -709,11 +797,22 @@
     <dialog class="new-session" data-new-session-dialog aria-labelledby="new-session-title">
         <form method="post" action="{{ new_session_url }}">
             {% csrf_token %}
+            <input type="hidden" name="plan_mode" value="" data-plan-mode-input>
             <h2 id="new-session-title">Start a new session</h2>
-            <label>
-                Prompt
-                <textarea name="prompt" required autocomplete="off" placeholder="Describe what you want the agent to do…"></textarea>
-            </label>
+            <div class="new-session-field">
+                <label for="new-session-prompt">Prompt</label>
+                <div class="new-session-prompt-row">
+                    <div class="new-session-command" data-slash-command>
+                        <button type="button" class="slash-trigger" aria-label="Slash commands" aria-haspopup="menu" aria-expanded="false" aria-pressed="false" data-slash-trigger>/</button>
+                        <div class="slash-menu" role="menu" data-slash-menu hidden>
+                            <button type="button" role="menuitemcheckbox" aria-checked="false" data-slash-plan>
+                                <span class="slash-menu-title">Plan mode</span>
+                            </button>
+                        </div>
+                    </div>
+                    <textarea id="new-session-prompt" name="prompt" required autocomplete="off" placeholder="Describe what you want the agent to do…"></textarea>
+                </div>
+            </div>
             <label>
                 Repository
                 {% if repos %}
@@ -1001,6 +1100,12 @@
             const newSessionCancel = newSessionDialog && newSessionDialog.querySelector("[data-new-session-cancel]");
             const newSessionForm = newSessionDialog && newSessionDialog.querySelector("form");
             const newSessionSubmit = newSessionDialog && newSessionDialog.querySelector("[data-new-session-submit]");
+            const newSessionInput = newSessionForm && newSessionForm.querySelector("textarea[name='prompt']");
+            const newSessionPlanModeInput = newSessionForm && newSessionForm.querySelector("[data-plan-mode-input]");
+            const newSessionSlashCommand = newSessionForm && newSessionForm.querySelector("[data-slash-command]");
+            const newSessionSlashTrigger = newSessionForm && newSessionForm.querySelector("[data-slash-trigger]");
+            const newSessionSlashMenu = newSessionForm && newSessionForm.querySelector("[data-slash-menu]");
+            const newSessionSlashPlan = newSessionForm && newSessionForm.querySelector("[data-slash-plan]");
             function isSuperEnter(event) {
                 const hasSuper = event.metaKey
                     || (event.getModifierState && event.getModifierState("Meta"))
@@ -1015,22 +1120,98 @@
                     submitter.click();
                 }
             }
+            function setNewSessionPlanMode(enabled) {
+                if (!newSessionForm) return;
+                newSessionForm.dataset.planMode = enabled ? "true" : "false";
+                if (newSessionPlanModeInput) newSessionPlanModeInput.value = enabled ? "true" : "";
+                if (newSessionSlashTrigger) newSessionSlashTrigger.setAttribute("aria-pressed", enabled ? "true" : "false");
+                if (newSessionSlashPlan) newSessionSlashPlan.setAttribute("aria-checked", enabled ? "true" : "false");
+            }
+            function closeNewSessionSlashMenu() {
+                if (!newSessionSlashMenu || !newSessionSlashTrigger) return;
+                newSessionSlashMenu.hidden = true;
+                newSessionSlashTrigger.setAttribute("aria-expanded", "false");
+            }
+            function openNewSessionSlashMenu() {
+                if (!newSessionSlashMenu || !newSessionSlashTrigger) return;
+                newSessionSlashMenu.hidden = false;
+                newSessionSlashTrigger.setAttribute("aria-expanded", "true");
+            }
+            function parseNewSessionPlanCommand() {
+                if (!newSessionInput) return null;
+                const text = newSessionInput.value.trim();
+                const parts = text.split(/\s+/, 2);
+                if (parts[0] !== "/plan") return null;
+                return text.slice(parts[0].length).trim();
+            }
+            setNewSessionPlanMode(false);
             newSessionOpenButtons.forEach((btn) => btn.addEventListener("click", () => {
                 showDialog(newSessionDialog);
                 scheduleKeyboardAdjustedDialog();
-                const textarea = newSessionDialog && newSessionDialog.querySelector("textarea[name='prompt']");
-                if (textarea) textarea.focus();
+                if (newSessionInput) newSessionInput.focus();
                 scheduleKeyboardAdjustedDialog();
             }));
             if (newSessionDialog) {
-                newSessionDialog.addEventListener("close", () => clearKeyboardAdjustedDialog(newSessionDialog));
+                newSessionDialog.addEventListener("close", () => {
+                    clearKeyboardAdjustedDialog(newSessionDialog);
+                    closeNewSessionSlashMenu();
+                });
             }
             if (newSessionCancel) newSessionCancel.addEventListener("click", () => hideDialog(newSessionDialog));
+            if (newSessionSlashTrigger && newSessionSlashMenu) {
+                newSessionSlashTrigger.addEventListener("click", () => {
+                    if (newSessionSlashMenu.hidden) {
+                        openNewSessionSlashMenu();
+                    } else {
+                        closeNewSessionSlashMenu();
+                    }
+                });
+            }
+            if (newSessionSlashPlan) {
+                newSessionSlashPlan.addEventListener("click", () => {
+                    const enabled = newSessionForm && newSessionForm.dataset.planMode !== "true";
+                    setNewSessionPlanMode(Boolean(enabled));
+                    if (enabled && newSessionInput && newSessionInput.value.trim() === "/") {
+                        newSessionInput.value = "";
+                    }
+                    closeNewSessionSlashMenu();
+                    if (newSessionInput) newSessionInput.focus();
+                });
+            }
+            document.addEventListener("click", (event) => {
+                if (!newSessionSlashCommand || !newSessionSlashMenu || newSessionSlashMenu.hidden) return;
+                if (!newSessionSlashCommand.contains(event.target)) closeNewSessionSlashMenu();
+            });
+            document.addEventListener("keydown", (event) => {
+                if (event.key !== "Escape") return;
+                if (!newSessionSlashMenu || newSessionSlashMenu.hidden) return;
+                closeNewSessionSlashMenu();
+                if (newSessionSlashTrigger) newSessionSlashTrigger.focus();
+            });
+            if (newSessionInput) {
+                newSessionInput.addEventListener("input", () => {
+                    if (newSessionInput.value.trim() === "/") {
+                        openNewSessionSlashMenu();
+                    } else {
+                        closeNewSessionSlashMenu();
+                    }
+                });
+            }
             if (newSessionForm) {
                 newSessionForm.addEventListener("keydown", (event) => {
                     if (!isSuperEnter(event)) return;
                     event.preventDefault();
                     requestSubmit(newSessionForm, newSessionSubmit);
+                });
+                newSessionForm.addEventListener("submit", (event) => {
+                    const commandPrompt = parseNewSessionPlanCommand();
+                    if (commandPrompt === null || !newSessionInput) return;
+                    setNewSessionPlanMode(true);
+                    newSessionInput.value = commandPrompt;
+                    if (!commandPrompt) {
+                        event.preventDefault();
+                        newSessionInput.focus();
+                    }
                 });
             }
 
