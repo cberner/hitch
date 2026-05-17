@@ -1215,14 +1215,14 @@ def _parse_instance_id(raw: str) -> tuple[int | None, str | None]:
 
 # Decisions the approval endpoint accepts. The wire string the worker writes
 # back to codex's app-server is taken straight from this set, so the constants
-# must stay aligned with codex's ``ReviewDecision`` enum (``approved`` /
-# ``denied`` / ``abort``). UI labels live in the template; this layer only
-# validates the wire value.
+# must stay aligned with app-server's approval response schema
+# (``accept`` / ``decline`` / ``cancel``). UI labels live in the template;
+# this layer only validates the wire value.
 _VALID_APPROVAL_DECISIONS = frozenset(
     {
-        ApprovalRequest.DECISION_APPROVED,
-        ApprovalRequest.DECISION_DENIED,
-        ApprovalRequest.DECISION_ABORT,
+        ApprovalRequest.DECISION_ACCEPT,
+        ApprovalRequest.DECISION_DECLINE,
+        ApprovalRequest.DECISION_CANCEL,
     }
 )
 
@@ -1240,7 +1240,8 @@ def resolve_approval(request: HttpRequest, approval_id: int) -> HttpResponse:
     clicks shouldn't silently overwrite an earlier choice that the worker
     has already returned to codex.
     """
-    decision = request.POST.get("decision", "").strip()
+    raw_decision = request.POST.get("decision", "").strip()
+    decision = ApprovalRequest.normalize_decision(raw_decision)
     if decision not in _VALID_APPROVAL_DECISIONS:
         return HttpResponseBadRequest("invalid decision")
     try:
@@ -1392,7 +1393,7 @@ def _emit_collapsed_turn(turn: list[dict[str, Any]]) -> Iterator[dict[str, Any]]
             yield entry
         elif entry["kind"] == "agent":
             intermediate.append({**_strip_phase(entry), "kind": "thinking"})
-        elif entry["kind"] == "approval_prompt":
+        elif entry["kind"] == "approval_declined":
             if intermediate:
                 yield _make_intermediate_entry(intermediate)
                 intermediate = []

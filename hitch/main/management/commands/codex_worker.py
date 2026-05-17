@@ -22,7 +22,7 @@ the SSE stream surfaces it), and blocks on a short-poll loop until the
 Django view records a decision via ``POST /approval/<id>/``. The cap on
 that wait is intentionally generous (``_APPROVAL_WAIT_SECONDS``) so a
 user who steps away from the laptop doesn't lose the turn; on timeout the
-handler defaults to ``denied`` because that is the safest no-answer
+handler defaults to ``decline`` because that is the safest no-answer
 fallback (refuse the action, but let the agent keep running).
 """
 
@@ -91,8 +91,8 @@ _APPROVAL_METHODS = frozenset(
 )
 
 # How long the worker waits on a single approval before defaulting to
-# ``denied``. 30 minutes leaves plenty of slack for a user who stepped
-# away without holding a worker forever; ``denied`` is the safer
+# ``decline``. 30 minutes leaves plenty of slack for a user who stepped
+# away without holding a worker forever; ``decline`` is the safer
 # no-answer fallback because the agent keeps running but the
 # specific action is refused.
 _APPROVAL_WAIT_SECONDS = 60 * 30
@@ -305,11 +305,10 @@ def _run_turn(
             # without an ``approval_handler`` argument, so the only way to wire
             # an interactive callback is to swap the bound method on the client
             # after construction. The SDK's default handler unconditionally
-            # rubber-stamps (and emits a wire string codex's ``ReviewDecision``
-            # enum no longer accepts), so we always install our own — either
+            # rubber-stamps, so we always install our own — either
             # the interactive one that opens an ``ApprovalRequest`` row, or
             # (only under ``approve_all``) a rubber-stamp that uses the
-            # correct ``approved`` wire value.
+            # current ``accept`` wire value.
             codex._client._approval_handler = _make_approval_handler(
                 instance=instance,
                 write_event=_write_event,
@@ -822,7 +821,7 @@ def _make_approval_handler(
 
     Two flavors:
 
-    * ``approve_all`` mode: every escalation is auto-answered ``approved``.
+    * ``approve_all`` mode: every escalation is auto-answered ``accept``.
       This preserves the existing "approve everything" promise of that
       mode without going through the interactive UI loop.
     * Any other mode (including ``auto_review`` and ``prompt_user``): each
@@ -853,7 +852,7 @@ def _make_approval_handler(
         ) -> dict[str, Any]:
             if method not in _APPROVAL_METHODS:
                 return {}
-            return {"decision": ApprovalRequest.DECISION_APPROVED}
+            return {"decision": ApprovalRequest.DECISION_ACCEPT}
 
         return _approve_all_handler
 
@@ -910,20 +909,20 @@ def _create_pending_approval(
 
 
 def _wait_for_decision(request_id: int) -> str:
-    """Poll the row for a recorded decision; default to ``denied`` on timeout.
+    """Poll the row for a recorded decision; default to ``decline`` on timeout.
 
     Polling (rather than a Postgres ``LISTEN``/``NOTIFY``-style wakeup)
     matches the rest of the project: the streaming layer also short-polls
     the events file, and the parent process is sqlite. The timeout exists
     so a worker doesn't sit forever if the user closed the browser tab —
-    ``denied`` is the safest no-answer fallback (refuse the action, but
+    ``decline`` is the safest no-answer fallback (refuse the action, but
     let the agent keep running so a follow-up turn can recover).
 
     On the timeout path the conditional ``decision=""`` UPDATE is what
     serialises against a user who clicks at the deadline boundary: if
     that UPDATE matches zero rows, the row already carries a real
     decision and we round-trip it back to codex instead of clobbering
-    the user's pick with ``denied``.
+    the user's pick with ``decline``.
     """
     from django.db import connection
     from django.utils import timezone as tz
@@ -937,23 +936,24 @@ def _wait_for_decision(request_id: int) -> str:
         finally:
             connection.close()
         if decision:
-            return decision
+            return ApprovalRequest.normalize_decision(decision)
         if time.monotonic() >= deadline:
             try:
                 updated = ApprovalRequest.objects.filter(
                     pk=request_id, decision=""
                 ).update(
-                    decision=ApprovalRequest.DECISION_DENIED,
+                    decision=ApprovalRequest.DECISION_DECLINE,
                     decided_at=tz.now(),
                 )
                 if updated:
-                    return ApprovalRequest.DECISION_DENIED
+                    return ApprovalRequest.DECISION_DECLINE
                 # Zero rows matched → the user wrote a real decision in
                 # the window between the last read and this UPDATE.
-                # Honour it rather than overwriting with ``denied``.
-                return ApprovalRequest.objects.values_list(
+                # Honour it rather than overwriting with ``decline``.
+                final_decision: str = ApprovalRequest.objects.values_list(
                     "decision", flat=True
                 ).get(pk=request_id)
+                return ApprovalRequest.normalize_decision(final_decision)
             finally:
                 connection.close()
         time.sleep(_APPROVAL_POLL_INTERVAL)

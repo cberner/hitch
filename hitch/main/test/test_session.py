@@ -457,14 +457,13 @@ class RolloutFileViewTests(TestCase):
         body = response.content.decode()
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Approval requested")
+        self.assertContains(response, "Approval declined")
         self.assertContains(response, "git push origin master")
         self.assertContains(response, "Pushing directly to origin/master is risky.")
-        self.assertContains(response, "I explicitly approve")
-        self.assertContains(response, "No, do not run this command")
-        self.assertContains(response, reverse("send_message", kwargs={"session_id": "thread-1"}))
-        self.assertLess(body.index("</details>"), body.index("Approval requested"))
-        self.assertLess(body.index("Approval requested"), body.index("Please confirm explicitly."))
+        self.assertNotContains(response, "I explicitly approve")
+        self.assertNotContains(response, "No, do not run this command")
+        self.assertLess(body.index("</details>"), body.index("Approval declined"))
+        self.assertLess(body.index("Approval declined"), body.index("Please confirm explicitly."))
 
     @patch("hitch.main.views.Codex")
     def test_falls_back_to_sdk_on_rollout_failure_modes(
