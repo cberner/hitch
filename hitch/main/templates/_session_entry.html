@@ -30,24 +30,12 @@ intermediate block, so the per-item layout stays identical in both contexts.
         {% endif %}
     </div>
 </div>
-{% elif entry.kind == "approval_prompt" %}
+{% elif entry.kind == "approval_declined" %}
 <div class="entry">
-    <div class="approval">
-        <div class="approval-header">Approval requested</div>
+    <div class="approval resolved">
+        <div class="approval-header">Approval declined</div>
         {% if entry.detail %}<div class="approval-detail">{{ entry.detail }}</div>{% endif %}
         {% if entry.rationale %}<div class="approval-reason">{{ entry.rationale }}</div>{% endif %}
-        <div class="approval-actions">
-            <form method="post" action="{{ send_message_url }}">
-                {% csrf_token %}
-                <input type="hidden" name="prompt" value="{{ entry.approve_prompt }}">
-                <button type="submit" data-decision="approved">Approve</button>
-            </form>
-            <form method="post" action="{{ send_message_url }}">
-                {% csrf_token %}
-                <input type="hidden" name="prompt" value="{{ entry.deny_prompt }}">
-                <button type="submit" data-decision="abort">Deny</button>
-            </form>
-        </div>
     </div>
 </div>
 {% endif %}

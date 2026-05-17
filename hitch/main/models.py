@@ -16,7 +16,7 @@ losing the answer.
 
 from __future__ import annotations
 
-from typing import override
+from typing import ClassVar, override
 
 from django.conf import settings
 from django.db import models
@@ -88,22 +88,30 @@ class ApprovalRequest(models.Model):
     POSTs a decision, and the worker's polling loop wakes up and answers
     the SDK call with the recorded value.
 
-    ``decision`` carries the wire string codex's ``ReviewDecision`` enum
-    expects — ``approved`` / ``denied`` / ``abort`` — rather than a UI
-    label, so the worker can splat it straight into the JSON-RPC reply
-    without an extra lookup.
+    ``decision`` carries the app-server wire string — ``accept`` /
+    ``decline`` / ``cancel`` — rather than a UI label, so the worker can
+    splat it straight into the JSON-RPC reply without an extra lookup.
     """
 
     DECISION_PENDING = ""
-    DECISION_APPROVED = "approved"
-    DECISION_DENIED = "denied"
-    DECISION_ABORT = "abort"
+    DECISION_ACCEPT = "accept"
+    DECISION_DECLINE = "decline"
+    DECISION_CANCEL = "cancel"
+    # Backwards-compatible names for call sites that still talk in UI-ish terms.
+    DECISION_APPROVED = DECISION_ACCEPT
+    DECISION_DENIED = DECISION_DECLINE
+    DECISION_ABORT = DECISION_CANCEL
+    LEGACY_DECISION_ALIASES: ClassVar[dict[str, str]] = {
+        "approved": DECISION_ACCEPT,
+        "denied": DECISION_DECLINE,
+        "abort": DECISION_CANCEL,
+    }
 
     DECISION_CHOICES = (
         (DECISION_PENDING, "pending"),
-        (DECISION_APPROVED, "approved"),
-        (DECISION_DENIED, "denied"),
-        (DECISION_ABORT, "abort"),
+        (DECISION_ACCEPT, "accept"),
+        (DECISION_DECLINE, "decline"),
+        (DECISION_CANCEL, "cancel"),
     )
 
     instance = models.ForeignKey(
@@ -133,6 +141,10 @@ class ApprovalRequest(models.Model):
             f"ApprovalRequest(pk={self.pk}, instance={self.instance_id}, "
             f"method={self.method}, decision={decision})"
         )
+
+    @classmethod
+    def normalize_decision(cls, decision: str) -> str:
+        return cls.LEGACY_DECISION_ALIASES.get(decision, decision)
 
 
 class UserSettings(models.Model):

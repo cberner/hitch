@@ -165,7 +165,7 @@ class IterEntriesTests(TestCase):
         statuses = [e["status"] for e in entries]
         self.assertEqual(statuses, ["failed", "inProgress", None, None, None, None])
 
-    def test_exec_command_rejection_yields_approval_prompt(self) -> None:
+    def test_exec_command_rejection_yields_approval_declined_entry(self) -> None:
         for tool_name, arg_key in (
             ("exec_command", "cmd"),
             ("shell_command", "command"),
@@ -204,14 +204,14 @@ class IterEntriesTests(TestCase):
 
                 self.assertEqual(command["kind"], "tool_call")
                 self.assertEqual(command["status"], "declined")
-                self.assertEqual(approval["kind"], "approval_prompt")
+                self.assertEqual(approval["kind"], "approval_declined")
                 self.assertEqual(approval["detail"], "git push origin master")
                 self.assertEqual(
                     approval["rationale"],
                     "`--force`: Pushing directly to origin/master is risky.",
                 )
-                self.assertIn("I explicitly approve", approval["approve_prompt"])
-                self.assertIn("git push origin master", approval["deny_prompt"])
+                self.assertNotIn("approve_prompt", approval)
+                self.assertNotIn("deny_prompt", approval)
 
     def test_local_shell_call_is_rendered(self) -> None:
         path = self._make(

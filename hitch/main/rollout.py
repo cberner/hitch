@@ -245,7 +245,7 @@ def _entry_from_response_item(
             status,
             timestamp,
         )
-        approval_entry = _approval_prompt(command, output_payload, timestamp)
+        approval_entry = _approval_declined_entry(command, output_payload, timestamp)
         if approval_entry is not None:
             return [tool_entry, approval_entry]
         return tool_entry
@@ -282,7 +282,7 @@ def _tool_call(
     }
 
 
-def _approval_prompt(
+def _approval_declined_entry(
     command: str,
     output_payload: dict[str, Any] | None,
     timestamp: int | None,
@@ -291,11 +291,9 @@ def _approval_prompt(
     if reason is None or not command:
         return None
     return {
-        "kind": "approval_prompt",
+        "kind": "approval_declined",
         "detail": command,
         "rationale": reason,
-        "approve_prompt": f"Yes, I explicitly approve running this command:\n\n{command}",
-        "deny_prompt": f"No, do not run this command:\n\n{command}",
         "timestamp": timestamp,
     }
 

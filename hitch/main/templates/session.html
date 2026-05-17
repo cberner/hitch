@@ -602,16 +602,16 @@
             font-weight: 500;
         }
         .approval-actions button:hover { background: var(--surface-2); }
-        .approval-actions button[data-decision="approved"] {
+        .approval-actions button[data-decision="accept"] {
             background: var(--accent);
             color: var(--accent-fg);
             border-color: var(--accent);
         }
-        .approval-actions button[data-decision="approved"]:hover {
+        .approval-actions button[data-decision="accept"]:hover {
             background: var(--accent-hover);
             border-color: var(--accent-hover);
         }
-        .approval-actions button[data-decision="abort"] {
+        .approval-actions button[data-decision="cancel"] {
             background: var(--status-error-bg);
             color: var(--status-error-fg);
             border-color: var(--status-error-fg);
@@ -2350,9 +2350,9 @@
                 const actions = document.createElement("div");
                 actions.className = "approval-actions";
                 const buttons = [
-                    { decision: "approved", label: "Run" },
-                    { decision: "denied", label: "Skip" },
-                    { decision: "abort", label: "Reject" },
+                    { decision: "accept", label: "Run" },
+                    { decision: "decline", label: "Skip" },
+                    { decision: "cancel", label: "Cancel" },
                 ];
                 for (const { decision, label } of buttons) {
                     const btn = document.createElement("button");
@@ -2423,7 +2423,7 @@
                 if (entry.actions.parentNode) entry.actions.remove();
                 const note = document.createElement("div");
                 note.className = "approval-resolution";
-                note.textContent = "Decision: " + (payload.decision || "denied");
+                note.textContent = "Decision: " + (payload.decision || "decline");
                 entry.box.appendChild(note);
                 followRenderedContent();
             }

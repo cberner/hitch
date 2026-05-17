@@ -486,9 +486,9 @@ class ApprovalRequestModelTests(TestCase):
         # makes the row's open state obvious.
         self.assertIn("decision=pending", rendered)
 
-        approval.decision = "approved"
+        approval.decision = "accept"
         approval.save(update_fields=["decision"])
-        self.assertIn("decision=approved", str(approval))
+        self.assertIn("decision=accept", str(approval))
 
 
 class ReconcileAndLookupTests(TestCase):
@@ -2076,9 +2076,8 @@ class CodexWorkerCommandTests(TestCase):
     ) -> None:
         """The handler must be hooked onto ``_client._approval_handler``
         *before* ``thread_resume`` runs, otherwise an early in-stream
-        approval request would still hit the SDK's broken default handler
-        (which sends ``{"decision": "accept"}`` — a value codex's
-        ``ReviewDecision`` enum no longer accepts)."""
+        approval request would still hit the SDK's default rubber-stamp
+        handler instead of surfacing Hitch's interactive prompt."""
         observed_handler: dict[str, object] = {}
         codex_ctx = mock_codex.return_value.__enter__.return_value
 
@@ -2124,9 +2123,7 @@ class ApprovalHandlerTests(TestCase):
     def test_approve_all_handler_rubber_stamps_known_methods(self) -> None:
         """``approve_all`` must keep its "approve everything" promise even
         though we replaced the SDK's default handler. Crucially the wire
-        value is ``approved`` (not ``accept``) — the SDK's prior default
-        sent ``accept``, which codex's ``ReviewDecision`` enum no longer
-        accepts."""
+        value is the current app-server response value, ``accept``."""
         instance = self._make_instance()
         events: list[tuple[str, object]] = []
 
@@ -2139,11 +2136,11 @@ class ApprovalHandlerTests(TestCase):
 
         self.assertEqual(
             handler("item/commandExecution/requestApproval", {"item": {"command": "ls"}}),
-            {"decision": "approved"},
+            {"decision": "accept"},
         )
         self.assertEqual(
             handler("item/fileChange/requestApproval", {"item": {"changes": []}}),
-            {"decision": "approved"},
+            {"decision": "accept"},
         )
         # Unknown methods fall through to ``{}`` — the SDK uses that for
         # any server-to-client call we don't explicitly handle.
@@ -2187,14 +2184,14 @@ class ApprovalHandlerTests(TestCase):
 
                 with patch(
                     "hitch.main.management.commands.codex_worker._wait_for_decision",
-                    return_value="approved",
+                    return_value="accept",
                 ):
                     result = handler(
                         "item/commandExecution/requestApproval",
                         {"item": {"command": "rm -rf /"}},
                     )
 
-                self.assertEqual(result, {"decision": "approved"})
+                self.assertEqual(result, {"decision": "accept"})
                 row = ApprovalRequest.objects.get(instance=instance)
                 self.assertEqual(row.method, "item/commandExecution/requestApproval")
                 self.assertEqual(row.params, {"item": {"command": "rm -rf /"}})
@@ -2208,7 +2205,7 @@ class ApprovalHandlerTests(TestCase):
                     methods_to_payload["approval/requested"]["method"], row.method
                 )
                 self.assertEqual(
-                    methods_to_payload["approval/resolved"]["decision"], "approved"
+                    methods_to_payload["approval/resolved"]["decision"], "accept"
                 )
 
     @patch(
@@ -2224,10 +2221,27 @@ class ApprovalHandlerTests(TestCase):
             instance=self._make_instance(),
             method="item/commandExecution/requestApproval",
             params={},
-            decision="abort",
+            decision="cancel",
         )
 
-        self.assertEqual(_wait_for_decision(approval.pk), "abort")
+        self.assertEqual(_wait_for_decision(approval.pk), "cancel")
+
+    @patch(
+        "hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001
+    )
+    def test_wait_for_decision_normalizes_legacy_recorded_decision(self) -> None:
+        """A worker may observe an old-page POST that wrote pre-v2 decision
+        strings. Normalize before answering app-server."""
+        from hitch.main.management.commands.codex_worker import _wait_for_decision
+
+        approval = ApprovalRequest.objects.create(
+            instance=self._make_instance(),
+            method="item/commandExecution/requestApproval",
+            params={},
+            decision="approved",
+        )
+
+        self.assertEqual(_wait_for_decision(approval.pk), "accept")
 
     @patch(
         "hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001
@@ -2235,10 +2249,10 @@ class ApprovalHandlerTests(TestCase):
     @patch(
         "hitch.main.management.commands.codex_worker._APPROVAL_WAIT_SECONDS", 0.02
     )
-    def test_wait_for_decision_defaults_to_denied_on_timeout(self) -> None:
+    def test_wait_for_decision_defaults_to_decline_on_timeout(self) -> None:
         """A stuck approval (browser tab closed, user away) must release the
         worker rather than hang the turn forever. The timeout writes
-        ``denied`` to the row so the UI doesn't show a perpetually-pending
+        ``decline`` to the row so the UI doesn't show a perpetually-pending
         prompt after the next page reload."""
         from hitch.main.management.commands.codex_worker import _wait_for_decision
 
@@ -2248,9 +2262,9 @@ class ApprovalHandlerTests(TestCase):
             params={},
         )
 
-        self.assertEqual(_wait_for_decision(approval.pk), "denied")
+        self.assertEqual(_wait_for_decision(approval.pk), "decline")
         approval.refresh_from_db()
-        self.assertEqual(approval.decision, "denied")
+        self.assertEqual(approval.decision, "decline")
         self.assertIsNotNone(approval.decided_at)
 
     @patch(
@@ -2263,7 +2277,7 @@ class ApprovalHandlerTests(TestCase):
         """When a user click lands in the window between the last empty
         read and the timeout's conditional UPDATE, the UPDATE matches
         zero rows. The handler must round-trip the user's recorded
-        decision rather than overwriting it with ``denied`` (which
+        decision rather than overwriting it with ``decline`` (which
         would diverge the executed action from the click)."""
         from hitch.main.management.commands.codex_worker import _wait_for_decision
 
@@ -2277,7 +2291,7 @@ class ApprovalHandlerTests(TestCase):
         # initial values_list() read sees an empty decision but before
         # the timeout UPDATE runs. Patching ``values_list().get`` to
         # return ``""`` once and then handing control to the UPDATE
-        # path with the real ``approved`` row already written is what
+        # path with the real ``accept`` row already written is what
         # the production race looks like.
         original_values_list = ApprovalRequest.objects.values_list
         call_count = {"n": 0}
@@ -2286,7 +2300,7 @@ class ApprovalHandlerTests(TestCase):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 # First read: row is still pending — flip it to
-                # ``approved`` *after* we hand the empty value back, so
+                # ``accept`` *after* we hand the empty value back, so
                 # the timeout UPDATE will see ``decision != ""`` and
                 # match zero rows.
                 qs = original_values_list(*args, **kwargs)
@@ -2295,7 +2309,7 @@ class ApprovalHandlerTests(TestCase):
                     def get(self, **q: Any) -> str:
                         result: str = qs.get(**q)
                         ApprovalRequest.objects.filter(pk=approval.pk).update(
-                            decision="approved"
+                            decision="accept"
                         )
                         return result
 
@@ -2305,9 +2319,9 @@ class ApprovalHandlerTests(TestCase):
         with patch.object(
             ApprovalRequest.objects, "values_list", side_effect=_values_list
         ):
-            self.assertEqual(_wait_for_decision(approval.pk), "approved")
+            self.assertEqual(_wait_for_decision(approval.pk), "accept")
         approval.refresh_from_db()
-        self.assertEqual(approval.decision, "approved")
+        self.assertEqual(approval.decision, "accept")
 
     def test_interactive_handler_ignores_unknown_methods(self) -> None:
         """Approval methods we don't recognise (future SDK additions) must

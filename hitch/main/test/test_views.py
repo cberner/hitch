@@ -1719,21 +1719,21 @@ class ResolveApprovalViewTests(TestCase):
 
         response = self.client.post(
             reverse("resolve_approval", kwargs={"approval_id": approval.pk}),
-            data={"decision": "approved"},
+            data={"decision": "accept"},
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.content, b"approved")
+        self.assertEqual(response.content, b"accept")
         approval.refresh_from_db()
-        self.assertEqual(approval.decision, "approved")
+        self.assertEqual(approval.decision, "accept")
         self.assertIsNotNone(approval.decided_at)
 
     def test_accepts_each_valid_decision(self) -> None:
         """Pin the wire-string contract — these three values are what
-        codex's ``ReviewDecision`` enum accepts (``approved`` /
-        ``denied`` / ``abort``). A regression that drops one of them
+        app-server's approval response schema accepts (``accept`` /
+        ``decline`` / ``cancel``). A regression that drops one of them
         would silently break that decision in the UI."""
-        for decision in ("approved", "denied", "abort"):
+        for decision in ("accept", "decline", "cancel"):
             with self.subTest(decision=decision):
                 approval = self._make_approval()
                 response = self.client.post(
@@ -1744,8 +1744,29 @@ class ResolveApprovalViewTests(TestCase):
                 approval.refresh_from_db()
                 self.assertEqual(approval.decision, decision)
 
+    def test_normalizes_legacy_decision_values(self) -> None:
+        """Tabs loaded before a deploy may still POST the old UI values.
+        Normalize them at the boundary so a click doesn't poison the row
+        with a value app-server treats as a declined request."""
+        aliases = {
+            "approved": "accept",
+            "denied": "decline",
+            "abort": "cancel",
+        }
+        for posted, stored in aliases.items():
+            with self.subTest(posted=posted):
+                approval = self._make_approval()
+                response = self.client.post(
+                    reverse("resolve_approval", kwargs={"approval_id": approval.pk}),
+                    data={"decision": posted},
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.content, stored.encode())
+                approval.refresh_from_db()
+                self.assertEqual(approval.decision, stored)
+
     def test_rejects_invalid_decision(self) -> None:
-        """A POST with a value outside the codex-accepted set must 400
+        """A POST with a value outside the app-server-accepted set must 400
         rather than poison the row — the worker would otherwise round-trip
         the bogus string into a JSON-RPC response codex rejects."""
         approval = self._make_approval()
@@ -1762,7 +1783,7 @@ class ResolveApprovalViewTests(TestCase):
     def test_returns_404_for_missing_approval(self) -> None:
         response = self.client.post(
             reverse("resolve_approval", kwargs={"approval_id": 99999999}),
-            data={"decision": "approved"},
+            data={"decision": "accept"},
         )
 
         self.assertEqual(response.status_code, 404)
@@ -1771,16 +1792,16 @@ class ResolveApprovalViewTests(TestCase):
         """Two browser tabs racing the same approval must not silently
         clobber each other. The first POST wins; later POSTs get 409 so
         the UI knows the choice is locked in."""
-        approval = self._make_approval(decision="approved")
+        approval = self._make_approval(decision="accept")
 
         response = self.client.post(
             reverse("resolve_approval", kwargs={"approval_id": approval.pk}),
-            data={"decision": "denied"},
+            data={"decision": "decline"},
         )
 
         self.assertEqual(response.status_code, 409)
         approval.refresh_from_db()
-        self.assertEqual(approval.decision, "approved")
+        self.assertEqual(approval.decision, "accept")
 
     def test_rejects_get(self) -> None:
         approval = self._make_approval()
