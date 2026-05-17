@@ -102,9 +102,11 @@ def spawn_turn(
     thread_id: str,
     cwd: str,
     prompt: str,
+    model: str | None = None,
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
+    plan_mode: bool = False,
 ) -> CodexInstance:
     """Detach a worker that resumes an existing thread to run one prompt."""
     previous = latest_for_thread(thread_id)
@@ -116,9 +118,11 @@ def spawn_turn(
         cwd=cwd,
         prompt=prompt,
         developer_instructions=developer_instructions or None,
+        model=model,
         reasoning_effort=reasoning_effort,
         sandbox_policy=sandbox_policy,
         approval_mode=approval_mode,
+        plan_mode=plan_mode,
     )
 
 
@@ -445,9 +449,11 @@ def _spawn_worker(
     cwd: str,
     prompt: str,
     developer_instructions: str | None = None,
+    model: str | None = None,
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
+    plan_mode: bool = False,
 ) -> CodexInstance:
     target_dir = events_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -466,12 +472,22 @@ def _spawn_worker(
         instance.save(update_fields=["events_path"])
 
     try:
-        proc = _launch_worker_process(
-            instance_id=instance.pk,
-            reasoning_effort=reasoning_effort,
-            sandbox_policy=sandbox_policy,
-            approval_mode=approval_mode,
-        )
+        if model or plan_mode:
+            proc = _launch_worker_process(
+                instance_id=instance.pk,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                sandbox_policy=sandbox_policy,
+                approval_mode=approval_mode,
+                plan_mode=plan_mode,
+            )
+        else:
+            proc = _launch_worker_process(
+                instance_id=instance.pk,
+                reasoning_effort=reasoning_effort,
+                sandbox_policy=sandbox_policy,
+                approval_mode=approval_mode,
+            )
     except Exception as exc:
         # Without this, a Popen failure (e.g. ENOMEM, E2BIG, missing python)
         # would leave the row stuck in ``starting`` with pid=0 and no
@@ -489,9 +505,11 @@ def _spawn_worker(
 def _launch_worker_process(
     *,
     instance_id: int,
+    model: str | None = None,
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
+    plan_mode: bool = False,
 ) -> subprocess.Popen[bytes]:
     manage_py = str(Path(settings.BASE_DIR) / "manage.py")
     env = os.environ.copy()
@@ -512,10 +530,14 @@ def _launch_worker_process(
         # the worker stays self-contained: the parent dies, the worker
         # already has every input it needs to finish the turn.
         argv.extend(["--reasoning-effort", reasoning_effort])
+    if model:
+        argv.extend(["--model", model])
     if sandbox_policy:
         argv.extend(["--sandbox-policy", sandbox_policy])
     if approval_mode:
         argv.extend(["--approval-mode", approval_mode])
+    if plan_mode:
+        argv.append("--plan-mode")
 
     return subprocess.Popen(
         argv,

@@ -470,6 +470,85 @@
             white-space: nowrap;
         }
 
+        .plan-card {
+            display: flex;
+            flex-direction: column;
+            gap: 0.55rem;
+            padding: 0.65rem 0.85rem;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--accent);
+            border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+            box-shadow: var(--shadow);
+            font-size: 0.88rem;
+            color: var(--text-muted);
+        }
+        .plan-card .plan-header {
+            display: flex;
+            align-items: center;
+            gap: 0.45rem;
+            font-size: 0.78rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--text-muted);
+        }
+        .plan-card .plan-explanation {
+            color: var(--text-muted);
+            font-size: 0.84rem;
+        }
+        .plan-card .plan-explanation[hidden],
+        .plan-card .plan-checklist[hidden],
+        .plan-card .plan-text[hidden] { display: none; }
+        .plan-checklist {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+        }
+        .plan-step {
+            display: grid;
+            grid-template-columns: 1.1rem minmax(0, 1fr);
+            gap: 0.45rem;
+            align-items: start;
+            color: var(--text);
+        }
+        .plan-step::before {
+            content: "";
+            width: 0.9rem;
+            height: 0.9rem;
+            margin-top: 0.18rem;
+            border: 1px solid var(--border-strong);
+            border-radius: 50%;
+            background: var(--surface);
+        }
+        .plan-step.inProgress::before {
+            border-color: var(--accent);
+            background: var(--accent-soft);
+            box-shadow: 0 0 0 3px var(--accent-soft);
+        }
+        .plan-step.completed::before {
+            content: "\2713";
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-color: var(--accent);
+            background: var(--accent);
+            color: var(--accent-fg);
+            font-size: 0.68rem;
+            font-weight: 700;
+            line-height: 1;
+        }
+        .plan-step.pending { color: var(--text-muted); }
+        .plan-text {
+            color: var(--text);
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            font-size: 0.9rem;
+        }
+
         .approval {
             display: flex;
             flex-direction: column;
@@ -780,6 +859,72 @@
             background: var(--surface-3);
             border-color: var(--border-strong);
             color: var(--text-faint);
+        }
+        .composer-command {
+            position: relative;
+            flex: 0 0 auto;
+        }
+        .composer .slash-trigger {
+            width: 2.6rem;
+            min-width: 2.6rem;
+            padding: 0;
+            background: var(--surface);
+            color: var(--text-muted);
+            border-color: var(--border-strong);
+            font-size: 1.1rem;
+            font-weight: 700;
+            line-height: 1;
+        }
+        .composer .slash-trigger:hover,
+        .composer .slash-trigger[aria-expanded="true"] {
+            background: var(--surface-2);
+            border-color: var(--accent);
+            color: var(--text);
+        }
+        .composer[data-plan-mode="true"] .slash-trigger {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: var(--accent-fg);
+        }
+        .slash-menu {
+            position: absolute;
+            left: 0;
+            bottom: calc(100% + 0.45rem);
+            z-index: 28;
+            width: min(18rem, calc(100vw - 1.5rem));
+            padding: 0.35rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--surface);
+            box-shadow: var(--shadow-lg);
+        }
+        .slash-menu[hidden] { display: none; }
+        .composer .slash-menu button {
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 0.15rem;
+            min-height: 0;
+            padding: 0.55rem 0.65rem;
+            border: 0;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text);
+            text-align: left;
+            cursor: pointer;
+        }
+        .composer .slash-menu button:hover,
+        .composer .slash-menu button:focus {
+            outline: none;
+            background: var(--surface-2);
+        }
+        .slash-menu button[aria-checked="true"] {
+            background: var(--accent-soft);
+        }
+        .slash-menu-title {
+            font-weight: 600;
+            font-size: 0.9rem;
         }
 
         .empty-thread {
@@ -1295,7 +1440,16 @@
 
     <form class="composer" method="post" action="{{ send_message_url }}" data-composer data-stream-url="{{ stream_url }}">
         {% csrf_token %}
+        <input type="hidden" name="plan_mode" value="" data-plan-mode-input>
         <div class="composer-inner">
+            <div class="composer-command" data-slash-command>
+                <button type="button" class="slash-trigger" aria-label="Slash commands" aria-haspopup="menu" aria-expanded="false" aria-pressed="false" data-slash-trigger>/</button>
+                <div class="slash-menu" role="menu" data-slash-menu hidden>
+                    <button type="button" role="menuitemcheckbox" aria-checked="false" data-slash-plan>
+                        <span class="slash-menu-title">Plan mode</span>
+                    </button>
+                </div>
+            </div>
             <textarea name="prompt" rows="1" required autocomplete="off" placeholder="Send a message…" aria-label="Send a message" data-composer-input></textarea>
             <button type="submit" data-composer-submit>Send</button>
             {% if active_worker %}
@@ -1420,19 +1574,97 @@
                 const input = composer.querySelector("[data-composer-input]");
                 const submit = composer.querySelector("[data-composer-submit]");
                 const stop = composer.querySelector("[data-composer-stop]");
+                const planModeInput = composer.querySelector("[data-plan-mode-input]");
+                const slashCommand = composer.querySelector("[data-slash-command]");
+                const slashTrigger = composer.querySelector("[data-slash-trigger]");
+                const slashMenu = composer.querySelector("[data-slash-menu]");
+                const slashPlan = composer.querySelector("[data-slash-plan]");
                 const sync = () => {
                     input.style.height = "auto";
                     input.style.height = input.scrollHeight + "px";
                     submit.disabled = input.value.trim().length === 0;
                 };
+                const setPlanMode = (enabled) => {
+                    composer.dataset.planMode = enabled ? "true" : "false";
+                    if (planModeInput) planModeInput.value = enabled ? "true" : "";
+                    if (slashTrigger) slashTrigger.setAttribute("aria-pressed", enabled ? "true" : "false");
+                    if (slashPlan) slashPlan.setAttribute("aria-checked", enabled ? "true" : "false");
+                };
+                const closeSlashMenu = () => {
+                    if (!slashMenu || !slashTrigger) return;
+                    slashMenu.hidden = true;
+                    slashTrigger.setAttribute("aria-expanded", "false");
+                };
+                const openSlashMenu = () => {
+                    if (!slashMenu || !slashTrigger) return;
+                    slashMenu.hidden = false;
+                    slashTrigger.setAttribute("aria-expanded", "true");
+                };
+                const parsePlanCommand = () => {
+                    const text = input.value.trim();
+                    const parts = text.split(/\s+/, 2);
+                    if (parts[0] !== "/plan") return null;
+                    return text.slice(parts[0].length).trim();
+                };
+                setPlanMode(false);
                 sync();
-                input.addEventListener("input", sync);
+                if (slashTrigger && slashMenu) {
+                    slashTrigger.addEventListener("click", () => {
+                        if (slashMenu.hidden) {
+                            openSlashMenu();
+                        } else {
+                            closeSlashMenu();
+                        }
+                    });
+                }
+                if (slashPlan) {
+                    slashPlan.addEventListener("click", () => {
+                        const enabled = composer.dataset.planMode !== "true";
+                        setPlanMode(enabled);
+                        if (enabled && input.value.trim() === "/") {
+                            input.value = "";
+                            sync();
+                        }
+                        closeSlashMenu();
+                        input.focus();
+                    });
+                }
+                document.addEventListener("click", (event) => {
+                    if (!slashCommand || !slashMenu || slashMenu.hidden) return;
+                    if (!slashCommand.contains(event.target)) closeSlashMenu();
+                });
+                document.addEventListener("keydown", (event) => {
+                    if (event.key !== "Escape") return;
+                    if (!slashMenu || slashMenu.hidden) return;
+                    closeSlashMenu();
+                    if (slashTrigger) slashTrigger.focus();
+                });
+                input.addEventListener("input", () => {
+                    sync();
+                    if (input.value.trim() === "/") {
+                        openSlashMenu();
+                    } else {
+                        closeSlashMenu();
+                    }
+                });
                 input.addEventListener("keydown", (event) => {
                     if (!isSuperEnter(event)) return;
                     event.preventDefault();
                     requestSubmit(composer, submit);
                 });
-                composer.addEventListener("submit", () => {
+                composer.addEventListener("submit", (event) => {
+                    const commandPrompt = parsePlanCommand();
+                    if (commandPrompt !== null) {
+                        setPlanMode(true);
+                        input.value = commandPrompt;
+                        if (!commandPrompt) {
+                            event.preventDefault();
+                            sync();
+                            input.focus();
+                            return;
+                        }
+                        sync();
+                    }
                     // Defer the disable until after the form's entry
                     // list has been serialized: the Stop button carries
                     // the active worker's id as its name/value, and
@@ -1585,6 +1817,7 @@
             // item id; for agent messages we keep a reference to the body
             // node so deltas append directly.
             const items = new Map();
+            const planViews = new Map();
             // The pending-user bubble is replaced once the server-side
             // user message arrives via the stream, so it doesn't end up
             // double-rendered with the canonical reload.
@@ -1730,6 +1963,76 @@
                 followRenderedContent();
             }
 
+            function ensurePlanView(turnId, itemId) {
+                const key = turnId || itemId || "active";
+                let view = planViews.get(key);
+                if (!view && itemId) view = planViews.get(itemId);
+                if (!view && turnId) view = planViews.get(turnId);
+                if (!view) {
+                    const wrap = document.createElement("div");
+                    wrap.className = "entry";
+                    if (itemId) wrap.dataset.itemId = itemId;
+                    const card = document.createElement("div");
+                    card.className = "plan-card";
+                    const header = document.createElement("div");
+                    header.className = "plan-header";
+                    header.textContent = "Plan";
+                    const explanation = document.createElement("div");
+                    explanation.className = "plan-explanation";
+                    explanation.hidden = true;
+                    const list = document.createElement("ol");
+                    list.className = "plan-checklist";
+                    list.hidden = true;
+                    const text = document.createElement("div");
+                    text.className = "plan-text";
+                    text.hidden = true;
+                    card.appendChild(header);
+                    card.appendChild(explanation);
+                    card.appendChild(list);
+                    card.appendChild(text);
+                    wrap.appendChild(card);
+                    insertBeforeLive(wrap);
+                    view = { node: wrap, explanation, list, text, textRaw: "" };
+                    planViews.set(key, view);
+                    followRenderedContent();
+                }
+                if (turnId) planViews.set(turnId, view);
+                if (itemId) planViews.set(itemId, view);
+                if (itemId) {
+                    view.node.dataset.itemId = itemId;
+                    items.set(itemId, { kind: "plan", node: view.node, view });
+                }
+                return view;
+            }
+
+            function renderPlanItem(item, turnId) {
+                const view = ensurePlanView(turnId, item.id);
+                view.textRaw = item.text || view.textRaw || "";
+                renderPlanText(view);
+                followRenderedContent();
+            }
+
+            function renderPlanText(view) {
+                const text = view.textRaw.trim();
+                view.text.textContent = text;
+                view.text.hidden = !text || !view.list.hidden;
+            }
+
+            function renderPlanSteps(view, steps) {
+                view.list.replaceChildren();
+                for (const step of steps) {
+                    const text = typeof step.step === "string" ? step.step.trim() : "";
+                    if (!text) continue;
+                    const li = document.createElement("li");
+                    const status = typeof step.status === "string" ? step.status : "pending";
+                    li.className = "plan-step " + status;
+                    li.textContent = text;
+                    view.list.appendChild(li);
+                }
+                view.list.hidden = view.list.children.length === 0;
+                renderPlanText(view);
+            }
+
             function toolDetail(item) {
                 switch (item.type) {
                     case "commandExecution": return item.command || "";
@@ -1753,6 +2056,7 @@
                 switch (item.type) {
                     case "userMessage": renderUserItem(item); break;
                     case "agentMessage": renderAgentItem(item); break;
+                    case "plan": renderPlanItem(item, payload.turnId); break;
                     default: renderToolCallItem(item); break;
                 }
             }
@@ -1764,13 +2068,25 @@
                 followRenderedContent();
             }
 
+            function handlePlanDelta(payload) {
+                const itemId = payload.itemId;
+                if (!itemId) return;
+                const entry = items.get(itemId);
+                const view = entry && entry.kind === "plan"
+                    ? entry.view
+                    : ensurePlanView(payload.turnId, itemId);
+                view.textRaw += payload.delta || "";
+                renderPlanText(view);
+                followRenderedContent();
+            }
+
             function handleItemCompleted(payload) {
                 const item = payload.item || {};
                 const entry = items.get(item.id);
                 if (!entry) {
                     // Item that completed without a prior started event —
                     // render now so the user still sees it.
-                    handleItemStarted({ item });
+                    handleItemStarted(payload);
                     return handleItemCompleted(payload);
                 }
                 if (entry.kind === "agent" && item.type === "agentMessage") {
@@ -1782,6 +2098,12 @@
                         const role = entry.node.querySelector(".role");
                         if (role) role.textContent = "Agent (thinking)";
                     }
+                    followRenderedContent();
+                    return;
+                }
+                if (entry.kind === "plan" && item.type === "plan") {
+                    entry.view.textRaw = item.text || entry.view.textRaw;
+                    renderPlanText(entry.view);
                     followRenderedContent();
                     return;
                 }
@@ -1841,6 +2163,19 @@
             function handleGoalCleared(order) {
                 if (!applyGoalOrder(order)) return;
                 setGoal("");
+            }
+
+            function handlePlanUpdated(payload) {
+                const turnId = payload && payload.turnId;
+                if (!turnId) return;
+                const view = ensurePlanView(turnId, null);
+                const explanation = typeof payload.explanation === "string"
+                    ? payload.explanation.trim()
+                    : "";
+                view.explanation.textContent = explanation;
+                view.explanation.hidden = !explanation;
+                renderPlanSteps(view, Array.isArray(payload.plan) ? payload.plan : []);
+                followRenderedContent();
             }
 
             function handleApprovalRequested(payload) {
@@ -1956,9 +2291,11 @@
                 switch (method) {
                     case "item/started": handleItemStarted(payload); break;
                     case "item/agentMessage/delta": handleAgentDelta(payload); break;
+                    case "item/plan/delta": handlePlanDelta(payload); break;
                     case "item/completed": handleItemCompleted(payload); break;
                     case "thread/goal/updated": handleGoalUpdated(payload, order); break;
                     case "thread/goal/cleared": handleGoalCleared(order); break;
+                    case "turn/plan/updated": handlePlanUpdated(payload); break;
                     case "approval/requested": handleApprovalRequested(payload); break;
                     case "approval/resolved": handleApprovalResolved(payload); break;
                 }

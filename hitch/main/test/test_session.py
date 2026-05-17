@@ -1246,6 +1246,18 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "requestSubmit(composer, submit)")
 
     @patch("hitch.main.views.Codex")
+    def test_composer_exposes_plan_slash_command(self, mock_codex: MagicMock) -> None:
+        _patch_thread(self, mock_codex, _thread([]))
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertContains(response, 'class="slash-trigger"')
+        self.assertContains(response, 'name="plan_mode"')
+        self.assertContains(response, "Plan mode")
+        self.assertContains(response, 'case "turn/plan/updated"')
+        self.assertContains(response, 'case "item/plan/delta"')
+
+    @patch("hitch.main.views.Codex")
     def test_stream_url_carries_baseline_and_active_when_worker_present(
         self, mock_codex: MagicMock
     ) -> None:
