@@ -135,6 +135,7 @@ _NAME_MAX_LEN = 200
 # from ``objects.get`` — a 500 for what should be a clean 400.
 _MAX_BIGAUTOFIELD = 2**63 - 1
 _PLAN_SLASH_COMMAND = "/plan"
+_PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium.value
 
 # Friendly labels for non-message thread item types. Anything not in this map
 # falls back to the raw type tag so we never silently drop an item from the UI.
@@ -242,6 +243,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
     # mode forever, since the EventSource wouldn't reach an end event.
     codex_pool.reconcile_dead()
     config = AppServerConfig(codex_bin=shutil.which("codex"))
+    settings = _stored_settings(request)
     with Codex(config=config) as codex:
         # ``thread/read`` only works for threads already loaded into the
         # app-server's in-memory map. Each request spawns a fresh app-server
@@ -249,7 +251,9 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
         # different worker) need ``thread/resume`` to read them off disk.
         # The resume response already carries the full thread including turns,
         # so a follow-up ``thread/read`` would just be a redundant round-trip.
-        thread = codex._client.thread_resume(session_id).thread
+        resumed = codex._client.thread_resume(session_id)
+        thread = resumed.thread
+        plan_model = _plan_mode_model(codex, resumed, settings)
     is_archived = _thread_is_archived(thread)
     entries = list(_entries_for(thread))
     name_value = getattr(thread, "name", None) or ""
@@ -302,6 +306,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             # bubble while the stream catches up.
             "pending_user_prompt": _pending_user_prompt(active_instance),
             "token_usage": token_usage,
+            "next_message_config": _next_message_config(settings, resumed, plan_model),
             "goal_objective": goal_objective,
             "diff_view": diff_view,
         },
@@ -403,6 +408,67 @@ def _token_usage_for(thread: Any) -> dict[str, str] | None:
         "cached": f"{usage['cached_input_tokens']:,}",
         "output": f"{usage['output_tokens']:,}",
     }
+
+
+def _next_message_config(
+    settings: SettingsValues, resumed: Any, plan_model: str | None
+) -> list[dict[str, str]]:
+    """Return the settings that will govern the next submitted message."""
+    model = _string_value(getattr(resumed, "model", None))
+    reasoning = _string_value(getattr(resumed, "reasoning_effort", None))
+    plan_model_value = plan_model or "Unknown"
+    sandbox_value = _option_label(
+        _SANDBOX_POLICY_OPTIONS,
+        _effective_sandbox_policy(settings),
+        default="Codex default",
+    )
+    approval_value = _option_label(
+        _APPROVAL_MODE_OPTIONS, _effective_approval_mode(settings)
+    )
+    return [
+        {"label": "model", "value": model or "Unknown", "plan_value": plan_model_value},
+        {
+            "label": "reasoning",
+            "value": reasoning or "Model default",
+            "plan_value": _PLAN_MODE_REASONING_EFFORT,
+        },
+        {
+            "label": "sandbox",
+            "value": sandbox_value,
+            "plan_value": sandbox_value,
+        },
+        {
+            "label": "approval",
+            "value": approval_value,
+            "plan_value": approval_value,
+        },
+    ]
+
+
+def _effective_sandbox_policy(settings: SettingsValues) -> str:
+    sandbox_policy = settings.sandbox_policy
+    if sandbox_policy and sandbox_policy not in _VALID_SANDBOX_POLICIES:
+        return ""
+    return sandbox_policy
+
+
+def _effective_approval_mode(settings: SettingsValues) -> str:
+    if settings.approval_mode not in _VALID_APPROVAL_MODES:
+        return _DEFAULT_APPROVAL_MODE
+    return settings.approval_mode
+
+
+def _string_value(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    return raw.strip() if isinstance(raw, str) else ""
+
+
+def _option_label(
+    options: tuple[tuple[str, str], ...], value: str, *, default: str | None = None
+) -> str:
+    if not value and default is not None:
+        return default
+    return next((label for option_value, label in options if option_value == value), value)
 
 
 def _active_instance_for(session_id: str) -> CodexInstance | None:
@@ -1133,12 +1199,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     # the cookies or every turn after the first silently reverts to Codex
     # defaults — which breaks multi-turn workflows that depend on
     # elevated permissions or stricter escalation handling.
-    sandbox_policy = settings.sandbox_policy
-    if sandbox_policy and sandbox_policy not in _VALID_SANDBOX_POLICIES:
-        sandbox_policy = ""
-    approval_mode = settings.approval_mode
-    if approval_mode not in _VALID_APPROVAL_MODES:
-        approval_mode = _DEFAULT_APPROVAL_MODE
+    sandbox_policy = _effective_sandbox_policy(settings)
+    approval_mode = _effective_approval_mode(settings)
     spawn_kwargs: dict[str, Any] = {
         "thread_id": session_id,
         "cwd": cwd,

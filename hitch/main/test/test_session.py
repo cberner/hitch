@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from django.core import signing
 from django.http import HttpResponse
 from django.test import Client, TestCase
 from django.urls import reverse
@@ -126,6 +127,15 @@ def _get_session(client: Client, session_id: str = "thread-1") -> HttpResponse:
     return response
 
 
+def _sign(name: str, value: str) -> str:
+    return signing.get_cookie_signer(salt=name).sign(value)
+
+
+def _seed_cookies(client: Client, **values: str) -> None:
+    for name, value in values.items():
+        client.cookies[name] = _sign(name, value)
+
+
 def _diff_view() -> DiffView:
     return DiffView(
         files=[
@@ -173,6 +183,55 @@ class SessionViewTests(TestCase):
                 self.assertContains(response, 'name="archived" value="true"')
                 self.assertContains(response, 'role="menuitem">Archive</button>')
                 self.assertNotContains(response, ">Edit</button>")
+
+    @patch("hitch.main.views.Codex")
+    def test_next_message_settings_render_under_title(
+        self, mock_codex: MagicMock
+    ) -> None:
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=_thread([_turn([_user_message("hi")])]),
+            model="gpt-5.4",
+            reasoning_effort=SimpleNamespace(value="high"),
+        )
+        _seed_cookies(
+            self.client,
+            hitch_sandbox_policy="workspaceWrite",
+            hitch_approval_mode="prompt_user",
+        )
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'aria-label="Settings for the next message"')
+        self.assertContains(response, ">model<")
+        self.assertContains(response, "gpt-5.4")
+        self.assertContains(response, ">reasoning<")
+        self.assertContains(response, "high")
+        self.assertContains(response, 'data-normal-value="high"')
+        self.assertContains(response, 'data-plan-value="medium"')
+        self.assertContains(response, ">sandbox<")
+        self.assertContains(response, "Workspace write")
+        self.assertContains(response, ">approval<")
+        self.assertContains(response, "Always prompt for approval")
+
+    @patch("hitch.main.views.Codex")
+    def test_next_message_model_comes_only_from_resumed_thread(
+        self, mock_codex: MagicMock
+    ) -> None:
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=_thread([_turn([_user_message("hi")])]),
+            reasoning_effort=SimpleNamespace(value="medium"),
+        )
+        _seed_cookies(self.client, hitch_model="gpt-stale")
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, ">model<")
+        self.assertContains(response, 'data-normal-value="Unknown"')
+        self.assertContains(response, 'data-plan-value="gpt-stale"')
 
     @patch("hitch.main.views.build_worktree_diff")
     @patch("hitch.main.views.Codex")
@@ -1144,6 +1203,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, 'aria-label="Jump to latest message"')
         self.assertContains(response, '<dialog class="diff-modal"', html=False)
         self.assertNotContains(response, 'class="diff-fab"')
+        self.assertNotContains(response, 'aria-label="Settings for the next message"')
 
     @patch("hitch.main.views.build_worktree_diff")
     @patch("hitch.main.views.Codex")
@@ -1291,6 +1351,8 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, 'class="slash-trigger"')
         self.assertContains(response, 'name="plan_mode"')
         self.assertContains(response, "Plan mode")
+        self.assertContains(response, "syncNextMessageConfig")
+        self.assertContains(response, 'parsePlanCommand() !== null')
         self.assertContains(response, 'case "turn/plan/updated"')
         self.assertContains(response, 'case "item/plan/delta"')
 
