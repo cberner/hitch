@@ -8,6 +8,8 @@ import json
 import os
 import signal
 import tempfile
+import threading
+import time
 from collections.abc import Iterator
 from io import StringIO
 from pathlib import Path
@@ -903,6 +905,313 @@ class InterruptInstanceTests(TestCase):
         mock_killpg.assert_not_called()
         instance.refresh_from_db()
         self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
+
+
+class SteerInstanceTests(TestCase):
+    """Targeted-steer entry point used by active composer submissions."""
+
+    def _make(
+        self,
+        *,
+        pid: int = 1,
+        thread_id: str = "t",
+        status: str = CodexInstance.STATUS_RUNNING,
+        events_path: str,
+    ) -> CodexInstance:
+        return CodexInstance.objects.create(
+            pid=pid,
+            thread_id=thread_id,
+            cwd="/r",
+            events_path=events_path,
+            status=status,
+        )
+
+    @patch("hitch.main.codex_pool._steer_instance")
+    def test_steer_active_targets_latest_active_instance(
+        self, mock_steer: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            active = self._make(
+                thread_id="t",
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(Path(raw) / "active.jsonl"),
+            )
+            self._make(
+                thread_id="other",
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(Path(raw) / "other.jsonl"),
+            )
+            mock_steer.return_value = active
+
+            result = codex_pool.steer_active("t", prompt="also do this")
+
+        self.assertEqual(result, active)
+        mock_steer.assert_called_once_with(active, prompt="also do this")
+
+    @patch("hitch.main.codex_pool._steer_instance")
+    def test_steer_active_returns_none_without_active_instance(
+        self, mock_steer: MagicMock
+    ) -> None:
+        result = codex_pool.steer_active("missing", prompt="also do this")
+
+        self.assertIsNone(result)
+        mock_steer.assert_not_called()
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_queues_payload_and_signals_running_instance(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            target = self._make(
+                pid=4321,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(Path(raw) / "target.jsonl"),
+            )
+            bystander = self._make(
+                pid=9999,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(Path(raw) / "bystander.jsonl"),
+            )
+
+            result = codex_pool.steer_instance(
+                target.pk,
+                expected_thread_id="t",
+                prompt="also update the tests",
+            )
+
+            self.assertIsNotNone(result)
+            mock_identity.assert_called_once_with(4321, target.pk)
+            mock_kill.assert_called_once_with(4321, signal.SIGUSR1)
+            line = codex_pool.control_path_for(target).read_text(encoding="utf-8")
+            self.assertEqual(
+                json.loads(line),
+                {"op": "steer", "input": "also update the tests"},
+            )
+            self.assertFalse(codex_pool.control_path_for(bystander).exists())
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_starting_instance_queues_without_signal(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make(
+                pid=4321,
+                status=CodexInstance.STATUS_STARTING,
+                events_path=str(Path(raw) / "events.jsonl"),
+            )
+
+            result = codex_pool.steer_instance(
+                instance.pk,
+                expected_thread_id="t",
+                prompt="also inspect migrations",
+            )
+
+            self.assertIsNotNone(result)
+            mock_identity.assert_called_once_with(4321, instance.pk)
+            mock_kill.assert_not_called()
+            self.assertTrue(codex_pool.control_path_for(instance).exists())
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_starting_instance_returns_none_if_refresh_sees_terminal(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        original_append = codex_pool._append_control_request
+
+        def append_and_finish(
+            instance: CodexInstance,
+            payload: dict[str, str],
+        ) -> None:
+            original_append(instance, payload)
+            CodexInstance.objects.filter(pk=instance.pk).update(
+                status=CodexInstance.STATUS_FAILED
+            )
+
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make(
+                pid=4321,
+                status=CodexInstance.STATUS_STARTING,
+                events_path=str(Path(raw) / "events.jsonl"),
+            )
+            with patch(
+                "hitch.main.codex_pool._append_control_request",
+                side_effect=append_and_finish,
+            ):
+                result = codex_pool.steer_instance(
+                    instance.pk,
+                    expected_thread_id="t",
+                    prompt="also inspect migrations",
+                )
+
+            self.assertIsNone(result)
+            mock_identity.assert_called_once_with(4321, instance.pk)
+            mock_kill.assert_not_called()
+            self.assertTrue(codex_pool.control_path_for(instance).exists())
+
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_thread_id_mismatch_refuses(self, mock_kill: MagicMock) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make(
+                thread_id="other",
+                events_path=str(Path(raw) / "events.jsonl"),
+            )
+
+            result = codex_pool.steer_instance(
+                instance.pk,
+                expected_thread_id="t",
+                prompt="also do this",
+            )
+
+            self.assertIsNone(result)
+            mock_kill.assert_not_called()
+            self.assertFalse(codex_pool.control_path_for(instance).exists())
+
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_terminal_instance_refuses(self, mock_kill: MagicMock) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make(
+                status=CodexInstance.STATUS_COMPLETED,
+                events_path=str(Path(raw) / "events.jsonl"),
+            )
+
+            result = codex_pool.steer_instance(
+                instance.pk,
+                expected_thread_id="t",
+                prompt="also do this",
+            )
+
+            self.assertIsNone(result)
+            mock_kill.assert_not_called()
+            self.assertFalse(codex_pool.control_path_for(instance).exists())
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=False)
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_dead_pid_marks_failed_but_reports_not_steered(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make(
+                pid=4321,
+                events_path=str(Path(raw) / "events.jsonl"),
+            )
+
+            result = codex_pool.steer_instance(
+                instance.pk,
+                expected_thread_id="t",
+                prompt="also do this",
+            )
+
+            self.assertIsNone(result)
+            mock_identity.assert_called_once_with(4321, instance.pk)
+            mock_kill.assert_not_called()
+            instance.refresh_from_db()
+            self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+            self.assertEqual(instance.error, "worker process unavailable for steer")
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_process_lookup_error_marks_failed_but_reports_not_steered(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        mock_kill.side_effect = ProcessLookupError
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make(
+                pid=4321,
+                events_path=str(Path(raw) / "events.jsonl"),
+            )
+
+            result = codex_pool.steer_instance(
+                instance.pk,
+                expected_thread_id="t",
+                prompt="also do this",
+            )
+
+            self.assertIsNone(result)
+            mock_identity.assert_called_once_with(4321, instance.pk)
+            mock_kill.assert_called_once_with(4321, signal.SIGUSR1)
+            instance.refresh_from_db()
+            self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+            self.assertEqual(instance.error, "worker process exited before steer")
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_running_instance_returns_none_if_refresh_sees_terminal(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make(
+                pid=4321,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(Path(raw) / "events.jsonl"),
+            )
+
+            def finish_after_signal(_pid: int, _signal: int) -> None:
+                CodexInstance.objects.filter(pk=instance.pk).update(
+                    status=CodexInstance.STATUS_COMPLETED
+                )
+
+            mock_kill.side_effect = finish_after_signal
+
+            result = codex_pool.steer_instance(
+                instance.pk,
+                expected_thread_id="t",
+                prompt="also do this",
+            )
+
+            self.assertIsNone(result)
+            mock_identity.assert_called_once_with(4321, instance.pk)
+            mock_kill.assert_called_once_with(4321, signal.SIGUSR1)
+            self.assertTrue(codex_pool.control_path_for(instance).exists())
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.codex_pool._append_control_request")
+    def test_control_file_write_error_reports_not_steered(
+        self,
+        mock_append: MagicMock,
+        mock_kill: MagicMock,
+        mock_identity: MagicMock,
+    ) -> None:
+        mock_append.side_effect = OSError("disk full")
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make(
+                pid=4321,
+                events_path=str(Path(raw) / "events.jsonl"),
+            )
+
+            result = codex_pool.steer_instance(
+                instance.pk,
+                expected_thread_id="t",
+                prompt="also do this",
+            )
+
+            self.assertIsNone(result)
+            mock_identity.assert_called_once_with(4321, instance.pk)
+            mock_append.assert_called_once()
+            mock_kill.assert_not_called()
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker")
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_unset_pid_refuses(self, mock_kill: MagicMock, mock_identity: MagicMock) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make(
+                pid=0,
+                status=CodexInstance.STATUS_STARTING,
+                events_path=str(Path(raw) / "events.jsonl"),
+            )
+
+            result = codex_pool.steer_instance(
+                instance.pk,
+                expected_thread_id="t",
+                prompt="also do this",
+            )
+
+            self.assertIsNone(result)
+            mock_identity.assert_not_called()
+            mock_kill.assert_not_called()
+            self.assertFalse(codex_pool.control_path_for(instance).exists())
 
 
 class PidIsOurWorkerTests(TestCase):
@@ -1967,30 +2276,40 @@ class ApprovalHandlerTests(TestCase):
 
 
 class WorkerCancellationTests(TestCase):
-    """The worker's graceful-stop path: SIGTERM handler + SDK interrupt.
+    """The worker's control paths: SIGTERM interrupt and SIGUSR1 steer.
 
     The stop endpoint signals the worker with SIGTERM; the worker turns
     that into the SDK's ``turn.interrupt()`` between stream events
-    rather than dying abruptly. We test the handler (sets the flag),
-    the interrupt helper (calls SDK, swallows errors), and the
-    integration where a flag set during streaming triggers exactly one
-    SDK interrupt.
+    rather than dying abruptly. Active composer submissions append steer
+    payloads to the worker's control file and nudge it with SIGUSR1; the
+    worker control forwarder drains those payloads and calls
+    ``turn.steer(...)``.
     """
 
     @override
     def setUp(self) -> None:
-        # Module-level flag persists across tests; reset to a known
+        # Module-level control state persists across tests; reset to a known
         # state so previous tests don't bleed into this one.
         codex_worker_module._cancel_requested = False
+        codex_worker_module._steer_wakeup = None
 
     @override
     def tearDown(self) -> None:
         codex_worker_module._cancel_requested = False
+        codex_worker_module._steer_wakeup = None
 
     def test_sigterm_handler_sets_flag(self) -> None:
         self.assertFalse(codex_worker_module._cancel_requested)
         codex_worker_module._on_sigterm(15, None)
         self.assertTrue(codex_worker_module._cancel_requested)
+
+    def test_sigusr1_handler_wakes_control_forwarder(self) -> None:
+        wakeup = threading.Event()
+        codex_worker_module._steer_wakeup = wakeup
+
+        self.assertFalse(wakeup.is_set())
+        codex_worker_module._on_sigusr1(signal.SIGUSR1, None)
+        self.assertTrue(wakeup.is_set())
 
     def test_try_interrupt_calls_sdk_and_reports_sent(self) -> None:
         turn = MagicMock()
@@ -1999,6 +2318,215 @@ class WorkerCancellationTests(TestCase):
 
         self.assertTrue(sent)
         turn.interrupt.assert_called_once_with()
+
+    def test_try_steer_calls_sdk_with_text_input_and_reports_sent(self) -> None:
+        turn = MagicMock()
+
+        sent = codex_worker_module._try_steer(turn, "also update docs")
+
+        self.assertTrue(sent)
+        turn.steer.assert_called_once()
+        self.assertEqual(turn.steer.call_args.args[0].text, "also update docs")
+
+    def test_try_steer_reports_sdk_errors(self) -> None:
+        turn = MagicMock()
+        turn.steer.side_effect = RuntimeError("turn no longer accepts steer")
+
+        sent = codex_worker_module._try_steer(turn, "also update docs")
+
+        self.assertFalse(sent)
+        turn.steer.assert_called_once()
+
+    def test_drain_steer_requests_consumes_complete_jsonl_only(self) -> None:
+        turn = MagicMock()
+        with tempfile.TemporaryDirectory() as raw:
+            control_path = Path(raw) / "worker.control.jsonl"
+            control_path.write_bytes(
+                b'{"op":"steer","input":"also run tests"}\n'
+                b'{"op":"ignore","input":"ignored"}\n'
+                b'{"op":"steer","input":"wait for newline"}'
+            )
+
+            offset = codex_worker_module._drain_steer_requests(
+                turn,
+                control_path=control_path,
+                control_offset=0,
+            )
+
+            turn.steer.assert_called_once()
+            self.assertEqual(turn.steer.call_args.args[0].text, "also run tests")
+            self.assertLess(offset, control_path.stat().st_size)
+
+            with control_path.open("ab") as fh:
+                fh.write(b"\n")
+            offset = codex_worker_module._drain_steer_requests(
+                turn,
+                control_path=control_path,
+                control_offset=offset,
+            )
+
+            self.assertEqual(turn.steer.call_count, 2)
+            self.assertEqual(turn.steer.call_args.args[0].text, "wait for newline")
+            self.assertEqual(offset, control_path.stat().st_size)
+
+    def test_drain_steer_requests_skips_failed_steer_line(self) -> None:
+        turn = MagicMock()
+        turn.steer.side_effect = [RuntimeError("rejected"), None]
+        first_line = b'{"op":"steer","input":"bad"}\n'
+        retry_line = b'{"op":"steer","input":"retry me"}\n'
+        with tempfile.TemporaryDirectory() as raw:
+            control_path = Path(raw) / "worker.control.jsonl"
+            control_path.write_bytes(first_line + retry_line)
+
+            offset = codex_worker_module._drain_steer_requests(
+                turn,
+                control_path=control_path,
+                control_offset=0,
+            )
+
+            self.assertEqual(offset, len(first_line) + len(retry_line))
+            self.assertEqual(turn.steer.call_count, 2)
+        self.assertEqual(turn.steer.call_args.args[0].text, "retry me")
+
+    def test_drain_steer_requests_missing_file_is_noop(self) -> None:
+        turn = MagicMock()
+        with tempfile.TemporaryDirectory() as raw:
+            offset = codex_worker_module._drain_steer_requests(
+                turn,
+                control_path=Path(raw) / "missing.control.jsonl",
+                control_offset=0,
+            )
+
+        self.assertEqual(offset, 0)
+        turn.steer.assert_not_called()
+
+    def test_drain_steer_requests_ignores_malformed_json(self) -> None:
+        turn = MagicMock()
+        with tempfile.TemporaryDirectory() as raw:
+            control_path = Path(raw) / "worker.control.jsonl"
+            control_path.write_bytes(
+                b"{not-json}\n"
+                b'{"op":"steer","input":"valid after malformed"}\n'
+            )
+
+            offset = codex_worker_module._drain_steer_requests(
+                turn,
+                control_path=control_path,
+                control_offset=0,
+            )
+            expected_size = control_path.stat().st_size
+
+        self.assertEqual(offset, expected_size)
+        turn.steer.assert_called_once()
+        self.assertEqual(
+            turn.steer.call_args.args[0].text,
+            "valid after malformed",
+        )
+
+    def test_steer_forwarder_drains_once_after_stop(self) -> None:
+        turn = MagicMock()
+        initial_drain = threading.Event()
+        original_drain = codex_worker_module._drain_steer_requests
+
+        def drain_side_effect(
+            turn_arg: Any,
+            *,
+            control_path: Path,
+            control_offset: int,
+        ) -> int:
+            result = original_drain(
+                turn_arg,
+                control_path=control_path,
+                control_offset=control_offset,
+            )
+            initial_drain.set()
+            return result
+
+        with tempfile.TemporaryDirectory() as raw:
+            control_path = Path(raw) / "worker.control.jsonl"
+            wakeup = threading.Event()
+            stop = threading.Event()
+            with (
+                patch.object(codex_worker_module, "_STEER_CONTROL_POLL_INTERVAL", 60),
+                patch.object(
+                    codex_worker_module,
+                    "_drain_steer_requests",
+                    side_effect=drain_side_effect,
+                ),
+            ):
+                forwarder = threading.Thread(
+                    target=codex_worker_module._forward_steer_requests,
+                    kwargs={
+                        "turn": turn,
+                        "control_path": control_path,
+                        "wakeup": wakeup,
+                        "stop": stop,
+                    },
+                    daemon=True,
+                )
+                forwarder.start()
+                self.assertTrue(initial_drain.wait(timeout=1))
+                control_path.write_text(
+                    json.dumps({"op": "steer", "input": "last chance"}) + "\n",
+                    encoding="utf-8",
+                )
+
+                stop.set()
+                wakeup.set()
+                forwarder.join(timeout=1)
+
+        self.assertFalse(forwarder.is_alive())
+        turn.steer.assert_called_once()
+        self.assertEqual(turn.steer.call_args.args[0].text, "last chance")
+
+    def test_sigusr1_wakes_running_steer_forwarder(self) -> None:
+        turn = MagicMock()
+        initial_drain = threading.Event()
+        original_drain = codex_worker_module._drain_steer_requests
+
+        def drain_side_effect(
+            turn_arg: Any,
+            *,
+            control_path: Path,
+            control_offset: int,
+        ) -> int:
+            result = original_drain(
+                turn_arg,
+                control_path=control_path,
+                control_offset=control_offset,
+            )
+            initial_drain.set()
+            return result
+
+        with tempfile.TemporaryDirectory() as raw:
+            control_path = Path(raw) / "worker.control.jsonl"
+            with (
+                patch.object(codex_worker_module, "_STEER_CONTROL_POLL_INTERVAL", 60),
+                patch.object(
+                    codex_worker_module,
+                    "_drain_steer_requests",
+                    side_effect=drain_side_effect,
+                ),
+            ):
+                forwarder = codex_worker_module._start_steer_control_forwarder(
+                    turn,
+                    control_path=control_path,
+                )
+                try:
+                    self.assertTrue(initial_drain.wait(timeout=1))
+                    control_path.write_text(
+                        json.dumps({"op": "steer", "input": "wake up"}) + "\n",
+                        encoding="utf-8",
+                    )
+                    codex_worker_module._on_sigusr1(signal.SIGUSR1, None)
+
+                    deadline = time.monotonic() + 1
+                    while turn.steer.call_count == 0 and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    turn.steer.assert_called_once()
+                    self.assertEqual(turn.steer.call_args.args[0].text, "wake up")
+                finally:
+                    codex_worker_module._stop_steer_control_forwarder(forwarder)
 
     def test_try_interrupt_swallows_sdk_errors(self) -> None:
         # A failed SDK call (turn already done, transport hiccup) must
@@ -2055,6 +2583,42 @@ class WorkerCancellationTests(TestCase):
             call_command("codex_worker", "--instance-id", str(instance.pk))
 
         captured["turn"].interrupt.assert_called_once_with()
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_queued_steer_file_drained_after_turn_handle_exists(
+        self, mock_codex: MagicMock
+    ) -> None:
+        completion = _completed_event("turn-1", TurnStatus.completed)
+        captured: dict[str, Any] = {}
+
+        def thread_resume_side_effect(*_args: object, **_kwargs: object) -> object:
+            turn_mock = MagicMock()
+            turn_mock.id = "turn-1"
+            turn_mock.stream.return_value = iter([completion])
+            captured["turn"] = turn_mock
+            return SimpleNamespace(turn=lambda _input: turn_mock)
+
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.side_effect = thread_resume_side_effect
+
+        with tempfile.TemporaryDirectory() as raw:
+            instance = CodexInstance.objects.create(
+                pid=12345,
+                thread_id="thread-1",
+                cwd="/repo",
+                prompt="hi",
+                events_path=str(Path(raw) / "events.jsonl"),
+                status=CodexInstance.STATUS_STARTING,
+            )
+            codex_pool.control_path_for(instance).write_text(
+                json.dumps({"op": "steer", "input": "also check docs"}) + "\n",
+                encoding="utf-8",
+            )
+
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+
+        captured["turn"].steer.assert_called_once()
+        self.assertEqual(captured["turn"].steer.call_args.args[0].text, "also check docs")
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_interrupt_called_exactly_once_when_flag_stays_set(

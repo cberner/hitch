@@ -38,6 +38,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
+from pathlib import Path
 from typing import IO, Any, Protocol, override
 
 from django.core.management.base import BaseCommand, CommandParser
@@ -75,6 +76,7 @@ from openai_codex.models import Notification
 from pydantic import BaseModel
 
 from hitch.main.codex_events import GOAL_METHODS
+from hitch.main.codex_pool import control_path_for
 from hitch.main.models import ApprovalRequest, CodexInstance
 
 # JSON-RPC method names the SDK invokes on the client transport when codex's
@@ -101,6 +103,11 @@ _APPROVAL_WAIT_SECONDS = 60 * 30
 # pin a CPU per pending approval.
 _APPROVAL_POLL_INTERVAL = 0.2
 
+# Cadence for the steer control thread's fallback poll. SIGUSR1 sets its
+# wakeup event for prompt delivery; the poll catches queued payloads from
+# STARTING-state races where the request process intentionally skipped signal.
+_STEER_CONTROL_POLL_INTERVAL = 0.2
+
 # Custom approval mode name not in ``ApprovalMode``. The SDK enum exposes
 # only ``auto_review`` and ``deny_all``; this one is wired through by
 # bypassing ``thread.turn(approval_mode=)`` and posting an on-request +
@@ -116,6 +123,10 @@ _PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium
 # calls that would race the main loop's read on the response pipe).
 _cancel_requested = False
 
+# Set by the active turn so the SIGUSR1 handler can wake the control-file
+# forwarder without doing blocking JSON-RPC work from inside the handler.
+_steer_wakeup: threading.Event | None = None
+
 
 def _on_sigterm(_signum: int, _frame: Any) -> None:
     """Mark the active turn for graceful cancellation.
@@ -129,6 +140,12 @@ def _on_sigterm(_signum: int, _frame: Any) -> None:
     """
     global _cancel_requested
     _cancel_requested = True
+
+
+def _on_sigusr1(_signum: int, _frame: Any) -> None:
+    """Mark the active turn for a control-file drain."""
+    if _steer_wakeup is not None:
+        _steer_wakeup.set()
 
 # Map the cookie/CLI policy strings onto factories for the discriminated
 # SandboxPolicy variants the SDK expects. Lookup misses (unknown / stale
@@ -169,10 +186,11 @@ class Command(BaseCommand):
         plan_mode: bool = options.get("plan_mode", False)
         instance = CodexInstance.objects.get(pk=instance_id)
 
-        # Install the cancel handler before flipping to RUNNING so a Stop
-        # click that lands the instant we transition can still be observed
-        # by the stream loop (it'll see the flag on the first iteration).
+        # Install the signal handlers before flipping to RUNNING so a Stop or
+        # Steer request that lands the instant we transition can still be
+        # observed by the stream loop.
         signal.signal(signal.SIGTERM, _on_sigterm)
+        signal.signal(signal.SIGUSR1, _on_sigusr1)
 
         instance.status = CodexInstance.STATUS_RUNNING
         instance.save(update_fields=["status"])
@@ -276,7 +294,9 @@ def _run_turn(
     final_turn: Turn | None = None
     interrupt_sent = False
     goal_forwarder: threading.Thread | None = None
+    steer_forwarder: _SteerControlForwarder | None = None
     notification_order: NotificationOrdering = _fallback_notification_order
+    control_path = control_path_for(instance)
     try:
         with Codex(config=config) as codex:
             notification_order = _install_notification_sequencer(codex)
@@ -314,25 +334,39 @@ def _run_turn(
                 approval_mode=approval_mode,
                 plan_mode=plan_mode,
             )
-            # A Stop click that landed before the turn handle existed sets the
-            # flag without us being able to call interrupt yet; act on it now
-            # that the handle is ready.
-            if _cancel_requested and not interrupt_sent:
-                interrupt_sent = _try_interrupt(turn)
-            for event in turn.stream():
-                _write_notification(event)
-                payload = event.payload
-                if isinstance(payload, TurnCompletedNotification) and payload.turn.id == turn.id:
-                    final_turn = payload.turn
+            steer_forwarder = _start_steer_control_forwarder(
+                turn,
+                control_path=control_path,
+            )
+            try:
+                # A Stop click that landed before the turn handle existed sets the
+                # flag without us being able to call interrupt yet; act on it now
+                # that the handle is ready.
                 if _cancel_requested and not interrupt_sent:
-                    # SDK-level interrupt is the graceful cancellation path:
-                    # the app-server stops the model, emits the remaining
-                    # events (including a turn/completed with status=interrupted),
-                    # and the worker's normal status-update code at the end
-                    # records that as a failed turn. SIGKILL is the next
-                    # escalation if the user clicks Stop again.
                     interrupt_sent = _try_interrupt(turn)
+                for event in turn.stream():
+                    _write_notification(event)
+                    payload = event.payload
+                    if (
+                        isinstance(payload, TurnCompletedNotification)
+                        and payload.turn.id == turn.id
+                    ):
+                        final_turn = payload.turn
+                    if _cancel_requested and not interrupt_sent:
+                        # SDK-level interrupt is the graceful cancellation path:
+                        # the app-server stops the model, emits the remaining
+                        # events (including a turn/completed with status=interrupted),
+                        # and the worker's normal status-update code at the end
+                        # records that as a failed turn. SIGKILL is the next
+                        # escalation if the user clicks Stop again.
+                        interrupt_sent = _try_interrupt(turn)
+            finally:
+                if steer_forwarder is not None:
+                    _stop_steer_control_forwarder(steer_forwarder)
+                    steer_forwarder = None
     finally:
+        if steer_forwarder is not None:
+            _stop_steer_control_forwarder(steer_forwarder)
         if goal_forwarder is not None:
             goal_forwarder.join(timeout=0.5)
     return final_turn
@@ -348,6 +382,126 @@ def _try_interrupt(turn: TurnHandle) -> bool:
     with contextlib.suppress(Exception):
         turn.interrupt()
     return True
+
+
+@dataclasses.dataclass(slots=True)
+class _SteerControlForwarder:
+    thread: threading.Thread
+    wakeup: threading.Event
+    stop: threading.Event
+
+
+def _start_steer_control_forwarder(
+    turn: TurnHandle,
+    *,
+    control_path: Path,
+) -> _SteerControlForwarder:
+    """Start a side drain for per-turn steer payloads."""
+    global _steer_wakeup
+    wakeup = threading.Event()
+    stop = threading.Event()
+    forwarder = _SteerControlForwarder(
+        thread=threading.Thread(
+            target=_forward_steer_requests,
+            kwargs={
+                "turn": turn,
+                "control_path": control_path,
+                "wakeup": wakeup,
+                "stop": stop,
+            },
+            daemon=True,
+        ),
+        wakeup=wakeup,
+        stop=stop,
+    )
+    _steer_wakeup = wakeup
+    forwarder.thread.start()
+    return forwarder
+
+
+def _stop_steer_control_forwarder(forwarder: _SteerControlForwarder) -> None:
+    """Stop the steer forwarder after waking it for one final drain."""
+    global _steer_wakeup
+    forwarder.stop.set()
+    forwarder.wakeup.set()
+    forwarder.thread.join(timeout=0.5)
+    if _steer_wakeup is forwarder.wakeup:
+        _steer_wakeup = None
+
+
+def _forward_steer_requests(
+    *,
+    turn: TurnHandle,
+    control_path: Path,
+    wakeup: threading.Event,
+    stop: threading.Event,
+) -> None:
+    """Forward complete JSONL steer requests into the active turn.
+
+    The initial drain catches requests queued while the worker was still
+    STARTING. The final drain catches requests appended after the last stream
+    event but before the worker records a terminal row status.
+    """
+    control_offset = 0
+    while not stop.is_set():
+        control_offset = _drain_steer_requests(
+            turn,
+            control_path=control_path,
+            control_offset=control_offset,
+        )
+        wakeup.wait(_STEER_CONTROL_POLL_INTERVAL)
+        wakeup.clear()
+    _drain_steer_requests(
+        turn,
+        control_path=control_path,
+        control_offset=control_offset,
+    )
+
+
+def _drain_steer_requests(
+    turn: TurnHandle,
+    *,
+    control_path: Path,
+    control_offset: int,
+) -> int:
+    """Read new complete control-file lines and apply steer requests.
+
+    The control file is append-only JSONL. Incomplete trailing bytes are left
+    for the next drain so a concurrent writer cannot produce a corrupt request.
+    """
+    try:
+        with control_path.open("rb") as fh:
+            fh.seek(control_offset)
+            chunk = fh.read()
+    except FileNotFoundError:
+        return control_offset
+    if not chunk:
+        return control_offset
+    newline = chunk.rfind(b"\n")
+    if newline < 0:
+        return control_offset
+    complete = chunk[: newline + 1]
+    for raw in complete.splitlines():
+        try:
+            request = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(request, dict) or request.get("op") != "steer":
+            continue
+        text = request.get("input")
+        if isinstance(text, str) and text.strip():
+            _try_steer(turn, text)
+    return control_offset + len(complete)
+
+
+def _try_steer(turn: TurnHandle, text: str) -> bool:
+    """Send one SDK-level steer request; report whether it was attempted."""
+    try:
+        turn.steer(TextInput(text))
+    except Exception:
+        return False
+    else:
+        return True
 
 
 def _start_turn(

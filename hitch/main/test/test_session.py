@@ -1190,10 +1190,15 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "data-pending-user>")
         # Stop button is wired to the interrupt endpoint via formaction so
         # the user can abort an in-progress turn without leaving the page.
+        # The regular composer submit carries the same active instance in a
+        # hidden field so it steers this running turn instead of spawning an
+        # overlapping follow-up worker.
         # The button's name/value carries the *specific* worker the page
         # is showing — clicking Stop on a stale tab must not accidentally
         # abort a newer overlapping worker the user can't see.
         stop_url = reverse("stop_session", kwargs={"session_id": "thread-1"})
+        self.assertContains(response, f'name="active_instance" value="{instance.id}"')
+        self.assertContains(response, ">Steer</button>")
         self.assertContains(response, f'formaction="{stop_url}"')
         self.assertContains(response, f'name="instance" value="{instance.id}"')
 
