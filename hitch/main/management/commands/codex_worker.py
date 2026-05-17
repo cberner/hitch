@@ -80,10 +80,9 @@ from hitch.main.codex_pool import control_path_for
 from hitch.main.models import ApprovalRequest, CodexInstance
 
 # JSON-RPC method names the SDK invokes on the client transport when codex's
-# auto-reviewer escalates an action. The ``approve_all`` worker mode also
-# routes through these methods (the wire-level ``ApprovalsReviewer.user``
-# pairing forces every escalation back to the client transport), so the same
-# handler covers both interactive and rubber-stamp policies.
+# auto-reviewer escalates an action. Custom user-reviewer worker modes also
+# route through these methods, so the same handler covers both interactive
+# and rubber-stamp policies.
 _APPROVAL_METHODS = frozenset(
     {
         "item/commandExecution/requestApproval",
@@ -108,12 +107,14 @@ _APPROVAL_POLL_INTERVAL = 0.2
 # STARTING-state races where the request process intentionally skipped signal.
 _STEER_CONTROL_POLL_INTERVAL = 0.2
 
-# Custom approval mode name not in ``ApprovalMode``. The SDK enum exposes
-# only ``auto_review`` and ``deny_all``; this one is wired through by
-# bypassing ``thread.turn(approval_mode=)`` and posting an on-request +
-# no-reviewer ``TurnStartParams`` so the client's default auto-approve
-# handler answers every escalation unconditionally.
+# Custom approval mode names not in ``ApprovalMode``. The SDK enum exposes
+# only ``auto_review`` and ``deny_all``; these are wired through by
+# bypassing ``thread.turn(approval_mode=)`` and posting an on-request
+# policy with ``ApprovalsReviewer.user`` so every escalation reaches the
+# client transport.
+_PROMPT_USER = "prompt_user"
 _APPROVE_ALL = "approve_all"
+_USER_REVIEWER_APPROVAL_MODES = frozenset({_PROMPT_USER, _APPROVE_ALL})
 _PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium
 
 # Set by the SIGTERM handler so the stream loop knows to call
@@ -517,18 +518,15 @@ def _start_turn(
 ) -> TurnHandle:
     """Start a turn under the requested approval policy.
 
-    ``approve_all`` is not an ``ApprovalMode`` enum value, so we bypass
-    ``Thread.turn(approval_mode=)`` and post the wire-level params
-    directly: an on-request approval policy paired with the ``user``
-    reviewer routes every escalation back to the client transport,
-    where ``AppServerClient._default_approval_handler`` rubber-stamps
-    both ``commandExecution`` and ``fileChange`` requests. Leaving
-    ``approvals_reviewer`` unset falls back to server-side routing
-    (typically ``auto_review``), which can still decline — so the
-    explicit ``ApprovalsReviewer.user`` is load-bearing for the
-    "approve everything" promise. Known SDK values (``auto_review``,
-    ``deny_all``) and the unset case go through the typed
-    ``Thread.turn`` API.
+    The custom user-reviewer modes are not ``ApprovalMode`` enum values, so
+    we bypass ``Thread.turn(approval_mode=)`` and post the wire-level params
+    directly: an on-request approval policy paired with the ``user`` reviewer
+    routes every escalation back to the client transport. ``prompt_user``
+    surfaces the normal browser prompt there; ``approve_all`` is answered by
+    a special rubber-stamp handler. Leaving ``approvals_reviewer`` unset falls
+    back to server-side routing (typically ``auto_review``), which can still
+    decide without involving the browser. Known SDK values (``auto_review``,
+    ``deny_all``) and the unset case go through the typed ``Thread.turn`` API.
     """
     if plan_mode:
         return _start_plan_turn(
@@ -540,7 +538,7 @@ def _start_turn(
             approval_mode=approval_mode,
         )
 
-    if approval_mode == _APPROVE_ALL:
+    if approval_mode in _USER_REVIEWER_APPROVAL_MODES:
         typed_input = [UserInput(root=TextUserInput(type="text", text=prompt))]
         params = TurnStartParams(
             thread_id=thread.id,
@@ -548,6 +546,7 @@ def _start_turn(
             approval_policy=AskForApproval(root=AskForApprovalValue.on_request),
             approvals_reviewer=ApprovalsReviewer.user,
             effort=effort,
+            model=model,
             sandbox_policy=sandbox_policy,
         )
         # ``_client.turn_start`` requires the input again as its second
@@ -598,7 +597,7 @@ def _start_plan_turn(
     }
     if sandbox_policy is not None:
         params["sandboxPolicy"] = sandbox_policy.model_dump(mode="json", by_alias=True)
-    if approval_mode == _APPROVE_ALL:
+    if approval_mode in _USER_REVIEWER_APPROVAL_MODES:
         params["approvalPolicy"] = AskForApproval(
             root=AskForApprovalValue.on_request
         ).model_dump(mode="json", by_alias=True)
@@ -826,10 +825,11 @@ def _make_approval_handler(
     * ``approve_all`` mode: every escalation is auto-answered ``approved``.
       This preserves the existing "approve everything" promise of that
       mode without going through the interactive UI loop.
-    * Any other mode (including ``auto_review``): each escalation creates
-      an ``ApprovalRequest`` row, emits an ``approval/requested`` event
-      so the SSE stream surfaces it, and blocks polling the row until
-      the Django view records a decision via ``POST /approval/<id>/``.
+    * Any other mode (including ``auto_review`` and ``prompt_user``): each
+      escalation creates an ``ApprovalRequest`` row, emits an
+      ``approval/requested`` event so the SSE stream surfaces it, and blocks
+      polling the row until the Django view records a decision via
+      ``POST /approval/<id>/``.
 
     The handler runs on the SDK's reader thread (the same thread that reads
     JSON-RPC frames off codex's stdout), so it must:
