@@ -10,7 +10,7 @@ import signal
 import tempfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -1856,15 +1856,16 @@ class CodexWorkerCommandTests(TestCase):
                     self.assertEqual(captured.get("approval_mode"), expected)
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_approve_all_bypasses_thread_turn(self, mock_codex: MagicMock) -> None:
-        """``approve_all`` is not in the SDK's ``ApprovalMode`` enum, so
-        the worker has to bypass ``Thread.turn(approval_mode=)`` and post
-        wire-level ``TurnStartParams`` directly: an on-request approval
-        policy paired with ``ApprovalsReviewer.user`` routes every
-        escalation to the client transport, where the default approval
-        handler rubber-stamps it. Pin the wire call so a refactor cannot
-        quietly downgrade the mode to one of the typed SDK values, or
-        drop the explicit reviewer (which would let server-side routing
+    def test_user_reviewer_modes_bypass_thread_turn(
+        self, mock_codex: MagicMock
+    ) -> None:
+        """Custom user-reviewer modes are not in the SDK's ``ApprovalMode``
+        enum, so the worker has to bypass ``Thread.turn(approval_mode=)``
+        and post wire-level ``TurnStartParams`` directly: an on-request
+        approval policy paired with ``ApprovalsReviewer.user`` routes every
+        escalation to the client transport. Pin the wire call so a refactor
+        cannot quietly downgrade these modes to one of the typed SDK values,
+        or drop the explicit reviewer (which would let server-side routing
         send approvals to the auto-reviewer instead of the client)."""
         captured_params: dict[str, object] = {}
         codex_ctx = mock_codex.return_value.__enter__.return_value
@@ -1883,31 +1884,33 @@ class CodexWorkerCommandTests(TestCase):
             id="thread-1", turn=MagicMock()
         )
 
-        with tempfile.TemporaryDirectory() as raw:
-            instance = self._make_instance(Path(raw))
-            call_command(
-                "codex_worker",
-                "--instance-id",
-                str(instance.pk),
-                "--approval-mode",
-                "approve_all",
-            )
+        for mode in ("prompt_user", "approve_all"):
+            with self.subTest(mode=mode):
+                captured_params.clear()
+                codex_ctx.thread_resume.return_value.turn.reset_mock()
+                with tempfile.TemporaryDirectory() as raw:
+                    instance = self._make_instance(Path(raw))
+                    call_command(
+                        "codex_worker",
+                        "--instance-id",
+                        str(instance.pk),
+                        "--approval-mode",
+                        mode,
+                    )
 
-        # ``Thread.turn`` (the typed SDK entry point) must NOT be used —
-        # otherwise the call routes through ``ApprovalMode`` and the
-        # rubber-stamp pairing is unreachable.
-        codex_ctx.thread_resume.return_value.turn.assert_not_called()
-        params = captured_params["params"]
-        assert isinstance(params, TurnStartParams)
-        # On-request approval policy + ``user`` reviewer means every
-        # escalation is routed to the client transport, where the
-        # default auto-approve handler answers it unconditionally.
-        # ``reviewer=None`` would defer to server-side routing and is
-        # NOT a safe substitute.
-        approval_policy = params.approval_policy
-        assert approval_policy is not None
-        self.assertEqual(approval_policy.root, AskForApprovalValue.on_request)
-        self.assertEqual(params.approvals_reviewer, ApprovalsReviewer.user)
+                # ``Thread.turn`` (the typed SDK entry point) must NOT be
+                # used — otherwise the call routes through ``ApprovalMode``
+                # and the user-reviewer pairing is unreachable.
+                codex_ctx.thread_resume.return_value.turn.assert_not_called()
+                params = captured_params["params"]
+                assert isinstance(params, TurnStartParams)
+                # On-request approval policy + ``user`` reviewer means every
+                # escalation is routed to the client transport. ``reviewer=None``
+                # would defer to server-side routing and is NOT a safe substitute.
+                approval_policy = params.approval_policy
+                assert approval_policy is not None
+                self.assertEqual(approval_policy.root, AskForApprovalValue.on_request)
+                self.assertEqual(params.approvals_reviewer, ApprovalsReviewer.user)
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_plan_mode_posts_collaboration_mode(self, mock_codex: MagicMock) -> None:
@@ -1981,6 +1984,7 @@ class CodexWorkerCommandTests(TestCase):
         cases = [
             ("auto_review", "on-request", "auto_review"),
             ("deny_all", "never", None),
+            ("prompt_user", "on-request", "user"),
             ("approve_all", "on-request", "user"),
         ]
         for mode, approval_policy, approvals_reviewer in cases:
@@ -2127,38 +2131,52 @@ class ApprovalHandlerTests(TestCase):
         request handler — sqlite under the test runner can't cleanly model
         that cross-thread race, so we exercise the orchestration directly
         and cover the polling loop in a separate test."""
-        instance = self._make_instance()
-        events: list[tuple[str, dict[str, Any]]] = []
 
-        def _record(method: str, payload: object) -> None:
-            assert isinstance(payload, dict)
-            events.append((method, payload))
+        def _recorder(
+            events: list[tuple[str, dict[str, Any]]],
+        ) -> Callable[[str, Any], None]:
+            def _record(method: str, payload: Any) -> None:
+                assert isinstance(payload, dict)
+                events.append((method, payload))
 
-        handler = _make_approval_handler(
-            instance=instance, write_event=_record, approval_mode="auto_review"
-        )
+            return _record
 
-        with patch(
-            "hitch.main.management.commands.codex_worker._wait_for_decision",
-            return_value="approved",
-        ):
-            result = handler(
-                "item/commandExecution/requestApproval",
-                {"item": {"command": "rm -rf /"}},
-            )
+        for approval_mode in ("auto_review", "prompt_user"):
+            with self.subTest(approval_mode=approval_mode):
+                instance = self._make_instance()
+                events: list[tuple[str, dict[str, Any]]] = []
 
-        self.assertEqual(result, {"decision": "approved"})
-        row = ApprovalRequest.objects.get(instance=instance)
-        self.assertEqual(row.method, "item/commandExecution/requestApproval")
-        self.assertEqual(row.params, {"item": {"command": "rm -rf /"}})
-        # The pk is the link between the SSE event and the
-        # ``POST /approval/<id>/`` URL the browser POSTs to.
-        methods_to_payload = {m: p for m, p in events}
-        self.assertIn("approval/requested", methods_to_payload)
-        self.assertIn("approval/resolved", methods_to_payload)
-        self.assertEqual(methods_to_payload["approval/requested"]["id"], row.pk)
-        self.assertEqual(methods_to_payload["approval/requested"]["method"], row.method)
-        self.assertEqual(methods_to_payload["approval/resolved"]["decision"], "approved")
+                handler = _make_approval_handler(
+                    instance=instance,
+                    write_event=_recorder(events),
+                    approval_mode=approval_mode,
+                )
+
+                with patch(
+                    "hitch.main.management.commands.codex_worker._wait_for_decision",
+                    return_value="approved",
+                ):
+                    result = handler(
+                        "item/commandExecution/requestApproval",
+                        {"item": {"command": "rm -rf /"}},
+                    )
+
+                self.assertEqual(result, {"decision": "approved"})
+                row = ApprovalRequest.objects.get(instance=instance)
+                self.assertEqual(row.method, "item/commandExecution/requestApproval")
+                self.assertEqual(row.params, {"item": {"command": "rm -rf /"}})
+                # The pk is the link between the SSE event and the
+                # ``POST /approval/<id>/`` URL the browser POSTs to.
+                methods_to_payload = {m: p for m, p in events}
+                self.assertIn("approval/requested", methods_to_payload)
+                self.assertIn("approval/resolved", methods_to_payload)
+                self.assertEqual(methods_to_payload["approval/requested"]["id"], row.pk)
+                self.assertEqual(
+                    methods_to_payload["approval/requested"]["method"], row.method
+                )
+                self.assertEqual(
+                    methods_to_payload["approval/resolved"]["decision"], "approved"
+                )
 
     @patch(
         "hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001

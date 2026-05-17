@@ -171,11 +171,12 @@ class SettingsDialogRenderTests(TestCase):
         self.assertContains(response, 'value="dangerFullAccess"')
         # Approval mode dropdown: ``auto_review`` (safe default) is
         # pre-selected when no cookie has been written; the stricter
-        # ``deny_all`` and the rubber-stamp ``approve_all`` (a custom
-        # non-SDK mode) are opt-in. No empty option — the worker
-        # always wants an explicit value.
+        # ``prompt_user``, ``deny_all``, and the rubber-stamp
+        # ``approve_all`` (custom non-SDK modes) are opt-in. No empty
+        # option — the worker always wants an explicit value.
         self.assertContains(response, 'name="approval_mode"')
         self.assertContains(response, 'value="auto_review" selected')
+        self.assertContains(response, 'value="prompt_user"')
         self.assertContains(response, 'value="deny_all"')
         self.assertContains(response, 'value="approve_all"')
         self.assertContains(response, "Extra developer prompt")
@@ -773,7 +774,7 @@ class ApprovalModeSettingsTests(TestCase):
         self, mock_codex: MagicMock
     ) -> None:
         _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
-        for mode in ("deny_all", "approve_all"):
+        for mode in ("prompt_user", "deny_all", "approve_all"):
             with self.subTest(mode=mode):
                 response = self.client.post(
                     reverse("update_settings"),
@@ -824,13 +825,16 @@ class ApprovalModeDialogTests(TestCase):
         """A mode persisted in the cookie must come back marked selected
         on the next render — otherwise the dropdown silently rolls back
         to the safe default and the user assumes the pick was lost."""
-        _seed_cookies(self.client, **{_APPROVAL_COOKIE: "deny_all"})
         _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        for mode in ("prompt_user", "deny_all"):
+            with self.subTest(mode=mode):
+                _seed_cookies(self.client, **{_APPROVAL_COOKIE: mode})
 
-        self.assertContains(response, 'value="deny_all" selected')
+                response = self.client.get(reverse("index"))
+
+                self.assertContains(response, f'value="{mode}" selected')
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")

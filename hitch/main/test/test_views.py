@@ -396,28 +396,33 @@ class NewSessionViewTests(TestCase):
         mock_spawn: MagicMock,
         mock_codex: MagicMock,
     ) -> None:
-        """An explicit ``deny_all`` cookie must reach the spawn call; the
-        SDK default is the safe fallback otherwise, but a user who picked
-        the stricter mode expects it to take effect on session start."""
+        """An explicit approval-mode cookie must reach the spawn call; the
+        SDK default is the safe fallback otherwise, but a user who picked a
+        stricter/user-prompting mode expects it to take effect on session
+        start."""
         mock_discover.return_value = [Path(self.REPO)]
         mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
         _setup_codex(mock_codex, models=[])
-        _seed_cookies(self.client, hitch_approval_mode="deny_all")
 
-        self.client.post(
-            reverse("new_session"),
-            data={"prompt": "do thing", "cwd": self.REPO},
-        )
+        for mode in ("deny_all", "prompt_user"):
+            with self.subTest(mode=mode):
+                mock_spawn.reset_mock()
+                _seed_cookies(self.client, hitch_approval_mode=mode)
 
-        mock_spawn.assert_called_once_with(
-            cwd=self.REPO,
-            prompt="do thing",
-            developer_instructions=None,
-            model=None,
-            reasoning_effort=None,
-            sandbox_policy=None,
-            approval_mode="deny_all",
-        )
+                self.client.post(
+                    reverse("new_session"),
+                    data={"prompt": "do thing", "cwd": self.REPO},
+                )
+
+                mock_spawn.assert_called_once_with(
+                    cwd=self.REPO,
+                    prompt="do thing",
+                    developer_instructions=None,
+                    model=None,
+                    reasoning_effort=None,
+                    sandbox_policy=None,
+                    approval_mode=mode,
+                )
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
@@ -980,25 +985,29 @@ class SendMessageViewTests(TestCase):
         mock_discover: MagicMock,
     ) -> None:
         """Approval mode is applied per-turn just like sandbox policy, so
-        the cookie has to ride into every follow-up turn or the explicit
-        ``deny_all`` choice silently reverts to the SDK default."""
+        the cookie has to ride into every follow-up turn or an explicit
+        stricter/user-prompting choice silently reverts to the SDK default."""
         self._patch_codex(mock_codex)
         mock_discover.return_value = [Path("/repo")]
-        _seed_cookies(self.client, hitch_approval_mode="deny_all")
 
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "follow-up"},
-        )
+        for mode in ("deny_all", "prompt_user"):
+            with self.subTest(mode=mode):
+                mock_spawn.reset_mock()
+                _seed_cookies(self.client, hitch_approval_mode=mode)
 
-        self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt="follow-up",
-            sandbox_policy=None,
-            approval_mode="deny_all",
-        )
+                response = self.client.post(
+                    reverse("send_message", kwargs={"session_id": "abc"}),
+                    data={"prompt": "follow-up"},
+                )
+
+                self.assertEqual(response.status_code, 302)
+                mock_spawn.assert_called_once_with(
+                    thread_id="abc",
+                    cwd="/repo",
+                    prompt="follow-up",
+                    sandbox_policy=None,
+                    approval_mode=mode,
+                )
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")

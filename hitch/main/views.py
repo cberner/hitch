@@ -67,15 +67,16 @@ _SANDBOX_POLICY_OPTIONS: tuple[tuple[str, str], ...] = (
 _VALID_SANDBOX_POLICIES = {value for value, _ in _SANDBOX_POLICY_OPTIONS}
 
 # Approval modes the dialog offers. ``auto_review`` and ``deny_all`` map 1:1
-# onto the SDK's ``ApprovalMode`` enum. ``approve_all`` is not in that enum —
-# the worker handles it specially by bypassing ``thread.turn(approval_mode=)``
-# and pairing an on-request policy with the ``user`` reviewer, which routes
-# every escalation to the client transport where the default auto-approve
-# handler rubber-stamps it. ``auto_review`` is also the SDK's own default;
-# keeping it first here makes it the safe default the dialog selects when
-# no cookie has been written yet.
+# onto the SDK's ``ApprovalMode`` enum. The ``prompt_user`` and
+# ``approve_all`` modes are custom worker modes that force escalations to
+# the client transport with the ``user`` reviewer; the worker either surfaces
+# a browser prompt or rubber-stamps the request depending on the selected
+# mode. ``auto_review`` is also the SDK's own default; keeping it first here
+# makes it the safe default the dialog selects when no cookie has been
+# written yet.
 _APPROVAL_MODE_OPTIONS: tuple[tuple[str, str], ...] = (
     ("auto_review", "Auto review (default)"),
+    ("prompt_user", "Always prompt for approval"),
     ("deny_all", "Deny all escalations"),
     ("approve_all", "Approve all (dangerous)"),
 )
@@ -973,10 +974,9 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest("invalid reasoning effort")
     if sandbox and sandbox not in _VALID_SANDBOX_POLICIES:
         return HttpResponseBadRequest("invalid sandbox policy")
-    # Approval mode always carries one of the dialog's two values — there is
-    # no empty "Codex default" option because the SDK requires an enum and
-    # an empty form post is treated as "user picked nothing", which we
-    # snap to the safe default.
+    # Approval mode always carries one of the dialog's values. An empty
+    # form post is treated as "user picked nothing", which we snap to the
+    # safe default.
     if approval and approval not in _VALID_APPROVAL_MODES:
         return HttpResponseBadRequest("invalid approval mode")
     if not approval:
