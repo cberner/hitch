@@ -1294,6 +1294,27 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, 'case "turn/plan/updated"')
         self.assertContains(response, 'case "item/plan/delta"')
 
+    @patch("hitch.main.views.build_worktree_diff")
+    @patch("hitch.main.views.Codex")
+    def test_open_slash_menu_offsets_live_status_pill(
+        self, mock_codex: MagicMock, mock_diff: MagicMock
+    ) -> None:
+        mock_diff.return_value = DiffView(files=[])
+        _patch_thread(self, mock_codex, _thread([]))
+        _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_RUNNING,
+            prompt="warming up",
+            pid=_LIVE_PID,
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertContains(response, 'data-live-work data-state="working"')
+        self.assertContains(response, 'data-slash-menu-open="true"')
+        self.assertContains(response, "syncSlashMenuStatusOffset")
+        self.assertContains(response, 'liveWork.dataset.slashMenuOpen = "true"')
+
     @patch("hitch.main.views.Codex")
     def test_stream_url_carries_baseline_and_active_when_worker_present(
         self, mock_codex: MagicMock

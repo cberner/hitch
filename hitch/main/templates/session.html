@@ -709,6 +709,17 @@
             pointer-events: none;
         }
         .live-work[data-state="idle"] { display: none; }
+        .live-work[data-slash-menu-open="true"] {
+            bottom: calc(8rem + var(--safe-bottom) + var(--composer-keyboard-offset));
+            justify-content: flex-end;
+        }
+        .live-work[data-slash-menu-open="true"] .live-status {
+            order: 2;
+        }
+        .live-work[data-slash-menu-open="true"] .live-goal {
+            order: 1;
+            flex: 0 1 min(32rem, calc(100% - 10rem));
+        }
         .live-status {
             display: inline-flex;
             align-items: center;
@@ -1269,7 +1280,17 @@
                 width: calc(100vw - 1rem);
                 flex-wrap: wrap;
             }
+            .live-work[data-slash-menu-open="true"] {
+                bottom: calc(8rem + var(--safe-bottom) + var(--composer-keyboard-offset));
+                justify-content: flex-start;
+            }
+            .live-work[data-slash-menu-open="true"] .live-status {
+                margin-left: auto;
+            }
             .live-goal {
+                flex: 1 1 100%;
+            }
+            .live-work[data-slash-menu-open="true"] .live-goal {
                 flex: 1 1 100%;
             }
             .composer-inner { padding: 0.6rem 0.7rem; }
@@ -1602,6 +1623,7 @@
                 const slashTrigger = composer.querySelector("[data-slash-trigger]");
                 const slashMenu = composer.querySelector("[data-slash-menu]");
                 const slashPlan = composer.querySelector("[data-slash-plan]");
+                const liveWork = document.querySelector("[data-live-work]");
                 const composerKeyboardOffsetProperty = "--composer-keyboard-offset";
                 const mobileComposerQuery = window.matchMedia("(max-width: 640px)");
                 let composerKeyboardFrame = 0;
@@ -1649,15 +1671,25 @@
                     if (slashTrigger) slashTrigger.setAttribute("aria-pressed", enabled ? "true" : "false");
                     if (slashPlan) slashPlan.setAttribute("aria-checked", enabled ? "true" : "false");
                 };
+                const syncSlashMenuStatusOffset = () => {
+                    if (!liveWork || !slashMenu) return;
+                    if (slashMenu.hidden) {
+                        delete liveWork.dataset.slashMenuOpen;
+                    } else {
+                        liveWork.dataset.slashMenuOpen = "true";
+                    }
+                };
                 const closeSlashMenu = () => {
                     if (!slashMenu || !slashTrigger) return;
                     slashMenu.hidden = true;
                     slashTrigger.setAttribute("aria-expanded", "false");
+                    syncSlashMenuStatusOffset();
                 };
                 const openSlashMenu = () => {
                     if (!slashMenu || !slashTrigger) return;
                     slashMenu.hidden = false;
                     slashTrigger.setAttribute("aria-expanded", "true");
+                    syncSlashMenuStatusOffset();
                 };
                 const parsePlanCommand = () => {
                     const text = input.value.trim();
