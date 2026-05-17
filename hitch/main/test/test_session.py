@@ -1084,7 +1084,8 @@ class SessionViewActiveWorkerTests(TestCase):
         # (``data-live-root``) must not be in the DOM, so streamed item
         # events have nowhere to land — but the live-status pill still
         # renders (in its hidden idle state) so the JS heartbeat handler
-        # can flip it to "Connection lost" if frames stop arriving.
+        # can surface reconnecting/fatal connection states if frames stop
+        # arriving.
         # The pill-text checks use the ``>...</span`` anchor so they
         # don't false-match the same string literal inside the JS map.
         _patch_thread(self, mock_codex, _thread([]))
@@ -1098,6 +1099,24 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, ">Connected</span>")
         self.assertNotContains(response, ">Codex is working")
         self.assertNotContains(response, 'class="jump-latest" data-jump-latest')
+
+    @patch("hitch.main.views.Codex")
+    def test_connection_indicator_retries_before_showing_fatal_loss(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _patch_thread(self, mock_codex, _thread([]))
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertContains(response, 'reconnecting: "Reconnecting')
+        self.assertContains(response, "const RECONNECT_FATAL_MS")
+        self.assertContains(response, '"disconnected" : "reconnecting"')
+        self.assertContains(response, 'indicator.addEventListener("click"')
+        self.assertContains(response, "function retryNow()")
+        self.assertContains(response, "function clearRetryTimer()")
+        self.assertContains(response, "new EventSource(streamUrl)")
+        self.assertContains(response, "const seenEvents = new Set()")
+        self.assertContains(response, "if (seenEvents.has(key)) return;")
 
     @patch("hitch.main.views.build_worktree_diff")
     @patch("hitch.main.views.Codex")
