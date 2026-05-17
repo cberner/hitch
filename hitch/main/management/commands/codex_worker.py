@@ -36,6 +36,7 @@ import shutil
 import signal
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from typing import IO, Any, Protocol, override
 
@@ -474,6 +475,8 @@ def _install_notification_sequencer(codex: Codex) -> NotificationOrdering:
     def ordered_route(notification: Notification) -> None:
         with lock:
             order_by_id[id(notification)] = next_order()
+        if _preserve_early_turn_completed(router, notification):
+            return
         route_notification(notification)
 
     def notification_order(notification: Notification) -> NotificationOrder:
@@ -485,6 +488,28 @@ def _install_notification_sequencer(codex: Codex) -> NotificationOrdering:
 
     router.route_notification = ordered_route  # type: ignore[method-assign]
     return notification_order
+
+
+def _preserve_early_turn_completed(router: Any, notification: Notification) -> bool:
+    """Work around SDK router versions that drop early ``turn/completed``.
+
+    Fast turns can finish after ``turn/start`` responds but before
+    ``TurnHandle.stream()`` registers its queue. The pinned SDK preserves
+    early in-turn notifications but discards ``turn/completed`` in that
+    window, leaving the worker blocked forever waiting for a completion
+    event that already arrived. Store it with the pending turn notifications
+    so stream registration replays it normally.
+    """
+    if notification.method != "turn/completed":
+        return False
+    turn_id = router._notification_turn_id(notification)
+    if turn_id is None:
+        return False
+    with router._lock:
+        if router._turn_notifications.get(turn_id) is not None:
+            return False
+        router._pending_turn_notifications.setdefault(turn_id, deque()).append(notification)
+    return True
 
 
 def _start_goal_event_forwarder(

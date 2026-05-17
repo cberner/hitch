@@ -19,6 +19,7 @@ from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from openai_codex import ApprovalMode
+from openai_codex._message_router import MessageRouter
 from openai_codex.generated.v2_all import (
     ApprovalsReviewer,
     AskForApprovalValue,
@@ -1217,6 +1218,34 @@ class GoalNotificationForwarderTests(TestCase):
             self.assertEqual(written, [])
             self.assertEqual(discarded_orders, [(2_000, 1)])
             self.assertEqual(order_for(skipped), (3_000, 2))
+
+    def test_preserves_early_turn_completed_until_stream_registration(self) -> None:
+        """Fast turns may complete before ``TurnHandle.stream`` registers.
+
+        The pinned SDK drops that early completion by default; Hitch's worker
+        router shim must keep it pending so the stream loop can observe the
+        terminal event and mark the row completed.
+        """
+        router = MessageRouter()
+        codex = SimpleNamespace(_client=SimpleNamespace(_router=router))
+        _install_notification_sequencer(cast(Any, codex))
+        completed = Notification(
+            method="turn/completed",
+            payload=cast(
+                Any,
+                TurnCompletedNotification(
+                    thread_id="thread-1",
+                    turn=Turn(id="turn-1", items=[], status=TurnStatus.completed),
+                ),
+            ),
+        )
+
+        router.route_notification(completed)
+        router.register_turn("turn-1")
+
+        queue = router._turn_notifications["turn-1"]
+        self.assertEqual(queue.qsize(), 1)
+        self.assertIs(queue.get_nowait(), completed)
 
 
 class CodexWorkerCommandTests(TestCase):
