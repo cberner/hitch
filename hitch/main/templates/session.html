@@ -41,6 +41,7 @@
             --radius-sm: 8px;
             --safe-top: env(safe-area-inset-top, 0px);
             --safe-bottom: env(safe-area-inset-bottom, 0px);
+            --composer-keyboard-offset: 0px;
         }
         @media (prefers-color-scheme: dark) {
             :root {
@@ -85,7 +86,7 @@
             -moz-osx-font-smoothing: grayscale;
             -webkit-tap-highlight-color: transparent;
             min-height: 100vh;
-            padding-bottom: calc(7rem + var(--safe-bottom));
+            padding-bottom: calc(7rem + var(--safe-bottom) + var(--composer-keyboard-offset));
         }
         a { color: var(--link); text-decoration: none; }
         a:hover { text-decoration: underline; }
@@ -679,7 +680,7 @@
             position: fixed;
             left: 0;
             right: 0;
-            bottom: 0;
+            bottom: var(--composer-keyboard-offset);
             z-index: 20;
             background: color-mix(in srgb, var(--bg) 88%, transparent);
             backdrop-filter: saturate(180%) blur(14px);
@@ -698,7 +699,7 @@
         .live-work {
             position: fixed;
             left: 50%;
-            bottom: calc(5rem + var(--safe-bottom));
+            bottom: calc(5rem + var(--safe-bottom) + var(--composer-keyboard-offset));
             transform: translateX(-50%);
             z-index: 24;
             width: min(820px, calc(100vw - 2rem));
@@ -797,7 +798,7 @@
         .jump-latest {
             position: fixed;
             right: max(1rem, env(safe-area-inset-right, 0px));
-            bottom: calc(5.9rem + var(--safe-bottom));
+            bottom: calc(5.9rem + var(--safe-bottom) + var(--composer-keyboard-offset));
             z-index: 25;
             display: inline-flex;
             align-items: center;
@@ -953,7 +954,7 @@
         .diff-fab {
             position: fixed;
             right: max(1rem, env(safe-area-inset-right, 0px));
-            bottom: calc(5.9rem + var(--safe-bottom));
+            bottom: calc(5.9rem + var(--safe-bottom) + var(--composer-keyboard-offset));
             z-index: 25;
             display: inline-flex;
             align-items: center;
@@ -1264,7 +1265,7 @@
             details.intermediate .intermediate-body { padding: 0.65rem 0.75rem; }
             .meta code { max-width: 12rem; }
             .live-work {
-                bottom: calc(4.8rem + var(--safe-bottom));
+                bottom: calc(4.8rem + var(--safe-bottom) + var(--composer-keyboard-offset));
                 width: calc(100vw - 1rem);
                 flex-wrap: wrap;
             }
@@ -1274,11 +1275,11 @@
             .composer-inner { padding: 0.6rem 0.7rem; }
             .diff-fab {
                 right: 0.75rem;
-                bottom: calc(5.4rem + var(--safe-bottom));
+                bottom: calc(5.4rem + var(--safe-bottom) + var(--composer-keyboard-offset));
             }
             .jump-latest {
                 right: 0.75rem;
-                bottom: calc(5.4rem + var(--safe-bottom));
+                bottom: calc(5.4rem + var(--safe-bottom) + var(--composer-keyboard-offset));
             }
             .diff-modal { width: calc(100vw - 0.75rem); }
             .diff-layout { grid-template-columns: 1fr; }
@@ -1601,10 +1602,46 @@
                 const slashTrigger = composer.querySelector("[data-slash-trigger]");
                 const slashMenu = composer.querySelector("[data-slash-menu]");
                 const slashPlan = composer.querySelector("[data-slash-plan]");
+                const composerKeyboardOffsetProperty = "--composer-keyboard-offset";
+                const mobileComposerQuery = window.matchMedia("(max-width: 640px)");
+                let composerKeyboardFrame = 0;
                 const sync = () => {
                     input.style.height = "auto";
                     input.style.height = input.scrollHeight + "px";
                     submit.disabled = input.value.trim().length === 0;
+                };
+                const clearComposerKeyboardOffset = () => {
+                    document.documentElement.style.removeProperty(composerKeyboardOffsetProperty);
+                };
+                const updateComposerKeyboardOffset = () => {
+                    composerKeyboardFrame = 0;
+                    const viewport = window.visualViewport;
+                    if (
+                        !viewport
+                        || !mobileComposerQuery.matches
+                        || Math.abs((viewport.scale || 1) - 1) > 0.01
+                        || !composer.contains(document.activeElement)
+                    ) {
+                        clearComposerKeyboardOffset();
+                        return;
+                    }
+                    const layoutHeight = document.documentElement.clientHeight || window.innerHeight;
+                    const offset = Math.max(
+                        0,
+                        Math.ceil(layoutHeight - viewport.height - viewport.offsetTop),
+                    );
+                    if (offset > 0) {
+                        document.documentElement.style.setProperty(
+                            composerKeyboardOffsetProperty,
+                            `${offset}px`,
+                        );
+                    } else {
+                        clearComposerKeyboardOffset();
+                    }
+                };
+                const scheduleComposerKeyboardOffset = () => {
+                    if (composerKeyboardFrame) return;
+                    composerKeyboardFrame = window.requestAnimationFrame(updateComposerKeyboardOffset);
                 };
                 const setPlanMode = (enabled) => {
                     composer.dataset.planMode = enabled ? "true" : "false";
@@ -1674,6 +1711,15 @@
                     event.preventDefault();
                     requestSubmit(composer, submit);
                 });
+                composer.addEventListener("focusin", scheduleComposerKeyboardOffset);
+                composer.addEventListener("focusout", () => {
+                    window.setTimeout(scheduleComposerKeyboardOffset, 0);
+                });
+                if (window.visualViewport) {
+                    window.visualViewport.addEventListener("resize", scheduleComposerKeyboardOffset);
+                    window.visualViewport.addEventListener("scroll", scheduleComposerKeyboardOffset);
+                }
+                window.addEventListener("resize", scheduleComposerKeyboardOffset);
                 composer.addEventListener("submit", (event) => {
                     const commandPrompt = parsePlanCommand();
                     if (commandPrompt !== null) {
