@@ -26,6 +26,7 @@ from hitch.main.worktrees import (
 )
 
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
+_MODEL_COOKIE = "hitch_model"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 
@@ -612,11 +613,20 @@ class NewSessionViewTests(TestCase):
 
 
 class SendMessageViewTests(TestCase):
-    def _patch_codex(self, mock_codex: MagicMock, *, cwd: object = "/repo") -> None:
+    def _patch_codex(
+        self,
+        mock_codex: MagicMock,
+        *,
+        cwd: object = "/repo",
+        model: str | None = "gpt-5",
+        models: list[Any] | None = None,
+    ) -> None:
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_resume.return_value = SimpleNamespace(
-            thread=SimpleNamespace(cwd=cwd)
-        )
+        resumed = SimpleNamespace(thread=SimpleNamespace(cwd=cwd))
+        if model is not None:
+            resumed.model = model
+        client._client.thread_resume.return_value = resumed
+        client.models.return_value.data = models or []
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
@@ -796,6 +806,144 @@ class SendMessageViewTests(TestCase):
             sandbox_policy=None,
             approval_mode="deny_all",
         )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_forwards_plan_mode_for_one_turn(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex, model="gpt-5.4")
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "make a migration plan", "plan_mode": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="make a migration plan",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model="gpt-5.4",
+            plan_mode=True,
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_plan_slash_command_strips_command_prefix(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex, model="gpt-5.4")
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "/plan make a migration plan"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="make a migration plan",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model="gpt-5.4",
+            plan_mode=True,
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_plan_mode_uses_saved_model_when_resume_omits_model(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex, model=None)
+        mock_discover.return_value = [Path("/repo")]
+        _seed_cookies(self.client, **{_MODEL_COOKIE: "gpt-saved"})
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "make a migration plan", "plan_mode": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="make a migration plan",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model="gpt-saved",
+            plan_mode=True,
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_plan_mode_uses_default_model_when_resume_omits_model(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(
+            mock_codex,
+            model=None,
+            models=[_make_model("gpt-default", is_default=True)],
+        )
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "make a migration plan", "plan_mode": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="make a migration plan",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model="gpt-default",
+            plan_mode=True,
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_plan_mode_returns_bad_request_when_model_cannot_be_resolved(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex, model=None, models=[])
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "make a migration plan", "plan_mode": "true"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, "plan mode requires a model", status_code=400)
+        mock_spawn.assert_not_called()
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")

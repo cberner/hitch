@@ -133,6 +133,7 @@ _NAME_MAX_LEN = 200
 # the ORM and surfaces as a backend-specific OverflowError/DataError
 # from ``objects.get`` — a 500 for what should be a clean 400.
 _MAX_BIGAUTOFIELD = 2**63 - 1
+_PLAN_SLASH_COMMAND = "/plan"
 
 # Friendly labels for non-message thread item types. Anything not in this map
 # falls back to the raw type tag so we never silently drop an item from the UI.
@@ -1081,15 +1082,18 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
 
 @require_http_methods(["POST"])
 def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
-    prompt = request.POST.get("prompt", "").strip()
+    prompt, plan_mode = _message_prompt_and_plan_mode(request)
     if not prompt:
         return HttpResponseBadRequest("prompt is required")
+    settings = _stored_settings(request)
     # ``Thread.cwd`` is an ``AbsolutePathBuf`` pydantic RootModel, so unwrap
     # ``.root`` to get the underlying string the worker subprocess expects;
     # also accept a plain str so a future SDK schema change does not break us.
     config = AppServerConfig(codex_bin=shutil.which("codex"))
     with Codex(config=config) as codex:
-        thread = codex._client.thread_resume(session_id).thread
+        resumed = codex._client.thread_resume(session_id)
+        thread = resumed.thread
+        plan_model = _plan_mode_model(codex, resumed, settings) if plan_mode else None
     cwd = _thread_cwd(thread)
     if not cwd:
         return HttpResponseBadRequest("thread has no cwd")
@@ -1104,21 +1108,59 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     # the cookies or every turn after the first silently reverts to Codex
     # defaults — which breaks multi-turn workflows that depend on
     # elevated permissions or stricter escalation handling.
-    settings = _stored_settings(request)
     sandbox_policy = settings.sandbox_policy
     if sandbox_policy and sandbox_policy not in _VALID_SANDBOX_POLICIES:
         sandbox_policy = ""
     approval_mode = settings.approval_mode
     if approval_mode not in _VALID_APPROVAL_MODES:
         approval_mode = _DEFAULT_APPROVAL_MODE
-    codex_pool.spawn_turn(
-        thread_id=session_id,
-        cwd=cwd,
-        prompt=prompt,
-        sandbox_policy=sandbox_policy or None,
-        approval_mode=approval_mode,
-    )
+    spawn_kwargs: dict[str, Any] = {
+        "thread_id": session_id,
+        "cwd": cwd,
+        "prompt": prompt,
+        "sandbox_policy": sandbox_policy or None,
+        "approval_mode": approval_mode,
+    }
+    if plan_mode:
+        if not plan_model:
+            return HttpResponseBadRequest("plan mode requires a model")
+        spawn_kwargs["model"] = plan_model
+        spawn_kwargs["plan_mode"] = True
+    codex_pool.spawn_turn(**spawn_kwargs)
     return redirect("session", session_id=session_id)
+
+
+def _message_prompt_and_plan_mode(request: HttpRequest) -> tuple[str, bool]:
+    prompt = request.POST.get("prompt", "").strip()
+    plan_mode = request.POST.get("plan_mode", "").strip().lower() == "true"
+    parts = prompt.split(maxsplit=1)
+    if parts and parts[0] == _PLAN_SLASH_COMMAND:
+        return (parts[1].strip() if len(parts) > 1 else ""), True
+    return prompt, plan_mode
+
+
+def _plan_mode_model(codex: Codex, resumed: Any, settings: SettingsValues) -> str | None:
+    resumed_model = getattr(resumed, "model", "")
+    if isinstance(resumed_model, str) and resumed_model.strip():
+        return resumed_model.strip()
+    models_data = _models_for_plan_mode_fallback(codex)
+    if settings.model:
+        valid_ids = {m.id for m in models_data}
+        if not valid_ids or settings.model in valid_ids:
+            return settings.model
+    default_model = next((m for m in models_data if m.is_default), None)
+    if default_model is None and models_data:
+        default_model = models_data[0]
+    model_id = getattr(default_model, "id", "") if default_model is not None else ""
+    return model_id if isinstance(model_id, str) and model_id else None
+
+
+def _models_for_plan_mode_fallback(codex: Codex) -> list[Any]:
+    try:
+        return list(codex.models().data)
+    except Exception:
+        logger.exception("failed to fetch models for plan mode fallback")
+        return []
 
 
 def _thread_cwd(thread: Any) -> str | None:

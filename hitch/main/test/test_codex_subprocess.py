@@ -254,6 +254,33 @@ class SpawnTurnTests(TestCase):
         )
 
     @patch("hitch.main.codex_pool._launch_worker_process")
+    def test_plan_mode_turn_forwards_model_and_plan_flag(
+        self, mock_launch: MagicMock
+    ) -> None:
+        mock_launch.return_value = SimpleNamespace(pid=1234)
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_turn(
+                thread_id="thread-xyz",
+                cwd="/repo",
+                prompt="make a plan",
+                model="gpt-5.4",
+                plan_mode=True,
+            )
+
+        mock_launch.assert_called_once_with(
+            instance_id=instance.pk,
+            model="gpt-5.4",
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode=None,
+            plan_mode=True,
+        )
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
     def test_copies_developer_instructions_from_previous_turn(
         self, mock_launch: MagicMock
     ) -> None:
@@ -349,6 +376,21 @@ class LaunchWorkerProcessTests(TestCase):
         argv = mock_popen.call_args.args[0]
         self.assertIn("--approval-mode", argv)
         self.assertEqual(argv[argv.index("--approval-mode") + 1], "deny_all")
+
+    @patch("hitch.main.codex_pool.subprocess.Popen")
+    def test_forwards_plan_mode_cli_args(self, mock_popen: MagicMock) -> None:
+        mock_popen.return_value = SimpleNamespace(pid=999)
+
+        codex_pool._launch_worker_process(
+            instance_id=7,
+            model="gpt-5.4",
+            plan_mode=True,
+        )
+
+        argv = mock_popen.call_args.args[0]
+        self.assertIn("--model", argv)
+        self.assertEqual(argv[argv.index("--model") + 1], "gpt-5.4")
+        self.assertIn("--plan-mode", argv)
 
 
 class IsAliveTests(TestCase):
@@ -1528,6 +1570,111 @@ class CodexWorkerCommandTests(TestCase):
         assert approval_policy is not None
         self.assertEqual(approval_policy.root, AskForApprovalValue.on_request)
         self.assertEqual(params.approvals_reviewer, ApprovalsReviewer.user)
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_plan_mode_posts_collaboration_mode(self, mock_codex: MagicMock) -> None:
+        """Plan mode is exposed by app-server as a raw ``collaborationMode``
+        turn-start field; the installed SDK model may lag that field, so the
+        worker uses the raw params path only for plan turns."""
+        captured_params: dict[str, object] = {}
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+
+        def _capture_turn_start(
+            _thread_id: str, _input: object, *, params: object
+        ) -> object:
+            captured_params["params"] = params
+            return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
+
+        codex_ctx._client.turn_start.side_effect = _capture_turn_start
+        codex_ctx._client.next_turn_notification.return_value = _completed_event(
+            "turn-1", TurnStatus.completed
+        )
+        codex_ctx.thread_resume.return_value = SimpleNamespace(
+            id="thread-1", turn=MagicMock()
+        )
+
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(Path(raw))
+            call_command(
+                "codex_worker",
+                "--instance-id",
+                str(instance.pk),
+                "--plan-mode",
+                "--model",
+                "gpt-5.4",
+            )
+
+        codex_ctx.thread_resume.return_value.turn.assert_not_called()
+        params = captured_params["params"]
+        assert isinstance(params, dict)
+        self.assertEqual(
+            params["collaborationMode"],
+            {
+                "mode": "plan",
+                "settings": {
+                    "developer_instructions": None,
+                    "reasoning_effort": "medium",
+                    "model": "gpt-5.4",
+                },
+            },
+        )
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_plan_mode_forwards_sandbox_and_approval_overrides(
+        self, mock_codex: MagicMock
+    ) -> None:
+        captured_params: dict[str, object] = {}
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+
+        def _capture_turn_start(
+            _thread_id: str, _input: object, *, params: object
+        ) -> object:
+            captured_params["params"] = params
+            return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
+
+        codex_ctx._client.turn_start.side_effect = _capture_turn_start
+        codex_ctx._client.next_turn_notification.return_value = _completed_event(
+            "turn-1", TurnStatus.completed
+        )
+        codex_ctx.thread_resume.return_value = SimpleNamespace(
+            id="thread-1", turn=MagicMock()
+        )
+
+        cases = [
+            ("auto_review", "on-request", "auto_review"),
+            ("deny_all", "never", None),
+            ("approve_all", "on-request", "user"),
+        ]
+        for mode, approval_policy, approvals_reviewer in cases:
+            with self.subTest(mode=mode):
+                captured_params.clear()
+                codex_ctx.thread_resume.return_value.turn.reset_mock()
+                with tempfile.TemporaryDirectory() as raw:
+                    instance = self._make_instance(Path(raw))
+                    call_command(
+                        "codex_worker",
+                        "--instance-id",
+                        str(instance.pk),
+                        "--plan-mode",
+                        "--model",
+                        "gpt-5.4",
+                        "--sandbox-policy",
+                        "workspaceWrite",
+                        "--approval-mode",
+                        mode,
+                    )
+
+                codex_ctx.thread_resume.return_value.turn.assert_not_called()
+                params = captured_params["params"]
+                assert isinstance(params, dict)
+                self.assertEqual(params["approvalPolicy"], approval_policy)
+                if approvals_reviewer is None:
+                    self.assertNotIn("approvalsReviewer", params)
+                else:
+                    self.assertEqual(params["approvalsReviewer"], approvals_reviewer)
+                sandbox_policy = params["sandboxPolicy"]
+                assert isinstance(sandbox_policy, dict)
+                self.assertEqual(sandbox_policy["type"], "workspaceWrite")
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_marks_running_before_streaming(self, mock_codex: MagicMock) -> None:

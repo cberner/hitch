@@ -53,7 +53,9 @@ from openai_codex.generated.v2_all import (
     ApprovalsReviewer,
     AskForApproval,
     AskForApprovalValue,
+    CollaborationMode,
     DangerFullAccessSandboxPolicy,
+    ModeKind,
     ReadOnlySandboxPolicy,
     ReasoningEffort,
     SandboxPolicy,
@@ -64,6 +66,9 @@ from openai_codex.generated.v2_all import (
     TurnStatus,
     UserInput,
     WorkspaceWriteSandboxPolicy,
+)
+from openai_codex.generated.v2_all import (
+    Settings as CodexModeSettings,
 )
 from openai_codex.models import Notification
 from pydantic import BaseModel
@@ -101,6 +106,7 @@ _APPROVAL_POLL_INTERVAL = 0.2
 # no-reviewer ``TurnStartParams`` so the client's default auto-approve
 # handler answers every escalation unconditionally.
 _APPROVE_ALL = "approve_all"
+_PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium
 
 # Set by the SIGTERM handler so the stream loop knows to call
 # ``turn.interrupt()`` between events. Plain module-level bool is fine —
@@ -147,15 +153,19 @@ class Command(BaseCommand):
         # forwards it here so the detached worker doesn't have to reach back
         # into the parent process or any shared store.
         parser.add_argument("--reasoning-effort", type=str, default=None)
+        parser.add_argument("--model", type=str, default=None)
         parser.add_argument("--sandbox-policy", type=str, default=None)
         parser.add_argument("--approval-mode", type=str, default=None)
+        parser.add_argument("--plan-mode", action="store_true")
 
     @override
     def handle(self, *args: Any, **options: Any) -> None:
         instance_id: int = options["instance_id"]
         reasoning_effort: str | None = options.get("reasoning_effort")
+        model: str | None = options.get("model")
         sandbox_policy: str | None = options.get("sandbox_policy")
         approval_mode: str | None = options.get("approval_mode")
+        plan_mode: bool = options.get("plan_mode", False)
         instance = CodexInstance.objects.get(pk=instance_id)
 
         # Install the cancel handler before flipping to RUNNING so a Stop
@@ -172,9 +182,11 @@ class Command(BaseCommand):
                     instance=instance,
                     prompt=instance.prompt,
                     events_file=events_file,
+                    model=model,
                     reasoning_effort=reasoning_effort,
                     sandbox_policy=sandbox_policy,
                     approval_mode=approval_mode,
+                    plan_mode=plan_mode,
                 )
         except Exception as exc:  # noqa: BLE001 - record any failure, then re-raise
             instance.status = CodexInstance.STATUS_FAILED
@@ -208,9 +220,11 @@ def _run_turn(
     instance: CodexInstance,
     prompt: str,
     events_file: IO[str],
+    model: str | None = None,
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
+    plan_mode: bool = False,
 ) -> Turn | None:
     config = AppServerConfig(codex_bin=shutil.which("codex"))
     effort: ReasoningEffort | None = None
@@ -293,9 +307,11 @@ def _run_turn(
                 codex,
                 thread,
                 prompt=prompt,
+                model=model,
                 effort=effort,
                 sandbox_policy=policy,
                 approval_mode=approval_mode,
+                plan_mode=plan_mode,
             )
             # A Stop click that landed before the turn handle existed sets the
             # flag without us being able to call interrupt yet; act on it now
@@ -338,9 +354,11 @@ def _start_turn(
     thread: Thread,
     *,
     prompt: str,
+    model: str | None,
     effort: ReasoningEffort | None,
     sandbox_policy: SandboxPolicy | None,
     approval_mode: str | None,
+    plan_mode: bool,
 ) -> TurnHandle:
     """Start a turn under the requested approval policy.
 
@@ -357,6 +375,16 @@ def _start_turn(
     ``deny_all``) and the unset case go through the typed
     ``Thread.turn`` API.
     """
+    if plan_mode:
+        return _start_plan_turn(
+            codex,
+            thread,
+            prompt=prompt,
+            model=model,
+            sandbox_policy=sandbox_policy,
+            approval_mode=approval_mode,
+        )
+
     if approval_mode == _APPROVE_ALL:
         typed_input = [UserInput(root=TextUserInput(type="text", text=prompt))]
         params = TurnStartParams(
@@ -377,12 +405,68 @@ def _start_turn(
     turn_kwargs: dict[str, Any] = {}
     if effort is not None:
         turn_kwargs["effort"] = effort
+    if model is not None:
+        turn_kwargs["model"] = model
     if sandbox_policy is not None:
         turn_kwargs["sandbox_policy"] = sandbox_policy
     mode = _build_approval_mode(approval_mode)
     if mode is not None:
         turn_kwargs["approval_mode"] = mode
     return thread.turn(TextInput(prompt), **turn_kwargs)
+
+
+def _start_plan_turn(
+    codex: Codex,
+    thread: Thread,
+    *,
+    prompt: str,
+    model: str | None,
+    sandbox_policy: SandboxPolicy | None,
+    approval_mode: str | None,
+) -> TurnHandle:
+    if not model:
+        raise ValueError("plan mode requires a model")
+    typed_input = [UserInput(root=TextUserInput(type="text", text=prompt))]
+    wire_input = [item.model_dump(mode="json", by_alias=True) for item in typed_input]
+    collaboration_mode = CollaborationMode(
+        mode=ModeKind.plan,
+        settings=CodexModeSettings(
+            developer_instructions=None,
+            model=model,
+            reasoning_effort=_PLAN_MODE_REASONING_EFFORT,
+        ),
+    )
+    params: dict[str, Any] = {
+        "threadId": thread.id,
+        "input": wire_input,
+        "collaborationMode": collaboration_mode.model_dump(mode="json", by_alias=True),
+    }
+    if sandbox_policy is not None:
+        params["sandboxPolicy"] = sandbox_policy.model_dump(mode="json", by_alias=True)
+    if approval_mode == _APPROVE_ALL:
+        params["approvalPolicy"] = AskForApproval(
+            root=AskForApprovalValue.on_request
+        ).model_dump(mode="json", by_alias=True)
+        params["approvalsReviewer"] = ApprovalsReviewer.user.value
+    else:
+        mode = _build_approval_mode(approval_mode)
+        if mode is not None:
+            approval_policy, approvals_reviewer = _approval_mode_params(mode)
+            params["approvalPolicy"] = approval_policy
+            if approvals_reviewer is not None:
+                params["approvalsReviewer"] = approvals_reviewer
+    response = codex._client.turn_start(thread.id, wire_input, params=params)
+    return TurnHandle(codex._client, thread.id, response.turn.id)
+
+
+def _approval_mode_params(
+    mode: ApprovalMode,
+) -> tuple[str, str | None]:
+    if mode == ApprovalMode.auto_review:
+        return AskForApprovalValue.on_request.value, ApprovalsReviewer.auto_review.value
+    if mode == ApprovalMode.deny_all:
+        return AskForApprovalValue.never.value, None
+    raise AssertionError(f"Unhandled approval mode: {mode!r}")
 
 
 def _build_sandbox_policy(value: str | None) -> SandboxPolicy | None:
