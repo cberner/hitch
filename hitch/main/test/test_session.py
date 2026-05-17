@@ -467,6 +467,89 @@ class RolloutFileViewTests(TestCase):
         self.assertLess(body.index("Approval requested"), body.index("Please confirm explicitly."))
 
     @patch("hitch.main.views.Codex")
+    def test_plan_mode_rollout_renders_final_plan_from_response_item(
+        self, mock_codex: MagicMock
+    ) -> None:
+        plan = "# Fix Login CSRF Redirect Failure\n\n## Summary\nRead the CSRF cookie at submit time."
+        rollout_lines = [
+            _rollout_line(
+                "event_msg",
+                {"type": "user_message", "message": "Debug the login CSRF issue"},
+            ),
+            _rollout_line(
+                "response_item",
+                {
+                    "type": "function_call",
+                    "name": "request_user_input",
+                    "arguments": json.dumps(
+                        {
+                            "questions": [
+                                {
+                                    "id": "failure_point",
+                                    "header": "Failure",
+                                    "question": "Where do you see the CSRF failure?",
+                                    "options": [
+                                        {
+                                            "label": "Main-page action (Recommended)",
+                                            "description": "The next unsafe action fails.",
+                                        },
+                                        {
+                                            "label": "Immediate page",
+                                            "description": "Login lands on the failure page.",
+                                        },
+                                    ],
+                                }
+                            ]
+                        }
+                    ),
+                    "call_id": "ask",
+                },
+            ),
+            _rollout_line(
+                "response_item",
+                {
+                    "type": "function_call_output",
+                    "call_id": "ask",
+                    "output": json.dumps({"answers": {}}),
+                },
+            ),
+            _rollout_line(
+                "event_msg",
+                {
+                    "type": "item_completed",
+                    "item": {"type": "Plan", "id": "turn-plan", "text": plan},
+                },
+            ),
+            _rollout_line(
+                "response_item",
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": f"<proposed_plan>\n{plan}\n</proposed_plan>",
+                        }
+                    ],
+                    "phase": "final_answer",
+                },
+            ),
+        ]
+        rollout_path = _make_rollout(self, rollout_lines)
+        _patch_thread(self, mock_codex, _thread([], path=str(rollout_path)))
+
+        response = _get_session(self.client)
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Fix Login CSRF Redirect Failure")
+        self.assertContains(response, "Read the CSRF cookie at submit time.")
+        self.assertNotContains(response, "&lt;proposed_plan&gt;")
+        self.assertNotContains(response, "Input requested")
+        self.assertNotContains(response, '<details class="intermediate">')
+        self.assertIn("Debug the login CSRF issue", body)
+
+    @patch("hitch.main.views.Codex")
     def test_falls_back_to_sdk_on_rollout_failure_modes(
         self, mock_codex: MagicMock
     ) -> None:
