@@ -721,6 +721,7 @@
             font-weight: 500;
             flex: 0 0 auto;
             pointer-events: auto;
+            cursor: default;
             transition: background 0.2s ease, color 0.2s ease, border-color 0.2s ease;
         }
         .live-status::before {
@@ -735,10 +736,22 @@
         .live-status[data-state="working"]::before {
             animation: live-pulse 1.6s ease-out infinite;
         }
+        .live-status[data-state="reconnecting"] {
+            background: var(--status-warn-bg);
+            border-color: var(--status-warn-bg);
+            color: var(--status-warn-fg);
+            cursor: pointer;
+        }
+        .live-status[data-state="reconnecting"]::before {
+            background: var(--status-warn-fg);
+            box-shadow: none;
+            animation: live-pulse 1.6s ease-out infinite;
+        }
         .live-status[data-state="disconnected"] {
             background: var(--status-error-bg);
             border-color: var(--status-error-bg);
             color: var(--status-error-fg);
+            cursor: pointer;
         }
         .live-status[data-state="disconnected"]::before {
             background: var(--danger);
@@ -1697,13 +1710,13 @@
         //
         // The live work strip (fixed above the composer) shows the live
         // stream's state: pulsing green "Codex is working…" while a turn is
-        // in progress, hidden when connected and idle, red "Connection lost"
-        // if heartbeats stop arriving. Goal notifications update the adjacent
+        // in progress, hidden when connected and idle, amber "Reconnecting…"
+        // for recoverable transport loss, and red "Connection lost" only
+        // after a longer fatal timeout. Goal notifications update the adjacent
         // chip with Codex's current high-level objective. The server emits
         // a named ``heartbeat`` event every few seconds carrying
         // ``{working: bool}`` so the pill can stay accurate without
-        // inferring state from item events alone, and a JS-side timer
-        // flips the pill to "Connection lost" if no frame lands in time.
+        // inferring state from item events alone.
         //
         // When a live worker is rendering we also progressively project
         // its item events into the DOM (agent deltas, tool-call status);
@@ -1721,33 +1734,85 @@
             const STATE_TEXT = {
                 disconnected: "Connection lost",
                 idle: "Connected",
+                reconnecting: "Reconnecting…",
                 working: "Codex is working…",
             };
             // Liveness budget: heartbeats arrive ~3s apart, so two missed
-            // intervals plus a margin give us ~8s before flipping red.
+            // intervals plus a margin move the pill into reconnecting.
+            // Only show "Connection lost" after a substantially longer
+            // period with no successful frame.
             const STALE_MS = 8000;
+            const RECONNECT_FATAL_MS = 30000;
+            const RETRY_MS = 2000;
             // Initial state matches what the server rendered so the pill
             // doesn't flash through "disconnected" before the first
-            // heartbeat arrives. The setState gate below treats this
-            // initial sync as a no-op.
+            // heartbeat arrives.
             let connState = indicator.dataset.state || "disconnected";
             let lastFrame = Date.now();
-            const setState = (state) => {
+            let problemStartedAt = 0;
+            let retryTimer = 0;
+            let source = null;
+            let streamEnded = false;
+            function setState(state) {
+                const retryable = state === "reconnecting" || state === "disconnected";
+                indicator.setAttribute("role", retryable ? "button" : "status");
+                if (retryable) {
+                    indicator.tabIndex = 0;
+                } else {
+                    indicator.removeAttribute("tabindex");
+                }
                 if (state === connState) return;
                 connState = state;
                 indicator.dataset.state = state;
                 if (liveWork) liveWork.dataset.state = state;
                 indicator.textContent = STATE_TEXT[state];
-            };
-            const bump = () => { lastFrame = Date.now(); };
+            }
+            function clearRetryTimer() {
+                if (!retryTimer) return;
+                clearTimeout(retryTimer);
+                retryTimer = 0;
+            }
+            function bump() {
+                lastFrame = Date.now();
+                problemStartedAt = 0;
+                clearRetryTimer();
+            }
+            function retryNow() {
+                if (streamEnded) return;
+                clearRetryTimer();
+                problemStartedAt = Date.now();
+                lastFrame = Date.now();
+                setState("reconnecting");
+                connect();
+            }
+            function scheduleRetry() {
+                if (streamEnded || retryTimer) return;
+                retryTimer = window.setTimeout(() => {
+                    retryTimer = 0;
+                    connect();
+                }, RETRY_MS);
+            }
+            function markConnectionProblem() {
+                if (!problemStartedAt) problemStartedAt = Date.now();
+                const failedFor = Date.now() - problemStartedAt;
+                setState(failedFor >= RECONNECT_FATAL_MS ? "disconnected" : "reconnecting");
+                scheduleRetry();
+            }
+            indicator.addEventListener("click", () => {
+                if (connState === "reconnecting" || connState === "disconnected") retryNow();
+            });
+            indicator.addEventListener("keydown", (event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                if (connState !== "reconnecting" && connState !== "disconnected") return;
+                event.preventDefault();
+                retryNow();
+            });
             // Periodically re-check liveness so a silent connection (no
             // heartbeats arriving despite the EventSource still believing
-            // it's open) flips the pill to "Connection lost" without the
-            // user having to refresh.
+            // it's open) starts a manual reconnect. A fatal label appears
+            // only after repeated reconnect attempts fail to produce frames.
             setInterval(() => {
-                if (connState !== "disconnected" && Date.now() - lastFrame > STALE_MS) {
-                    setState("disconnected");
-                }
+                if (!streamEnded && Date.now() - lastFrame > STALE_MS) markConnectionProblem();
             }, 1000);
 
             const liveRoot = document.querySelector("[data-live-root]");
@@ -2222,7 +2287,7 @@
                 box.appendChild(actions);
                 wrap.appendChild(box);
                 insertBeforeLive(wrap);
-                approvals.set(id, { node: wrap, box, actions });
+                approvals.set(id, { node: wrap, box, actions, resolved: false });
                 followRenderedContent();
             }
 
@@ -2274,6 +2339,8 @@
                 const id = payload.id;
                 const entry = approvals.get(id);
                 if (!entry) return;
+                if (entry.resolved) return;
+                entry.resolved = true;
                 entry.box.classList.add("resolved");
                 if (entry.actions.parentNode) entry.actions.remove();
                 const note = document.createElement("div");
@@ -2283,17 +2350,35 @@
                 followRenderedContent();
             }
 
-            const source = new EventSource(streamUrl);
-            source.addEventListener("heartbeat", (event) => {
+            const seenEvents = new Set();
+
+            function eventKey(event) {
+                const recordedAt = Number.isSafeInteger(event.recordedAt) ? event.recordedAt : null;
+                const eventSeq = Number.isSafeInteger(event.eventSeq) ? event.eventSeq : null;
+                if (recordedAt === null && eventSeq === null) return "";
+                return [
+                    recordedAt === null ? "" : recordedAt,
+                    eventSeq === null ? "" : eventSeq,
+                    event.method || "",
+                ].join(":");
+            }
+
+            function handleHeartbeat(event) {
                 bump();
                 let payload;
                 try { payload = JSON.parse(event.data); } catch { payload = {}; }
                 setState(payload && payload.working ? "working" : "idle");
-            });
-            source.addEventListener("message", (event) => {
+            }
+
+            function handleMessage(event) {
                 bump();
                 let parsed;
                 try { parsed = JSON.parse(event.data); } catch { return; }
+                const key = eventKey(parsed);
+                if (key) {
+                    if (seenEvents.has(key)) return;
+                    seenEvents.add(key);
+                }
                 const method = parsed.method;
                 const payload = parsed.payload || {};
                 const order = eventOrder(parsed);
@@ -2308,17 +2393,29 @@
                     case "approval/requested": handleApprovalRequested(payload); break;
                     case "approval/resolved": handleApprovalResolved(payload); break;
                 }
-            });
-            source.addEventListener("end", () => {
-                source.close();
+            }
+
+            function handleEnd() {
+                streamEnded = true;
+                clearRetryTimer();
+                if (source) source.close();
                 // Reload so the rollout-based render replaces the live DOM
                 // (markdown rendering, intermediate collapsing, etc.) and the
                 // page picks up any newly-spawned worker.
                 window.location.reload();
-            });
-            // EventSource auto-retries on transport errors; the staleness
-            // check above flips the indicator red if the retry doesn't
-            // produce fresh frames in time.
+            }
+
+            function connect() {
+                if (streamEnded) return;
+                if (source) source.close();
+                source = new EventSource(streamUrl);
+                source.addEventListener("heartbeat", handleHeartbeat);
+                source.addEventListener("message", handleMessage);
+                source.addEventListener("end", handleEnd);
+                source.addEventListener("error", markConnectionProblem);
+            }
+
+            connect();
         })();
     </script>
 </body>

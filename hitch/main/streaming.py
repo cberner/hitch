@@ -38,9 +38,9 @@ _POLL_INTERVAL = 0.2
 _IDLE_POLL_INTERVAL = 1.0
 
 # Cadence for the named ``heartbeat`` event the client uses to drive its
-# connection-status indicator. The indicator flips to "disconnected" if no
-# heartbeat (or other frame) lands within roughly two intervals, so this must
-# stay well under the user-visible 5-second liveness target.
+# connection-status indicator. The indicator enters a recoverable reconnecting
+# state if no heartbeat (or other frame) lands within roughly two intervals,
+# so this should stay comfortably shorter than the visible stale threshold.
 _HEARTBEAT_INTERVAL = 3.0
 
 # Hard ceiling on how long a single stream connection stays open. Without this
