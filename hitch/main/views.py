@@ -1285,7 +1285,7 @@ def stop_session(request: HttpRequest, session_id: str) -> HttpResponse:
 
 @require_http_methods(["POST"])
 def new_session(request: HttpRequest) -> HttpResponse:
-    prompt = request.POST.get("prompt", "").strip()
+    prompt, plan_mode = _message_prompt_and_plan_mode(request)
     cwd = request.POST.get("cwd", "").strip()
     if not prompt:
         return HttpResponseBadRequest("prompt is required")
@@ -1315,6 +1315,8 @@ def new_session(request: HttpRequest) -> HttpResponse:
         _show_archived_sessions,
         cookie_updates,
     ) = _resolved_settings(request, models_data)
+    if plan_mode and not model:
+        return HttpResponseBadRequest("plan mode requires a model")
 
     session_cwd = cwd
     managed_worktree = None
@@ -1328,16 +1330,19 @@ def new_session(request: HttpRequest) -> HttpResponse:
     # Detach a worker subprocess so the initial turn keeps running past a
     # Django restart. The thread itself is created synchronously to give the
     # caller a stable id to redirect to.
+    spawn_kwargs: dict[str, Any] = {
+        "cwd": session_cwd,
+        "prompt": prompt,
+        "developer_instructions": extra_system_prompt or None,
+        "model": model or None,
+        "reasoning_effort": reasoning_effort or None,
+        "sandbox_policy": sandbox_policy or None,
+        "approval_mode": approval_mode,
+    }
+    if plan_mode:
+        spawn_kwargs["plan_mode"] = True
     try:
-        instance = codex_pool.spawn_new_session(
-            cwd=session_cwd,
-            prompt=prompt,
-            developer_instructions=extra_system_prompt or None,
-            model=model or None,
-            reasoning_effort=reasoning_effort or None,
-            sandbox_policy=sandbox_policy or None,
-            approval_mode=approval_mode,
-        )
+        instance = codex_pool.spawn_new_session(**spawn_kwargs)
     except Exception:
         if managed_worktree is not None:
             try:

@@ -248,6 +248,22 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    def test_new_session_dialog_exposes_plan_slash_command(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex)
+        mock_discover.return_value = [Path("/home/user/proj")]
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, 'class="slash-trigger"')
+        self.assertContains(response, 'name="plan_mode"')
+        self.assertContains(response, "Plan mode")
+        self.assertContains(response, "parseNewSessionPlanCommand")
+        self.assertContains(response, 'parts[0] !== "/plan"')
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
     def test_title_rendering(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -418,6 +434,109 @@ class NewSessionViewTests(TestCase):
             sandbox_policy=None,
             approval_mode="deny_all",
         )
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_forwards_plan_mode_for_new_session(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[_make_model("gpt-default", is_default=True)])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "make a migration plan",
+                "cwd": self.REPO,
+                "plan_mode": "true",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            cwd=self.REPO,
+            prompt="make a migration plan",
+            developer_instructions=None,
+            model="gpt-default",
+            reasoning_effort="medium",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            plan_mode=True,
+        )
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_plan_slash_command_starts_new_session_in_plan_mode(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[_make_model("gpt-5", is_default=True)])
+        _seed_cookies(self.client, **{_MODEL_COOKIE: "gpt-5"})
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "/plan make a migration plan", "cwd": self.REPO},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            cwd=self.REPO,
+            prompt="make a migration plan",
+            developer_instructions=None,
+            model="gpt-5",
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            plan_mode=True,
+        )
+
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    def test_plan_slash_command_without_prompt_is_rejected(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "/plan", "cwd": self.REPO},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, "prompt is required", status_code=400)
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_plan_mode_returns_bad_request_when_model_cannot_be_resolved(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "make a migration plan",
+                "cwd": self.REPO,
+                "plan_mode": "true",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, "plan mode requires a model", status_code=400)
+        mock_spawn.assert_not_called()
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")

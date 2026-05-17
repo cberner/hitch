@@ -40,6 +40,7 @@ def spawn_new_session(
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
+    plan_mode: bool = False,
 ) -> CodexInstance:
     """Create a fresh Codex thread and detach a worker to run the initial prompt.
 
@@ -75,9 +76,11 @@ def spawn_new_session(
         cwd=cwd,
         prompt=prompt,
         developer_instructions=developer_instructions,
+        model=model if plan_mode else None,
         reasoning_effort=reasoning_effort,
         sandbox_policy=sandbox_policy,
         approval_mode=approval_mode,
+        plan_mode=plan_mode,
     )
 
 
