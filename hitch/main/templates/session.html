@@ -238,7 +238,8 @@
         }
         .meta time { font-variant-numeric: tabular-nums; color: var(--text-faint); }
 
-        .usage {
+        .usage,
+        .next-message {
             margin: 0.4rem 0 0;
             color: var(--text-muted);
             font-size: 0.78rem;
@@ -247,7 +248,8 @@
             gap: 0.3rem 0.6rem;
             align-items: center;
         }
-        .usage .usage-item {
+        .usage .usage-item,
+        .next-message .next-message-item {
             display: inline-flex;
             align-items: baseline;
             gap: 0.3rem;
@@ -256,18 +258,20 @@
             background: var(--surface-2);
             border: 1px solid var(--border);
         }
-        .usage .usage-label {
+        .usage .usage-label,
+        .next-message .next-message-label {
             color: var(--text-faint);
             text-transform: uppercase;
             letter-spacing: 0.05em;
             font-size: 0.66rem;
             font-weight: 600;
         }
-        .usage .usage-value {
+        .usage .usage-value,
+        .next-message .next-message-value {
             color: var(--text);
-            font-variant-numeric: tabular-nums;
             font-weight: 500;
         }
+        .usage .usage-value { font-variant-numeric: tabular-nums; }
 
         .edit-title {
             margin: 0 0 1rem;
@@ -1368,6 +1372,19 @@
                 <span class="usage-item"><span class="usage-label">cached</span><span class="usage-value">{{ token_usage.cached }}</span></span>
             </p>
             {% endif %}
+            {% if not active_worker %}
+            <p class="next-message" aria-label="Settings for the next message" data-next-message-config>
+                {% for item in next_message_config %}
+                <span class="next-message-item"
+                      data-next-message-item
+                      data-normal-value="{{ item.value }}"
+                      data-plan-value="{{ item.plan_value }}">
+                    <span class="next-message-label">{{ item.label }}</span>
+                    <span class="next-message-value" data-next-message-value>{{ item.value }}</span>
+                </span>
+                {% endfor %}
+            </p>
+            {% endif %}
         </div>
 
         {% if entries or pending_user_prompt or active_worker %}
@@ -1624,6 +1641,10 @@
                 const slashMenu = composer.querySelector("[data-slash-menu]");
                 const slashPlan = composer.querySelector("[data-slash-plan]");
                 const liveWork = document.querySelector("[data-live-work]");
+                const nextMessageConfig = document.querySelector("[data-next-message-config]");
+                const nextMessageItems = nextMessageConfig
+                    ? nextMessageConfig.querySelectorAll("[data-next-message-item]")
+                    : [];
                 const composerKeyboardOffsetProperty = "--composer-keyboard-offset";
                 const mobileComposerQuery = window.matchMedia("(max-width: 640px)");
                 let composerKeyboardFrame = 0;
@@ -1665,11 +1686,32 @@
                     if (composerKeyboardFrame) return;
                     composerKeyboardFrame = window.requestAnimationFrame(updateComposerKeyboardOffset);
                 };
+                const parsePlanCommand = () => {
+                    const text = input.value.trim();
+                    const parts = text.split(/\s+/, 2);
+                    if (parts[0] !== "/plan") return null;
+                    return text.slice(parts[0].length).trim();
+                };
+                const syncNextMessageConfig = () => {
+                    const planMode = composer.dataset.planMode === "true"
+                        || parsePlanCommand() !== null;
+                    if (nextMessageConfig) {
+                        nextMessageConfig.dataset.planMode = planMode ? "true" : "false";
+                    }
+                    for (const item of nextMessageItems) {
+                        const value = item.querySelector("[data-next-message-value]");
+                        if (!value) continue;
+                        value.textContent = planMode
+                            ? item.dataset.planValue || item.dataset.normalValue || ""
+                            : item.dataset.normalValue || "";
+                    }
+                };
                 const setPlanMode = (enabled) => {
                     composer.dataset.planMode = enabled ? "true" : "false";
                     if (planModeInput) planModeInput.value = enabled ? "true" : "";
                     if (slashTrigger) slashTrigger.setAttribute("aria-pressed", enabled ? "true" : "false");
                     if (slashPlan) slashPlan.setAttribute("aria-checked", enabled ? "true" : "false");
+                    syncNextMessageConfig();
                 };
                 const syncSlashMenuStatusOffset = () => {
                     if (!liveWork || !slashMenu) return;
@@ -1690,12 +1732,6 @@
                     slashMenu.hidden = false;
                     slashTrigger.setAttribute("aria-expanded", "true");
                     syncSlashMenuStatusOffset();
-                };
-                const parsePlanCommand = () => {
-                    const text = input.value.trim();
-                    const parts = text.split(/\s+/, 2);
-                    if (parts[0] !== "/plan") return null;
-                    return text.slice(parts[0].length).trim();
                 };
                 setPlanMode(false);
                 sync();
@@ -1737,6 +1773,7 @@
                     } else {
                         closeSlashMenu();
                     }
+                    syncNextMessageConfig();
                 });
                 input.addEventListener("keydown", (event) => {
                     if (!isSuperEnter(event)) return;
