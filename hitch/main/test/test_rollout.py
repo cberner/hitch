@@ -390,6 +390,234 @@ class IterEntriesTests(TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["kind"], "agent")
 
+    def test_response_item_dedup_preserves_later_same_text_fallback(self) -> None:
+        path = self._make(
+            [
+                _line("event_msg", {"type": "user_message", "message": "first"}),
+                _line("event_msg", {"type": "agent_message", "message": "same"}),
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": "second"},
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "same"}],
+                    },
+                ),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+
+        self.assertEqual(
+            [(entry["kind"], entry["text"]) for entry in entries],
+            [("user", "first"), ("agent", "same"), ("user", "second"), ("agent", "same")],
+        )
+
+    def test_response_item_dedup_suppresses_one_duplicate_per_turn(self) -> None:
+        path = self._make(
+            [
+                _line("event_msg", {"type": "user_message", "message": "first"}),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "same"}],
+                    },
+                ),
+                _line("event_msg", {"type": "agent_message", "message": "same"}),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "same"}],
+                    },
+                ),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+
+        self.assertEqual([entry["text"] for entry in entries], ["first", "same", "same"])
+
+    def test_response_item_message_is_fallback_agent_text(self) -> None:
+        plan = "# Fix it\n\nDo the thing."
+        path = self._make(
+            [
+                _line(
+                    "event_msg",
+                    {
+                        "type": "item_completed",
+                        "item": {"type": "Plan", "id": "turn-plan", "text": plan},
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": f"<proposed_plan>\n{plan}\n</proposed_plan>",
+                            }
+                        ],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["kind"], "agent")
+        self.assertEqual(entries[0]["phase"], "final_answer")
+        self.assertEqual(entries[0]["text"], plan)
+
+    def test_response_item_dedup_preserves_final_answer_after_commentary(self) -> None:
+        path = self._make(
+            [
+                _line("event_msg", {"type": "user_message", "message": "go"}),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "message": "Done",
+                        "phase": "commentary",
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Done"}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+
+        self.assertEqual(
+            [(entry["kind"], entry["text"], entry.get("phase")) for entry in entries],
+            [
+                ("user", "go", None),
+                ("agent", "Done", "commentary"),
+                ("agent", "Done", "final_answer"),
+            ],
+        )
+
+    def test_response_item_text_parts_deduplicate_without_injected_newlines(self) -> None:
+        path = self._make(
+            [
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "hel"},
+                            {"type": "output_text", "text": "lo"},
+                        ],
+                    },
+                ),
+                _line("event_msg", {"type": "agent_message", "message": "hello"}),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["text"], "hello")
+
+    def test_proposed_plan_tags_are_preserved_without_matching_plan_item(self) -> None:
+        text = "<proposed_plan>\nliteral XML example\n</proposed_plan>"
+        path = self._make(
+            [
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": text}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["text"], text)
+
+    def test_malformed_agent_response_messages_are_ignored(self) -> None:
+        path = self._make(
+            [
+                _line("event_msg", {"type": "agent_message", "message": 7}),
+                _line("event_msg", {"type": "item_completed", "item": []}),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "item_completed",
+                        "item": {"type": "Note", "text": "not a plan"},
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "output_text", "text": "not assistant"}],
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": "not a content list",
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": ["not a content part"],
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "   ",
+                            }
+                        ],
+                    },
+                ),
+                _line("event_msg", {"type": "user_message", "message": "valid"}),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["kind"], "user")
+        self.assertEqual(entries[0]["text"], "valid")
+
     def test_agent_message_phase_is_preserved(self) -> None:
         path = self._make(
             [

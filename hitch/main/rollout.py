@@ -16,6 +16,7 @@ the SDK-built turns when the path is missing or the file can't be read.
 
 import json
 import logging
+from collections import Counter
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -106,6 +107,7 @@ def _coerce_int(value: Any) -> int:
 
 Entry = dict[str, Any]
 EntryResult = Entry | list[Entry] | None
+AgentDedupeKey = tuple[str, str]
 
 
 def _entries_from_text(text: str, rollout_path: Path) -> Iterator[dict[str, Any]]:
@@ -132,8 +134,17 @@ def _entries_from_text(text: str, rollout_path: Path) -> Iterator[dict[str, Any]
         if isinstance(call_id, str):
             outputs[call_id] = payload
 
-    for entry in lines:
-        result = _entry_for_rollout_line(entry, outputs)
+    represented_agent_texts_by_turn = _represented_agent_texts_by_turn(lines)
+    completed_plan_texts_by_turn = _completed_plan_texts_by_turn(lines)
+    for turn_idx, entry in _lines_with_turn_indices(lines):
+        represented_agent_texts = represented_agent_texts_by_turn.get(turn_idx, Counter())
+        completed_plan_texts = completed_plan_texts_by_turn.get(turn_idx, set())
+        result = _entry_for_rollout_line(
+            entry,
+            outputs,
+            represented_agent_texts,
+            completed_plan_texts,
+        )
         if isinstance(result, list):
             yield from result
         elif result is not None:
@@ -143,6 +154,8 @@ def _entries_from_text(text: str, rollout_path: Path) -> Iterator[dict[str, Any]
 def _entry_for_rollout_line(
     line: dict[str, Any],
     outputs: dict[str, dict[str, Any]],
+    represented_agent_texts: Counter[AgentDedupeKey],
+    completed_plan_texts: set[str],
 ) -> EntryResult:
     line_type = line.get("type")
     payload = line.get("payload") or {}
@@ -151,7 +164,13 @@ def _entry_for_rollout_line(
     if line_type == "event_msg":
         return _entry_from_event(payload, timestamp)
     if line_type == "response_item":
-        return _entry_from_response_item(payload, timestamp, outputs)
+        return _entry_from_response_item(
+            payload,
+            timestamp,
+            outputs,
+            represented_agent_texts,
+            completed_plan_texts,
+        )
     return None
 
 
@@ -164,8 +183,8 @@ def _entry_from_event(payload: dict[str, Any], timestamp: int | None) -> dict[st
             "timestamp": timestamp,
         }
     if event_type == "agent_message":
-        text = payload.get("message") or ""
-        if not text:
+        text = payload.get("message")
+        if not isinstance(text, str) or not text:
             return None
         # `phase` is preserved so the view layer can pick the turn's final
         # agent reply with the same `MessagePhase` semantics as the SDK
@@ -228,8 +247,17 @@ def _entry_from_response_item(
     payload: dict[str, Any],
     timestamp: int | None,
     outputs: dict[str, dict[str, Any]],
+    represented_agent_texts: Counter[AgentDedupeKey],
+    completed_plan_texts: set[str],
 ) -> EntryResult:
     item_type = payload.get("type")
+    if item_type == "message":
+        return _agent_entry_from_response_message(
+            payload,
+            timestamp,
+            represented_agent_texts,
+            completed_plan_texts,
+        )
     if item_type == "function_call":
         name = payload.get("name") or ""
         if name not in _SHELL_TOOL_NAMES:
@@ -263,6 +291,123 @@ def _entry_from_response_item(
             timestamp,
         )
     return None
+
+
+def _lines_with_turn_indices(lines: list[dict[str, Any]]) -> Iterator[tuple[int, dict[str, Any]]]:
+    turn_idx = 0
+    started = False
+    for entry in lines:
+        if _is_user_message_line(entry):
+            if started:
+                turn_idx += 1
+            started = True
+        yield turn_idx, entry
+
+
+def _is_user_message_line(entry: dict[str, Any]) -> bool:
+    if entry.get("type") != "event_msg":
+        return False
+    payload = entry.get("payload") or {}
+    return payload.get("type") == "user_message"
+
+
+def _represented_agent_texts_by_turn(
+    lines: list[dict[str, Any]],
+) -> dict[int, Counter[AgentDedupeKey]]:
+    by_turn: dict[int, Counter[AgentDedupeKey]] = {}
+    for turn_idx, entry in _lines_with_turn_indices(lines):
+        if entry.get("type") != "event_msg":
+            continue
+        payload = entry.get("payload") or {}
+        if payload.get("type") != "agent_message":
+            continue
+        text = payload.get("message")
+        if not isinstance(text, str):
+            continue
+        text = text.strip()
+        if text:
+            by_turn.setdefault(turn_idx, Counter())[_agent_dedupe_key(text, payload)] += 1
+    return by_turn
+
+
+def _completed_plan_texts_by_turn(lines: list[dict[str, Any]]) -> dict[int, set[str]]:
+    by_turn: dict[int, set[str]] = {}
+    for turn_idx, entry in _lines_with_turn_indices(lines):
+        if entry.get("type") != "event_msg":
+            continue
+        payload = entry.get("payload") or {}
+        if payload.get("type") != "item_completed":
+            continue
+        item = payload.get("item")
+        if not isinstance(item, dict):
+            continue
+        item_type = item.get("type")
+        text = item.get("text")
+        if not isinstance(item_type, str) or item_type.lower() != "plan":
+            continue
+        if isinstance(text, str) and text.strip():
+            by_turn.setdefault(turn_idx, set()).add(text.strip())
+    return by_turn
+
+
+def _agent_entry_from_response_message(
+    payload: dict[str, Any],
+    timestamp: int | None,
+    represented_agent_texts: Counter[AgentDedupeKey],
+    completed_plan_texts: set[str],
+) -> dict[str, Any] | None:
+    if payload.get("role") != "assistant":
+        return None
+    text = _response_message_text(payload.get("content"))
+    if not text:
+        return None
+    text = _response_agent_text(text, completed_plan_texts)
+    if not text:
+        return None
+    key = _agent_dedupe_key(text, payload)
+    if represented_agent_texts[key] > 0:
+        represented_agent_texts[key] -= 1
+        return None
+    phase = payload.get("phase")
+    return {
+        "kind": "agent",
+        "text": text,
+        "timestamp": timestamp,
+        "phase": phase if isinstance(phase, str) else None,
+    }
+
+
+def _response_message_text(content: Any) -> str:
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        text = part.get("text")
+        if isinstance(text, str) and text:
+            parts.append(text)
+    return "".join(parts)
+
+
+def _response_agent_text(text: str, completed_plan_texts: set[str]) -> str:
+    text = text.strip()
+    plan_text = _proposed_plan_text(text)
+    if plan_text in completed_plan_texts:
+        return plan_text
+    return text
+
+
+def _proposed_plan_text(text: str) -> str | None:
+    open_tag = "<proposed_plan>"
+    close_tag = "</proposed_plan>"
+    if text.startswith(open_tag) and text.endswith(close_tag):
+        return text[len(open_tag) : -len(close_tag)].strip()
+    return None
+
+
+def _agent_dedupe_key(text: str, payload: dict[str, Any]) -> AgentDedupeKey:
+    return (text, "commentary" if payload.get("phase") == "commentary" else "answer")
 
 
 def _tool_call(
