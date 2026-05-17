@@ -1270,6 +1270,19 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "requestSubmit(composer, submit)")
 
     @patch("hitch.main.views.Codex")
+    def test_composer_adjusts_for_mobile_keyboard(self, mock_codex: MagicMock) -> None:
+        _patch_thread(self, mock_codex, _thread([]))
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertContains(response, "--composer-keyboard-offset")
+        self.assertContains(response, "window.visualViewport")
+        self.assertContains(response, 'window.matchMedia("(max-width: 640px)")')
+        self.assertContains(response, "viewport.scale")
+        self.assertContains(response, "document.documentElement.style.setProperty")
+        self.assertContains(response, "scheduleComposerKeyboardOffset")
+
+    @patch("hitch.main.views.Codex")
     def test_composer_exposes_plan_slash_command(self, mock_codex: MagicMock) -> None:
         _patch_thread(self, mock_codex, _thread([]))
 
