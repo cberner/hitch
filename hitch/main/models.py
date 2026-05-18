@@ -42,6 +42,15 @@ class CodexInstance(models.Model):
         (STATUS_COMPLETED, "completed"),
         (STATUS_FAILED, "failed"),
     )
+    PURPOSE_USER = "user"
+    PURPOSE_SYSTEM_AGENT = "system_agent"
+    PURPOSE_SYSTEM_FEEDBACK = "system_feedback"
+
+    PURPOSE_CHOICES = (
+        (PURPOSE_USER, "user"),
+        (PURPOSE_SYSTEM_AGENT, "system agent"),
+        (PURPOSE_SYSTEM_FEEDBACK, "system feedback"),
+    )
 
     pid = models.IntegerField()
     thread_id = models.CharField(max_length=128, db_index=True)
@@ -64,16 +73,128 @@ class CodexInstance(models.Model):
     # SDK interrupt" to SIGKILL. Null means no Stop has been issued yet.
     interrupt_requested_at = models.DateTimeField(null=True, blank=True)
     error = models.TextField(blank=True, default="")
+    purpose = models.CharField(
+        max_length=32, choices=PURPOSE_CHOICES, default=PURPOSE_USER
+    )
+    workflow_id = models.BigIntegerField(null=True, blank=True, db_index=True)
+    agent_kind = models.CharField(max_length=64, blank=True, default="")
+    display_author = models.CharField(max_length=128, blank=True, default="")
+    output_schema = models.JSONField(default=None, blank=True, null=True)
+    user_message_index = models.PositiveIntegerField(null=True, blank=True, db_index=True)
 
     class Meta:
         indexes = [
             models.Index(fields=["thread_id", "-started_at"]),
             models.Index(fields=["status"]),
+            models.Index(fields=["purpose"]),
         ]
 
     @override
     def __str__(self) -> str:
         return f"CodexInstance(pid={self.pid}, thread_id={self.thread_id}, status={self.status})"
+
+
+class SystemWorkflow(models.Model):
+    """Durable state for Hitch-managed system-agent workflows."""
+
+    KIND_PR_QA = "pr_qa"
+
+    STATUS_RUNNING = "running"
+    STATUS_BLOCKED = "blocked"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+    STATUS_MAX_ITERATIONS_REACHED = "max_iterations_reached"
+
+    STATUS_CHOICES = (
+        (STATUS_RUNNING, "running"),
+        (STATUS_BLOCKED, "blocked"),
+        (STATUS_COMPLETED, "completed"),
+        (STATUS_FAILED, "failed"),
+        (STATUS_MAX_ITERATIONS_REACHED, "max iterations reached"),
+    )
+
+    kind = models.CharField(max_length=64)
+    main_thread_id = models.CharField(max_length=128, db_index=True)
+    cwd = models.CharField(max_length=4096)
+    status = models.CharField(max_length=64, choices=STATUS_CHOICES, default=STATUS_RUNNING)
+    step = models.CharField(max_length=64, blank=True, default="")
+    iteration = models.PositiveIntegerField(default=0)
+    max_iterations = models.PositiveIntegerField(default=3)
+    state = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["kind", "main_thread_id", "status"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["kind", "main_thread_id"],
+                condition=models.Q(status="running"),
+                name="uniq_running_system_workflow",
+            )
+        ]
+
+    @override
+    def __str__(self) -> str:
+        return (
+            f"SystemWorkflow(kind={self.kind}, main_thread_id={self.main_thread_id}, "
+            f"status={self.status})"
+        )
+
+
+class SystemAgentRun(models.Model):
+    """One hidden Hitch system-agent turn inside a workflow."""
+
+    STATUS_STARTING = "starting"
+    STATUS_RUNNING = "running"
+    STATUS_COMPLETED = "completed"
+    STATUS_FAILED = "failed"
+
+    STATUS_CHOICES = (
+        (STATUS_STARTING, "starting"),
+        (STATUS_RUNNING, "running"),
+        (STATUS_COMPLETED, "completed"),
+        (STATUS_FAILED, "failed"),
+    )
+
+    workflow = models.ForeignKey(
+        SystemWorkflow, on_delete=models.CASCADE, related_name="agent_runs"
+    )
+    agent_kind = models.CharField(max_length=64)
+    thread_id = models.CharField(max_length=128, db_index=True)
+    instance = models.ForeignKey(
+        CodexInstance,
+        on_delete=models.CASCADE,
+        related_name="system_agent_runs",
+    )
+    status = models.CharField(max_length=64, choices=STATUS_CHOICES, default=STATUS_STARTING)
+    input = models.JSONField(default=dict, blank=True)
+    output = models.JSONField(default=dict, blank=True)
+    raw_output = models.TextField(blank=True, default="")
+    error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["workflow", "-created_at"]),
+            models.Index(fields=["agent_kind", "status"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["instance"],
+                name="uniq_system_agent_run_instance",
+            )
+        ]
+
+    @override
+    def __str__(self) -> str:
+        return (
+            f"SystemAgentRun(agent_kind={self.agent_kind}, thread_id={self.thread_id}, "
+            f"status={self.status})"
+        )
 
 
 class ApprovalRequest(models.Model):

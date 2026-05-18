@@ -1748,7 +1748,7 @@
                 <span class="usage-item"><span class="usage-label">cached</span><span class="usage-value">{{ token_usage.cached }}</span></span>
             </p>
             {% endif %}
-            {% if not active_worker %}
+            {% if not active_worker and not active_system_workflow %}
             <p class="next-message" aria-label="Settings for the next message" data-next-message-config>
                 {% for item in next_message_config %}
                 <span class="next-message-item"
@@ -1778,7 +1778,7 @@
             {% endfor %}
             {% if pending_user_prompt %}
             <div class="entry" data-pending-user>
-                <div class="entry-header"><span class="role">User</span></div>
+                <div class="entry-header"><span class="role">{% if pending_user_author %}{{ pending_user_author }}{% else %}User{% endif %}</span></div>
                 <div class="message user pending" data-copyable-message>
                     <div class="body">{{ pending_user_prompt }}</div>
                 </div>
@@ -1787,6 +1787,7 @@
             {% if active_worker %}
             <div class="entry"
                  data-live-root
+                 data-active-author="{{ pending_user_author }}"
                  data-approval-url-template="{{ approval_url_template }}"
                  data-input-url-template="{{ input_url_template }}"></div>
             {% endif %}
@@ -1797,8 +1798,13 @@
         </div>
         {% endif %}
         </div>
-        <div class="live-work" data-live-work data-state="{% if active_worker %}working{% else %}idle{% endif %}">
-            <span class="live-status" data-live-status data-state="{% if active_worker %}working{% else %}idle{% endif %}" role="status" aria-live="polite">{% if active_worker %}Codex is working…{% else %}Connected{% endif %}</span>
+        <div class="live-work" data-live-work data-state="{% if active_worker or active_system_workflow %}working{% else %}idle{% endif %}">
+            <span class="live-status"
+                  data-live-status
+                  data-state="{% if active_worker or active_system_workflow %}working{% else %}idle{% endif %}"
+                  {% if active_system_workflow and not active_worker %}data-working-text="{{ workflow_status_text }}"{% endif %}
+                  role="status"
+                  aria-live="polite">{% if active_system_workflow and not active_worker %}{{ workflow_status_text }}{% elif active_worker %}Codex is working…{% else %}Connected{% endif %}</span>
             <span class="live-goal" data-live-goal {% if not active_worker or not goal_objective %}hidden{% endif %}>
                 <span class="live-goal-label">Goal</span>
                 <span class="live-goal-text" data-live-goal-text>{{ goal_objective }}</span>
@@ -1806,7 +1812,7 @@
         </div>
     </main>
 
-    {% if diff_view.has_changes and not active_worker %}
+    {% if diff_view.has_changes and not active_worker and not active_system_workflow %}
     <button type="button" class="diff-fab" data-diff-open aria-label="View diff">
         <span>Diff</span>
         <span class="diff-fab-count">{{ diff_view.file_count }}</span>
@@ -1874,6 +1880,7 @@
           action="{{ send_message_url }}"
           data-composer
           data-stream-url="{{ stream_url }}"
+          data-workflow-locked="{% if active_system_workflow %}true{% else %}false{% endif %}"
           data-plan-mode="{{ default_plan_mode|yesno:'true,false' }}"
           data-initial-plan-mode="{{ default_plan_mode|yesno:'true,false' }}">
         {% csrf_token %}
@@ -1882,7 +1889,7 @@
         <input type="hidden" name="plan_mode_explicit" value="" data-plan-mode-explicit-input>
         <div class="composer-inner">
             <div class="composer-command" data-slash-command>
-                <button type="button" class="slash-trigger" aria-label="Slash commands" aria-haspopup="menu" aria-expanded="false" aria-pressed="{{ default_plan_mode|yesno:'true,false' }}" data-slash-trigger>/</button>
+                <button type="button" class="slash-trigger" aria-label="Slash commands" aria-haspopup="menu" aria-expanded="false" aria-pressed="{{ default_plan_mode|yesno:'true,false' }}" data-slash-trigger {% if active_system_workflow %}disabled{% endif %}>/</button>
                 <div class="slash-menu" role="menu" data-slash-menu hidden>
                     <button type="button" role="menuitemcheckbox" aria-checked="{{ default_plan_mode|yesno:'true,false' }}" data-slash-plan>
                         <span class="slash-menu-title">Plan mode</span>
@@ -1898,13 +1905,18 @@
             <textarea name="prompt"
                       rows="1"
                       required
+                      {% if active_system_workflow %}disabled{% endif %}
                       autocomplete="off"
-                      placeholder="{% if active_worker %}Add instructions…{% else %}Send a message…{% endif %}"
-                      aria-label="{% if active_worker %}Add instructions{% else %}Send a message{% endif %}"
+                      placeholder="{% if active_system_workflow %}QA workflow is running…{% elif active_worker %}Add instructions…{% else %}Send a message…{% endif %}"
+                      aria-label="{% if active_system_workflow %}QA workflow is running{% elif active_worker %}Add instructions{% else %}Send a message{% endif %}"
                       data-composer-input></textarea>
-            <button type="submit" data-composer-submit>{% if active_worker %}Steer{% else %}Send{% endif %}</button>
+            <button type="submit" data-composer-submit {% if active_system_workflow %}disabled{% endif %}>{% if active_system_workflow %}Waiting{% elif active_worker %}Steer{% else %}Send{% endif %}</button>
+            {% if active_worker or active_system_workflow %}
             {% if active_worker %}
             <button type="submit" class="stop" formaction="{{ stop_url }}" formnovalidate name="instance" value="{{ active_instance.id }}" data-composer-stop aria-label="Stop the running turn">Stop</button>
+            {% else %}
+            <button type="submit" class="stop" formaction="{{ stop_url }}" formnovalidate data-composer-stop aria-label="Stop the QA workflow">Stop</button>
+            {% endif %}
             {% endif %}
         </div>
     </form>
@@ -2144,11 +2156,12 @@
                 const composerKeyboardOffsetProperty = "--composer-keyboard-offset";
                 const mobileComposerQuery = window.matchMedia("(max-width: 640px)");
                 const prPrompt = "{{ pr_slash_prompt|escapejs }}";
+                const workflowLocked = composer.dataset.workflowLocked === "true";
                 let composerKeyboardFrame = 0;
                 const sync = () => {
                     input.style.height = "auto";
                     input.style.height = input.scrollHeight + "px";
-                    submit.disabled = input.value.trim().length === 0;
+                    submit.disabled = workflowLocked || input.value.trim().length === 0;
                 };
                 const clearComposerKeyboardOffset = () => {
                     document.documentElement.style.removeProperty(composerKeyboardOffsetProperty);
@@ -2305,6 +2318,11 @@
                 }
                 window.addEventListener("resize", scheduleComposerKeyboardOffset);
                 composer.addEventListener("submit", (event) => {
+                    const submitter = event.submitter || document.activeElement;
+                    if (workflowLocked && submitter !== stop) {
+                        event.preventDefault();
+                        return;
+                    }
                     const prCommandPrompt = parsePrCommand();
                     const commandPrompt = prCommandPrompt === null ? parsePlanCommand() : null;
                     if (prCommandPrompt !== null) {
@@ -2372,6 +2390,7 @@
                 reconnecting: "Reconnecting…",
                 working: "Codex is working…",
             };
+            const workingText = indicator.dataset.workingText || STATE_TEXT.working;
             // Liveness budget: heartbeats arrive ~3s apart, so two missed
             // intervals plus a margin move the pill into reconnecting.
             // Only show "Connection lost" after a substantially longer
@@ -2400,7 +2419,7 @@
                 connState = state;
                 indicator.dataset.state = state;
                 if (liveWork) liveWork.dataset.state = state;
-                indicator.textContent = STATE_TEXT[state];
+                indicator.textContent = state === "working" ? workingText : STATE_TEXT[state];
             }
             function clearRetryTimer() {
                 if (!retryTimer) return;
@@ -2611,7 +2630,9 @@
                 header.className = "entry-header";
                 const role = document.createElement("span");
                 role.className = "role";
-                role.textContent = "User";
+                role.textContent = liveRoot && liveRoot.dataset.activeAuthor
+                    ? liveRoot.dataset.activeAuthor
+                    : "User";
                 header.appendChild(role);
                 const msg = document.createElement("div");
                 msg.className = "message user";

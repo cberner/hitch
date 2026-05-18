@@ -14,7 +14,7 @@ from openai_codex.errors import AppServerError
 
 from hitch.main import codex_events
 from hitch.main.diffs import DiffFile, DiffLine, DiffView
-from hitch.main.models import CodexInstance
+from hitch.main.models import CodexInstance, SystemWorkflow
 from hitch.main.views import _tool_call_detail, _tool_call_status
 
 # Used for active-worker rendering tests so the session view's
@@ -225,6 +225,61 @@ class SessionViewTests(TestCase):
         self.assertContains(response, "Workspace write")
         self.assertContains(response, ">approval<")
         self.assertContains(response, "Always prompt for approval")
+
+    @patch("hitch.main.views.Codex")
+    def test_system_feedback_renders_with_display_author(
+        self, mock_codex: MagicMock
+    ) -> None:
+        prompt = "Feedback from Hitch QA agent:\n\nFix the failing flow."
+        thread = _thread([_turn([_user_message(prompt), _agent_message("fixed")])])
+        _patch_thread(self, mock_codex, thread)
+        CodexInstance.objects.create(
+            pid=1,
+            thread_id="thread-1",
+            cwd="/tmp/demo",
+            prompt=prompt,
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            display_author="QA agent",
+            user_message_index=0,
+        )
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '<span class="role">QA agent</span>')
+        self.assertNotContains(response, '<span class="role">User</span>')
+
+    @patch("hitch.main.views.Codex")
+    def test_system_feedback_author_uses_turn_index_not_text(
+        self, mock_codex: MagicMock
+    ) -> None:
+        prompt = "Feedback from Hitch QA agent:\n\nFix the failing flow."
+        thread = _thread(
+            [
+                _turn([_user_message(prompt), _agent_message("fixed")]),
+                _turn([_user_message(prompt), _agent_message("explained")]),
+            ]
+        )
+        _patch_thread(self, mock_codex, thread)
+        CodexInstance.objects.create(
+            pid=1,
+            thread_id="thread-1",
+            cwd="/tmp/demo",
+            prompt=prompt,
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            display_author="QA agent",
+            user_message_index=0,
+        )
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '<span class="role">QA agent</span>', count=1)
+        self.assertContains(response, '<span class="role">User</span>', count=1)
 
     @patch("hitch.main.views.Codex")
     def test_next_message_model_comes_only_from_resumed_thread(
@@ -1704,6 +1759,32 @@ class SessionViewActiveWorkerTests(TestCase):
         )
 
     @patch("hitch.main.views.Codex")
+    def test_hidden_system_workflow_renders_busy_state(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _patch_thread(self, mock_codex, _thread([]))
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-1",
+            cwd="/tmp/demo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step="qa_running",
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        stream_path = reverse("session_stream", kwargs={"session_id": "thread-1"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "QA agent is reviewing...")
+        self.assertContains(response, 'data-workflow-locked="true"')
+        self.assertContains(response, "QA workflow is running")
+        self.assertContains(response, 'aria-label="Stop the QA workflow"')
+        self.assertContains(
+            response,
+            f'data-stream-url="{stream_path}?baseline=&amp;active=&amp;workflow={workflow.pk}"',
+        )
+
+    @patch("hitch.main.views.Codex")
     def test_indicator_stream_url_lives_on_composer_form(
         self, mock_codex: MagicMock
     ) -> None:
@@ -1721,7 +1802,8 @@ class SessionViewActiveWorkerTests(TestCase):
         # prior state".
         self.assertContains(response, "data-composer")
         self.assertContains(
-            response, f'data-stream-url="{stream_path}?baseline=&amp;active="'
+            response,
+            f'data-stream-url="{stream_path}?baseline=&amp;active=&amp;workflow="',
         )
 
     @patch("hitch.main.views.Codex")
@@ -1845,7 +1927,7 @@ class SessionViewActiveWorkerTests(TestCase):
         stream_path = reverse("session_stream", kwargs={"session_id": "thread-1"})
         self.assertContains(
             response,
-            f'data-stream-url="{stream_path}?baseline={instance.pk}&amp;active={instance.pk}"',
+            f'data-stream-url="{stream_path}?baseline={instance.pk}&amp;active={instance.pk}&amp;workflow="',
         )
 
     @patch("hitch.main.views.Codex")
