@@ -2,9 +2,10 @@
 
 This file tells coding agents how to work productively in this repository.
 
-## Before completing a task
+## Before completing codebase-changing work
 
-**Always run `just test` and confirm it passes before telling the user you are done.**
+**Run `just test` and confirm it passes after making any change that can affect the codebase
+in the current working directory.**
 This target runs the `pre` recipe first, which executes `uv sync --all-groups`,
 `uv run ruff check .`, and `uv run mypy .`, and then runs the Django test suite.
 If any of those fail, fix the underlying issue — do not bypass checks.
