@@ -10,13 +10,16 @@ import shutil
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
-from django.test import TestCase, tag
+from django.test import TestCase, override_settings, tag
 from django.urls import reverse
 from openai_codex import AppServerConfig, Codex
 
 from hitch.main import codex_pool
+from hitch.main.models import CodexInstance
 
 
 @contextmanager
@@ -107,3 +110,50 @@ class CodexIntegrationTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, instance.thread_id)
+
+    def test_plan_approval_spawns_default_collaboration_worker(self) -> None:
+        """Plan approval must enqueue a default collaboration turn.
+
+        This exercises the real view and ``codex_pool.spawn_turn`` path, while
+        stubbing only the final detached subprocess launch. That is the boundary
+        where Hitch must preserve the SDK mode switch for the worker.
+        """
+        repo = os.getcwd()
+        with _fresh_codex_home():
+            with _start_codex() as codex:
+                thread = codex.thread_start(cwd=repo)
+                thread_id = thread.id
+                codex._client.thread_set_name(thread_id, "Plan approval integration")
+                expected_model = codex._client.thread_resume(thread_id).model
+
+            with (
+                tempfile.TemporaryDirectory(prefix="hitch-events-") as events_dir,
+                override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+                patch("hitch.main.views.discover_repos", return_value=[Path(repo)]),
+                patch(
+                    "hitch.main.codex_pool._launch_worker_process",
+                    return_value=SimpleNamespace(pid=4321),
+                ) as mock_launch,
+            ):
+                response = self.client.post(
+                    reverse("send_message", kwargs={"session_id": thread_id}),
+                    data={
+                        "prompt": "Implement the plan.",
+                        "collaboration_mode": "default",
+                    },
+                )
+
+        self.assertEqual(response.status_code, 302)
+        instance = CodexInstance.objects.get(thread_id=thread_id)
+        self.assertEqual(instance.prompt, "Implement the plan.")
+        self.assertEqual(instance.cwd, repo)
+        self.assertEqual(instance.pid, 4321)
+        mock_launch.assert_called_once_with(
+            instance_id=instance.pk,
+            model=expected_model,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            plan_mode=False,
+            collaboration_mode="default",
+        )
