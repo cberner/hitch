@@ -194,6 +194,7 @@ class UserSettings(models.Model):
     extra_system_prompt = models.TextField(blank=True, default="")
     use_worktrees = models.BooleanField(default=False)
     show_archived_sessions = models.BooleanField(default=False)
+    last_selected_repo = models.CharField(max_length=4096, blank=True, default="")
     updated_at = models.DateTimeField(auto_now=True)
 
     @override

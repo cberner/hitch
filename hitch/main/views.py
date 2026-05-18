@@ -58,6 +58,13 @@ class SettingsValues(NamedTuple):
     extra_system_prompt: str
     use_worktrees: bool
     show_archived_sessions: bool
+    last_selected_repo: str
+
+
+class ResolvedSettings(NamedTuple):
+    values: SettingsValues
+    cookie_updates: dict[str, str]
+
 
 # Sandbox-policy variants offered in the settings dialog. Stored as the
 # SandboxPolicy ``type`` discriminator string so the cookie value can map
@@ -104,6 +111,7 @@ _APPROVAL_COOKIE = "hitch_approval_mode"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
+_LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
 
 # Roughly one year. Long enough that a user's pick survives across
 # sessions without ever needing a manual revisit; short enough that the
@@ -133,6 +141,7 @@ _MINUTES_PER_DAY = 24 * _MINUTES_PER_HOUR
 # set on the edit form so a client without HTML validation cannot push an
 # unbounded blob through.
 _NAME_MAX_LEN = 200
+_LAST_SELECTED_REPO_MAX_LEN = 4096
 
 # Upper bound for ``CodexInstance.pk`` validation. The project sets
 # ``DEFAULT_AUTO_FIELD = BigAutoField``, which is a signed 64-bit
@@ -177,25 +186,18 @@ def index(request: HttpRequest) -> HttpResponse:
     config = AppServerConfig(codex_bin=shutil.which("codex"))
     with Codex(config=config) as codex:
         models_data = list(codex.models().data)
-        (
-            current_model,
-            current_effort,
-            current_sandbox,
-            current_approval,
-            current_extra_system_prompt,
-            current_use_worktrees,
-            current_show_archived_sessions,
-            cookie_updates,
-        ) = _resolved_settings(request, models_data)
+        resolved_settings = _resolved_settings(request, models_data)
+        current_settings = resolved_settings.values
+        cookie_updates = resolved_settings.cookie_updates
         threads = list(codex.thread_list().data)
-        if current_show_archived_sessions:
+        if current_settings.show_archived_sessions:
             threads.extend(codex.thread_list(archived=True).data)
         rate_limits = _fetch_rate_limits(codex)
     threads = sorted(threads, key=lambda s: s.updated_at, reverse=True)
     sessions = []
     for thread in threads:
         is_archived = _thread_is_archived(thread)
-        if is_archived and not current_show_archived_sessions:
+        if is_archived and not current_settings.show_archived_sessions:
             continue
         sessions.append(
             {
@@ -208,6 +210,7 @@ def index(request: HttpRequest) -> HttpResponse:
             }
         )
     repos = [str(p) for p in discover_repos()]
+    current_repo = _selected_repo_for_dialog(current_settings.last_selected_repo, repos)
     model_options = [
         {"id": m.id, "display_name": m.display_name} for m in models_data
     ]
@@ -235,14 +238,15 @@ def index(request: HttpRequest) -> HttpResponse:
             "effort_options": effort_options,
             "sandbox_options": sandbox_options,
             "approval_options": approval_options,
-            "current_model": current_model,
-            "current_effort": current_effort,
-            "current_sandbox": current_sandbox,
-            "current_approval": current_approval,
-            "current_extra_system_prompt": current_extra_system_prompt,
+            "current_model": current_settings.model,
+            "current_effort": current_settings.reasoning_effort,
+            "current_sandbox": current_settings.sandbox_policy,
+            "current_approval": current_settings.approval_mode,
+            "current_extra_system_prompt": current_settings.extra_system_prompt,
             "extra_system_prompt_max_len": _EXTRA_SYSTEM_PROMPT_MAX_LEN,
-            "current_use_worktrees": current_use_worktrees,
-            "current_show_archived_sessions": current_show_archived_sessions,
+            "current_use_worktrees": current_settings.use_worktrees,
+            "current_show_archived_sessions": current_settings.show_archived_sessions,
+            "current_repo": current_repo,
             "name_max_len": _NAME_MAX_LEN,
             "pr_slash_prompt": _PR_SLASH_PROMPT,
             "rate_limits": rate_limits,
@@ -502,6 +506,10 @@ def _option_label(
     return next((label for option_value, label in options if option_value == value), value)
 
 
+def _selected_repo_for_dialog(saved_repo: str, repos: list[str]) -> str:
+    return saved_repo if saved_repo in repos else ""
+
+
 def _active_instance_for(session_id: str) -> CodexInstance | None:
     """Return the latest *active* CodexInstance for ``session_id``, or None.
 
@@ -696,17 +704,12 @@ def _entries_from_rollout(thread: Any) -> list[dict[str, Any]] | None:
     return entries
 
 
-def _resolved_settings(
-    request: HttpRequest, models_data: list[Any]
-) -> tuple[str, str, str, str, str, bool, bool, dict[str, str]]:
+def _resolved_settings(request: HttpRequest, models_data: list[Any]) -> ResolvedSettings:
     """Read the dialog state from storage and reconcile against Codex.
 
-    Returns ``(model, effort, sandbox_policy, approval_mode,
-    extra_system_prompt, use_worktrees, show_archived_sessions,
-    cookie_updates)``.
-    ``cookie_updates`` is a dict of cookie-name → new-value pairs the caller
-    must persist on the response (via ``_apply_cookie_updates``) so the
-    corrected state takes effect on the next request.
+    The returned ``cookie_updates`` map must be persisted on the response
+    (via ``_apply_cookie_updates``) so corrected state takes effect on the
+    next request.
 
     Two stale-state cases handled here:
       1. The saved model id is no longer offered → snap to the provider's
@@ -772,21 +775,12 @@ def _resolved_settings(
 
 def _resolved_settings_result(
     request: HttpRequest, values: SettingsValues, cookie_updates: dict[str, str]
-) -> tuple[str, str, str, str, str, bool, bool, dict[str, str]]:
+) -> ResolvedSettings:
     user = _authenticated_user(request)
     if user is not None:
         _save_user_settings(user, values)
         cookie_updates = _settings_cookie_updates(values)
-    return (
-        values.model,
-        values.reasoning_effort,
-        values.sandbox_policy,
-        values.approval_mode,
-        values.extra_system_prompt,
-        values.use_worktrees,
-        values.show_archived_sessions,
-        cookie_updates,
-    )
+    return ResolvedSettings(values=values, cookie_updates=cookie_updates)
 
 
 def _authenticated_user(request: HttpRequest) -> Any | None:
@@ -806,6 +800,7 @@ def _stored_settings(request: HttpRequest) -> SettingsValues:
         extra_system_prompt=_read_extra_system_prompt_cookie(request),
         use_worktrees=_read_cookie(request, _USE_WORKTREES_COOKIE) == "true",
         show_archived_sessions=_read_cookie(request, _SHOW_ARCHIVED_COOKIE) == "true",
+        last_selected_repo=_read_cookie(request, _LAST_SELECTED_REPO_COOKIE),
     )
 
 
@@ -823,6 +818,7 @@ def _settings_values_for_user(settings: UserSettings) -> SettingsValues:
         extra_system_prompt=settings.extra_system_prompt,
         use_worktrees=settings.use_worktrees,
         show_archived_sessions=settings.show_archived_sessions,
+        last_selected_repo=settings.last_selected_repo,
     )
 
 
@@ -837,6 +833,7 @@ def _save_user_settings(user: Any, values: SettingsValues) -> UserSettings:
         ("extra_system_prompt", values.extra_system_prompt),
         ("use_worktrees", values.use_worktrees),
         ("show_archived_sessions", values.show_archived_sessions),
+        ("last_selected_repo", values.last_selected_repo),
     ):
         if getattr(settings, field) != value:
             setattr(settings, field, value)
@@ -857,6 +854,7 @@ def _settings_cookie_updates(values: SettingsValues) -> dict[str, str]:
         ),
         _USE_WORKTREES_COOKIE: "true" if values.use_worktrees else "false",
         _SHOW_ARCHIVED_COOKIE: "true" if values.show_archived_sessions else "false",
+        _LAST_SELECTED_REPO_COOKIE: values.last_selected_repo,
     }
 
 
@@ -899,6 +897,14 @@ def _valid_cookie_setting_updates(request: HttpRequest) -> dict[str, str | bool]
     use_worktrees = _read_signed_cookie_if_present(request, _USE_WORKTREES_COOKIE)
     if use_worktrees in {"true", "false"}:
         updates["use_worktrees"] = use_worktrees == "true"
+    last_selected_repo = _read_signed_cookie_if_present(
+        request, _LAST_SELECTED_REPO_COOKIE
+    )
+    if (
+        last_selected_repo is not None
+        and len(last_selected_repo) <= _LAST_SELECTED_REPO_MAX_LEN
+    ):
+        updates["last_selected_repo"] = last_selected_repo
     return updates
 
 
@@ -1095,6 +1101,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         compat_error = _validate_settings_against_models(model, effort, models_data)
         if compat_error:
             return HttpResponseBadRequest(compat_error)
+    stored = _stored_settings(request)
     values = SettingsValues(
         model=model,
         reasoning_effort=effort,
@@ -1103,6 +1110,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         extra_system_prompt=extra_system_prompt,
         use_worktrees=use_worktrees == "true",
         show_archived_sessions=show_archived == "true",
+        last_selected_repo=stored.last_selected_repo,
     )
     user = _authenticated_user(request)
     if user is not None:
@@ -1456,22 +1464,15 @@ def new_session(request: HttpRequest) -> HttpResponse:
     config = AppServerConfig(codex_bin=shutil.which("codex"))
     with Codex(config=config) as codex:
         models_data = list(codex.models().data)
-    (
-        model,
-        reasoning_effort,
-        sandbox_policy,
-        approval_mode,
-        extra_system_prompt,
-        use_worktrees,
-        _show_archived_sessions,
-        cookie_updates,
-    ) = _resolved_settings(request, models_data)
-    if plan_mode and not model:
+    resolved_settings = _resolved_settings(request, models_data)
+    settings = resolved_settings.values
+    cookie_updates = resolved_settings.cookie_updates
+    if plan_mode and not settings.model:
         return HttpResponseBadRequest("plan mode requires a model")
 
     session_cwd = cwd
     managed_worktree = None
-    if use_worktrees:
+    if settings.use_worktrees:
         try:
             managed_worktree = create_worktree_for_session(cwd)
         except WorktreeCreationError as exc:
@@ -1484,11 +1485,11 @@ def new_session(request: HttpRequest) -> HttpResponse:
     spawn_kwargs: dict[str, Any] = {
         "cwd": session_cwd,
         "prompt": prompt,
-        "developer_instructions": extra_system_prompt or None,
-        "model": model or None,
-        "reasoning_effort": reasoning_effort or None,
-        "sandbox_policy": sandbox_policy or None,
-        "approval_mode": approval_mode,
+        "developer_instructions": settings.extra_system_prompt or None,
+        "model": settings.model or None,
+        "reasoning_effort": settings.reasoning_effort or None,
+        "sandbox_policy": settings.sandbox_policy or None,
+        "approval_mode": settings.approval_mode,
     }
     if plan_mode:
         spawn_kwargs["plan_mode"] = True
@@ -1503,6 +1504,13 @@ def new_session(request: HttpRequest) -> HttpResponse:
                     "failed to clean up managed worktree %s", managed_worktree.path
                 )
         raise
+    remembered_values = settings._replace(last_selected_repo=cwd)
+    user = _authenticated_user(request)
+    if user is not None:
+        _save_user_settings(user, remembered_values)
+        cookie_updates = _settings_cookie_updates(remembered_values)
+    else:
+        cookie_updates = {**cookie_updates, _LAST_SELECTED_REPO_COOKIE: cwd}
     response = redirect("session", session_id=instance.thread_id)
     _apply_cookie_updates(response, cookie_updates)
     return response

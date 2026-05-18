@@ -955,7 +955,7 @@
                 {% if repos %}
                 <select name="cwd" required>
                     {% for repo in repos %}
-                    <option value="{{ repo }}">{{ repo }}</option>
+                    <option value="{{ repo }}"{% if repo == current_repo %} selected{% endif %}>{{ repo }}</option>
                     {% endfor %}
                 </select>
                 {% else %}
