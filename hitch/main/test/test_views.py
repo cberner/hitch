@@ -1850,6 +1850,29 @@ class ResolveInputRequestViewTests(TestCase):
         )
         self.assertIsNotNone(input_request.responded_at)
 
+    def test_records_empty_answers_when_payload_is_omitted(self) -> None:
+        input_request = self._make_input_request()
+
+        response = self.client.post(
+            reverse("resolve_input_request", kwargs={"input_id": input_request.pk})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        input_request.refresh_from_db()
+        self.assertEqual(input_request.response, {"answers": {}})
+
+    def test_trims_string_answers_and_ignores_blank_keys(self) -> None:
+        input_request = self._make_input_request()
+
+        response = self.client.post(
+            reverse("resolve_input_request", kwargs={"input_id": input_request.pk}),
+            data={"answers": json.dumps({" scope ": " UI ", " ": "ignored"})},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        input_request.refresh_from_db()
+        self.assertEqual(input_request.response, {"answers": {"scope": "UI"}})
+
     def test_rejects_invalid_answers_payload(self) -> None:
         input_request = self._make_input_request()
 
@@ -1893,6 +1916,50 @@ class ResolveInputRequestViewTests(TestCase):
         self.assertEqual(response.status_code, 409)
         input_request.refresh_from_db()
         self.assertEqual(input_request.response, {"answers": {"scope": "UI"}})
+
+    def test_returns_404_when_input_request_is_missing(self) -> None:
+        response = self.client.post(
+            reverse("resolve_input_request", kwargs={"input_id": 999_999}),
+            data={"answers": json.dumps({"scope": "UI"})},
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_returns_409_when_update_loses_race(self) -> None:
+        input_request = self._make_input_request()
+        original_filter = UserInputRequest.objects.filter
+
+        class _RacingUpdate:
+            def update(self, **kwargs: Any) -> int:
+                original_filter(pk=input_request.pk).update(
+                    response={"answers": {"scope": "already answered"}}
+                )
+                return 0
+
+        def _filter(*args: Any, **kwargs: Any) -> Any:
+            if kwargs == {"pk": input_request.pk, "response__isnull": True}:
+                return _RacingUpdate()
+            return original_filter(*args, **kwargs)
+
+        with patch.object(UserInputRequest.objects, "filter", side_effect=_filter):
+            response = self.client.post(
+                reverse("resolve_input_request", kwargs={"input_id": input_request.pk}),
+                data={"answers": json.dumps({"scope": "UI"})},
+            )
+
+        self.assertEqual(response.status_code, 409)
+        input_request.refresh_from_db()
+        self.assertEqual(
+            input_request.response,
+            {"answers": {"scope": "already answered"}},
+        )
+
+    def test_string_representation_reflects_response_state(self) -> None:
+        pending = self._make_input_request()
+        answered = self._make_input_request(response={"answers": {"scope": "UI"}})
+
+        self.assertIn("state=pending", str(pending))
+        self.assertIn("state=answered", str(answered))
 
 
 class SessionViewApprovalContextTests(TestCase):

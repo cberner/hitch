@@ -1355,8 +1355,6 @@ def resolve_input_request(request: HttpRequest, input_id: int) -> HttpResponse:
         return HttpResponseBadRequest("invalid answers")
     answers: dict[str, Any] = {}
     for key, value in parsed.items():
-        if not isinstance(key, str):
-            return HttpResponseBadRequest("invalid answers")
         key = key.strip()
         if isinstance(value, str):
             value = value.strip()

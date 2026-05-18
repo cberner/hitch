@@ -2238,6 +2238,7 @@ class ApprovalHandlerTests(TestCase):
             for request_method in (
                 "request_user_input",
                 "requestUserInput",
+                "item/tool/request_user_input",
                 "item/tool/requestUserInput",
             ):
                 with self.subTest(
@@ -2423,6 +2424,13 @@ class ApprovalHandlerTests(TestCase):
             _wait_for_user_input_response(input_request.pk),
             {"answers": {"scope": "UI"}},
         )
+
+    def test_wait_for_user_input_response_defaults_to_empty_for_missing_row(self) -> None:
+        from hitch.main.management.commands.codex_worker import (
+            _wait_for_user_input_response,
+        )
+
+        self.assertEqual(_wait_for_user_input_response(999_999), {"answers": {}})
 
     @patch(
         "hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001
