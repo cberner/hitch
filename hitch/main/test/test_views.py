@@ -13,12 +13,18 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+from django.contrib.auth import get_user_model
 from django.core import signing
 from django.test import Client, TestCase
 from django.urls import reverse
 from openai_codex.errors import MethodNotFoundError
 
-from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
+from hitch.main.models import (
+    ApprovalRequest,
+    CodexInstance,
+    UserInputRequest,
+    UserSettings,
+)
 from hitch.main.worktrees import (
     ManagedWorktree,
     WorktreeCleanupError,
@@ -29,6 +35,7 @@ _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _MODEL_COOKIE = "hitch_model"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
+_LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
 _PR_PROMPT = (
     "Do a thorough review of the diff. Rebase on master, clean it up, "
     "and then open a PR"
@@ -86,6 +93,11 @@ def _encode_extra_system_prompt(value: str) -> str:
 def _seed_cookies(client: Client, **values: str) -> None:
     for name, value in values.items():
         client.cookies[name] = _sign(name, value)
+
+
+def _cookie_value(response: object, name: str) -> str:
+    raw = response.cookies[name].value  # type: ignore[attr-defined]
+    return signing.get_cookie_signer(salt=name).unsign(raw)
 
 
 def _session(
@@ -248,6 +260,23 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    def test_repo_dropdown_selects_saved_repo(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _seed_cookies(
+            self.client,
+            **{_LAST_SELECTED_REPO_COOKIE: "/home/user/proj-b"},
+        )
+        _setup_codex(mock_codex)
+        mock_discover.return_value = [Path("/home/user/proj-a"), Path("/home/user/proj-b")]
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, 'value="/home/user/proj-b" selected')
+        self.assertNotContains(response, 'value="/home/user/proj-a" selected')
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
     def test_new_session_dialog_supports_super_enter_submit(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -351,6 +380,55 @@ class NewSessionViewTests(TestCase):
             sandbox_policy=None,
             approval_mode="auto_review",
         )
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_remembers_selected_repo_in_cookie(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        other_repo = "/home/user/other"
+        mock_discover.return_value = [Path(self.REPO), Path(other_repo)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "do thing", "cwd": other_repo},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(_cookie_value(response, _LAST_SELECTED_REPO_COOKIE), other_repo)
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_remembers_selected_repo_in_account_settings(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        user_model = get_user_model()
+        user = user_model.objects.create_user("dev@example.com", password="StrongPass123!")
+        self.client.force_login(user)
+        other_repo = "/home/user/other"
+        mock_discover.return_value = [Path(self.REPO), Path(other_repo)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "do thing", "cwd": other_repo},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        settings = UserSettings.objects.get(user=user)
+        self.assertEqual(settings.last_selected_repo, other_repo)
+        self.assertEqual(_cookie_value(response, _LAST_SELECTED_REPO_COOKIE), other_repo)
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
