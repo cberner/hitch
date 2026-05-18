@@ -295,6 +295,9 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
     default_plan_mode = _entries_await_plan_approval(entries)
     token_usage = _token_usage_for(thread)
     goal_objective = codex_events.latest_goal_for_thread(session_id)
+    task_plan = _task_plan_context(
+        codex_events.latest_task_plan_for_instance(active_instance)
+    )
     diff_view = build_worktree_diff(_thread_cwd(thread))
     return render(
         request,
@@ -342,6 +345,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             "pr_slash_prompt": _PR_SLASH_PROMPT,
             "default_plan_mode": default_plan_mode,
             "goal_objective": goal_objective,
+            "task_plan": task_plan,
             "diff_view": diff_view,
         },
     )
@@ -571,6 +575,34 @@ def _pending_user_prompt(active: CodexInstance | None) -> str:
     if active is None or not active.prompt:
         return ""
     return active.prompt
+
+
+def _task_plan_context(
+    snapshot: codex_events.TaskPlanSnapshot | None,
+) -> dict[str, Any] | None:
+    if snapshot is None:
+        return None
+    current = _current_task_text(snapshot.steps) or snapshot.explanation
+    return {
+        "visible": bool(current or snapshot.steps),
+        "current": current,
+        "explanation": snapshot.explanation,
+        "recorded_at": snapshot.order[0],
+        "event_seq": snapshot.order[1],
+        "fallback_order": snapshot.order[2],
+        "steps": [
+            {"step": step.step, "status": step.status}
+            for step in snapshot.steps
+        ],
+    }
+
+
+def _current_task_text(steps: tuple[codex_events.TaskPlanStep, ...]) -> str:
+    for status in ("inProgress", "pending"):
+        for step in steps:
+            if step.status == status:
+                return step.step
+    return steps[-1].step if steps else ""
 
 
 @require_http_methods(["GET"])
