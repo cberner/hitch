@@ -142,6 +142,7 @@ _NAME_MAX_LEN = 200
 _MAX_BIGAUTOFIELD = 2**63 - 1
 _PLAN_SLASH_COMMAND = "/plan"
 _PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium.value
+_DEFAULT_COLLABORATION_MODE = "default"
 
 # Friendly labels for non-message thread item types. Anything not in this map
 # falls back to the raw type tag so we never silently drop an item from the UI.
@@ -1172,6 +1173,11 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     prompt, plan_mode = _message_prompt_and_plan_mode(request)
     if not prompt:
         return HttpResponseBadRequest("prompt is required")
+    collaboration_mode = request.POST.get("collaboration_mode", "").strip().lower()
+    if collaboration_mode and collaboration_mode != _DEFAULT_COLLABORATION_MODE:
+        return HttpResponseBadRequest("invalid collaboration mode")
+    if collaboration_mode and plan_mode:
+        return HttpResponseBadRequest("collaboration mode conflicts with plan mode")
     settings = _stored_settings(request)
     raw_active = request.POST.get("active_instance", "").strip()
     if raw_active:
@@ -1205,7 +1211,11 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     with Codex(config=config) as codex:
         resumed = codex._client.thread_resume(session_id)
         thread = resumed.thread
-        plan_model = _plan_mode_model(codex, resumed, settings) if plan_mode else None
+        collaboration_model = (
+            _plan_mode_model(codex, resumed, settings)
+            if plan_mode or collaboration_mode == _DEFAULT_COLLABORATION_MODE
+            else None
+        )
     cwd = _thread_cwd(thread)
     if not cwd:
         return HttpResponseBadRequest("thread has no cwd")
@@ -1230,10 +1240,15 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         "approval_mode": approval_mode,
     }
     if plan_mode:
-        if not plan_model:
+        if not collaboration_model:
             return HttpResponseBadRequest("plan mode requires a model")
-        spawn_kwargs["model"] = plan_model
+        spawn_kwargs["model"] = collaboration_model
         spawn_kwargs["plan_mode"] = True
+    elif collaboration_mode == _DEFAULT_COLLABORATION_MODE:
+        if not collaboration_model:
+            return HttpResponseBadRequest("default collaboration mode requires a model")
+        spawn_kwargs["model"] = collaboration_model
+        spawn_kwargs["collaboration_mode"] = collaboration_mode
     codex_pool.spawn_turn(**spawn_kwargs)
     return redirect("session", session_id=session_id)
 

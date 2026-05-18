@@ -22,6 +22,7 @@ import signal
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 from django.conf import settings
 from django.db import transaction
@@ -111,6 +112,7 @@ def spawn_turn(
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
+    collaboration_mode: str | None = None,
     plan_mode: bool = False,
 ) -> CodexInstance:
     """Detach a worker that resumes an existing thread to run one prompt."""
@@ -127,6 +129,7 @@ def spawn_turn(
         reasoning_effort=reasoning_effort,
         sandbox_policy=sandbox_policy,
         approval_mode=approval_mode,
+        collaboration_mode=collaboration_mode,
         plan_mode=plan_mode,
     )
 
@@ -555,6 +558,7 @@ def _spawn_worker(
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
+    collaboration_mode: str | None = None,
     plan_mode: bool = False,
 ) -> CodexInstance:
     target_dir = events_dir()
@@ -574,22 +578,18 @@ def _spawn_worker(
         instance.save(update_fields=["events_path"])
 
     try:
+        launch_kwargs: dict[str, Any] = {
+            "instance_id": instance.pk,
+            "reasoning_effort": reasoning_effort,
+            "sandbox_policy": sandbox_policy,
+            "approval_mode": approval_mode,
+        }
         if model or plan_mode:
-            proc = _launch_worker_process(
-                instance_id=instance.pk,
-                model=model,
-                reasoning_effort=reasoning_effort,
-                sandbox_policy=sandbox_policy,
-                approval_mode=approval_mode,
-                plan_mode=plan_mode,
-            )
-        else:
-            proc = _launch_worker_process(
-                instance_id=instance.pk,
-                reasoning_effort=reasoning_effort,
-                sandbox_policy=sandbox_policy,
-                approval_mode=approval_mode,
-            )
+            launch_kwargs["model"] = model
+            launch_kwargs["plan_mode"] = plan_mode
+        if collaboration_mode:
+            launch_kwargs["collaboration_mode"] = collaboration_mode
+        proc = _launch_worker_process(**launch_kwargs)
     except Exception as exc:
         # Without this, a Popen failure (e.g. ENOMEM, E2BIG, missing python)
         # would leave the row stuck in ``starting`` with pid=0 and no
@@ -611,6 +611,7 @@ def _launch_worker_process(
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
+    collaboration_mode: str | None = None,
     plan_mode: bool = False,
 ) -> subprocess.Popen[bytes]:
     manage_py = str(Path(settings.BASE_DIR) / "manage.py")
@@ -638,6 +639,8 @@ def _launch_worker_process(
         argv.extend(["--sandbox-policy", sandbox_policy])
     if approval_mode:
         argv.extend(["--approval-mode", approval_mode])
+    if collaboration_mode:
+        argv.extend(["--collaboration-mode", collaboration_mode])
     if plan_mode:
         argv.append("--plan-mode")
 
