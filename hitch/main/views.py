@@ -29,7 +29,7 @@ from openai_codex.generated.v2_all import (
     ReasoningEffort,
 )
 
-from hitch.main import codex_events, codex_pool, rollout, streaming
+from hitch.main import codex_events, codex_pool, rollout, streaming, system_agents
 from hitch.main.diffs import build_worktree_diff
 from hitch.main.formatting import looks_like_markdown, render_markdown
 from hitch.main.models import (
@@ -159,10 +159,7 @@ _LAST_SELECTED_REPO_MAX_LEN = 4096
 _MAX_BIGAUTOFIELD = 2**63 - 1
 _PLAN_SLASH_COMMAND = "/plan"
 _PR_SLASH_COMMAND = "/pr"
-_PR_SLASH_PROMPT = (
-    "Do a thorough review of the diff. Rebase on master, clean it up, "
-    "and then open a PR"
-)
+_PR_SLASH_PROMPT = system_agents.PR_SLASH_PROMPT
 _PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium.value
 _DEFAULT_COLLABORATION_MODE = "default"
 
@@ -201,9 +198,12 @@ def index(request: HttpRequest) -> HttpResponse:
         if current_settings.show_archived_sessions:
             threads.extend(codex.thread_list(archived=True).data)
         rate_limits = _fetch_rate_limits(codex)
+    hidden_thread_ids = system_agents.hidden_thread_ids()
     threads = sorted(threads, key=lambda s: s.updated_at, reverse=True)
     sessions = []
     for thread in threads:
+        if thread.id in hidden_thread_ids:
+            continue
         is_archived = _thread_is_archived(thread)
         if is_archived and not current_settings.show_archived_sessions:
             continue
@@ -283,9 +283,10 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
         thread = resumed.thread
         plan_model = _plan_mode_model(codex, resumed, settings)
     is_archived = _thread_is_archived(thread)
-    entries = list(_entries_for(thread))
+    entries = _apply_system_authors(list(_entries_for(thread)), session_id)
     name_value = getattr(thread, "name", None) or ""
     active_instance = _active_instance_for(session_id)
+    active_system_workflow = system_agents.active_workflow_for_thread(session_id)
     # While a worker is running, drop the entries that belong to its
     # in-progress turn — the SSE stream replays them from byte 0 of the
     # events file, so leaving the rollout-rendered copy in place would
@@ -319,7 +320,9 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             # so a newer turn starting between render and EventSource
             # connect can't divert the live view away from the worker
             # the Stop button is wired to.
-            "stream_url": _stream_url_for(session_id, active_instance),
+            "stream_url": _stream_url_for(
+                session_id, active_instance, active_system_workflow
+            ),
             # The JS swaps the trailing ``0`` for the real ApprovalRequest
             # pk on each POST. Templating the URL server-side (rather than
             # building it in JS from a base path) keeps Django's URL
@@ -331,6 +334,8 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
                 "resolve_input_request", kwargs={"input_id": 0}
             ),
             "active_worker": active_instance is not None,
+            "active_system_workflow": active_system_workflow,
+            "workflow_status_text": _workflow_status_text(active_system_workflow),
             # Carried into the Stop button so the click targets the
             # specific worker the page is streaming, not "whichever
             # worker is latest at click time" — overlapping turns can
@@ -340,6 +345,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             # user wouldn't see their own message at all without a pending
             # bubble while the stream catches up.
             "pending_user_prompt": _pending_user_prompt(active_instance),
+            "pending_user_author": _pending_user_author(active_instance),
             "token_usage": token_usage,
             "next_message_config": _next_message_config(settings, resumed, plan_model),
             "pr_slash_prompt": _PR_SLASH_PROMPT,
@@ -605,6 +611,57 @@ def _current_task_text(steps: tuple[codex_events.TaskPlanStep, ...]) -> str:
     return steps[-1].step if steps else ""
 
 
+def _pending_user_author(active: CodexInstance | None) -> str:
+    if active is None:
+        return ""
+    return active.display_author if active.purpose == CodexInstance.PURPOSE_SYSTEM_FEEDBACK else ""
+
+
+def _workflow_status_text(workflow: Any | None) -> str:
+    if workflow is None:
+        return ""
+    if getattr(workflow, "kind", "") == "pr_qa":
+        return "QA agent is reviewing..."
+    return "Hitch system agent is working..."
+
+
+def _apply_system_authors(
+    entries: list[dict[str, Any]], session_id: str
+) -> list[dict[str, Any]]:
+    system_authors: dict[int, str] = {}
+    for user_message_index, author in CodexInstance.objects.filter(
+        thread_id=session_id,
+        purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+        user_message_index__isnull=False,
+    ).values_list("user_message_index", "display_author"):
+        if isinstance(user_message_index, int) and author:
+            system_authors[user_message_index] = author
+    if not system_authors:
+        return entries
+    user_message_index = 0
+    for entry in entries:
+        user_message_index = _apply_system_author(
+            entry, system_authors, user_message_index
+        )
+    return entries
+
+
+def _apply_system_author(
+    entry: dict[str, Any], system_authors: dict[int, str], user_message_index: int
+) -> int:
+    if entry.get("kind") == "user":
+        author = system_authors.get(user_message_index)
+        if author:
+            entry["display_author"] = author
+        return user_message_index + 1
+    if entry.get("kind") == "intermediate":
+        for item in entry.get("items", []):
+            user_message_index = _apply_system_author(
+                item, system_authors, user_message_index
+            )
+    return user_message_index
+
+
 @require_http_methods(["GET"])
 def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpResponse:
     """SSE endpoint that mirrors the active worker's events file to the browser.
@@ -623,23 +680,37 @@ def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpRespon
     """
     baseline_param = request.GET.get("baseline", "")
     active_param = request.GET.get("active", "")
+    workflow_param = request.GET.get("workflow", "")
     current_latest = codex_pool.latest_id_for_thread(session_id)
     current_latest_str = str(current_latest) if current_latest is not None else ""
     active = _active_instance_for(session_id)
     current_active_str = str(active.pk) if active is not None else ""
+    active_workflow = system_agents.active_workflow_for_thread(session_id)
+    current_workflow_str = str(active_workflow.pk) if active_workflow is not None else ""
 
-    if baseline_param != current_latest_str or active_param != current_active_str:
+    if (
+        baseline_param != current_latest_str
+        or active_param != current_active_str
+        or workflow_param != current_workflow_str
+    ):
         response = StreamingHttpResponse(
             streaming.reload_stream(), content_type="text/event-stream"
         )
-    elif active is None:
+    elif active is not None:
         response = StreamingHttpResponse(
-            streaming.idle_stream(session_id, current_latest),
+            streaming.stream_for_instance(active), content_type="text/event-stream"
+        )
+    elif active_workflow is not None:
+        response = StreamingHttpResponse(
+            streaming.system_workflow_stream(
+                session_id, current_latest, active_workflow.pk
+            ),
             content_type="text/event-stream",
         )
     else:
         response = StreamingHttpResponse(
-            streaming.stream_for_instance(active), content_type="text/event-stream"
+            streaming.idle_stream(session_id, current_latest),
+            content_type="text/event-stream",
         )
     # Discourage proxies from buffering: SSE depends on every frame reaching
     # the client immediately, not coalesced into a single response body.
@@ -648,7 +719,11 @@ def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpRespon
     return response
 
 
-def _stream_url_for(session_id: str, active_instance: CodexInstance | None) -> str:
+def _stream_url_for(
+    session_id: str,
+    active_instance: CodexInstance | None,
+    active_workflow: Any | None = None,
+) -> str:
     """Build the SSE URL for the session view, tagging it with the page's
     render-time view of the session state.
 
@@ -661,10 +736,12 @@ def _stream_url_for(session_id: str, active_instance: CodexInstance | None) -> s
     """
     baseline_id = codex_pool.latest_id_for_thread(session_id)
     active_id = active_instance.pk if active_instance is not None else None
+    workflow_id = active_workflow.pk if active_workflow is not None else None
     qs = urlencode(
         {
             "baseline": str(baseline_id) if baseline_id is not None else "",
             "active": str(active_id) if active_id is not None else "",
+            "workflow": str(workflow_id) if workflow_id is not None else "",
         }
     )
     return f"{reverse('session_stream', kwargs={'session_id': session_id})}?{qs}"
@@ -1258,6 +1335,7 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
 @require_http_methods(["POST"])
 def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     intent = _message_intent(request)
+    pr_activation = _is_pr_activation(request)
     prompt = intent.prompt
     plan_mode = intent.plan_mode
     if not prompt:
@@ -1267,11 +1345,22 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         return HttpResponseBadRequest("invalid collaboration mode")
     if collaboration_mode and plan_mode and intent.explicit_plan_mode:
         return HttpResponseBadRequest("collaboration mode conflicts with plan mode")
+    if pr_activation and collaboration_mode:
+        return HttpResponseBadRequest("PR workflow conflicts with collaboration mode")
     if collaboration_mode:
         plan_mode = False
+    if pr_activation:
+        plan_mode = False
+    active_system_workflow = system_agents.active_workflow_for_thread(session_id)
+    if active_system_workflow is not None:
+        if pr_activation:
+            return redirect("session", session_id=session_id)
+        return HttpResponseBadRequest("PR workflow is running for this session")
     settings = _stored_settings(request)
     raw_active = request.POST.get("active_instance", "").strip()
     if raw_active:
+        if pr_activation:
+            return HttpResponseBadRequest("PR workflow requires an idle session")
         instance_id, error = _parse_instance_id(raw_active)
         if error is not None or instance_id is None:
             return HttpResponseBadRequest(error or "invalid instance id")
@@ -1285,6 +1374,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     else:
         active_instance = codex_pool.latest_active_for_thread(session_id)
         if active_instance is not None:
+            if pr_activation:
+                return HttpResponseBadRequest("PR workflow requires an idle session")
             steered = codex_pool.steer_instance(
                 active_instance.pk,
                 expected_thread_id=session_id,
@@ -1302,7 +1393,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     with Codex(config=config) as codex:
         resumed = codex._client.thread_resume(session_id)
         thread = resumed.thread
-        thread_awaits_plan_approval = _thread_awaits_plan_approval(thread)
+        thread_entries = list(_entries_for(thread))
+        thread_awaits_plan_approval = _entries_await_plan_approval(thread_entries)
         if (
             not collaboration_mode
             and intent.allow_pending_plan_default
@@ -1332,6 +1424,29 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     # elevated permissions or stricter escalation handling.
     sandbox_policy = _effective_sandbox_policy(settings)
     approval_mode = _effective_approval_mode(settings)
+    if pr_activation:
+        previous_instance = codex_pool.latest_for_thread(session_id)
+        developer_instructions = (
+            previous_instance.developer_instructions
+            if previous_instance is not None
+            else settings.extra_system_prompt
+        )
+        workflow_model = _string_value(getattr(resumed, "model", None)) or settings.model
+        workflow_reasoning_effort = (
+            _string_value(getattr(resumed, "reasoning_effort", None))
+            or settings.reasoning_effort
+        )
+        system_agents.start_pr_qa_workflow(
+            main_thread_id=session_id,
+            cwd=cwd,
+            sandbox_policy=sandbox_policy or None,
+            approval_mode=approval_mode,
+            model=workflow_model or None,
+            reasoning_effort=workflow_reasoning_effort or None,
+            developer_instructions=developer_instructions or None,
+            initial_user_message_index=_count_user_entries(thread_entries),
+        )
+        return redirect("session", session_id=session_id)
     spawn_kwargs: dict[str, Any] = {
         "thread_id": session_id,
         "cwd": cwd,
@@ -1369,6 +1484,16 @@ def _entries_await_plan_approval(entries: list[dict[str, Any]]) -> bool:
     return False
 
 
+def _count_user_entries(entries: list[dict[str, Any]]) -> int:
+    count = 0
+    for entry in entries:
+        if entry.get("kind") == "user":
+            count += 1
+        elif entry.get("kind") == "intermediate":
+            count += _count_user_entries(entry.get("items", []))
+    return count
+
+
 def _message_intent(request: HttpRequest) -> _MessageIntent:
     prompt = request.POST.get("prompt", "").strip()
     plan_mode = request.POST.get("plan_mode", "").strip().lower() == "true"
@@ -1402,6 +1527,12 @@ def _message_intent(request: HttpRequest) -> _MessageIntent:
     if not plan_mode and prompt == _PR_SLASH_PROMPT:
         return _MessageIntent(prompt, False, False, False)
     return _MessageIntent(prompt, plan_mode, True, explicit_plan_mode)
+
+
+def _is_pr_activation(request: HttpRequest) -> bool:
+    prompt = request.POST.get("prompt", "").strip()
+    parts = prompt.split(maxsplit=1)
+    return bool(parts and parts[0].lower() == _PR_SLASH_COMMAND) or prompt == _PR_SLASH_PROMPT
 
 
 def _plan_mode_model(codex: Codex, resumed: Any, settings: SettingsValues) -> str | None:
@@ -1552,15 +1683,17 @@ def stop_session(request: HttpRequest, session_id: str) -> HttpResponse:
             return HttpResponseBadRequest(error or "invalid instance id")
         codex_pool.interrupt_instance(instance_id, expected_thread_id=session_id)
     else:
-        codex_pool.interrupt_active(session_id)
+        if not system_agents.stop_active_workflow(session_id):
+            codex_pool.interrupt_active(session_id)
     return redirect("session", session_id=session_id)
 
 
 @require_http_methods(["POST"])
 def new_session(request: HttpRequest) -> HttpResponse:
     intent = _message_intent(request)
+    pr_activation = _is_pr_activation(request)
     prompt = intent.prompt
-    plan_mode = intent.plan_mode
+    plan_mode = False if pr_activation else intent.plan_mode
     cwd = request.POST.get("cwd", "").strip()
     if not prompt:
         return HttpResponseBadRequest("prompt is required")
@@ -1587,6 +1720,36 @@ def new_session(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest("plan mode requires a model")
 
     session_cwd = cwd
+    # PR workflows review the selected repo's current diff; a fresh managed
+    # worktree would be clean and miss uncommitted changes.
+    if pr_activation:
+        thread_id = codex_pool.create_session_thread(
+            cwd=session_cwd,
+            name=_PR_SLASH_PROMPT,
+            developer_instructions=settings.extra_system_prompt or None,
+            model=settings.model or None,
+        )
+        system_agents.start_pr_qa_workflow(
+            main_thread_id=thread_id,
+            cwd=session_cwd,
+            sandbox_policy=settings.sandbox_policy or None,
+            approval_mode=settings.approval_mode,
+            model=settings.model or None,
+            reasoning_effort=settings.reasoning_effort or None,
+            developer_instructions=settings.extra_system_prompt or None,
+            initial_user_message_index=0,
+        )
+        remembered_values = settings._replace(last_selected_repo=cwd)
+        user = _authenticated_user(request)
+        if user is not None:
+            _save_user_settings(user, remembered_values)
+            cookie_updates = _settings_cookie_updates(remembered_values)
+        else:
+            cookie_updates = {**cookie_updates, _LAST_SELECTED_REPO_COOKIE: cwd}
+        response = redirect("session", session_id=thread_id)
+        _apply_cookie_updates(response, cookie_updates)
+        return response
+
     managed_worktree = None
     if settings.use_worktrees:
         try:

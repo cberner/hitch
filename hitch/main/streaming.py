@@ -25,7 +25,7 @@ from collections.abc import Generator, Iterator
 from pathlib import Path
 
 from hitch.main import codex_pool
-from hitch.main.models import CodexInstance
+from hitch.main.models import CodexInstance, SystemWorkflow
 
 # Cadence at which we re-poll the events file when it has no new bytes. Short
 # enough that streamed deltas surface in near-real-time; long enough not to
@@ -152,6 +152,33 @@ def idle_stream(session_id: str, baseline_id: int | None) -> Iterator[bytes]:
             return
         if time.monotonic() - last_heartbeat >= _HEARTBEAT_INTERVAL:
             yield _heartbeat_frame(working=False)
+            last_heartbeat = time.monotonic()
+        time.sleep(_IDLE_POLL_INTERVAL)
+
+
+def system_workflow_stream(
+    session_id: str, baseline_id: int | None, workflow_id: int
+) -> Iterator[bytes]:
+    """Heartbeat stream while a hidden system workflow owns the main thread."""
+    yield b"retry: 2000\n\n"
+    yield _heartbeat_frame(working=True)
+    deadline = time.monotonic() + _IDLE_MAX_STREAM_SECONDS
+    last_heartbeat = time.monotonic()
+    while True:
+        if codex_pool.latest_id_for_thread(session_id) != baseline_id:
+            yield _end_frame("active")
+            return
+        if not SystemWorkflow.objects.filter(
+            pk=workflow_id,
+            main_thread_id=session_id,
+            status=SystemWorkflow.STATUS_RUNNING,
+        ).exists():
+            yield _end_frame("workflow")
+            return
+        if time.monotonic() > deadline:
+            return
+        if time.monotonic() - last_heartbeat >= _HEARTBEAT_INTERVAL:
+            yield _heartbeat_frame(working=True)
             last_heartbeat = time.monotonic()
         time.sleep(_IDLE_POLL_INTERVAL)
 

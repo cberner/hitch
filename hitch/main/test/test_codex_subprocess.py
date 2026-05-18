@@ -52,7 +52,12 @@ from hitch.main.management.commands.codex_worker import (
     _serialize_event,
     _start_goal_event_forwarder,
 )
-from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
+from hitch.main.models import (
+    ApprovalRequest,
+    CodexInstance,
+    SystemWorkflow,
+    UserInputRequest,
+)
 
 
 def _events_dir() -> tempfile.TemporaryDirectory[str]:
@@ -345,6 +350,36 @@ class SpawnTurnTests(TestCase):
 
         self.assertEqual(instance.developer_instructions, "Prefer small, typed changes.")
 
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    def test_explicit_developer_instructions_override_previous_turn(
+        self, mock_launch: MagicMock
+    ) -> None:
+        mock_launch.return_value = SimpleNamespace(pid=1234)
+        CodexInstance.objects.create(
+            pid=999,
+            thread_id="thread-xyz",
+            cwd="/repo",
+            prompt="first",
+            developer_instructions="Old instructions.",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_turn(
+                thread_id="thread-xyz",
+                cwd="/repo",
+                prompt="follow-up",
+                developer_instructions="Fresh instructions.",
+                user_message_index=7,
+            )
+
+        self.assertEqual(instance.developer_instructions, "Fresh instructions.")
+        self.assertEqual(instance.user_message_index, 7)
+
 
 class LaunchWorkerProcessTests(TestCase):
     @patch("hitch.main.codex_pool.subprocess.Popen")
@@ -507,13 +542,21 @@ class ApprovalRequestModelTests(TestCase):
 
 
 class ReconcileAndLookupTests(TestCase):
-    def _make(self, *, pid: int = 1, thread_id: str = "t", status: str | None = None) -> CodexInstance:
+    def _make(
+        self,
+        *,
+        pid: int = 1,
+        thread_id: str = "t",
+        status: str | None = None,
+        purpose: str = CodexInstance.PURPOSE_USER,
+    ) -> CodexInstance:
         return CodexInstance.objects.create(
             pid=pid,
             thread_id=thread_id,
             cwd="/r",
             events_path="/dev/null",
             status=status or CodexInstance.STATUS_COMPLETED,
+            purpose=purpose,
         )
 
     @patch("hitch.main.codex_pool.is_alive")
@@ -537,6 +580,25 @@ class ReconcileAndLookupTests(TestCase):
         self.assertIsNone(live_running.ended_at)
         self.assertEqual(completed.status, CodexInstance.STATUS_COMPLETED)
         self.assertIn("exited", dead_running.error)
+
+    @patch("hitch.main.system_agents.on_codex_instance_finished")
+    @patch("hitch.main.codex_pool.is_alive", return_value=False)
+    def test_reconcile_notifies_system_agents_for_dead_system_rows(
+        self, _mock_alive: MagicMock, mock_notify: MagicMock
+    ) -> None:
+        system_agent = self._make(
+            pid=10,
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        )
+
+        n = codex_pool.reconcile_dead()
+
+        self.assertEqual(n, 1)
+        mock_notify.assert_called_once()
+        notified = mock_notify.call_args.args[0]
+        self.assertEqual(notified.pk, system_agent.pk)
+        self.assertEqual(notified.status, CodexInstance.STATUS_FAILED)
 
     def test_list_and_latest_for_thread(self) -> None:
         first = self._make(thread_id="t1")
@@ -3071,6 +3133,45 @@ class StreamForInstanceTests(TestCase):
         self.assertGreater(len(heartbeats), 1)
         for frame in heartbeats:
             self.assertIn(b'"working": false', frame)
+
+    @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
+    @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
+    def test_system_workflow_stream_reports_working(self) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-workflow",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step="qa_running",
+        )
+
+        frames = list(
+            streaming.system_workflow_stream(
+                "thread-workflow", baseline_id=None, workflow_id=workflow.pk
+            )
+        )
+
+        heartbeats = [f for f in frames if f.startswith(b"event: heartbeat")]
+        self.assertGreaterEqual(len(heartbeats), 1)
+        self.assertIn(b'"working": true', heartbeats[0])
+
+    def test_system_workflow_stream_ends_when_workflow_stops(self) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-workflow",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_BLOCKED,
+            step="blocked",
+        )
+
+        frames = list(
+            streaming.system_workflow_stream(
+                "thread-workflow", baseline_id=None, workflow_id=workflow.pk
+            )
+        )
+
+        self.assertTrue(frames[-1].startswith(b"event: end"))
+        self.assertIn(b'"workflow"', frames[-1])
 
     def test_reload_stream_yields_immediate_end(self) -> None:
         # ``session_stream`` returns this when it detects the page is

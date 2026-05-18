@@ -16,6 +16,7 @@ re-implementing Django bootstrap.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import signal
@@ -28,8 +29,11 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from openai_codex import AppServerConfig, Codex
+from openai_codex.generated.v2_all import ThreadSource
 
 from hitch.main.models import CodexInstance
+
+logger = logging.getLogger(__name__)
 
 
 def spawn_new_session(
@@ -42,6 +46,13 @@ def spawn_new_session(
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
     plan_mode: bool = False,
+    thread_source: ThreadSource | None = None,
+    purpose: str = CodexInstance.PURPOSE_USER,
+    workflow_id: int | None = None,
+    agent_kind: str = "",
+    display_author: str = "",
+    output_schema: dict[str, Any] | None = None,
+    user_message_index: int | None = 0,
 ) -> CodexInstance:
     """Create a fresh Codex thread and detach a worker to run the initial prompt.
 
@@ -54,11 +65,14 @@ def spawn_new_session(
     """
     config = AppServerConfig(codex_bin=_codex_bin())
     with Codex(config=config) as codex:
-        thread = codex.thread_start(
-            cwd=cwd,
-            developer_instructions=developer_instructions,
-            model=model,
-        )
+        start_kwargs: dict[str, Any] = {
+            "cwd": cwd,
+            "developer_instructions": developer_instructions,
+            "model": model,
+        }
+        if thread_source is not None:
+            start_kwargs["thread_source"] = thread_source
+        thread = codex.thread_start(**start_kwargs)
         thread_id = thread.id
         # ``thread/start`` only creates the thread in the app-server's
         # in-memory map; the rollout file on disk is not written until
@@ -82,7 +96,32 @@ def spawn_new_session(
         sandbox_policy=sandbox_policy,
         approval_mode=approval_mode,
         plan_mode=plan_mode,
+        purpose=purpose,
+        workflow_id=workflow_id,
+        agent_kind=agent_kind,
+        display_author=display_author,
+        output_schema=output_schema,
+        user_message_index=user_message_index,
     )
+
+
+def create_session_thread(
+    *,
+    cwd: str,
+    name: str,
+    developer_instructions: str | None = None,
+    model: str | None = None,
+) -> str:
+    """Create and persist a visible Codex thread without starting a turn."""
+    config = AppServerConfig(codex_bin=_codex_bin())
+    with Codex(config=config) as codex:
+        thread = codex.thread_start(
+            cwd=cwd,
+            developer_instructions=developer_instructions,
+            model=model,
+        )
+        codex._client.thread_set_name(thread.id, _initial_thread_name(name))
+        return thread.id
 
 
 # Upper bound for the auto-derived thread name. Matches the
@@ -114,12 +153,20 @@ def spawn_turn(
     approval_mode: str | None = None,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
+    developer_instructions: str | None = None,
+    purpose: str = CodexInstance.PURPOSE_USER,
+    workflow_id: int | None = None,
+    agent_kind: str = "",
+    display_author: str = "",
+    output_schema: dict[str, Any] | None = None,
+    user_message_index: int | None = None,
 ) -> CodexInstance:
     """Detach a worker that resumes an existing thread to run one prompt."""
-    previous = latest_for_thread(thread_id)
-    developer_instructions = (
-        previous.developer_instructions if previous is not None else None
-    )
+    if developer_instructions is None:
+        previous = latest_for_thread(thread_id)
+        developer_instructions = (
+            previous.developer_instructions if previous is not None else None
+        )
     return _spawn_worker(
         thread_id=thread_id,
         cwd=cwd,
@@ -131,6 +178,12 @@ def spawn_turn(
         approval_mode=approval_mode,
         collaboration_mode=collaboration_mode,
         plan_mode=plan_mode,
+        purpose=purpose,
+        workflow_id=workflow_id,
+        agent_kind=agent_kind,
+        display_author=display_author,
+        output_schema=output_schema,
+        user_message_index=user_message_index,
     )
 
 
@@ -526,8 +579,26 @@ def reconcile_dead() -> int:
             instance.error = "worker process exited before reporting completion"
         instance.ended_at = now
         instance.save(update_fields=["status", "error", "ended_at"])
+        _notify_system_agents_if_needed(instance)
         updated += 1
     return updated
+
+
+def _notify_system_agents_if_needed(instance: CodexInstance) -> None:
+    if instance.purpose not in (
+        CodexInstance.PURPOSE_SYSTEM_AGENT,
+        CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+    ):
+        return
+    try:
+        from hitch.main import system_agents
+
+        system_agents.on_codex_instance_finished(instance)
+    except Exception:
+        logger.exception(
+            "failed to notify system workflow for reconciled instance %s",
+            instance.pk,
+        )
 
 
 def events_dir() -> Path:
@@ -560,6 +631,12 @@ def _spawn_worker(
     approval_mode: str | None = None,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
+    purpose: str = CodexInstance.PURPOSE_USER,
+    workflow_id: int | None = None,
+    agent_kind: str = "",
+    display_author: str = "",
+    output_schema: dict[str, Any] | None = None,
+    user_message_index: int | None = None,
 ) -> CodexInstance:
     target_dir = events_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -573,6 +650,12 @@ def _spawn_worker(
             events_path="",
             status=CodexInstance.STATUS_STARTING,
             pid=0,
+            purpose=purpose,
+            workflow_id=workflow_id,
+            agent_kind=agent_kind,
+            display_author=display_author,
+            output_schema=output_schema,
+            user_message_index=user_message_index,
         )
         instance.events_path = str(target_dir / f"{instance.pk}.jsonl")
         instance.save(update_fields=["events_path"])

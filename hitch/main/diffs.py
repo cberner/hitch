@@ -110,6 +110,33 @@ def build_worktree_diff(cwd: str | None) -> DiffView:
     return _parse_unified_diff(text, truncated=truncated)
 
 
+def build_worktree_diff_text(cwd: str | None) -> str:
+    """Return the raw current git diff text for system-agent prompts."""
+    if not cwd:
+        return ""
+    repo = _repo_root(Path(cwd))
+    if repo is None:
+        return ""
+
+    diff_base = _branch_diff_base_ref(repo)
+    raw_diff = None
+    if diff_base is not None:
+        raw_diff = _git_output(repo, [*_DIFF_ARGS, diff_base, "--"])
+    if raw_diff is None:
+        raw_diff = _git_output(repo, [*_DIFF_ARGS, "HEAD", "--"])
+    if raw_diff is None:
+        raw_diff = _git_output(repo, [*_DIFF_ARGS, "--"]) or ""
+
+    parts = [raw_diff] if raw_diff else []
+    untracked_diff = _untracked_diff(repo)
+    if untracked_diff:
+        parts.append(untracked_diff)
+    text = "\n".join(part for part in parts if part)
+    if len(text) > _MAX_DIFF_CHARS:
+        text = text[:_MAX_DIFF_CHARS] + "\n\n[diff truncated]"
+    return text
+
+
 def _branch_diff_base_ref(repo: Path) -> str | None:
     output = _git_output(repo, ["rev-parse", "--verify", "--quiet", _BRANCH_DIFF_BASE_REF])
     if not output or not output.strip():

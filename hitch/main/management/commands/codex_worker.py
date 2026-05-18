@@ -30,6 +30,7 @@ import contextlib
 import dataclasses
 import itertools
 import json
+import logging
 import shutil
 import signal
 import threading
@@ -76,6 +77,8 @@ from pydantic import BaseModel
 from hitch.main.codex_events import GOAL_METHODS
 from hitch.main.codex_pool import control_path_for
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
+
+logger = logging.getLogger(__name__)
 
 # JSON-RPC method names the SDK invokes on the client transport when codex's
 # auto-reviewer escalates an action. Custom user-reviewer worker modes also
@@ -237,12 +240,14 @@ class Command(BaseCommand):
                     approval_mode=approval_mode,
                     collaboration_mode=collaboration_mode,
                     plan_mode=plan_mode,
+                    output_schema=instance.output_schema,
                 )
         except Exception as exc:  # noqa: BLE001 - record any failure, then re-raise
             instance.status = CodexInstance.STATUS_FAILED
             instance.ended_at = timezone.now()
             instance.error = repr(exc)
             instance.save(update_fields=["status", "ended_at", "error"])
+            _notify_system_agents(instance)
             raise
 
         instance.ended_at = timezone.now()
@@ -263,6 +268,16 @@ class Command(BaseCommand):
                 else f"turn ended with status {final_turn.status.value}"
             )
         instance.save(update_fields=["status", "ended_at", "error"])
+        _notify_system_agents(instance)
+
+
+def _notify_system_agents(instance: CodexInstance) -> None:
+    try:
+        from hitch.main import system_agents
+
+        system_agents.on_codex_instance_finished(instance)
+    except Exception:
+        logger.exception("failed to route completed worker %s to system agents", instance.pk)
 
 
 def _run_turn(
@@ -276,6 +291,7 @@ def _run_turn(
     approval_mode: str | None = None,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
+    output_schema: dict[str, Any] | None = None,
 ) -> Turn | None:
     config = AppServerConfig(codex_bin=shutil.which("codex"))
     effort: ReasoningEffort | None = None
@@ -365,6 +381,7 @@ def _run_turn(
                 approval_mode=approval_mode,
                 collaboration_mode=collaboration_mode,
                 plan_mode=plan_mode,
+                output_schema=output_schema,
             )
             steer_forwarder = _start_steer_control_forwarder(
                 turn,
@@ -547,6 +564,7 @@ def _start_turn(
     approval_mode: str | None,
     collaboration_mode: str | None,
     plan_mode: bool,
+    output_schema: dict[str, Any] | None,
 ) -> TurnHandle:
     """Start a turn under the requested approval policy.
 
@@ -568,6 +586,7 @@ def _start_turn(
             model=model,
             sandbox_policy=sandbox_policy,
             approval_mode=approval_mode,
+            output_schema=output_schema,
         )
     if collaboration_mode == _DEFAULT_COLLABORATION_MODE:
         return _start_default_collaboration_turn(
@@ -578,6 +597,7 @@ def _start_turn(
             effort=effort,
             sandbox_policy=sandbox_policy,
             approval_mode=approval_mode,
+            output_schema=output_schema,
         )
     if collaboration_mode:
         raise ValueError(f"unsupported collaboration mode: {collaboration_mode}")
@@ -592,6 +612,7 @@ def _start_turn(
             effort=effort,
             model=model,
             sandbox_policy=sandbox_policy,
+            output_schema=output_schema,
         )
         # ``_client.turn_start`` requires the input again as its second
         # positional arg; the value in ``params.input`` is overwritten by
@@ -607,6 +628,8 @@ def _start_turn(
         turn_kwargs["model"] = model
     if sandbox_policy is not None:
         turn_kwargs["sandbox_policy"] = sandbox_policy
+    if output_schema is not None:
+        turn_kwargs["output_schema"] = output_schema
     mode = _build_approval_mode(approval_mode)
     if mode is not None:
         turn_kwargs["approval_mode"] = mode
@@ -621,6 +644,7 @@ def _start_plan_turn(
     model: str | None,
     sandbox_policy: SandboxPolicy | None,
     approval_mode: str | None,
+    output_schema: dict[str, Any] | None,
 ) -> TurnHandle:
     if not model:
         raise ValueError("plan mode requires a model")
@@ -639,6 +663,7 @@ def _start_plan_turn(
         collaboration_mode=collaboration_mode,
         sandbox_policy=sandbox_policy,
         approval_mode=approval_mode,
+        output_schema=output_schema,
     )
 
 
@@ -651,6 +676,7 @@ def _start_default_collaboration_turn(
     effort: ReasoningEffort | None,
     sandbox_policy: SandboxPolicy | None,
     approval_mode: str | None,
+    output_schema: dict[str, Any] | None,
 ) -> TurnHandle:
     if not model:
         raise ValueError("default collaboration mode requires a model")
@@ -669,6 +695,7 @@ def _start_default_collaboration_turn(
         collaboration_mode=collaboration_mode,
         sandbox_policy=sandbox_policy,
         approval_mode=approval_mode,
+        output_schema=output_schema,
     )
 
 
@@ -680,6 +707,7 @@ def _start_collaboration_turn(
     collaboration_mode: CollaborationMode,
     sandbox_policy: SandboxPolicy | None,
     approval_mode: str | None,
+    output_schema: dict[str, Any] | None,
 ) -> TurnHandle:
     typed_input = [UserInput(root=TextUserInput(type="text", text=prompt))]
     wire_input = [item.model_dump(mode="json", by_alias=True) for item in typed_input]
@@ -690,6 +718,8 @@ def _start_collaboration_turn(
     }
     if sandbox_policy is not None:
         params["sandboxPolicy"] = sandbox_policy.model_dump(mode="json", by_alias=True)
+    if output_schema is not None:
+        params["outputSchema"] = output_schema
     if approval_mode in _USER_REVIEWER_APPROVAL_MODES:
         params["approvalPolicy"] = AskForApproval(
             root=AskForApprovalValue.on_request
