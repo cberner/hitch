@@ -141,6 +141,8 @@ _NAME_MAX_LEN = 200
 # from ``objects.get`` — a 500 for what should be a clean 400.
 _MAX_BIGAUTOFIELD = 2**63 - 1
 _PLAN_SLASH_COMMAND = "/plan"
+_PR_SLASH_COMMAND = "/pr"
+_PR_SLASH_PROMPT = "Do a thorough review of the diff. Clean it up, and then open a PR"
 _PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium.value
 _DEFAULT_COLLABORATION_MODE = "default"
 
@@ -1257,8 +1259,13 @@ def _message_prompt_and_plan_mode(request: HttpRequest) -> tuple[str, bool]:
     prompt = request.POST.get("prompt", "").strip()
     plan_mode = request.POST.get("plan_mode", "").strip().lower() == "true"
     parts = prompt.split(maxsplit=1)
-    if parts and parts[0] == _PLAN_SLASH_COMMAND:
+    if not parts:
+        return prompt, plan_mode
+    command = parts[0].lower()
+    if command == _PLAN_SLASH_COMMAND:
         return (parts[1].strip() if len(parts) > 1 else ""), True
+    if command == _PR_SLASH_COMMAND:
+        return _PR_SLASH_PROMPT, False
     return prompt, plan_mode
 
 
