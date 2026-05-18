@@ -414,6 +414,20 @@ class LaunchWorkerProcessTests(TestCase):
         self.assertEqual(argv[argv.index("--approval-mode") + 1], "deny_all")
 
     @patch("hitch.main.codex_pool.subprocess.Popen")
+    def test_forwards_collaboration_mode_as_cli_arg(
+        self, mock_popen: MagicMock
+    ) -> None:
+        mock_popen.return_value = SimpleNamespace(pid=999)
+
+        codex_pool._launch_worker_process(
+            instance_id=7, collaboration_mode="default"
+        )
+
+        argv = mock_popen.call_args.args[0]
+        self.assertIn("--collaboration-mode", argv)
+        self.assertEqual(argv[argv.index("--collaboration-mode") + 1], "default")
+
+    @patch("hitch.main.codex_pool.subprocess.Popen")
     def test_forwards_plan_mode_cli_args(self, mock_popen: MagicMock) -> None:
         mock_popen.return_value = SimpleNamespace(pid=999)
 
@@ -1988,6 +2002,56 @@ class CodexWorkerCommandTests(TestCase):
                 "settings": {
                     "developer_instructions": None,
                     "reasoning_effort": "medium",
+                    "model": "gpt-5.4",
+                },
+            },
+        )
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_default_collaboration_mode_posts_collaboration_mode(
+        self, mock_codex: MagicMock
+    ) -> None:
+        captured_params: dict[str, object] = {}
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+
+        def _capture_turn_start(
+            _thread_id: str, _input: object, *, params: object
+        ) -> object:
+            captured_params["params"] = params
+            return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
+
+        codex_ctx._client.turn_start.side_effect = _capture_turn_start
+        codex_ctx._client.next_turn_notification.return_value = _completed_event(
+            "turn-1", TurnStatus.completed
+        )
+        codex_ctx.thread_resume.return_value = SimpleNamespace(
+            id="thread-1", turn=MagicMock()
+        )
+
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(Path(raw))
+            call_command(
+                "codex_worker",
+                "--instance-id",
+                str(instance.pk),
+                "--collaboration-mode",
+                "default",
+                "--model",
+                "gpt-5.4",
+                "--reasoning-effort",
+                "high",
+            )
+
+        codex_ctx.thread_resume.return_value.turn.assert_not_called()
+        params = captured_params["params"]
+        assert isinstance(params, dict)
+        self.assertEqual(
+            params["collaborationMode"],
+            {
+                "mode": "default",
+                "settings": {
+                    "developer_instructions": None,
+                    "reasoning_effort": "high",
                     "model": "gpt-5.4",
                 },
             },

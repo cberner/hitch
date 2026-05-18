@@ -122,6 +122,7 @@ _PROMPT_USER = "prompt_user"
 _APPROVE_ALL = "approve_all"
 _USER_REVIEWER_APPROVAL_MODES = frozenset({_PROMPT_USER, _APPROVE_ALL})
 _PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium
+_DEFAULT_COLLABORATION_MODE = "default"
 
 # Set by the SIGTERM handler so the stream loop knows to call
 # ``turn.interrupt()`` between events. Plain module-level bool is fine —
@@ -181,6 +182,7 @@ class Command(BaseCommand):
         parser.add_argument("--model", type=str, default=None)
         parser.add_argument("--sandbox-policy", type=str, default=None)
         parser.add_argument("--approval-mode", type=str, default=None)
+        parser.add_argument("--collaboration-mode", type=str, default=None)
         parser.add_argument("--plan-mode", action="store_true")
 
     @override
@@ -190,6 +192,7 @@ class Command(BaseCommand):
         model: str | None = options.get("model")
         sandbox_policy: str | None = options.get("sandbox_policy")
         approval_mode: str | None = options.get("approval_mode")
+        collaboration_mode: str | None = options.get("collaboration_mode")
         plan_mode: bool = options.get("plan_mode", False)
         instance = CodexInstance.objects.get(pk=instance_id)
 
@@ -212,6 +215,7 @@ class Command(BaseCommand):
                     reasoning_effort=reasoning_effort,
                     sandbox_policy=sandbox_policy,
                     approval_mode=approval_mode,
+                    collaboration_mode=collaboration_mode,
                     plan_mode=plan_mode,
                 )
         except Exception as exc:  # noqa: BLE001 - record any failure, then re-raise
@@ -250,6 +254,7 @@ def _run_turn(
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
+    collaboration_mode: str | None = None,
     plan_mode: bool = False,
 ) -> Turn | None:
     config = AppServerConfig(codex_bin=shutil.which("codex"))
@@ -338,6 +343,7 @@ def _run_turn(
                 effort=effort,
                 sandbox_policy=policy,
                 approval_mode=approval_mode,
+                collaboration_mode=collaboration_mode,
                 plan_mode=plan_mode,
             )
             steer_forwarder = _start_steer_control_forwarder(
@@ -519,6 +525,7 @@ def _start_turn(
     effort: ReasoningEffort | None,
     sandbox_policy: SandboxPolicy | None,
     approval_mode: str | None,
+    collaboration_mode: str | None,
     plan_mode: bool,
 ) -> TurnHandle:
     """Start a turn under the requested approval policy.
@@ -542,6 +549,18 @@ def _start_turn(
             sandbox_policy=sandbox_policy,
             approval_mode=approval_mode,
         )
+    if collaboration_mode == _DEFAULT_COLLABORATION_MODE:
+        return _start_default_collaboration_turn(
+            codex,
+            thread,
+            prompt=prompt,
+            model=model,
+            effort=effort,
+            sandbox_policy=sandbox_policy,
+            approval_mode=approval_mode,
+        )
+    if collaboration_mode:
+        raise ValueError(f"unsupported collaboration mode: {collaboration_mode}")
 
     if approval_mode in _USER_REVIEWER_APPROVAL_MODES:
         typed_input = [UserInput(root=TextUserInput(type="text", text=prompt))]
@@ -585,8 +604,6 @@ def _start_plan_turn(
 ) -> TurnHandle:
     if not model:
         raise ValueError("plan mode requires a model")
-    typed_input = [UserInput(root=TextUserInput(type="text", text=prompt))]
-    wire_input = [item.model_dump(mode="json", by_alias=True) for item in typed_input]
     collaboration_mode = CollaborationMode(
         mode=ModeKind.plan,
         settings=CodexModeSettings(
@@ -595,6 +612,57 @@ def _start_plan_turn(
             reasoning_effort=_PLAN_MODE_REASONING_EFFORT,
         ),
     )
+    return _start_collaboration_turn(
+        codex,
+        thread,
+        prompt=prompt,
+        collaboration_mode=collaboration_mode,
+        sandbox_policy=sandbox_policy,
+        approval_mode=approval_mode,
+    )
+
+
+def _start_default_collaboration_turn(
+    codex: Codex,
+    thread: Thread,
+    *,
+    prompt: str,
+    model: str | None,
+    effort: ReasoningEffort | None,
+    sandbox_policy: SandboxPolicy | None,
+    approval_mode: str | None,
+) -> TurnHandle:
+    if not model:
+        raise ValueError("default collaboration mode requires a model")
+    collaboration_mode = CollaborationMode(
+        mode=ModeKind.default,
+        settings=CodexModeSettings(
+            developer_instructions=None,
+            model=model,
+            reasoning_effort=effort,
+        ),
+    )
+    return _start_collaboration_turn(
+        codex,
+        thread,
+        prompt=prompt,
+        collaboration_mode=collaboration_mode,
+        sandbox_policy=sandbox_policy,
+        approval_mode=approval_mode,
+    )
+
+
+def _start_collaboration_turn(
+    codex: Codex,
+    thread: Thread,
+    *,
+    prompt: str,
+    collaboration_mode: CollaborationMode,
+    sandbox_policy: SandboxPolicy | None,
+    approval_mode: str | None,
+) -> TurnHandle:
+    typed_input = [UserInput(root=TextUserInput(type="text", text=prompt))]
+    wire_input = [item.model_dump(mode="json", by_alias=True) for item in typed_input]
     params: dict[str, Any] = {
         "threadId": thread.id,
         "input": wire_input,

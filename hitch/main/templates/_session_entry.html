@@ -52,7 +52,8 @@ intermediate block, so the per-item layout stays identical in both contexts.
         <div class="plan-actions">
             <form method="post" action="{{ send_message_url }}">
                 {% csrf_token %}
-                <button type="submit" name="prompt" value="Proceed with this plan.">Approve plan</button>
+                <input type="hidden" name="collaboration_mode" value="default">
+                <button type="submit" name="prompt" value="Implement the plan.">Approve plan</button>
             </form>
             <form method="post" action="{{ send_message_url }}">
                 {% csrf_token %}

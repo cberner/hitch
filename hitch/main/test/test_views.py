@@ -1159,6 +1159,37 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
+    def test_forwards_default_collaboration_mode_for_plan_approval(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex, model="gpt-5.4")
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={
+                "prompt": "Implement the plan.",
+                "collaboration_mode": "default",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="Implement the plan.",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model="gpt-5.4",
+            collaboration_mode="default",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
     def test_plan_slash_command_strips_command_prefix(
         self,
         mock_codex: MagicMock,
