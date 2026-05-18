@@ -213,6 +213,7 @@
             padding: 1rem 1rem 2rem;
         }
 
+        .session-body { min-width: 0; }
         .session-head { margin: 0.25rem 0 1.25rem; }
         .meta {
             color: var(--text-muted);
@@ -632,6 +633,95 @@
             overflow-wrap: anywhere;
             font-size: 0.9rem;
         }
+        .task-plan {
+            position: sticky;
+            top: calc(var(--safe-top) + 48px);
+            z-index: 9;
+            margin: -0.4rem -0.15rem 1rem;
+            background: color-mix(in srgb, var(--bg) 92%, transparent);
+            backdrop-filter: saturate(180%) blur(14px);
+            -webkit-backdrop-filter: saturate(180%) blur(14px);
+            border-bottom: 1px solid var(--border);
+            padding: 0.45rem 0.15rem;
+        }
+        .task-plan[hidden] { display: none; }
+        .task-plan-toggle {
+            width: 100%;
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--surface);
+            color: var(--text);
+            box-shadow: var(--shadow);
+            padding: 0.5rem 0.65rem;
+            font: inherit;
+            text-align: left;
+            cursor: pointer;
+        }
+        .task-plan-toggle::after {
+            content: "›";
+            flex: 0 0 auto;
+            color: var(--text-faint);
+            font-size: 1.1rem;
+            line-height: 1;
+            transform: rotate(90deg);
+            transition: transform 0.15s ease;
+        }
+        .task-plan[data-expanded="true"] .task-plan-toggle::after {
+            transform: rotate(-90deg);
+        }
+        .task-plan-toggle-label {
+            flex: 0 0 auto;
+            color: var(--text-faint);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-size: 0.66rem;
+            font-weight: 700;
+        }
+        .task-plan-current {
+            min-width: 0;
+            flex: 1 1 auto;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 0.86rem;
+            font-weight: 500;
+        }
+        .task-plan-card {
+            display: none;
+            flex-direction: column;
+            gap: 0.55rem;
+            margin-top: 0.45rem;
+            padding: 0.65rem 0.85rem;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--accent);
+            border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+            box-shadow: var(--shadow);
+            color: var(--text-muted);
+        }
+        .task-plan[data-expanded="true"] .task-plan-card {
+            display: flex;
+        }
+        .task-plan-header {
+            display: flex;
+            align-items: center;
+            gap: 0.45rem;
+            font-size: 0.78rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--text-muted);
+        }
+        .task-plan-explanation {
+            color: var(--text-muted);
+            font-size: 0.84rem;
+        }
+        .task-plan-explanation[hidden],
+        .task-plan-list[hidden] { display: none; }
         .plan-actions {
             display: flex;
             flex-wrap: wrap;
@@ -1485,6 +1575,44 @@
             50% { opacity: 0; }
         }
 
+        @media (min-width: 1120px) {
+            .topbar-inner {
+                max-width: 1180px;
+            }
+            main.has-task-plan {
+                max-width: 1180px;
+                display: grid;
+                grid-template-columns: minmax(0, 820px) minmax(260px, 320px);
+                column-gap: 1.25rem;
+                align-items: start;
+            }
+            main.has-task-plan .session-head,
+            main.has-task-plan .session-body {
+                grid-column: 1;
+            }
+            main.has-task-plan .task-plan {
+                grid-column: 2;
+                grid-row: 1 / span 2;
+                top: calc(var(--safe-top) + 4.25rem);
+                margin: 0.25rem 0 0;
+                padding: 0;
+                border-bottom: 0;
+                background: transparent;
+                backdrop-filter: none;
+                -webkit-backdrop-filter: none;
+            }
+            main.has-task-plan .task-plan-toggle {
+                display: none;
+            }
+            main.has-task-plan .task-plan-card {
+                display: flex;
+                margin-top: 0;
+                max-height: calc(100dvh - var(--safe-top) - 5.25rem);
+                overflow: auto;
+                -webkit-overflow-scrolling: touch;
+            }
+        }
+
         @media (max-width: 480px) {
             main { padding: 0.85rem 0.85rem 1.5rem; }
             .message { padding: 0.7rem 0.85rem; border-radius: 12px; }
@@ -1492,6 +1620,10 @@
             details.intermediate > summary { padding: 0.6rem 0.85rem; }
             details.intermediate .intermediate-body { padding: 0.65rem 0.75rem; }
             .meta code { max-width: 12rem; }
+            .task-plan {
+                margin-left: -0.1rem;
+                margin-right: -0.1rem;
+            }
             .live-work {
                 bottom: calc(4.8rem + var(--safe-bottom) + var(--composer-keyboard-offset));
                 width: calc(100vw - 1rem);
@@ -1564,7 +1696,35 @@
             </div>
         </div>
     </header>
-    <main>
+    <main data-session-main class="{% if task_plan.visible %}has-task-plan{% endif %}">
+        <aside class="task-plan"
+               data-task-plan
+               data-recorded-at="{% if task_plan %}{{ task_plan.recorded_at }}{% else %}0{% endif %}"
+               data-event-seq="{% if task_plan %}{{ task_plan.event_seq }}{% else %}0{% endif %}"
+               data-fallback-order="{% if task_plan %}{{ task_plan.fallback_order }}{% else %}0{% endif %}"
+               data-expanded="false"
+               aria-label="Current task plan"
+               {% if not task_plan.visible %}hidden{% endif %}>
+            <button type="button" class="task-plan-toggle" data-task-plan-toggle aria-expanded="false">
+                <span class="task-plan-toggle-label">Current</span>
+                <span class="task-plan-current" data-task-plan-current>{% if task_plan %}{{ task_plan.current }}{% endif %}</span>
+            </button>
+            <div class="task-plan-card" data-task-plan-card>
+                <div class="task-plan-header">Task Plan</div>
+                <div class="task-plan-explanation"
+                     data-task-plan-explanation
+                     {% if not task_plan.explanation %}hidden{% endif %}>{% if task_plan %}{{ task_plan.explanation }}{% endif %}</div>
+                <ol class="plan-checklist task-plan-list"
+                    data-task-plan-list
+                    {% if not task_plan.steps %}hidden{% endif %}>
+                    {% if task_plan %}
+                    {% for step in task_plan.steps %}
+                    <li class="plan-step {{ step.status }}">{{ step.step }}</li>
+                    {% endfor %}
+                    {% endif %}
+                </ol>
+            </div>
+        </aside>
         <div class="session-head">
             <div class="edit-title" data-edit-title hidden>
                 <form method="post" action="{{ set_name_url }}">
@@ -1603,6 +1763,7 @@
             {% endif %}
         </div>
 
+        <div class="session-body">
         {% if entries or pending_user_prompt or active_worker %}
         <section class="thread" data-thread>
             {% for entry in entries %}
@@ -1635,6 +1796,7 @@
             <p>No messages in this session yet.</p>
         </div>
         {% endif %}
+        </div>
         <div class="live-work" data-live-work data-state="{% if active_worker %}working{% else %}idle{% endif %}">
             <span class="live-status" data-live-status data-state="{% if active_worker %}working{% else %}idle{% endif %}" role="status" aria-live="polite">{% if active_worker %}Codex is working…{% else %}Connected{% endif %}</span>
             <span class="live-goal" data-live-goal {% if not active_worker or not goal_objective %}hidden{% endif %}>
@@ -2368,6 +2530,12 @@
             // node so deltas append directly.
             const items = new Map();
             const planViews = new Map();
+            const sessionMain = document.querySelector("[data-session-main]");
+            const taskPlan = document.querySelector("[data-task-plan]");
+            const taskPlanToggle = taskPlan && taskPlan.querySelector("[data-task-plan-toggle]");
+            const taskPlanCurrent = taskPlan && taskPlan.querySelector("[data-task-plan-current]");
+            const taskPlanExplanation = taskPlan && taskPlan.querySelector("[data-task-plan-explanation]");
+            const taskPlanList = taskPlan && taskPlan.querySelector("[data-task-plan-list]");
             // The pending-user bubble is replaced once the server-side
             // user message arrives via the stream, so it doesn't end up
             // double-rendered with the canonical reload.
@@ -2396,6 +2564,12 @@
             const approvals = new Map();
             const inputRequests = new Map();
             let latestGoalOrder = [0, 0];
+            let streamFallbackOrder = 0;
+            let latestTaskPlanOrder = [
+                taskPlan ? Number(taskPlan.dataset.recordedAt) || 0 : 0,
+                taskPlan ? Number(taskPlan.dataset.eventSeq) || 0 : 0,
+                taskPlan ? Number(taskPlan.dataset.fallbackOrder) || 0 : 0,
+            ];
 
             const APPROVAL_LABELS = {
                 "item/commandExecution/requestApproval": "Run command?",
@@ -2669,16 +2843,77 @@
             function renderPlanSteps(view, steps) {
                 view.list.replaceChildren();
                 for (const step of steps) {
-                    const text = typeof step.step === "string" ? step.step.trim() : "";
+                    const text = planStepText(step);
                     if (!text) continue;
                     const li = document.createElement("li");
-                    const status = typeof step.status === "string" ? step.status : "pending";
+                    const status = normalizePlanStatus(step && step.status);
                     li.className = "plan-step " + status;
                     li.textContent = text;
                     view.list.appendChild(li);
                 }
                 view.list.hidden = view.list.children.length === 0;
                 renderPlanText(view);
+            }
+
+            function normalizePlanStatus(status) {
+                if (status === "completed") return "completed";
+                if (status === "inProgress" || status === "in_progress") return "inProgress";
+                return "pending";
+            }
+
+            function planStepText(step) {
+                return step && typeof step.step === "string" ? step.step.trim() : "";
+            }
+
+            function currentTaskText(steps) {
+                const clean = steps
+                    .map((step) => ({
+                        text: planStepText(step),
+                        status: normalizePlanStatus(step && step.status),
+                    }))
+                    .filter((step) => step.text);
+                if (!clean.length) return "";
+                const active = clean.find((step) => step.status === "inProgress")
+                    || clean.find((step) => step.status === "pending")
+                    || clean[clean.length - 1];
+                return active ? active.text : "";
+            }
+
+            function updateTaskPlan(payload) {
+                if (!taskPlan || !taskPlanCurrent || !taskPlanExplanation || !taskPlanList) return;
+                const steps = Array.isArray(payload && payload.plan) ? payload.plan : [];
+                const explanation = typeof payload.explanation === "string"
+                    ? payload.explanation.trim()
+                    : "";
+                taskPlanExplanation.textContent = explanation;
+                taskPlanExplanation.hidden = !explanation;
+                taskPlanList.replaceChildren();
+                for (const step of steps) {
+                    const text = planStepText(step);
+                    if (!text) continue;
+                    const li = document.createElement("li");
+                    li.className = "plan-step " + normalizePlanStatus(step && step.status);
+                    li.textContent = text;
+                    taskPlanList.appendChild(li);
+                }
+                taskPlanList.hidden = taskPlanList.children.length === 0;
+                const current = currentTaskText(steps) || explanation;
+                taskPlanCurrent.textContent = current;
+                setTaskPlanVisible(!!current || !!taskPlanList.children.length);
+            }
+
+            if (taskPlan && taskPlanToggle) {
+                taskPlanToggle.addEventListener("click", () => {
+                    const expanded = taskPlan.dataset.expanded !== "true";
+                    taskPlan.dataset.expanded = expanded ? "true" : "false";
+                    taskPlanToggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+                });
+            }
+
+            function setTaskPlanVisible(visible) {
+                if (!taskPlan) return;
+                taskPlan.hidden = !visible;
+                if (sessionMain) sessionMain.classList.toggle("has-task-plan", visible);
             }
 
             function toolDetail(item) {
@@ -2787,10 +3022,11 @@
                 liveGoal.hidden = !text;
             }
 
-            function eventOrder(event) {
+            function eventOrder(event, fallbackOrder) {
                 return [
                     Number.isSafeInteger(event.recordedAt) ? event.recordedAt : 0,
                     Number.isSafeInteger(event.eventSeq) ? event.eventSeq : 0,
+                    fallbackOrder,
                 ];
             }
 
@@ -2805,6 +3041,22 @@
                 return true;
             }
 
+            function applyTaskPlanOrder(order) {
+                if (
+                    order[0] < latestTaskPlanOrder[0]
+                    || (order[0] === latestTaskPlanOrder[0] && order[1] < latestTaskPlanOrder[1])
+                    || (
+                        order[0] === latestTaskPlanOrder[0]
+                        && order[1] === latestTaskPlanOrder[1]
+                        && order[2] < latestTaskPlanOrder[2]
+                    )
+                ) {
+                    return false;
+                }
+                latestTaskPlanOrder = order;
+                return true;
+            }
+
             function handleGoalUpdated(payload, order) {
                 if (!applyGoalOrder(order)) return;
                 const goal = (payload && payload.goal) || {};
@@ -2816,16 +3068,9 @@
                 setGoal("");
             }
 
-            function handlePlanUpdated(payload) {
-                const turnId = payload && payload.turnId;
-                if (!turnId) return;
-                const view = ensurePlanView(turnId, null);
-                const explanation = typeof payload.explanation === "string"
-                    ? payload.explanation.trim()
-                    : "";
-                view.explanation.textContent = explanation;
-                view.explanation.hidden = !explanation;
-                renderPlanSteps(view, Array.isArray(payload.plan) ? payload.plan : []);
+            function handlePlanUpdated(payload, order) {
+                if (!applyTaskPlanOrder(order)) return;
+                updateTaskPlan(payload);
                 followRenderedContent();
             }
 
@@ -3094,6 +3339,7 @@
 
             function handleMessage(event) {
                 bump();
+                streamFallbackOrder += 1;
                 let parsed;
                 try { parsed = JSON.parse(event.data); } catch { return; }
                 const key = eventKey(parsed);
@@ -3103,7 +3349,7 @@
                 }
                 const method = parsed.method;
                 const payload = parsed.payload || {};
-                const order = eventOrder(parsed);
+                const order = eventOrder(parsed, streamFallbackOrder);
                 switch (method) {
                     case "item/started": handleItemStarted(payload); break;
                     case "item/agentMessage/delta": handleAgentDelta(payload); break;
@@ -3111,7 +3357,7 @@
                     case "item/completed": handleItemCompleted(payload); break;
                     case "thread/goal/updated": handleGoalUpdated(payload, order); break;
                     case "thread/goal/cleared": handleGoalCleared(order); break;
-                    case "turn/plan/updated": handlePlanUpdated(payload); break;
+                    case "turn/plan/updated": handlePlanUpdated(payload, order); break;
                     case "approval/requested": handleApprovalRequested(payload); break;
                     case "approval/resolved": handleApprovalResolved(payload); break;
                     case "input/requested": handleInputRequested(payload); break;

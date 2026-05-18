@@ -1468,6 +1468,182 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, ">Goal<")
         self.assertContains(response, "Keep the live goal visible")
 
+    @patch("hitch.main.views.build_worktree_diff")
+    @patch("hitch.main.views.Codex")
+    def test_active_worker_renders_latest_task_plan_after_refresh(
+        self, mock_codex: MagicMock, mock_diff: MagicMock
+    ) -> None:
+        mock_diff.return_value = _diff_view()
+        _patch_thread(self, mock_codex, _thread([]))
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "method": codex_events.TASK_PLAN_UPDATED_METHOD,
+                        "payload": {
+                            "threadId": "thread-1",
+                            "explanation": "Keep progress visible after refresh",
+                            "plan": [
+                                {"step": "Inspect current live UI", "status": "completed"},
+                                {"step": "Render saved task plan", "status": "in_progress"},
+                                {"step": "Run the refresh tests", "status": "pending"},
+                            ],
+                        },
+                        "recordedAt": 20,
+                        "eventSeq": 2,
+                    }
+                )
+                + "\n"
+            )
+            events_path = fh.name
+        self.addCleanup(Path(events_path).unlink, missing_ok=True)
+        _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_RUNNING,
+            prompt="warming up",
+            pid=_LIVE_PID,
+            events_path=events_path,
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        body = response.content.decode()
+
+        self.assertContains(response, 'data-task-plan')
+        self.assertContains(response, '<main data-session-main class="has-task-plan">')
+        self.assertContains(response, 'data-recorded-at="20"')
+        self.assertContains(response, 'data-event-seq="2"')
+        self.assertContains(response, 'data-fallback-order="1"')
+        self.assertNotIn('aria-label="Current task plan" hidden', body)
+        self.assertContains(response, "Keep progress visible after refresh")
+        self.assertContains(response, "Render saved task plan")
+        self.assertContains(response, 'class="plan-step inProgress"')
+        self.assertContains(
+            response,
+            '<span class="task-plan-current" data-task-plan-current>Render saved task plan</span>',
+            html=False,
+        )
+
+    @patch("hitch.main.views.build_worktree_diff")
+    @patch("hitch.main.views.Codex")
+    def test_active_worker_preserves_cleared_task_plan_order_after_refresh(
+        self, mock_codex: MagicMock, mock_diff: MagicMock
+    ) -> None:
+        mock_diff.return_value = _diff_view()
+        _patch_thread(self, mock_codex, _thread([]))
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "method": codex_events.TASK_PLAN_UPDATED_METHOD,
+                        "payload": {
+                            "threadId": "thread-1",
+                            "plan": [
+                                {"step": "Stale task", "status": "in_progress"},
+                            ],
+                        },
+                        "recordedAt": 10,
+                        "eventSeq": 1,
+                    }
+                )
+                + "\n"
+            )
+            fh.write(
+                json.dumps(
+                    {
+                        "method": codex_events.TASK_PLAN_UPDATED_METHOD,
+                        "payload": {"threadId": "thread-1", "plan": []},
+                        "recordedAt": 20,
+                        "eventSeq": 2,
+                    }
+                )
+                + "\n"
+            )
+            events_path = fh.name
+        self.addCleanup(Path(events_path).unlink, missing_ok=True)
+        _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_RUNNING,
+            prompt="warming up",
+            pid=_LIVE_PID,
+            events_path=events_path,
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        body = response.content.decode()
+
+        self.assertContains(response, 'data-task-plan')
+        self.assertContains(response, '<main data-session-main class="">')
+        self.assertContains(response, 'data-recorded-at="20"')
+        self.assertContains(response, 'data-event-seq="2"')
+        self.assertContains(response, 'data-fallback-order="2"')
+        self.assertRegex(
+            body,
+            r'<aside class="task-plan"[\s\S]*?data-recorded-at="20"'
+            r'[\s\S]*?data-fallback-order="2"'
+            r'[\s\S]*?aria-label="Current task plan"\s+hidden>',
+        )
+        self.assertNotIn("Stale task", body)
+        self.assertContains(
+            response,
+            '<span class="task-plan-current" data-task-plan-current></span>',
+            html=False,
+        )
+
+    @patch("hitch.main.views.build_worktree_diff")
+    @patch("hitch.main.views.Codex")
+    def test_active_worker_preserves_fallback_task_plan_order_after_refresh(
+        self, mock_codex: MagicMock, mock_diff: MagicMock
+    ) -> None:
+        mock_diff.return_value = _diff_view()
+        _patch_thread(self, mock_codex, _thread([]))
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "method": codex_events.TASK_PLAN_UPDATED_METHOD,
+                        "payload": {
+                            "threadId": "thread-1",
+                            "plan": [
+                                {"step": "Fallback stale task", "status": "in_progress"},
+                            ],
+                        },
+                    }
+                )
+                + "\n"
+            )
+            fh.write(
+                json.dumps(
+                    {
+                        "method": codex_events.TASK_PLAN_UPDATED_METHOD,
+                        "payload": {
+                            "threadId": "thread-1",
+                            "plan": [
+                                {"step": "Fallback latest task", "status": "pending"},
+                            ],
+                        },
+                    }
+                )
+                + "\n"
+            )
+            events_path = fh.name
+        self.addCleanup(Path(events_path).unlink, missing_ok=True)
+        _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_RUNNING,
+            prompt="warming up",
+            pid=_LIVE_PID,
+            events_path=events_path,
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        body = response.content.decode()
+
+        self.assertContains(response, 'data-recorded-at="0"')
+        self.assertContains(response, 'data-event-seq="0"')
+        self.assertContains(response, 'data-fallback-order="2"')
+        self.assertContains(response, "Fallback latest task")
+        self.assertNotIn("Fallback stale task", body)
+
     @patch("hitch.main.views.Codex")
     def test_active_worker_renders_live_section_and_stream_url(
         self, mock_codex: MagicMock
@@ -1597,6 +1773,36 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "input-option-description")
         self.assertContains(response, 'other.placeholder = "Other"')
         self.assertContains(response, "delete entry.answers[key]")
+
+    @patch("hitch.main.views.Codex")
+    def test_live_task_plan_uses_responsive_panel(self, mock_codex: MagicMock) -> None:
+        _patch_thread(self, mock_codex, _thread([]))
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertContains(response, 'class="task-plan"')
+        self.assertContains(response, 'data-task-plan')
+        self.assertContains(response, 'data-task-plan-current')
+        self.assertContains(response, 'data-fallback-order=')
+        self.assertContains(response, "@media (min-width: 1120px)")
+        self.assertContains(response, "main.has-task-plan")
+        self.assertContains(
+            response,
+            "grid-template-columns: minmax(0, 820px) minmax(260px, 320px)",
+        )
+        self.assertContains(response, "function updateTaskPlan")
+        self.assertContains(response, "function applyTaskPlanOrder")
+        self.assertContains(response, "let streamFallbackOrder = 0")
+        self.assertContains(response, "Number(taskPlan.dataset.fallbackOrder)")
+        self.assertContains(response, "streamFallbackOrder += 1")
+        self.assertContains(response, "order[2] < latestTaskPlanOrder[2]")
+        self.assertContains(
+            response,
+            'case "turn/plan/updated": handlePlanUpdated(payload, order); break;',
+        )
+        self.assertContains(response, 'status === "in_progress"')
+        self.assertContains(response, "taskPlan.dataset.expanded")
+        self.assertNotContains(response, "ensurePlanView(turnId, null)")
 
     @patch("hitch.main.views.build_worktree_diff")
     @patch("hitch.main.views.Codex")
