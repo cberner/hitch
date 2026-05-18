@@ -200,6 +200,7 @@ def index(request: HttpRequest) -> HttpResponse:
                 "cwd": thread.cwd,
                 "updated_at": thread.updated_at,
                 "display_title": _display_title(thread),
+                "name_value": getattr(thread, "name", None) or "",
                 "is_archived": is_archived,
             }
         )
@@ -239,6 +240,7 @@ def index(request: HttpRequest) -> HttpResponse:
             "extra_system_prompt_max_len": _EXTRA_SYSTEM_PROMPT_MAX_LEN,
             "current_use_worktrees": current_use_worktrees,
             "current_show_archived_sessions": current_show_archived_sessions,
+            "name_max_len": _NAME_MAX_LEN,
             "rate_limits": rate_limits,
         },
     )
@@ -1149,6 +1151,10 @@ def set_session_name(request: HttpRequest, session_id: str) -> HttpResponse:
     config = AppServerConfig(codex_bin=shutil.which("codex"))
     with Codex(config=config) as codex:
         codex._client.thread_set_name(session_id, name)
+    if request.headers.get("X-Requested-With") == "XMLHttpRequest":
+        return HttpResponse(status=204)
+    if request.POST.get("next", "").strip() == "index":
+        return redirect("index")
     return redirect("session", session_id=session_id)
 
 
@@ -1165,6 +1171,8 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
             codex.thread_unarchive(session_id)
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return HttpResponse(status=204)
+    if request.POST.get("next", "").strip() == "index":
+        return redirect("index")
     if archived == "true":
         return redirect("index")
     return redirect("session", session_id=session_id)
