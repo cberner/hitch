@@ -729,6 +729,13 @@ class RolloutFileViewTests(TestCase):
         self.assertContains(response, "Approve plan")
         self.assertContains(response, 'name="collaboration_mode" value="default"')
         self.assertContains(response, "Implement the plan.")
+        self.assertContains(response, 'data-initial-plan-mode="true"')
+        self.assertContains(response, 'name="plan_mode" value="true" data-plan-mode-input')
+        self.assertContains(response, 'name="default_plan_mode" value="true"')
+        self.assertContains(
+            response,
+            'name="plan_mode_explicit" value="" data-plan-mode-explicit-input',
+        )
         self.assertNotContains(response, "&lt;proposed_plan&gt;")
         self.assertNotContains(response, "request_user_input")
         self.assertNotContains(response, '<details class="intermediate">')
@@ -1536,9 +1543,9 @@ class SessionViewActiveWorkerTests(TestCase):
         # No workers exist for this session, so both query params are
         # empty — empty is the canonical encoding of "page knows of no
         # prior state".
+        self.assertContains(response, "data-composer")
         self.assertContains(
-            response,
-            f'data-composer data-stream-url="{stream_path}?baseline=&amp;active="',
+            response, f'data-stream-url="{stream_path}?baseline=&amp;active="'
         )
 
     @patch("hitch.main.views.Codex")

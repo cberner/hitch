@@ -1707,14 +1707,22 @@
     </dialog>
     {% endif %}
 
-    <form class="composer" method="post" action="{{ send_message_url }}" data-composer data-stream-url="{{ stream_url }}">
+    <form class="composer"
+          method="post"
+          action="{{ send_message_url }}"
+          data-composer
+          data-stream-url="{{ stream_url }}"
+          data-plan-mode="{{ default_plan_mode|yesno:'true,false' }}"
+          data-initial-plan-mode="{{ default_plan_mode|yesno:'true,false' }}">
         {% csrf_token %}
-        <input type="hidden" name="plan_mode" value="" data-plan-mode-input>
+        <input type="hidden" name="plan_mode" value="{% if default_plan_mode %}true{% endif %}" data-plan-mode-input>
+        <input type="hidden" name="default_plan_mode" value="{% if default_plan_mode %}true{% endif %}">
+        <input type="hidden" name="plan_mode_explicit" value="" data-plan-mode-explicit-input>
         <div class="composer-inner">
             <div class="composer-command" data-slash-command>
-                <button type="button" class="slash-trigger" aria-label="Slash commands" aria-haspopup="menu" aria-expanded="false" aria-pressed="false" data-slash-trigger>/</button>
+                <button type="button" class="slash-trigger" aria-label="Slash commands" aria-haspopup="menu" aria-expanded="false" aria-pressed="{{ default_plan_mode|yesno:'true,false' }}" data-slash-trigger>/</button>
                 <div class="slash-menu" role="menu" data-slash-menu hidden>
-                    <button type="button" role="menuitemcheckbox" aria-checked="false" data-slash-plan>
+                    <button type="button" role="menuitemcheckbox" aria-checked="{{ default_plan_mode|yesno:'true,false' }}" data-slash-plan>
                         <span class="slash-menu-title">Plan mode</span>
                     </button>
                     <button type="button" role="menuitem" data-slash-pr>
@@ -1960,6 +1968,7 @@
                 const submit = composer.querySelector("[data-composer-submit]");
                 const stop = composer.querySelector("[data-composer-stop]");
                 const planModeInput = composer.querySelector("[data-plan-mode-input]");
+                const planModeExplicitInput = composer.querySelector("[data-plan-mode-explicit-input]");
                 const slashCommand = composer.querySelector("[data-slash-command]");
                 const slashTrigger = composer.querySelector("[data-slash-trigger]");
                 const slashMenu = composer.querySelector("[data-slash-menu]");
@@ -2038,9 +2047,12 @@
                             : item.dataset.normalValue || "";
                     }
                 };
-                const setPlanMode = (enabled) => {
+                const setPlanMode = (enabled, explicit = false) => {
                     composer.dataset.planMode = enabled ? "true" : "false";
                     if (planModeInput) planModeInput.value = enabled ? "true" : "";
+                    if (planModeExplicitInput) {
+                        planModeExplicitInput.value = explicit ? "true" : "";
+                    }
                     if (slashTrigger) slashTrigger.setAttribute("aria-pressed", enabled ? "true" : "false");
                     if (slashPlan) slashPlan.setAttribute("aria-checked", enabled ? "true" : "false");
                     syncNextMessageConfig();
@@ -2065,7 +2077,7 @@
                     slashTrigger.setAttribute("aria-expanded", "true");
                     syncSlashMenuStatusOffset();
                 };
-                setPlanMode(false);
+                setPlanMode(composer.dataset.initialPlanMode === "true");
                 sync();
                 if (slashTrigger && slashMenu) {
                     slashTrigger.addEventListener("click", () => {
@@ -2079,7 +2091,7 @@
                 if (slashPlan) {
                     slashPlan.addEventListener("click", () => {
                         const enabled = composer.dataset.planMode !== "true";
-                        setPlanMode(enabled);
+                        setPlanMode(enabled, true);
                         if (enabled && input.value.trim() === "/") {
                             input.value = "";
                             sync();
@@ -2090,7 +2102,7 @@
                 }
                 if (slashPr) {
                     slashPr.addEventListener("click", () => {
-                        setPlanMode(false);
+                        setPlanMode(false, true);
                         input.value = prPrompt;
                         sync();
                         closeSlashMenu();
@@ -2134,11 +2146,11 @@
                     const prCommandPrompt = parsePrCommand();
                     const commandPrompt = prCommandPrompt === null ? parsePlanCommand() : null;
                     if (prCommandPrompt !== null) {
-                        setPlanMode(false);
+                        setPlanMode(false, true);
                         input.value = prCommandPrompt;
                         sync();
                     } else if (commandPrompt !== null) {
-                        setPlanMode(true);
+                        setPlanMode(true, true);
                         input.value = commandPrompt;
                         if (!commandPrompt) {
                             event.preventDefault();

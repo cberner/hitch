@@ -19,6 +19,7 @@ from django.test import Client, TestCase
 from django.urls import reverse
 from openai_codex.errors import MethodNotFoundError
 
+from hitch.main import views
 from hitch.main.models import (
     ApprovalRequest,
     CodexInstance,
@@ -40,6 +41,15 @@ _PR_PROMPT = (
     "Do a thorough review of the diff. Rebase on master, clean it up, "
     "and then open a PR"
 )
+
+
+def _rollout_line(
+    line_type: str,
+    payload: dict[str, object],
+    *,
+    timestamp: str = "2025-01-05T12:00:00Z",
+) -> str:
+    return json.dumps({"timestamp": timestamp, "type": line_type, "payload": payload})
 
 
 def _setup_codex(
@@ -117,6 +127,28 @@ def _session(
         path=path,
         updated_at=updated_at,
     )
+
+
+class PendingPlanStateTests(TestCase):
+    def test_approval_declined_does_not_clear_pending_plan(self) -> None:
+        entries = [
+            {"kind": "user", "text": "Plan it"},
+            {"kind": "plan", "text": "# Plan"},
+            {"kind": "user", "text": "Try command"},
+            {"kind": "approval_declined", "detail": "git push"},
+        ]
+
+        self.assertTrue(views._entries_await_plan_approval(entries))
+
+    def test_agent_answer_clears_pending_plan(self) -> None:
+        entries = [
+            {"kind": "user", "text": "Plan it"},
+            {"kind": "plan", "text": "# Plan"},
+            {"kind": "user", "text": "Implement the plan"},
+            {"kind": "agent", "text": "Done"},
+        ]
+
+        self.assertFalse(views._entries_await_plan_approval(entries))
 
 
 class IndexViewTests(TestCase):
@@ -871,13 +903,95 @@ class SendMessageViewTests(TestCase):
         cwd: object = "/repo",
         model: str | None = "gpt-5",
         models: list[Any] | None = None,
+        path: str | None = None,
+        turns: list[Any] | None = None,
     ) -> None:
         client = mock_codex.return_value.__enter__.return_value
-        resumed = SimpleNamespace(thread=SimpleNamespace(cwd=cwd))
+        thread = SimpleNamespace(cwd=cwd, turns=turns or [])
+        if path is not None:
+            thread.path = path
+        resumed = SimpleNamespace(thread=thread)
         if model is not None:
             resumed.model = model
         client._client.thread_resume.return_value = resumed
         client.models.return_value.data = models or []
+
+    def _make_rollout(self, lines: list[str]) -> Path:
+        with tempfile.NamedTemporaryFile(
+            prefix="rollout-",
+            suffix=".jsonl",
+            mode="w",
+            delete=False,
+        ) as fh:
+            fh.write("\n".join(lines))
+            if lines:
+                fh.write("\n")
+            path = Path(fh.name)
+        self.addCleanup(path.unlink, missing_ok=True)
+        return path
+
+    def _make_pending_plan_rollout(
+        self,
+        plan: str = "# Pending Plan\n\nReady to implement.",
+    ) -> Path:
+        return self._make_rollout(
+            [
+                _rollout_line("turn_context", {"collaboration_mode": {"mode": "plan"}}),
+                _rollout_line("event_msg", {"type": "user_message", "message": "Plan it"}),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": f"<proposed_plan>\n{plan}\n</proposed_plan>",
+                            }
+                        ],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+    def _make_resolved_plan_rollout(self) -> Path:
+        return self._make_rollout(
+            [
+                _rollout_line("turn_context", {"collaboration_mode": {"mode": "plan"}}),
+                _rollout_line("event_msg", {"type": "user_message", "message": "Plan it"}),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": (
+                                    "<proposed_plan>\n# Plan\n\nImplement it.\n"
+                                    "</proposed_plan>"
+                                ),
+                            }
+                        ],
+                        "phase": "final_answer",
+                    },
+                ),
+                _rollout_line("turn_context", {"collaboration_mode": {"mode": "default"}}),
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Implement the plan."},
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "message": "Implemented.",
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
 
     @patch("hitch.main.views.codex_pool.steer_instance")
     @patch("hitch.main.views.codex_pool.spawn_turn")
@@ -982,6 +1096,117 @@ class SendMessageViewTests(TestCase):
             expected_thread_id="abc",
             prompt="follow up",
         )
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="follow up",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.steer_instance", return_value=None)
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_stale_active_instance_recomputes_plan_mode_before_spawn(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_steer: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        rollout_path = self._make_resolved_plan_rollout()
+        self._patch_codex(mock_codex, path=str(rollout_path))
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={
+                "prompt": "follow up",
+                "active_instance": "42",
+                "plan_mode": "true",
+                "default_plan_mode": "true",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_steer.assert_called_once_with(
+            42,
+            expected_thread_id="abc",
+            prompt="follow up",
+        )
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="follow up",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.steer_instance", return_value=None)
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_explicit_plan_toggle_survives_stale_active_fallback(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_steer: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        rollout_path = self._make_resolved_plan_rollout()
+        self._patch_codex(mock_codex, path=str(rollout_path))
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={
+                "prompt": "make another plan",
+                "active_instance": "42",
+                "plan_mode": "true",
+                "plan_mode_explicit": "true",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_steer.assert_called_once_with(
+            42,
+            expected_thread_id="abc",
+            prompt="make another plan",
+        )
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="make another plan",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model="gpt-5",
+            plan_mode=True,
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_pending_plan_default_recomputes_before_spawn(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        rollout_path = self._make_resolved_plan_rollout()
+        self._patch_codex(mock_codex, path=str(rollout_path))
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={
+                "prompt": "follow up",
+                "plan_mode": "true",
+                "default_plan_mode": "true",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
         mock_spawn.assert_called_once_with(
             thread_id="abc",
             cwd="/repo",
@@ -1286,13 +1511,159 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
+    def test_follow_up_after_pending_plan_stays_in_plan_mode(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        rollout_path = self._make_pending_plan_rollout("# Revised Plan\n\nKeep planning.")
+        self._patch_codex(mock_codex, model="gpt-5.4", path=str(rollout_path))
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "tighten the QA part"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="tighten the QA part",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model="gpt-5.4",
+            plan_mode=True,
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_explicit_plan_toggle_off_after_pending_plan_stays_default_mode(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        rollout_path = self._make_pending_plan_rollout()
+        self._patch_codex(mock_codex, model="gpt-5.4", path=str(rollout_path))
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={
+                "prompt": "ship it without more planning",
+                "default_plan_mode": "true",
+                "plan_mode_explicit": "true",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="ship it without more planning",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_pending_plan_default_without_model_falls_back_to_default_mode(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        rollout_path = self._make_pending_plan_rollout()
+        self._patch_codex(mock_codex, model=None, models=[], path=str(rollout_path))
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={
+                "prompt": "tighten the QA part",
+                "plan_mode": "true",
+                "default_plan_mode": "true",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="tighten the QA part",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_pr_slash_command_after_pending_plan_stays_default_mode(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        rollout_path = self._make_pending_plan_rollout()
+        self._patch_codex(mock_codex, model="gpt-5.4", path=str(rollout_path))
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "/pr", "plan_mode": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt=_PR_PROMPT,
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_pr_menu_prompt_after_pending_plan_stays_default_mode(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        rollout_path = self._make_pending_plan_rollout()
+        self._patch_codex(mock_codex, model="gpt-5.4", path=str(rollout_path))
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": _PR_PROMPT},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt=_PR_PROMPT,
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
     def test_default_collaboration_mode_switches_to_default_mode(
         self,
         mock_codex: MagicMock,
         mock_spawn: MagicMock,
         mock_discover: MagicMock,
     ) -> None:
-        self._patch_codex(mock_codex, model="gpt-5.4")
+        rollout_path = self._make_pending_plan_rollout()
+        self._patch_codex(mock_codex, model="gpt-5.4", path=str(rollout_path))
         mock_discover.return_value = [Path("/repo")]
 
         response = self.client.post(
@@ -1300,6 +1671,8 @@ class SendMessageViewTests(TestCase):
             data={
                 "prompt": "Implement the plan.",
                 "collaboration_mode": "default",
+                "plan_mode": "true",
+                "default_plan_mode": "true",
             },
         )
 

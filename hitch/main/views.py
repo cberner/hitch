@@ -66,6 +66,14 @@ class ResolvedSettings(NamedTuple):
     cookie_updates: dict[str, str]
 
 
+
+class _MessageIntent(NamedTuple):
+    prompt: str
+    plan_mode: bool
+    allow_pending_plan_default: bool
+    explicit_plan_mode: bool
+
+
 # Sandbox-policy variants offered in the settings dialog. Stored as the
 # SandboxPolicy ``type`` discriminator string so the cookie value can map
 # 1:1 onto a constructed SandboxPolicy in the worker without any further
@@ -283,6 +291,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
     # double up every entry in the live DOM. The page reload on stream end
     # restores the canonical view.
     entries = _trim_in_progress_turn(entries, active_instance)
+    default_plan_mode = _entries_await_plan_approval(entries)
     token_usage = _token_usage_for(thread)
     goal_objective = codex_events.latest_goal_for_thread(session_id)
     diff_view = build_worktree_diff(_thread_cwd(thread))
@@ -330,6 +339,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             "token_usage": token_usage,
             "next_message_config": _next_message_config(settings, resumed, plan_model),
             "pr_slash_prompt": _PR_SLASH_PROMPT,
+            "default_plan_mode": default_plan_mode,
             "goal_objective": goal_objective,
             "diff_view": diff_view,
         },
@@ -1193,14 +1203,18 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
 
 @require_http_methods(["POST"])
 def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
-    prompt, plan_mode = _message_prompt_and_plan_mode(request)
+    intent = _message_intent(request)
+    prompt = intent.prompt
+    plan_mode = intent.plan_mode
     if not prompt:
         return HttpResponseBadRequest("prompt is required")
     collaboration_mode = request.POST.get("collaboration_mode", "").strip().lower()
     if collaboration_mode and collaboration_mode != _DEFAULT_COLLABORATION_MODE:
         return HttpResponseBadRequest("invalid collaboration mode")
-    if collaboration_mode and plan_mode:
+    if collaboration_mode and plan_mode and intent.explicit_plan_mode:
         return HttpResponseBadRequest("collaboration mode conflicts with plan mode")
+    if collaboration_mode:
+        plan_mode = False
     settings = _stored_settings(request)
     raw_active = request.POST.get("active_instance", "").strip()
     if raw_active:
@@ -1234,11 +1248,20 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     with Codex(config=config) as codex:
         resumed = codex._client.thread_resume(session_id)
         thread = resumed.thread
+        thread_awaits_plan_approval = _thread_awaits_plan_approval(thread)
+        if (
+            not collaboration_mode
+            and intent.allow_pending_plan_default
+            and not intent.explicit_plan_mode
+        ):
+            plan_mode = thread_awaits_plan_approval
         collaboration_model = (
             _plan_mode_model(codex, resumed, settings)
             if plan_mode or collaboration_mode == _DEFAULT_COLLABORATION_MODE
             else None
         )
+        if plan_mode and not collaboration_model and not intent.explicit_plan_mode:
+            plan_mode = False
     cwd = _thread_cwd(thread)
     if not cwd:
         return HttpResponseBadRequest("thread has no cwd")
@@ -1276,18 +1299,55 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     return redirect("session", session_id=session_id)
 
 
-def _message_prompt_and_plan_mode(request: HttpRequest) -> tuple[str, bool]:
+def _thread_awaits_plan_approval(thread: Any) -> bool:
+    return _entries_await_plan_approval(list(_entries_for(thread)))
+
+
+def _entries_await_plan_approval(entries: list[dict[str, Any]]) -> bool:
+    for entry in reversed(entries):
+        kind = entry.get("kind")
+        if kind in {"intermediate", "approval_declined", "tool_call", "thinking", "user"}:
+            continue
+        if kind == "plan":
+            return True
+        if kind == "agent":
+            return False
+    return False
+
+
+def _message_intent(request: HttpRequest) -> _MessageIntent:
     prompt = request.POST.get("prompt", "").strip()
     plan_mode = request.POST.get("plan_mode", "").strip().lower() == "true"
+    default_plan_mode_raw = request.POST.get("default_plan_mode")
+    default_plan_mode = (
+        default_plan_mode_raw.strip().lower() == "true"
+        if default_plan_mode_raw is not None
+        else False
+    )
+    default_plan_mode_posted = default_plan_mode_raw is not None
+    plan_mode_changed = (
+        plan_mode != default_plan_mode if default_plan_mode_posted else plan_mode
+    )
+    explicit_plan_mode = (
+        request.POST.get("plan_mode_explicit", "").strip().lower() == "true"
+        or plan_mode_changed
+    )
     parts = prompt.split(maxsplit=1)
     if not parts:
-        return prompt, plan_mode
+        return _MessageIntent(prompt, plan_mode, True, explicit_plan_mode)
     command = parts[0].lower()
     if command == _PLAN_SLASH_COMMAND:
-        return (parts[1].strip() if len(parts) > 1 else ""), True
+        return _MessageIntent(
+            parts[1].strip() if len(parts) > 1 else "",
+            True,
+            True,
+            True,
+        )
     if command == _PR_SLASH_COMMAND:
-        return _PR_SLASH_PROMPT, False
-    return prompt, plan_mode
+        return _MessageIntent(_PR_SLASH_PROMPT, False, False, False)
+    if not plan_mode and prompt == _PR_SLASH_PROMPT:
+        return _MessageIntent(prompt, False, False, False)
+    return _MessageIntent(prompt, plan_mode, True, explicit_plan_mode)
 
 
 def _plan_mode_model(codex: Codex, resumed: Any, settings: SettingsValues) -> str | None:
@@ -1444,7 +1504,9 @@ def stop_session(request: HttpRequest, session_id: str) -> HttpResponse:
 
 @require_http_methods(["POST"])
 def new_session(request: HttpRequest) -> HttpResponse:
-    prompt, plan_mode = _message_prompt_and_plan_mode(request)
+    intent = _message_intent(request)
+    prompt = intent.prompt
+    plan_mode = intent.plan_mode
     cwd = request.POST.get("cwd", "").strip()
     if not prompt:
         return HttpResponseBadRequest("prompt is required")
@@ -1615,7 +1677,7 @@ def _render_entries(thread: Any) -> Iterator[dict[str, Any]]:
     carries the turn's started_at timestamp; per-item timestamps are not
     exposed by the SDK.
     """
-    for turn in thread.turns:
+    for turn in getattr(thread, "turns", []) or []:
         timestamp = getattr(turn, "started_at", None)
         items = [thread_item.root for thread_item in turn.items]
         final_idx = _find_final_agent_idx(items)
