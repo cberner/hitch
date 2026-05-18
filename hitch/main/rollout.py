@@ -152,17 +152,25 @@ def _entries_from_text(text: str, rollout_path: Path) -> Iterator[dict[str, Any]
     memory_citations_by_turn_text = _memory_citations_by_turn_text(lines)
     completed_plan_texts_by_turn = _completed_plan_texts_by_turn(lines)
     plan_mode_turns = _plan_mode_turns(lines)
+    proposed_plan_texts_by_turn, event_plan_texts_by_turn = _proposed_plan_texts_by_turn(
+        lines,
+        plan_mode_turns,
+        completed_plan_texts_by_turn,
+    )
     for turn_idx, entry in _lines_with_turn_indices(lines):
         represented_agent_texts = represented_agent_texts_by_turn.get(turn_idx, Counter())
         memory_citations_by_text = memory_citations_by_turn_text.get(turn_idx, {})
         completed_plan_texts = completed_plan_texts_by_turn.get(turn_idx, set())
+        proposed_plan_texts = proposed_plan_texts_by_turn.get(turn_idx, set())
+        event_plan_texts = event_plan_texts_by_turn.get(turn_idx, set())
         result = _entry_for_rollout_line(
             entry,
             outputs,
             represented_agent_texts,
             memory_citations_by_text,
             completed_plan_texts,
-            turn_idx in plan_mode_turns,
+            proposed_plan_texts,
+            event_plan_texts,
         )
         if isinstance(result, list):
             yield from result
@@ -176,14 +184,22 @@ def _entry_for_rollout_line(
     represented_agent_texts: Counter[AgentDedupeKey],
     memory_citations_by_text: dict[AgentDedupeKey, list[MemoryCitation]],
     completed_plan_texts: set[str],
-    is_plan_mode_turn: bool,
+    proposed_plan_texts: set[str],
+    event_plan_texts: set[str],
 ) -> EntryResult:
     line_type = line.get("type")
     payload = line.get("payload") or {}
     timestamp = _iso_to_unix_seconds(line.get("timestamp"))
 
     if line_type == "event_msg":
-        return _entry_from_event(payload, timestamp, memory_citations_by_text)
+        return _entry_from_event(
+            payload,
+            timestamp,
+            memory_citations_by_text,
+            completed_plan_texts,
+            proposed_plan_texts,
+            event_plan_texts,
+        )
     if line_type == "response_item":
         return _entry_from_response_item(
             payload,
@@ -191,7 +207,8 @@ def _entry_for_rollout_line(
             outputs,
             represented_agent_texts,
             completed_plan_texts,
-            is_plan_mode_turn,
+            proposed_plan_texts,
+            event_plan_texts,
         )
     return None
 
@@ -200,6 +217,9 @@ def _entry_from_event(
     payload: dict[str, Any],
     timestamp: int | None,
     memory_citations_by_text: dict[AgentDedupeKey, list[MemoryCitation]],
+    completed_plan_texts: set[str],
+    proposed_plan_texts: set[str],
+    event_plan_texts: set[str],
 ) -> dict[str, Any] | None:
     event_type = payload.get("type")
     if event_type == "user_message":
@@ -215,6 +235,13 @@ def _entry_from_event(
         text, event_memory_citation = _strip_memory_citations(text)
         text = text.strip()
         if not text:
+            return None
+        plan_text = _proposed_plan_text(text)
+        if plan_text is not None and plan_text in completed_plan_texts:
+            return None
+        if plan_text is not None and plan_text in event_plan_texts:
+            return {"kind": "plan", "text": plan_text, "timestamp": timestamp}
+        if plan_text is not None and proposed_plan_texts:
             return None
         # `phase` is preserved so the view layer can pick the turn's final
         # agent reply with the same `MessagePhase` semantics as the SDK
@@ -288,7 +315,8 @@ def _entry_from_response_item(
     outputs: dict[str, dict[str, Any]],
     represented_agent_texts: Counter[AgentDedupeKey],
     completed_plan_texts: set[str],
-    is_plan_mode_turn: bool,
+    proposed_plan_texts: set[str],
+    event_plan_texts: set[str],
 ) -> EntryResult:
     item_type = payload.get("type")
     if item_type == "message":
@@ -297,7 +325,8 @@ def _entry_from_response_item(
             timestamp,
             represented_agent_texts,
             completed_plan_texts,
-            is_plan_mode_turn,
+            proposed_plan_texts,
+            event_plan_texts,
         )
     if item_type == "function_call":
         name = payload.get("name") or ""
@@ -355,21 +384,41 @@ def _is_user_message_line(entry: dict[str, Any]) -> bool:
 def _plan_mode_turns(lines: list[dict[str, Any]]) -> set[int]:
     plan_turns: set[int] = set()
     pending_plan_mode = False
-    turn_idx = 0
-    started = False
+    turn_idx = -1
+    current_turn_accepts_mode = False
     for entry in lines:
         if entry.get("type") == "turn_context":
-            pending_plan_mode = _turn_context_is_plan(entry)
+            is_plan = _turn_context_is_plan(entry)
+            if current_turn_accepts_mode:
+                _set_plan_turn_mode(plan_turns, turn_idx, is_plan)
+            else:
+                pending_plan_mode = is_plan
             continue
-        if not _is_user_message_line(entry):
+        if _is_task_started_line(entry):
+            mode = _task_started_collaboration_mode(entry)
+            if mode is not None:
+                is_plan = mode == "plan"
+                if current_turn_accepts_mode:
+                    _set_plan_turn_mode(plan_turns, turn_idx, is_plan)
+                else:
+                    pending_plan_mode = is_plan
             continue
-        if started:
+        if _is_user_message_line(entry):
             turn_idx += 1
-        started = True
-        if pending_plan_mode:
-            plan_turns.add(turn_idx)
-        pending_plan_mode = False
+            current_turn_accepts_mode = True
+            if pending_plan_mode:
+                plan_turns.add(turn_idx)
+            pending_plan_mode = False
+            continue
+        current_turn_accepts_mode = False
     return plan_turns
+
+
+def _set_plan_turn_mode(plan_turns: set[int], turn_idx: int, is_plan: bool) -> None:
+    if is_plan:
+        plan_turns.add(turn_idx)
+    else:
+        plan_turns.discard(turn_idx)
 
 
 def _turn_context_is_plan(entry: dict[str, Any]) -> bool:
@@ -378,6 +427,95 @@ def _turn_context_is_plan(entry: dict[str, Any]) -> bool:
     if not isinstance(mode_data, dict):
         return False
     return mode_data.get("mode") == "plan"
+
+
+def _is_task_started_line(entry: dict[str, Any]) -> bool:
+    if entry.get("type") != "event_msg":
+        return False
+    payload = entry.get("payload") or {}
+    return payload.get("type") == "task_started"
+
+
+def _task_started_collaboration_mode(entry: dict[str, Any]) -> str | None:
+    payload = entry.get("payload") or {}
+    mode = payload.get("collaboration_mode_kind")
+    return mode if isinstance(mode, str) else None
+
+
+def _proposed_plan_texts_by_turn(
+    lines: list[dict[str, Any]],
+    plan_mode_turns: set[int],
+    completed_plan_texts_by_turn: dict[int, set[str]],
+) -> tuple[dict[int, set[str]], dict[int, set[str]]]:
+    by_turn: dict[int, set[str]] = {}
+    event_by_turn: dict[int, set[str]] = {}
+    awaiting_plan_approval = False
+    for turn_idx, turn_lines in _lines_by_turn(lines):
+        event_turn_texts: set[str] = set()
+        response_turn_texts: set[str] = set()
+        for entry in turn_lines:
+            source, plan_text = _proposed_plan_text_from_line(entry)
+            if plan_text is None or not _should_render_proposed_plan(
+                plan_text,
+                turn_idx in plan_mode_turns,
+                awaiting_plan_approval,
+            ):
+                continue
+            if source == "event":
+                event_turn_texts.add(plan_text)
+            elif source == "response":
+                response_turn_texts.add(plan_text)
+        turn_texts = response_turn_texts or event_turn_texts
+        if response_turn_texts:
+            event_turn_texts = set()
+        if turn_texts:
+            by_turn[turn_idx] = turn_texts
+        if event_turn_texts:
+            event_by_turn[turn_idx] = event_turn_texts
+        if completed_plan_texts_by_turn.get(turn_idx) or turn_texts:
+            awaiting_plan_approval = True
+        elif _turn_has_agent_response(turn_lines):
+            awaiting_plan_approval = False
+    return by_turn, event_by_turn
+
+
+def _lines_by_turn(lines: list[dict[str, Any]]) -> Iterator[tuple[int, list[dict[str, Any]]]]:
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    for turn_idx, entry in _lines_with_turn_indices(lines):
+        grouped.setdefault(turn_idx, []).append(entry)
+    yield from grouped.items()
+
+
+def _proposed_plan_text_from_line(entry: dict[str, Any]) -> tuple[str | None, str | None]:
+    payload = entry.get("payload") or {}
+    if payload.get("phase") == "commentary":
+        return None, None
+    if entry.get("type") == "event_msg" and payload.get("type") == "agent_message":
+        text = payload.get("message")
+        if isinstance(text, str):
+            text, _ = _strip_memory_citations(text)
+            return "event", _proposed_plan_text(text.strip())
+    if (
+        entry.get("type") == "response_item"
+        and payload.get("type") == "message"
+        and payload.get("role") == "assistant"
+    ):
+        text, _ = _strip_memory_citations(_response_message_text(payload.get("content")))
+        return "response", _proposed_plan_text(text.strip())
+    return None, None
+
+
+def _turn_has_agent_response(turn_lines: list[dict[str, Any]]) -> bool:
+    for entry in turn_lines:
+        source, _ = _proposed_plan_text_from_line(entry)
+        if source is not None:
+            return True
+        payload = entry.get("payload") or {}
+        if payload.get("phase") == "commentary":
+            continue
+        if entry.get("type") == "event_msg" and payload.get("type") == "agent_message":
+            return True
+    return False
 
 
 def _represented_agent_texts_by_turn(
@@ -441,7 +579,8 @@ def _agent_entry_from_response_message(
     timestamp: int | None,
     represented_agent_texts: Counter[AgentDedupeKey],
     completed_plan_texts: set[str],
-    is_plan_mode_turn: bool,
+    proposed_plan_texts: set[str],
+    event_plan_texts: set[str],
 ) -> dict[str, Any] | None:
     if payload.get("role") != "assistant":
         return None
@@ -450,11 +589,11 @@ def _agent_entry_from_response_message(
         return None
     stripped_text, memory_citation = _strip_memory_citations(raw_text)
     plan_text = _proposed_plan_text(stripped_text.strip())
-    if (
-        is_plan_mode_turn
-        and plan_text is not None
-        and plan_text not in completed_plan_texts
-    ):
+    if plan_text is not None and plan_text in event_plan_texts:
+        return None
+    if plan_text is not None and plan_text in proposed_plan_texts:
+        if plan_text in completed_plan_texts:
+            return None
         return {"kind": "plan", "text": plan_text, "timestamp": timestamp}
     text = _response_agent_text(stripped_text, completed_plan_texts)
     if not text:
@@ -604,6 +743,18 @@ def _proposed_plan_text(text: str) -> str | None:
     if text.startswith(open_tag) and text.endswith(close_tag):
         return text[len(open_tag) : -len(close_tag)].strip()
     return None
+
+
+def _should_render_proposed_plan(
+    plan_text: str | None,
+    is_plan_mode_turn: bool,
+    awaiting_plan_approval: bool,
+) -> bool:
+    if plan_text is None:
+        return False
+    if is_plan_mode_turn:
+        return True
+    return awaiting_plan_approval
 
 
 def _plan_entry_from_completed_item(
