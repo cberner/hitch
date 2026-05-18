@@ -373,6 +373,43 @@ class SessionViewTests(TestCase):
         self.assertContains(response, 'data-ts="1700000123"')
 
     @patch("hitch.main.views.Codex")
+    def test_messages_are_copyable_by_long_press(self, mock_codex: MagicMock) -> None:
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message("Copy my prompt"),
+                        _agent_message("Thinking", phase="commentary"),
+                        _agent_message("Copy my answer"),
+                    ]
+                )
+            ]
+        )
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertContains(
+            response,
+            '<div class="message user" data-copyable-message>',
+            html=False,
+        )
+        self.assertContains(
+            response,
+            '<div class="message thinking" data-copyable-message>',
+            html=False,
+        )
+        self.assertContains(
+            response,
+            '<div class="message agent" data-copyable-message>',
+            html=False,
+        )
+        self.assertContains(response, 'target.closest("[data-copyable-message]")')
+        self.assertContains(response, "navigator.clipboard.writeText(text)")
+        self.assertContains(response, 'document.addEventListener("pointerdown"')
+        self.assertContains(response, 'msg.dataset.copyableMessage = "";')
+
+    @patch("hitch.main.views.Codex")
     def test_trailing_tool_calls_are_rendered(self, mock_codex: MagicMock) -> None:
         # Mid-turn agent commentary followed by a tool call (no final agent
         # message) still surfaces the tool call.
@@ -1349,6 +1386,11 @@ class SessionViewActiveWorkerTests(TestCase):
         # worker's user_message event reaches the rollout.
         self.assertContains(response, "please refactor")
         self.assertContains(response, "data-pending-user>")
+        self.assertContains(
+            response,
+            '<div class="message user pending" data-copyable-message>',
+            html=False,
+        )
         # Stop button is wired to the interrupt endpoint via formaction so
         # the user can abort an in-progress turn without leaving the page.
         # The regular composer submit carries the same active instance in a

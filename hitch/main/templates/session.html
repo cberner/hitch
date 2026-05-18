@@ -1260,6 +1260,13 @@
         .message.pending {
             opacity: 0.85;
         }
+        .message.copied {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+        }
+        .message.user.copied {
+            outline-color: rgba(255, 255, 255, 0.7);
+        }
         .message.streaming::after {
             content: "▍";
             display: inline-block;
@@ -1402,7 +1409,7 @@
             {% if pending_user_prompt %}
             <div class="entry" data-pending-user>
                 <div class="entry-header"><span class="role">User</span></div>
-                <div class="message user pending">
+                <div class="message user pending" data-copyable-message>
                     <div class="body">{{ pending_user_prompt }}</div>
                 </div>
             </div>
@@ -1611,6 +1618,110 @@
                     if (event.target === diffModal) closeDiff();
                 });
             }
+
+            const LONG_PRESS_MS = 650;
+            const LONG_PRESS_MOVE_PX = 10;
+            let longPress = null;
+            let suppressMessageClickUntil = 0;
+
+            function copyableMessageFrom(target) {
+                if (!(target instanceof Element)) return null;
+                return target.closest("[data-copyable-message]");
+            }
+
+            function messageCopyText(message) {
+                const body = message.querySelector(".body");
+                if (!body) return "";
+                return (body.innerText || body.textContent || "").trimEnd();
+            }
+
+            function fallbackCopyText(text) {
+                const textarea = document.createElement("textarea");
+                textarea.value = text;
+                textarea.setAttribute("readonly", "");
+                textarea.style.position = "fixed";
+                textarea.style.top = "-1000px";
+                document.body.appendChild(textarea);
+                textarea.select();
+                try {
+                    return document.execCommand("copy");
+                } finally {
+                    textarea.remove();
+                }
+            }
+
+            async function copyText(text) {
+                if (!text) return false;
+                if (navigator.clipboard && window.isSecureContext) {
+                    try {
+                        await navigator.clipboard.writeText(text);
+                        return true;
+                    } catch {
+                        // Fall back for browsers that expose the API but deny this call.
+                    }
+                }
+                return fallbackCopyText(text);
+            }
+
+            function markCopied(message) {
+                message.classList.add("copied");
+                window.setTimeout(() => message.classList.remove("copied"), 900);
+            }
+
+            function copyMessage(message) {
+                suppressMessageClickUntil = Date.now() + 900;
+                copyText(messageCopyText(message)).then((copied) => {
+                    if (copied) markCopied(message);
+                }).catch(() => {});
+            }
+
+            function clearLongPress() {
+                if (!longPress) return;
+                window.clearTimeout(longPress.timer);
+                longPress = null;
+            }
+
+            document.addEventListener("pointerdown", (event) => {
+                if (event.button && event.button !== 0) return;
+                const message = copyableMessageFrom(event.target);
+                if (!message) return;
+                clearLongPress();
+                longPress = {
+                    pointerId: event.pointerId,
+                    message,
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    timer: window.setTimeout(() => {
+                        const pendingMessage = longPress ? longPress.message : message;
+                        longPress = null;
+                        copyMessage(pendingMessage);
+                    }, LONG_PRESS_MS),
+                };
+            });
+            document.addEventListener("pointermove", (event) => {
+                if (!longPress || event.pointerId !== longPress.pointerId) return;
+                const dx = Math.abs(event.clientX - longPress.startX);
+                const dy = Math.abs(event.clientY - longPress.startY);
+                if (dx > LONG_PRESS_MOVE_PX || dy > LONG_PRESS_MOVE_PX) clearLongPress();
+            }, { passive: true });
+            document.addEventListener("pointerup", clearLongPress);
+            document.addEventListener("pointercancel", clearLongPress);
+            document.addEventListener("contextmenu", (event) => {
+                const message = copyableMessageFrom(event.target);
+                if (!message) return;
+                if (!longPress && Date.now() > suppressMessageClickUntil) return;
+                event.preventDefault();
+                if (!longPress) return;
+                const pendingMessage = longPress.message;
+                clearLongPress();
+                copyMessage(pendingMessage);
+            });
+            document.addEventListener("click", (event) => {
+                if (Date.now() > suppressMessageClickUntil) return;
+                if (!copyableMessageFrom(event.target)) return;
+                event.preventDefault();
+                event.stopPropagation();
+            }, true);
 
             function isSuperEnter(event) {
                 const hasSuper = event.metaKey
@@ -2079,6 +2190,7 @@
                 header.appendChild(role);
                 const msg = document.createElement("div");
                 msg.className = "message user";
+                msg.dataset.copyableMessage = "";
                 const body = document.createElement("div");
                 body.className = "body";
                 body.textContent = userMessageText(item);
@@ -2117,6 +2229,7 @@
                 header.appendChild(role);
                 const msg = document.createElement("div");
                 msg.className = "message agent streaming";
+                msg.dataset.copyableMessage = "";
                 const body = document.createElement("div");
                 body.className = "body";
                 body.textContent = item.text || "";

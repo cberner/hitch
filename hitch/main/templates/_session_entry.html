@@ -11,7 +11,7 @@ intermediate block, so the per-item layout stays identical in both contexts.
         <time data-ts="{{ entry.timestamp }}">{{ entry.timestamp }}</time>
         {% endif %}
     </div>
-    <div class="message {{ entry.kind }}">
+    <div class="message {{ entry.kind }}" data-copyable-message>
         {% if entry.html %}
         <div class="body markdown">{{ entry.html }}</div>
         {% else %}
