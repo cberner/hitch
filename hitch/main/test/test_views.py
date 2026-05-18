@@ -1193,7 +1193,7 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
-    def test_forwards_default_collaboration_mode_for_plan_approval(
+    def test_default_collaboration_mode_switches_to_default_mode(
         self,
         mock_codex: MagicMock,
         mock_spawn: MagicMock,

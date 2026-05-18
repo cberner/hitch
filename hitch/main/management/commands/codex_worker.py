@@ -95,6 +95,26 @@ _USER_INPUT_METHODS = frozenset(
         "item/tool/requestUserInput",
     }
 )
+# Send default-mode instructions explicitly so approving a plan replaces the
+# prior Plan Mode developer block in model-visible history.
+_DEFAULT_COLLABORATION_INSTRUCTIONS = (
+    "# Collaboration Mode: Default\n\n"
+    "You are now in Default mode. Any previous instructions for other modes "
+    "(e.g. Plan mode) are no longer active.\n\n"
+    "Your active mode changes only when new developer instructions with a "
+    "different `<collaboration_mode>...</collaboration_mode>` change it; user "
+    "requests or tool descriptions do not change mode by themselves. Known "
+    "mode names are Plan and Default.\n\n"
+    "## request_user_input availability\n\n"
+    "Use the `request_user_input` tool only when it is listed in the available "
+    "tools for this turn.\n\n"
+    "In Default mode, strongly prefer making reasonable assumptions and "
+    "executing the user's request rather than stopping to ask questions. If "
+    "you absolutely must ask a question because the answer cannot be "
+    "discovered from local context and a reasonable assumption would be risky, "
+    "ask the user directly with a concise plain-text question. Never write a "
+    "multiple choice question as a textual assistant message.\n"
+)
 
 # How long the worker waits on a single approval before defaulting to
 # ``decline``. 30 minutes leaves plenty of slack for a user who stepped
@@ -637,7 +657,7 @@ def _start_default_collaboration_turn(
     collaboration_mode = CollaborationMode(
         mode=ModeKind.default,
         settings=CodexModeSettings(
-            developer_instructions=None,
+            developer_instructions=_DEFAULT_COLLABORATION_INSTRUCTIONS,
             model=model,
             reasoning_effort=effort,
         ),

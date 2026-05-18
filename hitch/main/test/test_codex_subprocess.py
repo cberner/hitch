@@ -45,6 +45,7 @@ from pydantic import BaseModel
 from hitch.main import codex_events, codex_pool, streaming
 from hitch.main.management.commands import codex_worker as codex_worker_module
 from hitch.main.management.commands.codex_worker import (
+    _DEFAULT_COLLABORATION_INSTRUCTIONS,
     _forward_goal_notifications,
     _install_notification_sequencer,
     _make_approval_handler,
@@ -2045,12 +2046,20 @@ class CodexWorkerCommandTests(TestCase):
         codex_ctx.thread_resume.return_value.turn.assert_not_called()
         params = captured_params["params"]
         assert isinstance(params, dict)
+        collaboration_mode = params["collaborationMode"]
+        assert isinstance(collaboration_mode, dict)
+        settings = collaboration_mode["settings"]
+        assert isinstance(settings, dict)
+        instructions = settings["developer_instructions"]
+        assert isinstance(instructions, str)
+        self.assertIn("You are now in Default mode", instructions)
+        self.assertIn("previous instructions for other modes", instructions)
         self.assertEqual(
-            params["collaborationMode"],
+            collaboration_mode,
             {
                 "mode": "default",
                 "settings": {
-                    "developer_instructions": None,
+                    "developer_instructions": _DEFAULT_COLLABORATION_INSTRUCTIONS,
                     "reasoning_effort": "high",
                     "model": "gpt-5.4",
                 },
