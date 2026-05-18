@@ -712,8 +712,9 @@ class RolloutFileViewTests(TestCase):
     @patch("hitch.main.views.Codex")
     def test_token_usage_renders_under_title(self, mock_codex: MagicMock) -> None:
         # The most recent token_count event's cumulative total surfaces under
-        # the session title with thousands separators; threads with no
-        # token_count event in their rollout hide the section entirely.
+        # the session title with thousands separators, while context usage
+        # comes from the non-cumulative active context token count. Threads
+        # with no token_count event in their rollout hide the section entirely.
         rollout_lines = [
             _rollout_line("event_msg", {"type": "user_message", "message": "go"}),
             _rollout_line(
@@ -728,7 +729,13 @@ class RolloutFileViewTests(TestCase):
                             "reasoning_output_tokens": 3,
                             "total_tokens": 22038,
                         },
-                        "last_token_usage": {},
+                        "last_token_usage": {
+                            "input_tokens": 10000,
+                            "cached_input_tokens": 500,
+                            "output_tokens": 8000,
+                            "reasoning_output_tokens": 3,
+                            "total_tokens": 22038,
+                        },
                         "model_context_window": 200000,
                     },
                 },
@@ -741,6 +748,9 @@ class RolloutFileViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'class="usage"')
+        self.assertContains(response, ">context<")
+        self.assertContains(response, "11%")
+        self.assertContains(response, "22,038 of 200,000 tokens in current context")
         self.assertContains(response, ">in<")
         self.assertContains(response, ">out<")
         self.assertContains(response, ">cached<")
