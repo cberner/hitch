@@ -181,6 +181,12 @@
             max-height: 0;
             pointer-events: none;
         }
+        .session.menu-open,
+        .session.rename-open {
+            overflow: visible;
+            max-height: none;
+            z-index: 5;
+        }
         .session-swipe-action {
             position: absolute;
             inset: 0 auto 0 0;
@@ -197,26 +203,33 @@
         .session[data-session-archived="true"] .session-swipe-action {
             display: none;
         }
-        .session a.session-link {
+        .session-content {
             position: relative;
             z-index: 1;
-            display: block;
-            padding: 0.9rem 1rem;
+            display: flex;
+            align-items: stretch;
             background: var(--surface);
             color: inherit;
-            text-decoration: none;
             transform: translateX(var(--swipe-x));
             transition: transform 0.18s ease;
             touch-action: pan-y;
         }
-        .session.swiping a.session-link {
+        .session.swiping .session-content {
             transition: none;
         }
         .session.swipe-ready .session-swipe-action {
             background: var(--accent-hover);
         }
-        .session.pending-archive a.session-link {
+        .session.pending-archive .session-content {
             transform: translateX(100%);
+        }
+        .session a.session-link {
+            display: block;
+            flex: 1 1 auto;
+            min-width: 0;
+            padding: 0.9rem 1rem;
+            color: inherit;
+            text-decoration: none;
         }
         .session-title {
             font-weight: 600;
@@ -269,6 +282,108 @@
             padding: 0.05rem 0.4rem;
             color: var(--text-muted);
             font-size: 0.72rem;
+        }
+        .session-row-menu {
+            position: relative;
+            flex: 0 0 auto;
+            display: flex;
+            align-items: flex-start;
+            padding: 0.55rem 0.55rem 0.55rem 0;
+        }
+        .session-action {
+            font: inherit;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 2.25rem;
+            height: 2.25rem;
+            font-size: 1.2rem;
+            line-height: 1;
+            background: transparent;
+            color: var(--text-muted);
+            border: none;
+            border-radius: 8px;
+            padding: 0;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        .session-action:hover,
+        .session-action[aria-expanded="true"] {
+            background: var(--surface-2);
+            color: var(--text);
+        }
+        .session-menu {
+            position: absolute;
+            right: 0.55rem;
+            top: calc(100% - 0.25rem);
+            z-index: 20;
+            min-width: 9rem;
+            padding: 0.35rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--surface);
+            box-shadow: var(--shadow-lg);
+        }
+        .session-menu[hidden],
+        .session-rename[hidden] {
+            display: none;
+        }
+        .session-menu form { margin: 0; }
+        .session-menu button {
+            width: 100%;
+            font: inherit;
+            font-size: 0.9rem;
+            text-align: left;
+            border: 0;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text);
+            padding: 0.5rem 0.65rem;
+            cursor: pointer;
+        }
+        .session-menu button:hover,
+        .session-menu button:focus {
+            outline: none;
+            background: var(--surface-2);
+        }
+        .session-rename {
+            position: relative;
+            z-index: 1;
+            padding: 0 1rem 0.9rem;
+            background: var(--surface);
+        }
+        .session-rename form {
+            display: flex;
+            gap: 0.5rem;
+            align-items: stretch;
+            flex-wrap: wrap;
+        }
+        .session-rename input[name="name"] {
+            font: inherit;
+            font-size: 0.92rem;
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 0.5rem 0.65rem;
+            background: var(--surface);
+            color: var(--text);
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+        .session-rename input[name="name"]:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-soft);
+        }
+        .session-rename button {
+            font: inherit;
+            font-weight: 500;
+            border: 1px solid var(--accent);
+            border-radius: var(--radius-sm);
+            background: var(--accent);
+            color: var(--accent-fg);
+            padding: 0.45rem 0.8rem;
+            cursor: pointer;
+            flex: 0 0 auto;
         }
         .empty {
             text-align: center;
@@ -674,16 +789,38 @@
         {% if sessions %}
         <ul class="session-list">
             {% for session in sessions %}
-            <li class="session" data-session-row data-session-archived="{{ session.is_archived|yesno:'true,false' }}" data-session-archive-url="{% url 'set_session_archived' session_id=session.id %}">
+            <li class="session" data-session-row data-session-archived="{{ session.is_archived|yesno:'true,false' }}" data-session-archive-url="{% url 'set_session_archived' session_id=session.id %}" data-session-name-url="{% url 'set_session_name' session_id=session.id %}">
                 <div class="session-swipe-action" aria-hidden="true">Archive</div>
-                <a class="session-link" href="{% url 'session' session_id=session.id %}">
-                    <div class="session-title">{{ session.display_title }}</div>
-                    <div class="session-meta">
-                        <span class="meta-item"><span class="meta-label">cwd</span><code>{{ session.cwd }}</code></span>
-                        <span class="meta-item"><time data-updated-at="{{ session.updated_at }}">{{ session.updated_at }}</time></span>
-                        {% if session.is_archived %}<span class="archive-badge">Archived</span>{% endif %}
+                <div class="session-content">
+                    <a class="session-link" href="{% url 'session' session_id=session.id %}">
+                        <div class="session-title" data-session-title>{{ session.display_title }}</div>
+                        <div class="session-meta">
+                            <span class="meta-item"><span class="meta-label">cwd</span><code>{{ session.cwd }}</code></span>
+                            <span class="meta-item"><time data-updated-at="{{ session.updated_at }}">{{ session.updated_at }}</time></span>
+                            {% if session.is_archived %}<span class="archive-badge">Archived</span>{% endif %}
+                        </div>
+                    </a>
+                    <div class="session-row-menu" data-session-menu>
+                        <button type="button" class="session-action" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false" data-session-menu-open>...</button>
+                        <div class="session-menu" role="menu" data-session-menu-panel hidden>
+                            <button type="button" role="menuitem" data-session-rename-open>Rename</button>
+                            <form method="post" action="{% url 'set_session_archived' session_id=session.id %}" role="none" data-session-archive-form>
+                                {% csrf_token %}
+                                <input type="hidden" name="next" value="index">
+                                <input type="hidden" name="archived" value="{% if session.is_archived %}false{% else %}true{% endif %}" data-session-archive-value>
+                                <button type="submit" role="menuitem" data-session-archive-label>{% if session.is_archived %}Unarchive{% else %}Archive{% endif %}</button>
+                            </form>
+                        </div>
                     </div>
-                </a>
+                </div>
+                <div class="session-rename" data-session-rename hidden>
+                    <form method="post" action="{% url 'set_session_name' session_id=session.id %}" data-session-rename-form>
+                        {% csrf_token %}
+                        <input type="hidden" name="next" value="index">
+                        <input type="text" name="name" value="{{ session.name_value }}" maxlength="{{ name_max_len }}" required autocomplete="off" placeholder="Session title">
+                        <button type="submit">Save</button>
+                    </form>
+                </div>
             </li>
             {% endfor %}
         </ul>
@@ -886,7 +1023,43 @@
             const archiveUndo = document.querySelector("[data-archive-undo]");
             const archiveToastText = document.querySelector("[data-archive-toast-text]");
             const pendingArchives = new Map();
+            const swipableRows = new WeakSet();
             let undoRow = null;
+
+            function closeSessionMenu(menu) {
+                const button = menu && menu.querySelector("[data-session-menu-open]");
+                const panel = menu && menu.querySelector("[data-session-menu-panel]");
+                if (!button || !panel) return;
+                panel.hidden = true;
+                button.setAttribute("aria-expanded", "false");
+                const row = menu.closest("[data-session-row]");
+                if (row) row.classList.remove("menu-open");
+            }
+
+            function closeSessionMenus(except) {
+                for (const menu of document.querySelectorAll("[data-session-menu]")) {
+                    if (menu !== except) closeSessionMenu(menu);
+                }
+            }
+
+            function setRowArchived(row, archived) {
+                row.dataset.sessionArchived = archived ? "true" : "false";
+                const archiveInput = row.querySelector("[data-session-archive-value]");
+                const archiveLabel = row.querySelector("[data-session-archive-label]");
+                const meta = row.querySelector(".session-meta");
+                let badge = row.querySelector(".archive-badge");
+                if (archiveInput) archiveInput.value = archived ? "false" : "true";
+                if (archiveLabel) archiveLabel.textContent = archived ? "Unarchive" : "Archive";
+                if (archived && !badge && meta) {
+                    badge = document.createElement("span");
+                    badge.className = "archive-badge";
+                    badge.textContent = "Archived";
+                    meta.appendChild(badge);
+                } else if (!archived && badge) {
+                    badge.remove();
+                }
+                if (!archived) bindSwipe(row);
+            }
 
             function setSwipeDistance(row, distance) {
                 row.style.setProperty("--swipe-x", `${distance}px`);
@@ -938,6 +1111,7 @@
 
             function archiveRow(row) {
                 if (!row.dataset.sessionArchiveUrl || row.dataset.pendingArchive === "true") return;
+                closeSessionMenus();
                 resetSwipe(row);
                 row.dataset.pendingArchive = "true";
                 row.classList.add("pending-archive");
@@ -961,6 +1135,7 @@
                 postArchiveState(row, false).then(() => {
                     row.dataset.pendingArchive = "false";
                     row.classList.remove("pending-archive");
+                    setRowArchived(row, false);
                     hideArchiveToast(row);
                 }).catch(() => {
                     const retryTimeout = window.setTimeout(() => finalizeArchive(row), 5000);
@@ -971,11 +1146,14 @@
 
             if (archiveUndo) archiveUndo.addEventListener("click", undoArchive);
 
-            for (const row of document.querySelectorAll("[data-session-row][data-session-archived='false']")) {
+            function bindSwipe(row) {
+                if (swipableRows.has(row) || row.dataset.sessionArchived === "true") return;
+                swipableRows.add(row);
                 let swipe = null;
                 row.addEventListener("pointerdown", (event) => {
                     if (event.pointerType === "mouse" && event.button !== 0) return;
                     if (row.dataset.pendingArchive === "true") return;
+                    if (event.target.closest("[data-session-menu], [data-session-rename]")) return;
                     swipe = {
                         pointerId: event.pointerId,
                         startX: event.clientX,
@@ -1031,6 +1209,98 @@
                     event.stopPropagation();
                 }, true);
             }
+
+            for (const row of document.querySelectorAll("[data-session-row]")) {
+                bindSwipe(row);
+                const menu = row.querySelector("[data-session-menu]");
+                const menuButton = row.querySelector("[data-session-menu-open]");
+                const menuPanel = row.querySelector("[data-session-menu-panel]");
+                const renameButton = row.querySelector("[data-session-rename-open]");
+                const renamePanel = row.querySelector("[data-session-rename]");
+                const renameForm = row.querySelector("[data-session-rename-form]");
+                const archiveForm = row.querySelector("[data-session-archive-form]");
+
+                if (menu && menuButton && menuPanel) {
+                    menuButton.addEventListener("click", (event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        const willOpen = menuPanel.hidden;
+                        closeSessionMenus(menu);
+                        menuPanel.hidden = !willOpen;
+                        menuButton.setAttribute("aria-expanded", willOpen ? "true" : "false");
+                        row.classList.toggle("menu-open", willOpen);
+                    });
+                }
+                if (renameButton && renamePanel) {
+                    renameButton.addEventListener("click", () => {
+                        closeSessionMenus();
+                        renamePanel.hidden = false;
+                        row.classList.add("rename-open");
+                        const input = renamePanel.querySelector("input[name='name']");
+                        if (input) {
+                            input.focus();
+                            input.select();
+                        }
+                    });
+                }
+                if (renameForm) {
+                    renameForm.addEventListener("submit", (event) => {
+                        event.preventDefault();
+                        const input = renameForm.querySelector("input[name='name']");
+                        const title = row.querySelector("[data-session-title]");
+                        const name = input ? input.value.trim() : "";
+                        if (!name) {
+                            if (input) input.focus();
+                            return;
+                        }
+                        const body = new URLSearchParams(new FormData(renameForm));
+                        const headers = {
+                            "Content-Type": "application/x-www-form-urlencoded",
+                            "X-Requested-With": "XMLHttpRequest",
+                        };
+                        if (csrfToken) headers["X-CSRFToken"] = csrfToken;
+                        fetch(renameForm.action, {
+                            method: "POST",
+                            headers,
+                            body: body.toString(),
+                            credentials: "same-origin",
+                        }).then((response) => {
+                            if (!response.ok) throw new Error("rename request failed");
+                            if (input) input.value = name;
+                            if (title) title.textContent = name;
+                            if (renamePanel) renamePanel.hidden = true;
+                            row.classList.remove("rename-open");
+                        }).catch(() => {
+                            if (input) input.focus();
+                        });
+                    });
+                }
+                if (archiveForm) {
+                    archiveForm.addEventListener("submit", (event) => {
+                        event.preventDefault();
+                        closeSessionMenus();
+                        const archived = row.dataset.sessionArchived !== "true";
+                        if (archived) {
+                            archiveRow(row);
+                            return;
+                        }
+                        postArchiveState(row, false).then(() => {
+                            setRowArchived(row, false);
+                        });
+                    });
+                }
+            }
+
+            document.addEventListener("click", (event) => {
+                if (event.target.closest("[data-session-menu]")) return;
+                closeSessionMenus();
+            });
+            document.addEventListener("keydown", (event) => {
+                if (event.key !== "Escape") return;
+                const openButton = document.querySelector("[data-session-menu-open][aria-expanded='true']");
+                closeSessionMenus();
+                if (openButton) openButton.focus();
+            });
 
             function showDialog(dialog) {
                 if (!dialog) return;

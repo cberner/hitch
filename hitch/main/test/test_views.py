@@ -161,7 +161,18 @@ class IndexViewTests(TestCase):
             + reverse("set_session_archived", kwargs={"session_id": "newer"})
             + '"',
         )
+        self.assertContains(
+            response,
+            'data-session-name-url="'
+            + reverse("set_session_name", kwargs={"session_id": "newer"})
+            + '"',
+        )
         self.assertContains(response, 'data-session-archived="false"')
+        self.assertContains(response, 'aria-label="Session actions"')
+        self.assertContains(response, 'data-session-rename-open')
+        self.assertContains(response, 'name="name" value="Newer session" maxlength="200"')
+        self.assertContains(response, 'name="next" value="index"')
+        self.assertContains(response, 'data-session-archive-label>Archive</button>')
         self.assertContains(response, "data-archive-undo")
         self.assertLess(body.index("Newer session"), body.index("Middle session"))
         self.assertLess(body.index("Middle session"), body.index("Older session"))
@@ -210,6 +221,8 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Archived session")
         self.assertContains(response, '<span class="archive-badge">Archived</span>')
         self.assertContains(response, 'data-session-archived="true"')
+        self.assertContains(response, 'data-session-archive-label>Unarchive</button>')
+        self.assertContains(response, 'name="archived" value="false"')
         self.assertLess(body.index("Archived session"), body.index("Active session"))
         client = mock_codex.return_value.__enter__.return_value
         client.thread_list.assert_any_call()
@@ -1454,6 +1467,33 @@ class SetSessionNameViewTests(TestCase):
         client._client.thread_set_name.assert_called_once_with("abc", "New title")
 
     @patch("hitch.main.views.Codex")
+    def test_updates_name_and_redirects_to_index_when_requested(
+        self, mock_codex: MagicMock
+    ) -> None:
+        response = self.client.post(
+            reverse("set_session_name", kwargs={"session_id": "abc"}),
+            data={"name": "New title", "next": "index"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], reverse("index"))
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_set_name.assert_called_once_with("abc", "New title")
+
+    @patch("hitch.main.views.Codex")
+    def test_ajax_update_name_returns_no_content(self, mock_codex: MagicMock) -> None:
+        response = self.client.post(
+            reverse("set_session_name", kwargs={"session_id": "abc"}),
+            data={"name": "New title"},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+
+        self.assertEqual(response.status_code, 204)
+        self.assertNotIn("Location", response.headers)
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_set_name.assert_called_once_with("abc", "New title")
+
+    @patch("hitch.main.views.Codex")
     def test_rejects_invalid_input(self, mock_codex: MagicMock) -> None:
         # The form caps input client-side; the view enforces the same bounds
         # so a hand-crafted POST can't bypass them.
@@ -1524,6 +1564,21 @@ class SetSessionArchivedViewTests(TestCase):
             response.headers["Location"],
             reverse("session", kwargs={"session_id": "abc"}),
         )
+        client = mock_codex.return_value.__enter__.return_value
+        client.thread_unarchive.assert_called_once_with("abc")
+        client.thread_archive.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    def test_unarchives_session_and_redirects_to_index_when_requested(
+        self, mock_codex: MagicMock
+    ) -> None:
+        response = self.client.post(
+            reverse("set_session_archived", kwargs={"session_id": "abc"}),
+            data={"archived": "false", "next": "index"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], reverse("index"))
         client = mock_codex.return_value.__enter__.return_value
         client.thread_unarchive.assert_called_once_with("abc")
         client.thread_archive.assert_not_called()
