@@ -1488,8 +1488,15 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, 'class="slash-trigger"')
         self.assertContains(response, 'name="plan_mode"')
         self.assertContains(response, "Plan mode")
+        self.assertContains(response, "PR")
+        self.assertContains(response, "data-slash-pr")
+        self.assertContains(
+            response,
+            "Do a thorough review of the diff. Clean it up, and then open a PR",
+        )
         self.assertContains(response, "syncNextMessageConfig")
         self.assertContains(response, 'parsePlanCommand() !== null')
+        self.assertContains(response, "parsePrCommand")
         self.assertContains(response, 'case "turn/plan/updated"')
         self.assertContains(response, 'case "item/plan/delta"')
         self.assertContains(response, "activateFinalPlanText")

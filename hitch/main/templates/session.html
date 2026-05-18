@@ -1638,6 +1638,9 @@
                     <button type="button" role="menuitemcheckbox" aria-checked="false" data-slash-plan>
                         <span class="slash-menu-title">Plan mode</span>
                     </button>
+                    <button type="button" role="menuitem" data-slash-pr>
+                        <span class="slash-menu-title">PR</span>
+                    </button>
                 </div>
             </div>
             {% if active_worker %}
@@ -1882,6 +1885,7 @@
                 const slashTrigger = composer.querySelector("[data-slash-trigger]");
                 const slashMenu = composer.querySelector("[data-slash-menu]");
                 const slashPlan = composer.querySelector("[data-slash-plan]");
+                const slashPr = composer.querySelector("[data-slash-pr]");
                 const liveWork = document.querySelector("[data-live-work]");
                 const nextMessageConfig = document.querySelector("[data-next-message-config]");
                 const nextMessageItems = nextMessageConfig
@@ -1889,6 +1893,7 @@
                     : [];
                 const composerKeyboardOffsetProperty = "--composer-keyboard-offset";
                 const mobileComposerQuery = window.matchMedia("(max-width: 640px)");
+                const prPrompt = "Do a thorough review of the diff. Clean it up, and then open a PR";
                 let composerKeyboardFrame = 0;
                 const sync = () => {
                     input.style.height = "auto";
@@ -1931,8 +1936,14 @@
                 const parsePlanCommand = () => {
                     const text = input.value.trim();
                     const parts = text.split(/\s+/, 2);
-                    if (parts[0] !== "/plan") return null;
+                    if ((parts[0] || "").toLowerCase() !== "/plan") return null;
                     return text.slice(parts[0].length).trim();
+                };
+                const parsePrCommand = () => {
+                    const text = input.value.trim();
+                    const parts = text.split(/\s+/, 2);
+                    if ((parts[0] || "").toLowerCase() !== "/pr") return null;
+                    return prPrompt;
                 };
                 const syncNextMessageConfig = () => {
                     const planMode = composer.dataset.planMode === "true"
@@ -1998,6 +2009,15 @@
                         input.focus();
                     });
                 }
+                if (slashPr) {
+                    slashPr.addEventListener("click", () => {
+                        setPlanMode(false);
+                        input.value = prPrompt;
+                        sync();
+                        closeSlashMenu();
+                        requestSubmit(composer, submit);
+                    });
+                }
                 document.addEventListener("click", (event) => {
                     if (!slashCommand || !slashMenu || slashMenu.hidden) return;
                     if (!slashCommand.contains(event.target)) closeSlashMenu();
@@ -2032,8 +2052,13 @@
                 }
                 window.addEventListener("resize", scheduleComposerKeyboardOffset);
                 composer.addEventListener("submit", (event) => {
-                    const commandPrompt = parsePlanCommand();
-                    if (commandPrompt !== null) {
+                    const prCommandPrompt = parsePrCommand();
+                    const commandPrompt = prCommandPrompt === null ? parsePlanCommand() : null;
+                    if (prCommandPrompt !== null) {
+                        setPlanMode(false);
+                        input.value = prCommandPrompt;
+                        sync();
+                    } else if (commandPrompt !== null) {
                         setPlanMode(true);
                         input.value = commandPrompt;
                         if (!commandPrompt) {

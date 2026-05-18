@@ -808,6 +808,9 @@
                             <button type="button" role="menuitemcheckbox" aria-checked="false" data-slash-plan>
                                 <span class="slash-menu-title">Plan mode</span>
                             </button>
+                            <button type="button" role="menuitem" data-slash-pr>
+                                <span class="slash-menu-title">PR</span>
+                            </button>
                         </div>
                     </div>
                     <textarea id="new-session-prompt" name="prompt" required autocomplete="off" placeholder="Describe what you want the agent to do…"></textarea>
@@ -1106,6 +1109,8 @@
             const newSessionSlashTrigger = newSessionForm && newSessionForm.querySelector("[data-slash-trigger]");
             const newSessionSlashMenu = newSessionForm && newSessionForm.querySelector("[data-slash-menu]");
             const newSessionSlashPlan = newSessionForm && newSessionForm.querySelector("[data-slash-plan]");
+            const newSessionSlashPr = newSessionForm && newSessionForm.querySelector("[data-slash-pr]");
+            const prPrompt = "Do a thorough review of the diff. Clean it up, and then open a PR";
             function isSuperEnter(event) {
                 const hasSuper = event.metaKey
                     || (event.getModifierState && event.getModifierState("Meta"))
@@ -1141,8 +1146,15 @@
                 if (!newSessionInput) return null;
                 const text = newSessionInput.value.trim();
                 const parts = text.split(/\s+/, 2);
-                if (parts[0] !== "/plan") return null;
+                if ((parts[0] || "").toLowerCase() !== "/plan") return null;
                 return text.slice(parts[0].length).trim();
+            }
+            function parseNewSessionPrCommand() {
+                if (!newSessionInput) return null;
+                const text = newSessionInput.value.trim();
+                const parts = text.split(/\s+/, 2);
+                if ((parts[0] || "").toLowerCase() !== "/pr") return null;
+                return prPrompt;
             }
             setNewSessionPlanMode(false);
             newSessionOpenButtons.forEach((btn) => btn.addEventListener("click", () => {
@@ -1178,6 +1190,14 @@
                     if (newSessionInput) newSessionInput.focus();
                 });
             }
+            if (newSessionSlashPr) {
+                newSessionSlashPr.addEventListener("click", () => {
+                    setNewSessionPlanMode(false);
+                    if (newSessionInput) newSessionInput.value = prPrompt;
+                    closeNewSessionSlashMenu();
+                    requestSubmit(newSessionForm, newSessionSubmit);
+                });
+            }
             document.addEventListener("click", (event) => {
                 if (!newSessionSlashCommand || !newSessionSlashMenu || newSessionSlashMenu.hidden) return;
                 if (!newSessionSlashCommand.contains(event.target)) closeNewSessionSlashMenu();
@@ -1204,13 +1224,18 @@
                     requestSubmit(newSessionForm, newSessionSubmit);
                 });
                 newSessionForm.addEventListener("submit", (event) => {
-                    const commandPrompt = parseNewSessionPlanCommand();
-                    if (commandPrompt === null || !newSessionInput) return;
-                    setNewSessionPlanMode(true);
-                    newSessionInput.value = commandPrompt;
-                    if (!commandPrompt) {
-                        event.preventDefault();
-                        newSessionInput.focus();
+                    const prCommandPrompt = parseNewSessionPrCommand();
+                    const commandPrompt = prCommandPrompt === null ? parseNewSessionPlanCommand() : null;
+                    if (prCommandPrompt !== null && newSessionInput) {
+                        setNewSessionPlanMode(false);
+                        newSessionInput.value = prCommandPrompt;
+                    } else if (commandPrompt !== null && newSessionInput) {
+                        setNewSessionPlanMode(true);
+                        newSessionInput.value = commandPrompt;
+                        if (!commandPrompt) {
+                            event.preventDefault();
+                            newSessionInput.focus();
+                        }
                     }
                 });
             }

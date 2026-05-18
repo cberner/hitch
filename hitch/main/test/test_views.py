@@ -29,6 +29,7 @@ _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _MODEL_COOKIE = "hitch_model"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
+_PR_PROMPT = "Do a thorough review of the diff. Clean it up, and then open a PR"
 
 
 def _setup_codex(
@@ -259,8 +260,12 @@ class IndexViewTests(TestCase):
         self.assertContains(response, 'class="slash-trigger"')
         self.assertContains(response, 'name="plan_mode"')
         self.assertContains(response, "Plan mode")
+        self.assertContains(response, "PR")
+        self.assertContains(response, "data-slash-pr")
+        self.assertContains(response, _PR_PROMPT)
         self.assertContains(response, "parseNewSessionPlanCommand")
-        self.assertContains(response, 'parts[0] !== "/plan"')
+        self.assertContains(response, "parseNewSessionPrCommand")
+        self.assertContains(response, 'toLowerCase() !== "/plan"')
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -517,6 +522,35 @@ class NewSessionViewTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertContains(response, "prompt is required", status_code=400)
         mock_spawn.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_pr_slash_command_starts_new_session_with_review_prompt(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "/PR", "cwd": self.REPO, "plan_mode": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            cwd=self.REPO,
+            prompt=_PR_PROMPT,
+            developer_instructions=None,
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
@@ -1182,6 +1216,32 @@ class SendMessageViewTests(TestCase):
             approval_mode="auto_review",
             model="gpt-5.4",
             plan_mode=True,
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_pr_slash_command_sends_review_prompt(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex, model="gpt-5.4")
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "/pr", "plan_mode": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt=_PR_PROMPT,
+            sandbox_policy=None,
+            approval_mode="auto_review",
         )
 
     @patch("hitch.main.views.discover_repos")
