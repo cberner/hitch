@@ -112,7 +112,10 @@ def build_worktree_diff(cwd: str | None) -> DiffView:
 
 def _branch_diff_base_ref(repo: Path) -> str | None:
     output = _git_output(repo, ["rev-parse", "--verify", "--quiet", _BRANCH_DIFF_BASE_REF])
-    return _BRANCH_DIFF_BASE_REF if output and output.strip() else None
+    if not output or not output.strip():
+        return None
+    merge_base = _git_output(repo, ["merge-base", "HEAD", _BRANCH_DIFF_BASE_REF])
+    return merge_base.strip() if merge_base and merge_base.strip() else _BRANCH_DIFF_BASE_REF
 
 
 def _repo_root(cwd: Path) -> Path | None:

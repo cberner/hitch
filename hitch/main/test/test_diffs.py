@@ -70,6 +70,57 @@ class WorktreeDiffTests(SimpleTestCase):
         self.assertEqual(diff.additions, 1)
         self.assertEqual(diff.deletions, 1)
 
+    def test_branch_diff_uses_merge_base_when_origin_master_has_advanced(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            worktree = root / "feature-worktree"
+            subprocess.run(["git", "init", "--initial-branch=master", str(repo)], check=True, capture_output=True)
+            tracked = repo / "example.py"
+            tracked.write_text("def answer():\n    return 1\n")
+            _git(repo, "add", "example.py")
+            _git(repo, "commit", "-m", "initial")
+            _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
+            _git(repo, "worktree", "add", "-b", "feature", str(worktree), "master")
+
+            (repo / "upstream.py").write_text("def upstream():\n    return 10\n")
+            _git(repo, "add", "upstream.py")
+            _git(repo, "commit", "-m", "upstream change")
+            _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
+
+            branch_file = worktree / "example.py"
+            branch_file.write_text("def answer():\n    return 2\n")
+            _git(worktree, "commit", "-am", "feature change")
+
+            diff = build_worktree_diff(str(worktree))
+
+        self.assertTrue(diff.has_changes)
+        self.assertEqual(diff.file_count, 1)
+        self.assertEqual(diff.files[0].path, "example.py")
+        self.assertEqual(diff.additions, 1)
+        self.assertEqual(diff.deletions, 1)
+
+    def test_branch_diff_falls_back_to_origin_master_without_merge_base(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", "--initial-branch=feature", str(repo)], check=True, capture_output=True)
+            (repo / "feature.py").write_text("def feature():\n    return 1\n")
+            _git(repo, "add", "feature.py")
+            _git(repo, "commit", "-m", "feature")
+
+            _git(repo, "checkout", "--orphan", "remote-master")
+            _git(repo, "rm", "-rf", ".")
+            (repo / "remote.py").write_text("def remote():\n    return 2\n")
+            _git(repo, "add", "remote.py")
+            _git(repo, "commit", "-m", "remote master")
+            _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
+            _git(repo, "checkout", "feature")
+
+            diff = build_worktree_diff(str(repo))
+
+        self.assertTrue(diff.has_changes)
+        self.assertIn("feature.py", {file.path for file in diff.files})
+
     def test_origin_master_diff_does_not_require_local_master_branch(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
