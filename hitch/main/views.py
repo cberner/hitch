@@ -403,11 +403,23 @@ def _token_usage_for(thread: Any) -> dict[str, str] | None:
     usage = rollout.latest_token_usage(rollout_path)
     if usage is None:
         return None
-    return {
+    formatted = {
         "input": f"{usage['input_tokens']:,}",
         "cached": f"{usage['cached_input_tokens']:,}",
         "output": f"{usage['output_tokens']:,}",
     }
+    context_tokens = usage.get("context_tokens", 0)
+    context_window = usage.get("model_context_window", 0)
+    if context_tokens > 0 and context_window > 0:
+        percent = round((context_tokens / context_window) * 100)
+        percent = min(100, max(0, percent))
+        formatted.update(
+            {
+                "context": f"{percent}%",
+                "context_title": f"{context_tokens:,} of {context_window:,} tokens in current context",
+            }
+        )
+    return formatted
 
 
 def _next_message_config(

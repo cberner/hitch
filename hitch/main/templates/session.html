@@ -1367,6 +1367,9 @@
             </p>
             {% if token_usage %}
             <p class="usage" aria-label="Token usage for this session">
+                {% if token_usage.context %}
+                <span class="usage-item" title="{{ token_usage.context_title }}"><span class="usage-label">context</span><span class="usage-value">{{ token_usage.context }}</span></span>
+                {% endif %}
                 <span class="usage-item"><span class="usage-label">in</span><span class="usage-value">{{ token_usage.input }}</span></span>
                 <span class="usage-item"><span class="usage-label">out</span><span class="usage-value">{{ token_usage.output }}</span></span>
                 <span class="usage-item"><span class="usage-label">cached</span><span class="usage-value">{{ token_usage.cached }}</span></span>
