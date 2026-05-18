@@ -422,6 +422,85 @@
         .message .body.markdown hr { border: 0; border-top: 1px solid var(--border); margin: 0.9em 0; }
         .message .body.markdown a { color: var(--link); }
         .message.user .body.markdown a { color: var(--user-bubble-text); text-decoration: underline; }
+        .memory-citation {
+            position: relative;
+            display: inline-block;
+            margin-top: 0.65rem;
+            font-style: normal;
+            color: var(--text-muted);
+            max-width: 100%;
+        }
+        .memory-citation summary {
+            list-style: none;
+            width: fit-content;
+            max-width: 100%;
+            cursor: pointer;
+            user-select: none;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--surface-2);
+            color: var(--text-muted);
+            padding: 0.18rem 0.55rem;
+            font-size: 0.74rem;
+            font-weight: 600;
+            line-height: 1.35;
+        }
+        .memory-citation summary::-webkit-details-marker { display: none; }
+        .memory-citation summary:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+        }
+        .memory-popover {
+            display: none;
+            position: absolute;
+            left: 0;
+            top: calc(100% + 0.35rem);
+            z-index: 40;
+            width: min(28rem, calc(100vw - 3rem));
+            max-height: min(18rem, 58vh);
+            overflow: auto;
+            -webkit-overflow-scrolling: touch;
+            padding: 0.65rem 0.7rem;
+            border: 1px solid var(--border-strong);
+            border-radius: 8px;
+            background: var(--surface);
+            color: var(--text);
+            box-shadow: var(--shadow-lg);
+            font-size: 0.8rem;
+            line-height: 1.35;
+        }
+        .memory-citation[open] .memory-popover,
+        .memory-citation:hover .memory-popover,
+        .memory-citation:focus-within .memory-popover { display: block; }
+        .memory-list {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 0.45rem;
+        }
+        .memory-list + .memory-section-label { margin-top: 0.7rem; }
+        .memory-path {
+            display: block;
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+            font-size: 0.76rem;
+            color: var(--text);
+            overflow-wrap: anywhere;
+        }
+        .memory-note {
+            display: block;
+            margin-top: 0.12rem;
+            color: var(--text-muted);
+        }
+        .memory-section-label {
+            margin-bottom: 0.35rem;
+            color: var(--text-faint);
+            font-size: 0.68rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
 
         .tool-call {
             display: flex;
@@ -2377,6 +2456,92 @@
                 return parts.join("\n");
             }
 
+            function memoryEntries(citation) {
+                return Array.isArray(citation && citation.entries) ? citation.entries : [];
+            }
+
+            function memoryThreadIds(citation) {
+                if (Array.isArray(citation && citation.threadIds)) return citation.threadIds;
+                if (Array.isArray(citation && citation.thread_ids)) return citation.thread_ids;
+                return [];
+            }
+
+            function memoryCitationCount(citation) {
+                const entries = memoryEntries(citation);
+                const threadIds = memoryThreadIds(citation);
+                return entries.length || threadIds.length;
+            }
+
+            function memoryLine(entry) {
+                const start = entry.lineStart ?? entry.line_start;
+                const end = entry.lineEnd ?? entry.line_end;
+                if (entry.path && start && end) return entry.path + ":" + start + "-" + end;
+                return entry.path || "";
+            }
+
+            function appendMemoryRows(popover, rows) {
+                if (!rows.length) return;
+                const list = document.createElement("ul");
+                list.className = "memory-list";
+                for (const row of rows) {
+                    const item = document.createElement("li");
+                    const path = document.createElement("span");
+                    path.className = "memory-path";
+                    path.textContent = row.path || "";
+                    item.appendChild(path);
+                    if (row.note) {
+                        const note = document.createElement("span");
+                        note.className = "memory-note";
+                        note.textContent = row.note;
+                        item.appendChild(note);
+                    }
+                    list.appendChild(item);
+                }
+                popover.appendChild(list);
+            }
+
+            function renderMemoryCitation(citation) {
+                const count = memoryCitationCount(citation);
+                if (!count) return null;
+                const details = document.createElement("details");
+                details.className = "memory-citation";
+                const summary = document.createElement("summary");
+                summary.textContent = "Memories used: " + count;
+                details.appendChild(summary);
+
+                const popover = document.createElement("div");
+                popover.className = "memory-popover";
+                appendMemoryRows(
+                    popover,
+                    memoryEntries(citation).map((entry) => ({
+                        path: memoryLine(entry),
+                        note: entry.note || "",
+                    }))
+                );
+
+                const threadIds = memoryThreadIds(citation).filter(Boolean);
+                if (threadIds.length) {
+                    const label = document.createElement("div");
+                    label.className = "memory-section-label";
+                    label.textContent = "Prior sessions";
+                    popover.appendChild(label);
+                    appendMemoryRows(
+                        popover,
+                        threadIds.map((threadId) => ({ path: threadId, note: "" }))
+                    );
+                }
+
+                details.appendChild(popover);
+                return details;
+            }
+
+            function setMemoryCitation(message, citation) {
+                const existing = message.querySelector(".memory-citation");
+                if (existing) existing.remove();
+                const node = renderMemoryCitation(citation);
+                if (node) message.appendChild(node);
+            }
+
             function renderAgentItem(item) {
                 const wrap = document.createElement("div");
                 wrap.className = "entry";
@@ -2394,6 +2559,7 @@
                 body.className = "body";
                 body.textContent = item.text || "";
                 msg.appendChild(body);
+                setMemoryCitation(msg, item.memoryCitation || item.memory_citation);
                 wrap.appendChild(header);
                 wrap.appendChild(msg);
                 insertBeforeLive(wrap);
@@ -2562,6 +2728,7 @@
                 }
                 if (entry.kind === "agent" && item.type === "agentMessage") {
                     entry.body.textContent = item.text || entry.body.textContent;
+                    setMemoryCitation(entry.message, item.memoryCitation || item.memory_citation);
                     entry.message.classList.remove("streaming");
                     if (item.phase === "commentary") {
                         entry.message.classList.remove("agent");

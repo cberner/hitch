@@ -17,6 +17,31 @@ intermediate block, so the per-item layout stays identical in both contexts.
         {% else %}
         <div class="body">{{ entry.text }}</div>
         {% endif %}
+        {% if entry.memory_citation %}
+        <details class="memory-citation">
+            <summary>Memories used: {{ entry.memory_citation.count }}</summary>
+            <div class="memory-popover">
+                {% if entry.memory_citation.entries %}
+                <ul class="memory-list">
+                    {% for memory in entry.memory_citation.entries %}
+                    <li>
+                        <span class="memory-path">{{ memory.path }}:{{ memory.line_start }}-{{ memory.line_end }}</span>
+                        {% if memory.note %}<span class="memory-note">{{ memory.note }}</span>{% endif %}
+                    </li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+                {% if entry.memory_citation.thread_ids %}
+                <div class="memory-section-label">Prior sessions</div>
+                <ul class="memory-list">
+                    {% for thread_id in entry.memory_citation.thread_ids %}
+                    <li><span class="memory-path">{{ thread_id }}</span></li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+            </div>
+        </details>
+        {% endif %}
     </div>
 </div>
 {% elif entry.kind == "tool_call" %}
