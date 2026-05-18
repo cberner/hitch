@@ -603,6 +603,13 @@ class IterEntriesTests(TestCase):
                     },
                 ),
                 _line(
+                    "event_msg",
+                    {
+                        "type": "item_completed",
+                        "item": {"type": "Plan", "text": 7},
+                    },
+                ),
+                _line(
                     "response_item",
                     {
                         "type": "message",
