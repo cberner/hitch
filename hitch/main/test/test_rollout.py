@@ -390,6 +390,87 @@ class IterEntriesTests(TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["kind"], "agent")
 
+    def test_response_item_memory_citation_is_stripped_and_parsed(self) -> None:
+        text = (
+            "hello"
+            "<oai-mem-citation>"
+            "<citation_entries>\n"
+            "MEMORY.md:1-2|note=[summary]\n"
+            "</citation_entries>\n"
+            "<rollout_ids>\n"
+            "019cc2ea-1dff-7902-8d40-c8f6e5d83cc4\n"
+            "019cc2ea-1dff-7902-8d40-c8f6e5d83cc4\n"
+            "019cc2ea-1dff-7902-8d40-c8f6e5d83cc5\n"
+            "</rollout_ids>"
+            "</oai-mem-citation>"
+            " world"
+        )
+        path = self._make(
+            [
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": text}],
+                    },
+                ),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["text"], "hello world")
+        self.assertNotIn("oai-mem-citation", entries[0]["text"])
+        self.assertEqual(
+            entries[0]["memory_citation"],
+            {
+                "count": 1,
+                "entries": [
+                    {
+                        "path": "MEMORY.md",
+                        "line_start": 1,
+                        "line_end": 2,
+                        "note": "summary",
+                    }
+                ],
+                "thread_ids": [
+                    "019cc2ea-1dff-7902-8d40-c8f6e5d83cc4",
+                    "019cc2ea-1dff-7902-8d40-c8f6e5d83cc5",
+                ],
+            },
+        )
+
+    def test_deduped_response_item_memory_citation_attaches_to_event(self) -> None:
+        raw_text = (
+            "hello"
+            "<oai-mem-citation>"
+            "<citation_entries>\nMEMORY.md:1-2|note=[x]\n</citation_entries>"
+            "</oai-mem-citation>"
+            " world"
+        )
+        path = self._make(
+            [
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": raw_text}],
+                    },
+                ),
+                _line("event_msg", {"type": "agent_message", "message": "hello world"}),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["text"], "hello world")
+        self.assertEqual(entries[0]["memory_citation"]["count"], 1)
+        self.assertEqual(entries[0]["memory_citation"]["entries"][0]["note"], "x")
+
     def test_response_item_dedup_preserves_later_same_text_fallback(self) -> None:
         path = self._make(
             [

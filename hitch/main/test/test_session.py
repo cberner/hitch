@@ -37,11 +37,22 @@ def _user_message(*texts: str) -> SimpleNamespace:
     )
 
 
-def _agent_message(text: str, phase: str | None = None) -> SimpleNamespace:
+def _agent_message(
+    text: str,
+    phase: str | None = None,
+    memory_citation: SimpleNamespace | dict[str, object] | None = None,
+) -> SimpleNamespace:
     # The SDK surfaces phase as a MessagePhase enum (with `.value`); mirror
     # that shape so tests match production deserialization.
     phase_obj = SimpleNamespace(value=phase) if phase is not None else None
-    return _root(SimpleNamespace(type="agentMessage", text=text, phase=phase_obj))
+    return _root(
+        SimpleNamespace(
+            type="agentMessage",
+            text=text,
+            phase=phase_obj,
+            memory_citation=memory_citation,
+        )
+    )
 
 
 def _command(command: str, status: str = "completed") -> SimpleNamespace:
@@ -373,6 +384,45 @@ class SessionViewTests(TestCase):
         self.assertContains(response, 'data-ts="1700000123"')
 
     @patch("hitch.main.views.Codex")
+    def test_sdk_memory_citation_renders_details(self, mock_codex: MagicMock) -> None:
+        memory_citation = SimpleNamespace(
+            entries=[
+                SimpleNamespace(
+                    path="MEMORY.md",
+                    line_start=1,
+                    line_end=2,
+                    note="project convention",
+                )
+            ],
+            thread_ids=["019cc2ea-1dff-7902-8d40-c8f6e5d83cc4"],
+        )
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message("Use prior context"),
+                        _agent_message(
+                            "Applied the remembered convention.",
+                            memory_citation=memory_citation,
+                        ),
+                    ]
+                )
+            ]
+        )
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Applied the remembered convention.")
+        self.assertContains(response, "Memories used: 1")
+        self.assertContains(response, "MEMORY.md:1-2")
+        self.assertContains(response, "project convention")
+        self.assertContains(response, "019cc2ea-1dff-7902-8d40-c8f6e5d83cc4")
+        self.assertContains(response, "function renderMemoryCitation")
+        self.assertContains(response, "item.memoryCitation || item.memory_citation")
+
+    @patch("hitch.main.views.Codex")
     def test_messages_are_copyable_by_long_press(self, mock_codex: MagicMock) -> None:
         thread = _thread(
             [
@@ -509,6 +559,42 @@ class RolloutFileViewTests(TestCase):
         self.assertContains(response, "done")
         self.assertContains(response, '<details class="intermediate">')
         self.assertContains(response, "1 thinking message and 1 tool call")
+
+    @patch("hitch.main.views.Codex")
+    def test_rollout_memory_citation_renders_details(self, mock_codex: MagicMock) -> None:
+        raw_text = (
+            "Used prior context."
+            "<oai-mem-citation>"
+            "<citation_entries>\n"
+            "MEMORY.md:3-4|note=[repo preference]\n"
+            "</citation_entries>\n"
+            "<rollout_ids>\n"
+            "019cc2ea-1dff-7902-8d40-c8f6e5d83cc4\n"
+            "</rollout_ids>"
+            "</oai-mem-citation>"
+        )
+        rollout_lines = [
+            _rollout_line("event_msg", {"type": "user_message", "message": "remember?"}),
+            _rollout_line(
+                "response_item",
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": raw_text}],
+                },
+            ),
+        ]
+        rollout_path = _make_rollout(self, rollout_lines)
+        _patch_thread(self, mock_codex, _thread([], path=str(rollout_path)))
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Used prior context.")
+        self.assertContains(response, "Memories used: 1")
+        self.assertContains(response, "MEMORY.md:3-4")
+        self.assertContains(response, "repo preference")
+        self.assertNotContains(response, "oai-mem-citation")
 
     @patch("hitch.main.views.Codex")
     def test_rejected_command_renders_approval_choice(self, mock_codex: MagicMock) -> None:

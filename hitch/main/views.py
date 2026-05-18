@@ -1583,9 +1583,15 @@ def _render_entries(thread: Any) -> Iterator[dict[str, Any]]:
                 if intermediate:
                     yield _make_intermediate_entry(intermediate)
                     intermediate = []
-                yield _finalize_agent_entry(
-                    {"kind": "agent", "text": item.text, "timestamp": timestamp}
-                )
+                agent_entry: dict[str, Any] = {
+                    "kind": "agent",
+                    "text": item.text,
+                    "timestamp": timestamp,
+                }
+                memory_citation = _memory_citation_from_item(item)
+                if memory_citation is not None:
+                    agent_entry["memory_citation"] = memory_citation
+                yield _finalize_agent_entry(agent_entry)
             elif item.type == "userMessage":
                 if intermediate:
                     yield _make_intermediate_entry(intermediate)
@@ -1596,9 +1602,15 @@ def _render_entries(thread: Any) -> Iterator[dict[str, Any]]:
                     "timestamp": timestamp,
                 }
             elif item.type == "agentMessage":
-                intermediate.append(
-                    {"kind": "thinking", "text": item.text, "timestamp": timestamp}
-                )
+                thinking_entry: dict[str, Any] = {
+                    "kind": "thinking",
+                    "text": item.text,
+                    "timestamp": timestamp,
+                }
+                memory_citation = _memory_citation_from_item(item)
+                if memory_citation is not None:
+                    thinking_entry["memory_citation"] = memory_citation
+                intermediate.append(thinking_entry)
             elif item.type == "plan":
                 if intermediate:
                     yield _make_intermediate_entry(intermediate)
@@ -1650,6 +1662,68 @@ def _phase_value(item: Any) -> str | None:
         return phase
     value = getattr(phase, "value", None)
     return value if isinstance(value, str) else None
+
+
+def _memory_citation_from_item(item: Any) -> dict[str, Any] | None:
+    value = _value_for(item, "memory_citation")
+    if value is None:
+        value = _value_for(item, "memoryCitation")
+    if value is None:
+        return None
+
+    entries: list[dict[str, Any]] = []
+    for raw_entry in _sequence_value(_value_for(value, "entries")):
+        path = _string_value(_value_for(raw_entry, "path"))
+        line_start = _int_value(_value_for(raw_entry, "line_start"))
+        if line_start == 0:
+            line_start = _int_value(_value_for(raw_entry, "lineStart"))
+        line_end = _int_value(_value_for(raw_entry, "line_end"))
+        if line_end == 0:
+            line_end = _int_value(_value_for(raw_entry, "lineEnd"))
+        if not path or line_start == 0 or line_end == 0:
+            continue
+        entries.append(
+            {
+                "path": path,
+                "line_start": line_start,
+                "line_end": line_end,
+                "note": _string_value(_value_for(raw_entry, "note")),
+            }
+        )
+
+    thread_ids = [
+        thread_id
+        for raw_id in _sequence_value(
+            _value_for(value, "thread_ids") or _value_for(value, "threadIds")
+        )
+        if (thread_id := _string_value(raw_id))
+    ]
+    count = len(entries) if entries else len(thread_ids)
+    if count == 0:
+        return None
+    return {"count": count, "entries": entries, "thread_ids": thread_ids}
+
+
+def _value_for(value: Any, key: str) -> Any:
+    if isinstance(value, dict):
+        return value.get(key)
+    return getattr(value, key, None)
+
+
+def _sequence_value(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return []
+
+
+def _int_value(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value
+    return 0
 
 
 def _make_tool_call_entry(item: Any, timestamp: Any) -> dict[str, Any]:

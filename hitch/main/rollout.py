@@ -117,6 +117,11 @@ def _coerce_int(value: Any) -> int:
 Entry = dict[str, Any]
 EntryResult = Entry | list[Entry] | None
 AgentDedupeKey = tuple[str, str]
+MemoryCitation = dict[str, Any]
+MemoryCitationsByKey = dict[int, dict[AgentDedupeKey, list[MemoryCitation]]]
+
+_MEMORY_CITATION_OPEN_TAG = "<oai-mem-citation>"
+_MEMORY_CITATION_CLOSE_TAG = "</oai-mem-citation>"
 
 
 def _entries_from_text(text: str, rollout_path: Path) -> Iterator[dict[str, Any]]:
@@ -144,15 +149,18 @@ def _entries_from_text(text: str, rollout_path: Path) -> Iterator[dict[str, Any]
             outputs[call_id] = payload
 
     represented_agent_texts_by_turn = _represented_agent_texts_by_turn(lines)
+    memory_citations_by_turn_text = _memory_citations_by_turn_text(lines)
     completed_plan_texts_by_turn = _completed_plan_texts_by_turn(lines)
     plan_mode_turns = _plan_mode_turns(lines)
     for turn_idx, entry in _lines_with_turn_indices(lines):
         represented_agent_texts = represented_agent_texts_by_turn.get(turn_idx, Counter())
+        memory_citations_by_text = memory_citations_by_turn_text.get(turn_idx, {})
         completed_plan_texts = completed_plan_texts_by_turn.get(turn_idx, set())
         result = _entry_for_rollout_line(
             entry,
             outputs,
             represented_agent_texts,
+            memory_citations_by_text,
             completed_plan_texts,
             turn_idx in plan_mode_turns,
         )
@@ -166,6 +174,7 @@ def _entry_for_rollout_line(
     line: dict[str, Any],
     outputs: dict[str, dict[str, Any]],
     represented_agent_texts: Counter[AgentDedupeKey],
+    memory_citations_by_text: dict[AgentDedupeKey, list[MemoryCitation]],
     completed_plan_texts: set[str],
     is_plan_mode_turn: bool,
 ) -> EntryResult:
@@ -174,7 +183,7 @@ def _entry_for_rollout_line(
     timestamp = _iso_to_unix_seconds(line.get("timestamp"))
 
     if line_type == "event_msg":
-        return _entry_from_event(payload, timestamp)
+        return _entry_from_event(payload, timestamp, memory_citations_by_text)
     if line_type == "response_item":
         return _entry_from_response_item(
             payload,
@@ -187,7 +196,11 @@ def _entry_for_rollout_line(
     return None
 
 
-def _entry_from_event(payload: dict[str, Any], timestamp: int | None) -> dict[str, Any] | None:
+def _entry_from_event(
+    payload: dict[str, Any],
+    timestamp: int | None,
+    memory_citations_by_text: dict[AgentDedupeKey, list[MemoryCitation]],
+) -> dict[str, Any] | None:
     event_type = payload.get("type")
     if event_type == "user_message":
         return {
@@ -199,16 +212,27 @@ def _entry_from_event(payload: dict[str, Any], timestamp: int | None) -> dict[st
         text = payload.get("message")
         if not isinstance(text, str) or not text:
             return None
+        text, event_memory_citation = _strip_memory_citations(text)
+        text = text.strip()
+        if not text:
+            return None
         # `phase` is preserved so the view layer can pick the turn's final
         # agent reply with the same `MessagePhase` semantics as the SDK
         # (final_answer wins, commentary never wins, unset is eligible).
         phase = payload.get("phase")
-        return {
+        entry: dict[str, Any] = {
             "kind": "agent",
             "text": text,
             "timestamp": timestamp,
             "phase": phase if isinstance(phase, str) else None,
         }
+        citation = _pop_memory_citation(
+            memory_citations_by_text, _agent_dedupe_key(text, payload)
+        )
+        if citation is not None or event_memory_citation is not None:
+            citation = citation or event_memory_citation
+            entry["memory_citation"] = citation
+        return entry
     if event_type == "item_completed":
         return _plan_entry_from_completed_item(payload, timestamp)
     if event_type == "patch_apply_end":
@@ -369,6 +393,7 @@ def _represented_agent_texts_by_turn(
         text = payload.get("message")
         if not isinstance(text, str):
             continue
+        text, _ = _strip_memory_citations(text)
         text = text.strip()
         if text:
             by_turn.setdefault(turn_idx, Counter())[_agent_dedupe_key(text, payload)] += 1
@@ -389,6 +414,28 @@ def _completed_plan_texts_by_turn(lines: list[dict[str, Any]]) -> dict[int, set[
     return by_turn
 
 
+def _memory_citations_by_turn_text(lines: list[dict[str, Any]]) -> MemoryCitationsByKey:
+    by_turn: MemoryCitationsByKey = {}
+    for turn_idx, entry in _lines_with_turn_indices(lines):
+        if entry.get("type") != "response_item":
+            continue
+        payload = entry.get("payload") or {}
+        if payload.get("type") != "message" or payload.get("role") != "assistant":
+            continue
+        raw_text = _response_message_text(payload.get("content"))
+        if not raw_text:
+            continue
+        stripped_text, citation = _strip_memory_citations(raw_text)
+        if citation is None:
+            continue
+        text = _response_agent_text(stripped_text, set())
+        if not text:
+            continue
+        key = _agent_dedupe_key(text, payload)
+        by_turn.setdefault(turn_idx, {}).setdefault(key, []).append(citation)
+    return by_turn
+
+
 def _agent_entry_from_response_message(
     payload: dict[str, Any],
     timestamp: int | None,
@@ -401,14 +448,15 @@ def _agent_entry_from_response_message(
     raw_text = _response_message_text(payload.get("content"))
     if not raw_text:
         return None
-    plan_text = _proposed_plan_text(raw_text.strip())
+    stripped_text, memory_citation = _strip_memory_citations(raw_text)
+    plan_text = _proposed_plan_text(stripped_text.strip())
     if (
         is_plan_mode_turn
         and plan_text is not None
         and plan_text not in completed_plan_texts
     ):
         return {"kind": "plan", "text": plan_text, "timestamp": timestamp}
-    text = _response_agent_text(raw_text, completed_plan_texts)
+    text = _response_agent_text(stripped_text, completed_plan_texts)
     if not text:
         return None
     key = _agent_dedupe_key(text, payload)
@@ -416,12 +464,28 @@ def _agent_entry_from_response_message(
         represented_agent_texts[key] -= 1
         return None
     phase = payload.get("phase")
-    return {
+    entry: dict[str, Any] = {
         "kind": "agent",
         "text": text,
         "timestamp": timestamp,
         "phase": phase if isinstance(phase, str) else None,
     }
+    if memory_citation is not None:
+        entry["memory_citation"] = memory_citation
+    return entry
+
+
+def _pop_memory_citation(
+    memory_citations_by_text: dict[AgentDedupeKey, list[MemoryCitation]],
+    key: AgentDedupeKey,
+) -> MemoryCitation | None:
+    citations = memory_citations_by_text.get(key)
+    if not citations:
+        return None
+    citation = citations.pop(0)
+    if not citations:
+        del memory_citations_by_text[key]
+    return citation
 
 
 def _response_message_text(content: Any) -> str:
@@ -443,6 +507,95 @@ def _response_agent_text(text: str, completed_plan_texts: set[str]) -> str:
     if plan_text in completed_plan_texts:
         return ""
     return text
+
+
+def _strip_memory_citations(text: str) -> tuple[str, MemoryCitation | None]:
+    parts: list[str] = []
+    citations: list[str] = []
+    cursor = 0
+    while True:
+        start = text.find(_MEMORY_CITATION_OPEN_TAG, cursor)
+        if start == -1:
+            parts.append(text[cursor:])
+            break
+        parts.append(text[cursor:start])
+        body_start = start + len(_MEMORY_CITATION_OPEN_TAG)
+        end = text.find(_MEMORY_CITATION_CLOSE_TAG, body_start)
+        if end == -1:
+            citations.append(text[body_start:])
+            cursor = len(text)
+            break
+        citations.append(text[body_start:end])
+        cursor = end + len(_MEMORY_CITATION_CLOSE_TAG)
+    return "".join(parts), _memory_citation_from_bodies(citations)
+
+
+def _memory_citation_from_bodies(citations: list[str]) -> MemoryCitation | None:
+    entries: list[dict[str, Any]] = []
+    thread_ids: list[str] = []
+    seen_thread_ids: set[str] = set()
+    for citation in citations:
+        entries_block = _extract_memory_block(
+            citation, "<citation_entries>", "</citation_entries>"
+        )
+        if entries_block is not None:
+            entries.extend(
+                entry
+                for line in entries_block.splitlines()
+                if (entry := _parse_memory_citation_entry(line)) is not None
+            )
+        ids_block = _extract_ids_block(citation)
+        if ids_block is None:
+            continue
+        for thread_id in (line.strip() for line in ids_block.splitlines()):
+            if thread_id and thread_id not in seen_thread_ids:
+                seen_thread_ids.add(thread_id)
+                thread_ids.append(thread_id)
+
+    if not entries and not thread_ids:
+        return None
+    return {
+        "count": len(entries) if entries else len(thread_ids),
+        "entries": entries,
+        "thread_ids": thread_ids,
+    }
+
+
+def _parse_memory_citation_entry(line: str) -> dict[str, Any] | None:
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        location, note = line.rsplit("|note=[", 1)
+        if not note.endswith("]"):
+            return None
+        note = note[:-1].strip()
+        path, line_range = location.rsplit(":", 1)
+        line_start, line_end = line_range.split("-", 1)
+        return {
+            "path": path.strip(),
+            "line_start": int(line_start.strip()),
+            "line_end": int(line_end.strip()),
+            "note": note,
+        }
+    except (ValueError, TypeError):
+        return None
+
+
+def _extract_ids_block(text: str) -> str | None:
+    rollout_ids = _extract_memory_block(text, "<rollout_ids>", "</rollout_ids>")
+    if rollout_ids is not None:
+        return rollout_ids
+    return _extract_memory_block(text, "<thread_ids>", "</thread_ids>")
+
+
+def _extract_memory_block(text: str, open_tag: str, close_tag: str) -> str | None:
+    try:
+        _, rest = text.split(open_tag, 1)
+        body, _ = rest.split(close_tag, 1)
+    except ValueError:
+        return None
+    return body
 
 
 def _proposed_plan_text(text: str) -> str | None:
