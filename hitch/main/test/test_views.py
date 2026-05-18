@@ -29,7 +29,10 @@ _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _MODEL_COOKIE = "hitch_model"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
-_PR_PROMPT = "Do a thorough review of the diff. Clean it up, and then open a PR"
+_PR_PROMPT = (
+    "Do a thorough review of the diff. Rebase on master, clean it up, "
+    "and then open a PR"
+)
 
 
 def _setup_codex(

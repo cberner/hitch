@@ -1972,7 +1972,7 @@
                     : [];
                 const composerKeyboardOffsetProperty = "--composer-keyboard-offset";
                 const mobileComposerQuery = window.matchMedia("(max-width: 640px)");
-                const prPrompt = "Do a thorough review of the diff. Clean it up, and then open a PR";
+                const prPrompt = "{{ pr_slash_prompt|escapejs }}";
                 let composerKeyboardFrame = 0;
                 const sync = () => {
                     input.style.height = "auto";

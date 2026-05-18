@@ -142,7 +142,10 @@ _NAME_MAX_LEN = 200
 _MAX_BIGAUTOFIELD = 2**63 - 1
 _PLAN_SLASH_COMMAND = "/plan"
 _PR_SLASH_COMMAND = "/pr"
-_PR_SLASH_PROMPT = "Do a thorough review of the diff. Clean it up, and then open a PR"
+_PR_SLASH_PROMPT = (
+    "Do a thorough review of the diff. Rebase on master, clean it up, "
+    "and then open a PR"
+)
 _PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium.value
 _DEFAULT_COLLABORATION_MODE = "default"
 
@@ -241,6 +244,7 @@ def index(request: HttpRequest) -> HttpResponse:
             "current_use_worktrees": current_use_worktrees,
             "current_show_archived_sessions": current_show_archived_sessions,
             "name_max_len": _NAME_MAX_LEN,
+            "pr_slash_prompt": _PR_SLASH_PROMPT,
             "rate_limits": rate_limits,
         },
     )
@@ -321,6 +325,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             "pending_user_prompt": _pending_user_prompt(active_instance),
             "token_usage": token_usage,
             "next_message_config": _next_message_config(settings, resumed, plan_model),
+            "pr_slash_prompt": _PR_SLASH_PROMPT,
             "goal_objective": goal_objective,
             "diff_view": diff_view,
         },
