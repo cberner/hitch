@@ -1376,7 +1376,7 @@
             const newSessionSlashTrigger = newSessionForm && newSessionForm.querySelector("[data-slash-trigger]");
             const newSessionSlashMenu = newSessionForm && newSessionForm.querySelector("[data-slash-menu]");
             const newSessionSlashPlan = newSessionForm && newSessionForm.querySelector("[data-slash-plan]");
-            const prPrompt = "Do a thorough review of the diff. Clean it up, and then open a PR";
+            const prPrompt = "{{ pr_slash_prompt|escapejs }}";
             function isSuperEnter(event) {
                 const hasSuper = event.metaKey
                     || (event.getModifierState && event.getModifierState("Meta"))

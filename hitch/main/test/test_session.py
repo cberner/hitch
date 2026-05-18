@@ -1579,7 +1579,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "data-slash-pr")
         self.assertContains(
             response,
-            "Do a thorough review of the diff. Clean it up, and then open a PR",
+            "Do a thorough review of the diff. Rebase on master, clean it up, and then open a PR",
         )
         self.assertContains(response, "syncNextMessageConfig")
         self.assertContains(response, 'parsePlanCommand() !== null')
