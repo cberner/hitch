@@ -38,4 +38,29 @@ intermediate block, so the per-item layout stays identical in both contexts.
         {% if entry.rationale %}<div class="approval-reason">{{ entry.rationale }}</div>{% endif %}
     </div>
 </div>
+{% elif entry.kind == "plan" %}
+<div class="entry">
+    <div class="plan-card">
+        <div class="plan-header">
+            <span>Plan</span>
+            {% if entry.timestamp %}
+            <time data-ts="{{ entry.timestamp }}" data-format="time">{{ entry.timestamp }}</time>
+            {% endif %}
+        </div>
+        <div class="plan-text">{{ entry.text }}</div>
+        {% if send_message_url and not active_worker %}
+        <div class="plan-actions">
+            <form method="post" action="{{ send_message_url }}">
+                {% csrf_token %}
+                <button type="submit" name="prompt" value="Proceed with this plan.">Approve plan</button>
+            </form>
+            <form method="post" action="{{ send_message_url }}">
+                {% csrf_token %}
+                <input type="hidden" name="plan_mode" value="true">
+                <button type="submit" name="prompt" value="Revise the plan.">Revise</button>
+            </form>
+        </div>
+        {% endif %}
+    </div>
+</div>
 {% endif %}

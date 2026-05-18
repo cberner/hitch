@@ -5,12 +5,12 @@ runs exactly one turn for a Codex thread and then exits. The row outlives the
 Django process that spawned it so the running turn can be reconciled (status,
 events file location) after a server restart.
 
-ApprovalRequest is the cross-process handoff for interactive
-``commandExecution`` / ``fileChange`` approvals: the worker creates a
-pending row when codex's app-server escalates an action, the Django view
-records the user's pick on a POST, and the worker's polling loop picks
-the decision up and answers the JSON-RPC request. The row outlives both
-sides so the SSE stream and the request handler can race freely without
+ApprovalRequest and UserInputRequest are the cross-process handoffs for
+interactive browser prompts: the worker creates a pending row when codex's
+app-server asks the client for a decision or structured user input, the
+Django view records the user's pick on a POST, and the worker's polling loop
+picks the answer up and responds to the JSON-RPC request. The rows outlive
+both sides so the SSE stream and the request handler can race freely without
 losing the answer.
 """
 
@@ -145,6 +145,40 @@ class ApprovalRequest(models.Model):
     @classmethod
     def normalize_decision(cls, decision: str) -> str:
         return cls.LEGACY_DECISION_ALIASES.get(decision, decision)
+
+
+class UserInputRequest(models.Model):
+    """One row per app-server ``request_user_input`` prompt.
+
+    Plan-mode turns can ask the client to collect structured answers from the
+    human before continuing. The SDK delivers that as a synchronous
+    server-to-client JSON-RPC request, so the worker needs the same durable
+    browser handoff pattern used by approvals: write a pending row, emit an
+    SSE event, block until the browser records a JSON response, then return it
+    to app-server.
+    """
+
+    instance = models.ForeignKey(
+        CodexInstance, on_delete=models.CASCADE, related_name="input_requests"
+    )
+    method = models.CharField(max_length=128)
+    params = models.JSONField(default=dict, blank=True)
+    response = models.JSONField(default=None, blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    responded_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["instance", "-created_at"]),
+        ]
+
+    @override
+    def __str__(self) -> str:
+        state = "answered" if self.response is not None else "pending"
+        return (
+            f"UserInputRequest(pk={self.pk}, instance={self.instance_id}, "
+            f"method={self.method}, state={state})"
+        )
 
 
 class UserSettings(models.Model):

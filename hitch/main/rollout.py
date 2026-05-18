@@ -145,6 +145,7 @@ def _entries_from_text(text: str, rollout_path: Path) -> Iterator[dict[str, Any]
 
     represented_agent_texts_by_turn = _represented_agent_texts_by_turn(lines)
     completed_plan_texts_by_turn = _completed_plan_texts_by_turn(lines)
+    plan_mode_turns = _plan_mode_turns(lines)
     for turn_idx, entry in _lines_with_turn_indices(lines):
         represented_agent_texts = represented_agent_texts_by_turn.get(turn_idx, Counter())
         completed_plan_texts = completed_plan_texts_by_turn.get(turn_idx, set())
@@ -153,6 +154,7 @@ def _entries_from_text(text: str, rollout_path: Path) -> Iterator[dict[str, Any]
             outputs,
             represented_agent_texts,
             completed_plan_texts,
+            turn_idx in plan_mode_turns,
         )
         if isinstance(result, list):
             yield from result
@@ -165,6 +167,7 @@ def _entry_for_rollout_line(
     outputs: dict[str, dict[str, Any]],
     represented_agent_texts: Counter[AgentDedupeKey],
     completed_plan_texts: set[str],
+    is_plan_mode_turn: bool,
 ) -> EntryResult:
     line_type = line.get("type")
     payload = line.get("payload") or {}
@@ -179,6 +182,7 @@ def _entry_for_rollout_line(
             outputs,
             represented_agent_texts,
             completed_plan_texts,
+            is_plan_mode_turn,
         )
     return None
 
@@ -205,6 +209,8 @@ def _entry_from_event(payload: dict[str, Any], timestamp: int | None) -> dict[st
             "timestamp": timestamp,
             "phase": phase if isinstance(phase, str) else None,
         }
+    if event_type == "item_completed":
+        return _plan_entry_from_completed_item(payload, timestamp)
     if event_type == "patch_apply_end":
         changes = payload.get("changes") or {}
         return _tool_call(
@@ -258,6 +264,7 @@ def _entry_from_response_item(
     outputs: dict[str, dict[str, Any]],
     represented_agent_texts: Counter[AgentDedupeKey],
     completed_plan_texts: set[str],
+    is_plan_mode_turn: bool,
 ) -> EntryResult:
     item_type = payload.get("type")
     if item_type == "message":
@@ -266,6 +273,7 @@ def _entry_from_response_item(
             timestamp,
             represented_agent_texts,
             completed_plan_texts,
+            is_plan_mode_turn,
         )
     if item_type == "function_call":
         name = payload.get("name") or ""
@@ -320,6 +328,34 @@ def _is_user_message_line(entry: dict[str, Any]) -> bool:
     return payload.get("type") == "user_message"
 
 
+def _plan_mode_turns(lines: list[dict[str, Any]]) -> set[int]:
+    plan_turns: set[int] = set()
+    pending_plan_mode = False
+    turn_idx = 0
+    started = False
+    for entry in lines:
+        if entry.get("type") == "turn_context":
+            pending_plan_mode = _turn_context_is_plan(entry)
+            continue
+        if not _is_user_message_line(entry):
+            continue
+        if started:
+            turn_idx += 1
+        started = True
+        if pending_plan_mode:
+            plan_turns.add(turn_idx)
+        pending_plan_mode = False
+    return plan_turns
+
+
+def _turn_context_is_plan(entry: dict[str, Any]) -> bool:
+    payload = entry.get("payload") or {}
+    mode_data = payload.get("collaboration_mode") or payload.get("collaborationMode")
+    if not isinstance(mode_data, dict):
+        return False
+    return mode_data.get("mode") == "plan"
+
+
 def _represented_agent_texts_by_turn(
     lines: list[dict[str, Any]],
 ) -> dict[int, Counter[AgentDedupeKey]]:
@@ -347,15 +383,9 @@ def _completed_plan_texts_by_turn(lines: list[dict[str, Any]]) -> dict[int, set[
         payload = entry.get("payload") or {}
         if payload.get("type") != "item_completed":
             continue
-        item = payload.get("item")
-        if not isinstance(item, dict):
-            continue
-        item_type = item.get("type")
-        text = item.get("text")
-        if not isinstance(item_type, str) or item_type.lower() != "plan":
-            continue
-        if isinstance(text, str) and text.strip():
-            by_turn.setdefault(turn_idx, set()).add(text.strip())
+        plan_text = _completed_plan_text(payload)
+        if plan_text is not None:
+            by_turn.setdefault(turn_idx, set()).add(plan_text)
     return by_turn
 
 
@@ -364,13 +394,21 @@ def _agent_entry_from_response_message(
     timestamp: int | None,
     represented_agent_texts: Counter[AgentDedupeKey],
     completed_plan_texts: set[str],
+    is_plan_mode_turn: bool,
 ) -> dict[str, Any] | None:
     if payload.get("role") != "assistant":
         return None
-    text = _response_message_text(payload.get("content"))
-    if not text:
+    raw_text = _response_message_text(payload.get("content"))
+    if not raw_text:
         return None
-    text = _response_agent_text(text, completed_plan_texts)
+    plan_text = _proposed_plan_text(raw_text.strip())
+    if (
+        is_plan_mode_turn
+        and plan_text is not None
+        and plan_text not in completed_plan_texts
+    ):
+        return {"kind": "plan", "text": plan_text, "timestamp": timestamp}
+    text = _response_agent_text(raw_text, completed_plan_texts)
     if not text:
         return None
     key = _agent_dedupe_key(text, payload)
@@ -403,7 +441,7 @@ def _response_agent_text(text: str, completed_plan_texts: set[str]) -> str:
     text = text.strip()
     plan_text = _proposed_plan_text(text)
     if plan_text in completed_plan_texts:
-        return plan_text
+        return ""
     return text
 
 
@@ -413,6 +451,33 @@ def _proposed_plan_text(text: str) -> str | None:
     if text.startswith(open_tag) and text.endswith(close_tag):
         return text[len(open_tag) : -len(close_tag)].strip()
     return None
+
+
+def _plan_entry_from_completed_item(
+    payload: dict[str, Any], timestamp: int | None
+) -> dict[str, Any] | None:
+    text = _completed_plan_text(payload)
+    if text is None:
+        return None
+    return {
+        "kind": "plan",
+        "text": text,
+        "timestamp": timestamp,
+    }
+
+
+def _completed_plan_text(payload: dict[str, Any]) -> str | None:
+    item = payload.get("item")
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    if not isinstance(item_type, str) or item_type.lower() != "plan":
+        return None
+    text = item.get("text")
+    if not isinstance(text, str):
+        return None
+    text = text.strip()
+    return text or None
 
 
 def _agent_dedupe_key(text: str, payload: dict[str, Any]) -> AgentDedupeKey:

@@ -51,7 +51,7 @@ from hitch.main.management.commands.codex_worker import (
     _serialize_event,
     _start_goal_event_forwarder,
 )
-from hitch.main.models import ApprovalRequest, CodexInstance
+from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
 
 
 def _events_dir() -> tempfile.TemporaryDirectory[str]:
@@ -2208,6 +2208,87 @@ class ApprovalHandlerTests(TestCase):
                     methods_to_payload["approval/resolved"]["decision"], "accept"
                 )
 
+    def test_handler_creates_user_input_row_and_emits_events(self) -> None:
+        """Plan-mode ``request_user_input`` calls use the same durable
+        browser handoff shape as approvals, even in ``approve_all`` mode:
+        there is no safe response to rubber-stamp because the request asks
+        for structured human input."""
+
+        def _recorder(
+            events: list[tuple[str, dict[str, Any]]],
+        ) -> Callable[[str, Any], None]:
+            def _record(method: str, payload: Any) -> None:
+                assert isinstance(payload, dict)
+                events.append((method, payload))
+
+            return _record
+
+        params = {
+            "questions": [
+                {
+                    "id": "trigger_surface",
+                    "header": "Trigger",
+                    "question": "How should the loop start?",
+                    "options": [{"label": "Management command"}],
+                }
+            ]
+        }
+        response = {"answers": {"trigger_surface": "Management command"}}
+        for approval_mode in ("auto_review", "approve_all"):
+            for request_method in (
+                "request_user_input",
+                "requestUserInput",
+                "item/tool/requestUserInput",
+            ):
+                with self.subTest(
+                    approval_mode=approval_mode,
+                    request_method=request_method,
+                ):
+                    instance = self._make_instance()
+                    events: list[tuple[str, dict[str, Any]]] = []
+                    handler = _make_approval_handler(
+                        instance=instance,
+                        write_event=_recorder(events),
+                        approval_mode=approval_mode,
+                    )
+
+                    with patch(
+                        "hitch.main.management.commands.codex_worker."
+                        "_wait_for_user_input_response",
+                        return_value=response,
+                    ):
+                        result = handler(request_method, params)
+
+                    self.assertEqual(result, response)
+                    row = UserInputRequest.objects.get(instance=instance)
+                    self.assertEqual(row.method, request_method)
+                    self.assertEqual(row.params, params)
+                    methods_to_payload = {m: p for m, p in events}
+                    self.assertIn("input/requested", methods_to_payload)
+                    self.assertIn("input/resolved", methods_to_payload)
+                    self.assertEqual(
+                        methods_to_payload["input/requested"]["id"], row.pk
+                    )
+                    self.assertEqual(
+                        methods_to_payload["input/requested"]["method"], row.method
+                    )
+                    self.assertEqual(
+                        methods_to_payload["input/resolved"]["response"], response
+                    )
+
+    def test_handler_ignores_unrelated_request_user_input_substrings(self) -> None:
+        instance = self._make_instance()
+        events: list[tuple[str, object]] = []
+        handler = _make_approval_handler(
+            instance=instance,
+            write_event=lambda m, p: events.append((m, p)),
+            approval_mode="auto_review",
+        )
+
+        self.assertEqual(handler("custom/requestUserInputExtra", {}), {})
+        self.assertFalse(UserInputRequest.objects.exists())
+        self.assertEqual(events, [])
+
     @patch(
         "hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001
     )
@@ -2322,6 +2403,51 @@ class ApprovalHandlerTests(TestCase):
             self.assertEqual(_wait_for_decision(approval.pk), "accept")
         approval.refresh_from_db()
         self.assertEqual(approval.decision, "accept")
+
+    @patch(
+        "hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001
+    )
+    def test_wait_for_user_input_response_returns_recorded_response(self) -> None:
+        from hitch.main.management.commands.codex_worker import (
+            _wait_for_user_input_response,
+        )
+
+        input_request = UserInputRequest.objects.create(
+            instance=self._make_instance(),
+            method="request_user_input",
+            params={},
+            response={"answers": {"scope": "UI"}},
+        )
+
+        self.assertEqual(
+            _wait_for_user_input_response(input_request.pk),
+            {"answers": {"scope": "UI"}},
+        )
+
+    @patch(
+        "hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001
+    )
+    @patch(
+        "hitch.main.management.commands.codex_worker._APPROVAL_WAIT_SECONDS", 0.02
+    )
+    def test_wait_for_user_input_response_defaults_to_empty_on_timeout(self) -> None:
+        from hitch.main.management.commands.codex_worker import (
+            _wait_for_user_input_response,
+        )
+
+        input_request = UserInputRequest.objects.create(
+            instance=self._make_instance(),
+            method="request_user_input",
+            params={},
+        )
+
+        self.assertEqual(
+            _wait_for_user_input_response(input_request.pk),
+            {"answers": {}},
+        )
+        input_request.refresh_from_db()
+        self.assertEqual(input_request.response, {"answers": {}})
+        self.assertIsNotNone(input_request.responded_at)
 
     def test_interactive_handler_ignores_unknown_methods(self) -> None:
         """Approval methods we don't recognise (future SDK additions) must

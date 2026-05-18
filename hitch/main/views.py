@@ -1,5 +1,6 @@
 import base64
 import binascii
+import json
 import logging
 import shutil
 from collections.abc import Iterator
@@ -31,7 +32,12 @@ from openai_codex.generated.v2_all import (
 from hitch.main import codex_events, codex_pool, rollout, streaming
 from hitch.main.diffs import build_worktree_diff
 from hitch.main.formatting import looks_like_markdown, render_markdown
-from hitch.main.models import ApprovalRequest, CodexInstance, UserSettings
+from hitch.main.models import (
+    ApprovalRequest,
+    CodexInstance,
+    UserInputRequest,
+    UserSettings,
+)
 from hitch.main.repos import discover_repos
 from hitch.main.worktrees import (
     WorktreeCleanupError,
@@ -294,6 +300,9 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             # resolver authoritative even when the route changes.
             "approval_url_template": reverse(
                 "resolve_approval", kwargs={"approval_id": 0}
+            ),
+            "input_url_template": reverse(
+                "resolve_input_request", kwargs={"input_id": 0}
             ),
             "active_worker": active_instance is not None,
             # Carried into the Stop button so the click targets the
@@ -1336,6 +1345,40 @@ def resolve_approval(request: HttpRequest, approval_id: int) -> HttpResponse:
 
 
 @require_http_methods(["POST"])
+def resolve_input_request(request: HttpRequest, input_id: int) -> HttpResponse:
+    raw_answers = request.POST.get("answers", "").strip()
+    try:
+        parsed = json.loads(raw_answers) if raw_answers else {}
+    except json.JSONDecodeError:
+        return HttpResponseBadRequest("invalid answers")
+    if not isinstance(parsed, dict):
+        return HttpResponseBadRequest("invalid answers")
+    answers: dict[str, Any] = {}
+    for key, value in parsed.items():
+        if not isinstance(key, str):
+            return HttpResponseBadRequest("invalid answers")
+        key = key.strip()
+        if isinstance(value, str):
+            value = value.strip()
+        if key:
+            answers[key] = value
+    response: dict[str, Any] = {"answers": answers}
+    try:
+        input_request = UserInputRequest.objects.get(pk=input_id)
+    except UserInputRequest.DoesNotExist:
+        return HttpResponse("input request not found", status=404)
+    if input_request.response is not None:
+        return HttpResponse("input request already resolved", status=409)
+    updated = UserInputRequest.objects.filter(pk=input_id, response__isnull=True).update(
+        response=response,
+        responded_at=timezone.now(),
+    )
+    if not updated:
+        return HttpResponse("input request already resolved", status=409)
+    return HttpResponse(json.dumps(response), content_type="application/json")
+
+
+@require_http_methods(["POST"])
 def stop_session(request: HttpRequest, session_id: str) -> HttpResponse:
     """Interrupt the in-progress turn for ``session_id``.
 
@@ -1467,7 +1510,7 @@ def _emit_collapsed_turn(turn: list[dict[str, Any]]) -> Iterator[dict[str, Any]]
             yield entry
         elif entry["kind"] == "agent":
             intermediate.append({**_strip_phase(entry), "kind": "thinking"})
-        elif entry["kind"] == "approval_declined":
+        elif entry["kind"] in {"approval_declined", "plan"}:
             if intermediate:
                 yield _make_intermediate_entry(intermediate)
                 intermediate = []
@@ -1558,6 +1601,15 @@ def _render_entries(thread: Any) -> Iterator[dict[str, Any]]:
                 intermediate.append(
                     {"kind": "thinking", "text": item.text, "timestamp": timestamp}
                 )
+            elif item.type == "plan":
+                if intermediate:
+                    yield _make_intermediate_entry(intermediate)
+                    intermediate = []
+                yield {
+                    "kind": "plan",
+                    "text": getattr(item, "text", "") or "",
+                    "timestamp": timestamp,
+                }
             else:
                 intermediate.append(_make_tool_call_entry(item, timestamp))
 

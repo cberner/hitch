@@ -553,6 +553,33 @@
             overflow-wrap: anywhere;
             font-size: 0.9rem;
         }
+        .plan-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.45rem;
+        }
+        .plan-actions form { margin: 0; }
+        .plan-actions button {
+            font: inherit;
+            font-size: 0.8rem;
+            font-weight: 600;
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            background: var(--surface);
+            color: var(--text);
+            padding: 0.4rem 0.7rem;
+            cursor: pointer;
+        }
+        .plan-actions button:hover { background: var(--surface-2); }
+        .plan-actions form:first-child button {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: var(--accent-fg);
+        }
+        .plan-actions form:first-child button:hover {
+            background: var(--accent-hover);
+            border-color: var(--accent-hover);
+        }
 
         .approval {
             display: flex;
@@ -632,6 +659,106 @@
         .approval-resolution {
             font-size: 0.82rem;
             font-style: italic;
+        }
+        .input-request {
+            display: flex;
+            flex-direction: column;
+            gap: 0.7rem;
+            padding: 0.85rem 1rem;
+            background: var(--surface);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            box-shadow: var(--shadow);
+        }
+        .input-request-header {
+            font-size: 0.78rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            color: var(--text-muted);
+        }
+        .input-question {
+            display: flex;
+            flex-direction: column;
+            gap: 0.45rem;
+        }
+        .input-question-title {
+            color: var(--text);
+            font-size: 0.9rem;
+            font-weight: 600;
+        }
+        .input-question-header {
+            color: var(--text-faint);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-size: 0.66rem;
+            font-weight: 700;
+        }
+        .input-options,
+        .input-request-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.45rem;
+        }
+        .input-options {
+            align-items: stretch;
+        }
+        .input-options button,
+        .input-request-actions button {
+            font: inherit;
+            font-size: 0.8rem;
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            background: var(--surface);
+            color: var(--text);
+            padding: 0.4rem 0.65rem;
+            cursor: pointer;
+        }
+        .input-options button {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 0.15rem;
+            max-width: 18rem;
+            text-align: left;
+        }
+        .input-option-label {
+            font-weight: 600;
+        }
+        .input-option-description {
+            color: var(--text-muted);
+            font-size: 0.74rem;
+            line-height: 1.35;
+        }
+        .input-options button[aria-pressed="true"] {
+            background: var(--accent-soft);
+            border-color: var(--accent);
+            color: var(--text);
+        }
+        .input-other {
+            font: inherit;
+            font-size: 0.82rem;
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            background: var(--surface);
+            color: var(--text);
+            padding: 0.45rem 0.6rem;
+            min-width: min(100%, 14rem);
+        }
+        .input-other:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-soft);
+        }
+        .input-request-actions button[data-submit-input] {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: var(--accent-fg);
+            font-weight: 600;
+        }
+        .input-request.resolved {
+            border-color: var(--border);
+            background: var(--surface-2);
         }
 
         details.intermediate {
@@ -1420,7 +1547,8 @@
             {% if active_worker %}
             <div class="entry"
                  data-live-root
-                 data-approval-url-template="{{ approval_url_template }}"></div>
+                 data-approval-url-template="{{ approval_url_template }}"
+                 data-input-url-template="{{ input_url_template }}"></div>
             {% endif %}
         </section>
         {% else %}
@@ -2051,6 +2179,9 @@
             const APPROVAL_URL_TEMPLATE = liveRoot
                 ? liveRoot.dataset.approvalUrlTemplate || ""
                 : "";
+            const INPUT_URL_TEMPLATE = liveRoot
+                ? liveRoot.dataset.inputUrlTemplate || ""
+                : "";
             const empty = document.querySelector(".empty-thread");
             const jumpLatest = document.querySelector("[data-jump-latest]");
             const scrollRoot = document.scrollingElement || document.documentElement;
@@ -2147,6 +2278,7 @@
             // ``approval/resolved`` event can find and finalize the matching
             // node without re-rendering the whole turn.
             const approvals = new Map();
+            const inputRequests = new Map();
             let latestGoalOrder = [0, 0];
 
             const APPROVAL_LABELS = {
@@ -2312,9 +2444,17 @@
 
             function renderPlanItem(item, turnId) {
                 const view = ensurePlanView(turnId, item.id);
+                if (item.text) activateFinalPlanText(view);
                 view.textRaw = item.text || view.textRaw || "";
                 renderPlanText(view);
                 followRenderedContent();
+            }
+
+            function activateFinalPlanText(view) {
+                view.explanation.textContent = "";
+                view.explanation.hidden = true;
+                view.list.replaceChildren();
+                view.list.hidden = true;
             }
 
             function renderPlanText(view) {
@@ -2380,6 +2520,7 @@
                 const view = entry && entry.kind === "plan"
                     ? entry.view
                     : ensurePlanView(payload.turnId, itemId);
+                activateFinalPlanText(view);
                 view.textRaw += payload.delta || "";
                 renderPlanText(view);
                 followRenderedContent();
@@ -2407,6 +2548,7 @@
                     return;
                 }
                 if (entry.kind === "plan" && item.type === "plan") {
+                    activateFinalPlanText(entry.view);
                     entry.view.textRaw = item.text || entry.view.textRaw;
                     renderPlanText(entry.view);
                     followRenderedContent();
@@ -2522,6 +2664,110 @@
                 followRenderedContent();
             }
 
+            function handleInputRequested(payload) {
+                ensureNoEmpty();
+                const id = payload.id;
+                if (id == null || inputRequests.has(id)) return;
+                const params = payload.params || {};
+                const questions = Array.isArray(params.questions) ? params.questions : [];
+                const wrap = document.createElement("div");
+                wrap.className = "entry";
+                wrap.dataset.inputRequestId = String(id);
+                const box = document.createElement("div");
+                box.className = "input-request";
+                const header = document.createElement("div");
+                header.className = "input-request-header";
+                header.textContent = "Input requested";
+                box.appendChild(header);
+                const answers = {};
+                for (const question of questions) {
+                    const qid = typeof question.id === "string" ? question.id : "";
+                    if (!qid) continue;
+                    const qbox = document.createElement("div");
+                    qbox.className = "input-question";
+                    const qheader = document.createElement("div");
+                    qheader.className = "input-question-header";
+                    qheader.textContent = typeof question.header === "string" ? question.header : "";
+                    if (qheader.textContent) qbox.appendChild(qheader);
+                    const title = document.createElement("div");
+                    title.className = "input-question-title";
+                    title.textContent = typeof question.question === "string" ? question.question : qid;
+                    qbox.appendChild(title);
+                    const options = Array.isArray(question.options) ? question.options : [];
+                    const optionRow = document.createElement("div");
+                    optionRow.className = "input-options";
+                    const buttons = [];
+                    const setAnswer = (value, selected) => {
+                        answers[qid] = value;
+                        for (const btn of buttons) btn.setAttribute("aria-pressed", "false");
+                        if (selected) selected.setAttribute("aria-pressed", "true");
+                    };
+                    for (const option of options) {
+                        const label = typeof option.label === "string" ? option.label : "";
+                        if (!label) continue;
+                        const btn = document.createElement("button");
+                        btn.type = "button";
+                        btn.setAttribute("aria-pressed", "false");
+                        const labelNode = document.createElement("span");
+                        labelNode.className = "input-option-label";
+                        labelNode.textContent = label;
+                        btn.appendChild(labelNode);
+                        const description = typeof option.description === "string"
+                            ? option.description.trim()
+                            : "";
+                        if (description) {
+                            const descriptionNode = document.createElement("span");
+                            descriptionNode.className = "input-option-description";
+                            descriptionNode.textContent = description;
+                            btn.appendChild(descriptionNode);
+                        }
+                        btn.addEventListener("click", () => setAnswer(label, btn));
+                        optionRow.appendChild(btn);
+                        buttons.push(btn);
+                    }
+                    const other = document.createElement("input");
+                    other.type = "text";
+                    other.className = "input-other";
+                    other.placeholder = "Other";
+                    other.setAttribute("aria-label", "Other answer for " + qid);
+                    other.addEventListener("focus", () => setAnswer(other.value, null));
+                    other.addEventListener("input", () => setAnswer(other.value, null));
+                    optionRow.appendChild(other);
+                    if (buttons.length) {
+                        const firstLabel = buttons[0].querySelector(".input-option-label");
+                        setAnswer(firstLabel ? firstLabel.textContent || "" : "", buttons[0]);
+                    }
+                    qbox.appendChild(optionRow);
+                    box.appendChild(qbox);
+                }
+                const actions = document.createElement("div");
+                actions.className = "input-request-actions";
+                const submit = document.createElement("button");
+                submit.type = "button";
+                submit.dataset.submitInput = "true";
+                submit.textContent = "Submit";
+                submit.addEventListener("click", () => submitInputRequest(id));
+                actions.appendChild(submit);
+                const skip = document.createElement("button");
+                skip.type = "button";
+                skip.textContent = "Skip";
+                skip.addEventListener("click", () => {
+                    const entry = inputRequests.get(id);
+                    if (entry) {
+                        for (const key of Object.keys(entry.answers)) {
+                            delete entry.answers[key];
+                        }
+                    }
+                    submitInputRequest(id);
+                });
+                actions.appendChild(skip);
+                box.appendChild(actions);
+                wrap.appendChild(box);
+                insertBeforeLive(wrap);
+                inputRequests.set(id, { node: wrap, box, actions, answers, resolved: false });
+                followRenderedContent();
+            }
+
             function submitApproval(id, decision) {
                 const entry = approvals.get(id);
                 if (!entry) return;
@@ -2566,6 +2812,30 @@
                 });
             }
 
+            function submitInputRequest(id) {
+                const entry = inputRequests.get(id);
+                if (!entry || entry.resolved) return;
+                const controls = entry.box.querySelectorAll("button, input");
+                for (const btn of controls) btn.disabled = true;
+                const body = new URLSearchParams({ answers: JSON.stringify(entry.answers || {}) });
+                const url = INPUT_URL_TEMPLATE.replace(/\/0\/?$/, "/" + id + "/");
+                fetch(url, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "X-CSRFToken": csrfToken(),
+                    },
+                    body,
+                    credentials: "same-origin",
+                }).then((response) => {
+                    if (!response.ok && response.status !== 409) {
+                        for (const btn of controls) btn.disabled = false;
+                    }
+                }).catch(() => {
+                    for (const btn of controls) btn.disabled = false;
+                });
+            }
+
             function handleApprovalResolved(payload) {
                 const id = payload.id;
                 const entry = approvals.get(id);
@@ -2577,6 +2847,23 @@
                 const note = document.createElement("div");
                 note.className = "approval-resolution";
                 note.textContent = "Decision: " + (payload.decision || "decline");
+                entry.box.appendChild(note);
+                followRenderedContent();
+            }
+
+            function handleInputResolved(payload) {
+                const id = payload.id;
+                const entry = inputRequests.get(id);
+                if (!entry || entry.resolved) return;
+                entry.resolved = true;
+                entry.box.classList.add("resolved");
+                for (const control of entry.box.querySelectorAll("button, input")) {
+                    control.disabled = true;
+                }
+                if (entry.actions.parentNode) entry.actions.remove();
+                const note = document.createElement("div");
+                note.className = "approval-resolution";
+                note.textContent = "Answers submitted";
                 entry.box.appendChild(note);
                 followRenderedContent();
             }
@@ -2623,6 +2910,8 @@
                     case "turn/plan/updated": handlePlanUpdated(payload); break;
                     case "approval/requested": handleApprovalRequested(payload); break;
                     case "approval/resolved": handleApprovalResolved(payload); break;
+                    case "input/requested": handleInputRequested(payload); break;
+                    case "input/resolved": handleInputResolved(payload); break;
                 }
             }
 

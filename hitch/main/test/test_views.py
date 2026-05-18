@@ -18,7 +18,7 @@ from django.test import Client, TestCase
 from django.urls import reverse
 from openai_codex.errors import MethodNotFoundError
 
-from hitch.main.models import ApprovalRequest, CodexInstance
+from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
 from hitch.main.worktrees import (
     ManagedWorktree,
     WorktreeCleanupError,
@@ -1811,14 +1811,97 @@ class ResolveApprovalViewTests(TestCase):
         self.assertEqual(response.status_code, 405)
 
 
+class ResolveInputRequestViewTests(TestCase):
+    """The ``POST /input/<id>/`` endpoint records structured answers for
+    app-server ``request_user_input`` prompts.
+    """
+
+    def _make_input_request(
+        self, *, response: dict[str, object] | None = None
+    ) -> UserInputRequest:
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="thread-1",
+            cwd="/repo",
+            prompt="hi",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        return UserInputRequest.objects.create(
+            instance=instance,
+            method="request_user_input",
+            params={"questions": [{"id": "scope"}]},
+            response=response,
+        )
+
+    def test_records_answers_and_marks_responded_at(self) -> None:
+        input_request = self._make_input_request()
+
+        response = self.client.post(
+            reverse("resolve_input_request", kwargs={"input_id": input_request.pk}),
+            data={"answers": json.dumps({"scope": "Management command"})},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        input_request.refresh_from_db()
+        self.assertEqual(
+            input_request.response,
+            {"answers": {"scope": "Management command"}},
+        )
+        self.assertIsNotNone(input_request.responded_at)
+
+    def test_rejects_invalid_answers_payload(self) -> None:
+        input_request = self._make_input_request()
+
+        for answers in ("not-json", json.dumps(["not", "object"])):
+            with self.subTest(answers=answers):
+                response = self.client.post(
+                    reverse(
+                        "resolve_input_request", kwargs={"input_id": input_request.pk}
+                    ),
+                    data={"answers": answers},
+                )
+                self.assertEqual(response.status_code, 400)
+
+    def test_accepts_structured_answer_values(self) -> None:
+        input_request = self._make_input_request()
+        answers = {
+            "scope": ["UI", "CLI"],
+            "details": {"choice": "Other", "notes": ["keep history"]},
+            "confirmed": True,
+            "priority": 2,
+            "optional": None,
+        }
+
+        response = self.client.post(
+            reverse("resolve_input_request", kwargs={"input_id": input_request.pk}),
+            data={"answers": json.dumps(answers)},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        input_request.refresh_from_db()
+        self.assertEqual(input_request.response, {"answers": answers})
+
+    def test_returns_409_when_already_resolved(self) -> None:
+        input_request = self._make_input_request(response={"answers": {"scope": "UI"}})
+
+        response = self.client.post(
+            reverse("resolve_input_request", kwargs={"input_id": input_request.pk}),
+            data={"answers": json.dumps({"scope": "CLI"})},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        input_request.refresh_from_db()
+        self.assertEqual(input_request.response, {"answers": {"scope": "UI"}})
+
+
 class SessionViewApprovalContextTests(TestCase):
-    """The session detail view exposes a ``resolve_approval`` URL template
-    so the JS that handles SSE ``approval/requested`` events can POST
-    decisions back without hard-coding the route. Pin the template so a
-    URL refactor can't quietly break the streaming approval loop."""
+    """The session detail view exposes POST URL templates for live
+    browser prompts. Pin them so a URL refactor can't quietly break the
+    streaming approval or structured-input loops."""
 
     @patch("hitch.main.views.Codex")
-    def test_session_template_renders_approval_url_template(
+    def test_session_template_renders_prompt_url_templates(
         self, mock_codex: MagicMock
     ) -> None:
         ctx: MagicMock = mock_codex.return_value.__enter__.return_value
@@ -1856,5 +1939,11 @@ class SessionViewApprovalContextTests(TestCase):
             response,
             'data-approval-url-template="' + reverse(
                 "resolve_approval", kwargs={"approval_id": 0}
+            ),
+        )
+        self.assertContains(
+            response,
+            'data-input-url-template="' + reverse(
+                "resolve_input_request", kwargs={"input_id": 0}
             ),
         )
