@@ -525,7 +525,7 @@ class RolloutFileViewTests(TestCase):
         self.assertLess(body.index("Approval declined"), body.index("Please confirm explicitly."))
 
     @patch("hitch.main.views.Codex")
-    def test_plan_mode_rollout_renders_final_plan_from_response_item(
+    def test_plan_mode_rollout_renders_final_plan_card(
         self, mock_codex: MagicMock
     ) -> None:
         plan = "# Fix Login CSRF Redirect Failure\n\n## Summary\nRead the CSRF cookie at submit time."
@@ -600,10 +600,13 @@ class RolloutFileViewTests(TestCase):
         body = response.content.decode()
 
         self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'class="plan-card"')
         self.assertContains(response, "Fix Login CSRF Redirect Failure")
         self.assertContains(response, "Read the CSRF cookie at submit time.")
+        self.assertContains(response, "Approve plan")
+        self.assertContains(response, "Proceed with this plan.")
         self.assertNotContains(response, "&lt;proposed_plan&gt;")
-        self.assertNotContains(response, "Input requested")
+        self.assertNotContains(response, "request_user_input")
         self.assertNotContains(response, '<details class="intermediate">')
         self.assertIn("Debug the login CSRF issue", body)
 
@@ -1437,6 +1440,10 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, 'parsePlanCommand() !== null')
         self.assertContains(response, 'case "turn/plan/updated"')
         self.assertContains(response, 'case "item/plan/delta"')
+        self.assertContains(response, "activateFinalPlanText")
+        self.assertContains(response, "input-option-description")
+        self.assertContains(response, 'other.placeholder = "Other"')
+        self.assertContains(response, "delete entry.answers[key]")
 
     @patch("hitch.main.views.build_worktree_diff")
     @patch("hitch.main.views.Codex")

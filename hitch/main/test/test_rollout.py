@@ -445,7 +445,7 @@ class IterEntriesTests(TestCase):
 
         self.assertEqual([entry["text"] for entry in entries], ["first", "same", "same"])
 
-    def test_response_item_message_is_fallback_agent_text(self) -> None:
+    def test_completed_plan_item_suppresses_matching_proposed_plan_message(self) -> None:
         plan = "# Fix it\n\nDo the thing."
         path = self._make(
             [
@@ -476,8 +476,7 @@ class IterEntriesTests(TestCase):
         entries = list(rollout.iter_entries(path))
 
         self.assertEqual(len(entries), 1)
-        self.assertEqual(entries[0]["kind"], "agent")
-        self.assertEqual(entries[0]["phase"], "final_answer")
+        self.assertEqual(entries[0]["kind"], "plan")
         self.assertEqual(entries[0]["text"], plan)
 
     def test_response_item_dedup_preserves_final_answer_after_commentary(self) -> None:
@@ -558,6 +557,38 @@ class IterEntriesTests(TestCase):
 
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["text"], text)
+
+    def test_plan_mode_proposed_plan_without_completed_item_renders_plan(self) -> None:
+        plan = "# Fallback Plan\n\nUse the final proposed plan block."
+        path = self._make(
+            [
+                _line(
+                    "turn_context",
+                    {"collaboration_mode": {"mode": "plan"}},
+                ),
+                _line("event_msg", {"type": "user_message", "message": "Plan it"}),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": f"<proposed_plan>\n{plan}\n</proposed_plan>",
+                            }
+                        ],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[1]["kind"], "plan")
+        self.assertEqual(entries[1]["text"], plan)
 
     def test_malformed_agent_response_messages_are_ignored(self) -> None:
         path = self._make(

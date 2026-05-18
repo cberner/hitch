@@ -14,16 +14,14 @@ Invoked by ``codex_pool._launch_worker_process`` as a fresh-session Django
 The events file plus the status transitions on the row are the only output —
 stdout/stderr are redirected to /dev/null by the parent.
 
-Interactive approvals route through ``_make_approval_handler``: when the
-SDK reader thread receives an ``item/{commandExecution,fileChange}/
-requestApproval`` request, the handler creates an ``ApprovalRequest`` row,
-emits a synthetic ``approval/requested`` event into the events file (so
-the SSE stream surfaces it), and blocks on a short-poll loop until the
-Django view records a decision via ``POST /approval/<id>/``. The cap on
-that wait is intentionally generous (``_APPROVAL_WAIT_SECONDS``) so a
-user who steps away from the laptop doesn't lose the turn; on timeout the
-handler defaults to ``decline`` because that is the safest no-answer
-fallback (refuse the action, but let the agent keep running).
+Interactive browser prompts route through ``_make_approval_handler``: when
+the SDK reader thread receives an approval or ``request_user_input`` request,
+the handler creates a durable pending row, emits a synthetic event into the
+events file (so the SSE stream surfaces it), and blocks on a short-poll loop
+until the Django view records the browser response. The cap on that wait is
+intentionally generous (``_APPROVAL_WAIT_SECONDS``) so a user who steps away
+from the laptop doesn't lose the turn; on timeout approvals decline and
+structured input returns empty answers.
 """
 
 from __future__ import annotations
@@ -77,7 +75,7 @@ from pydantic import BaseModel
 
 from hitch.main.codex_events import GOAL_METHODS
 from hitch.main.codex_pool import control_path_for
-from hitch.main.models import ApprovalRequest, CodexInstance
+from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
 
 # JSON-RPC method names the SDK invokes on the client transport when codex's
 # auto-reviewer escalates an action. Custom user-reviewer worker modes also
@@ -87,6 +85,14 @@ _APPROVAL_METHODS = frozenset(
     {
         "item/commandExecution/requestApproval",
         "item/fileChange/requestApproval",
+    }
+)
+_USER_INPUT_METHODS = frozenset(
+    {
+        "request_user_input",
+        "requestUserInput",
+        "item/tool/request_user_input",
+        "item/tool/requestUserInput",
     }
 )
 
@@ -850,6 +856,13 @@ def _make_approval_handler(
         def _approve_all_handler(
             method: str, _params: dict[str, Any] | None
         ) -> dict[str, Any]:
+            if _is_user_input_request_method(method):
+                return _handle_user_input_request(
+                    instance=instance,
+                    write_event=write_event,
+                    method=method,
+                    params=_params or {},
+                )
             if method not in _APPROVAL_METHODS:
                 return {}
             return {"decision": ApprovalRequest.DECISION_ACCEPT}
@@ -859,6 +872,13 @@ def _make_approval_handler(
     def _interactive_handler(
         method: str, params: dict[str, Any] | None
     ) -> dict[str, Any]:
+        if _is_user_input_request_method(method):
+            return _handle_user_input_request(
+                instance=instance,
+                write_event=write_event,
+                method=method,
+                params=params or {},
+            )
         if method not in _APPROVAL_METHODS:
             return {}
         request_id = _create_pending_approval(
@@ -887,6 +907,42 @@ def _make_approval_handler(
     return _interactive_handler
 
 
+def _is_user_input_request_method(method: str) -> bool:
+    return (
+        method in _USER_INPUT_METHODS
+        or method.endswith("/requestUserInput")
+        or method.endswith("/request_user_input")
+    )
+
+
+def _handle_user_input_request(
+    *,
+    instance: CodexInstance,
+    write_event: WriteEvent,
+    method: str,
+    params: dict[str, Any],
+) -> dict[str, Any]:
+    request_id = _create_pending_user_input(
+        instance_id=instance.pk,
+        method=method,
+        params=params,
+    )
+    write_event(
+        "input/requested",
+        {
+            "id": request_id,
+            "method": method,
+            "params": params,
+        },
+    )
+    response = _wait_for_user_input_response(request_id)
+    write_event(
+        "input/resolved",
+        {"id": request_id, "method": method, "response": response},
+    )
+    return response
+
+
 def _create_pending_approval(
     *, instance_id: int, method: str, params: dict[str, Any]
 ) -> int:
@@ -904,6 +960,62 @@ def _create_pending_approval(
             instance_id=instance_id, method=method, params=params
         )
         return approval.pk
+    finally:
+        connection.close()
+
+
+def _create_pending_user_input(
+    *, instance_id: int, method: str, params: dict[str, Any]
+) -> int:
+    from django.db import connection
+
+    try:
+        input_request = UserInputRequest.objects.create(
+            instance_id=instance_id,
+            method=method,
+            params=params,
+        )
+        return input_request.pk
+    finally:
+        connection.close()
+
+
+def _wait_for_user_input_response(request_id: int) -> dict[str, Any]:
+    deadline = time.monotonic() + _APPROVAL_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        response = _user_input_response_value(request_id)
+        if isinstance(response, dict):
+            return response
+        time.sleep(_APPROVAL_POLL_INTERVAL)
+
+    fallback: dict[str, Any] = {"answers": {}}
+    _record_default_user_input_response(request_id, fallback)
+    return fallback
+
+
+def _user_input_response_value(request_id: int) -> Any:
+    from django.db import connection
+
+    try:
+        return UserInputRequest.objects.values_list("response", flat=True).get(
+            pk=request_id
+        )
+    except UserInputRequest.DoesNotExist:
+        return {"answers": {}}
+    finally:
+        connection.close()
+
+
+def _record_default_user_input_response(
+    request_id: int, response: dict[str, Any]
+) -> None:
+    from django.db import connection
+
+    try:
+        UserInputRequest.objects.filter(pk=request_id, response__isnull=True).update(
+            response=response,
+            responded_at=timezone.now(),
+        )
     finally:
         connection.close()
 

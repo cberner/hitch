@@ -39,6 +39,11 @@ urlpatterns = [
         name="resolve_approval",
     ),
     path(
+        "input/<int:input_id>/",
+        hitch.main.views.resolve_input_request,
+        name="resolve_input_request",
+    ),
+    path(
         "sessions/<str:session_id>/stop/",
         hitch.main.views.stop_session,
         name="stop_session",
