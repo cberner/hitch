@@ -69,6 +69,10 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(kwargs["agent_kind"], system_agents.PR_QA_AGENT_KIND)
         self.assertEqual(kwargs["display_author"], system_agents.QA_DISPLAY_AUTHOR)
         self.assertIn("output_schema", kwargs)
+        self.assertIn("Apply the same review standards as Codex /review", kwargs["prompt"])
+        self.assertIn("Do not stop at the first issue", kwargs["prompt"])
+        self.assertIn("shortest useful file/line reference", kwargs["prompt"])
+        self.assertIn("diff --git", kwargs["prompt"])
 
         run = SystemAgentRun.objects.get(workflow=workflow)
         self.assertEqual(run.thread_id, "qa-thread")

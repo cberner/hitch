@@ -39,6 +39,26 @@ _QA_OUTPUT_SCHEMA: dict[str, Any] = {
     },
 }
 
+_CODEX_REVIEW_GUIDANCE = (
+    "Apply the same review standards as Codex /review:\n"
+    "- Flag only bugs or risks that meaningfully affect correctness, performance, "
+    "security, or maintainability.\n"
+    "- Each finding must be discrete, actionable, introduced by this diff, and "
+    "something the author would likely fix.\n"
+    "- Do not rely on unstated assumptions, speculative downstream breakage, or "
+    "intentional behavior changes.\n"
+    "- Ignore trivial style unless it obscures meaning or violates documented "
+    "standards.\n"
+    "- Do not stop at the first issue; keep reviewing until every qualifying "
+    "finding is listed.\n"
+    "- Prioritize findings as [P0], [P1], [P2], or [P3], using P0 only for "
+    "universal release-blocking issues.\n"
+    "- For each finding, include the shortest useful file/line reference that "
+    "overlaps the diff and a one-paragraph explanation of why the issue matters.\n"
+    "- If there are no qualifying findings, say that clearly rather than "
+    "inventing nits.\n"
+)
+
 
 def start_pr_qa_workflow(
     *,
@@ -321,16 +341,23 @@ def _qa_prompt(cwd: str, diff_text: str) -> str:
     diff = diff_text or "(No current worktree diff was detected.)"
     return (
         "You are Hitch's QA agent for a PR workflow.\n\n"
-        "Thoroughly review the current code diff. Also do your own manual QA: "
-        "if there is an interactive interface related to the diff, manually test it out. "
-        "Report concrete feedback for the work agent. If the diff is ready for the PR "
-        "agent to do a final review/cleanup/open-PR pass, set lgtm to true.\n\n"
+        "Thoroughly review the current code diff before the PR agent runs its final "
+        "review/cleanup/open-PR pass.\n\n"
+        f"{_CODEX_REVIEW_GUIDANCE}\n"
+        "Also do your own manual QA: if there is an interactive interface related "
+        "to the diff, manually test it out and include concrete failures or gaps in "
+        "your feedback.\n\n"
+        "Set lgtm to false when there are substantive findings, missing tests, or "
+        "manual-QA failures the work agent should fix. Set lgtm to true only when "
+        "the diff is ready for the PR agent to continue.\n\n"
         f"Repository cwd: {cwd}\n\n"
         "Current diff:\n"
         "```diff\n"
         f"{diff}\n"
         "```\n\n"
-        'Return only JSON matching this shape: {"feedback": string, "lgtm": boolean}.'
+        "Return only JSON matching this shape: "
+        '{"feedback": string, "lgtm": boolean}. Put the prioritized review '
+        "findings, manual-QA results, or a clear no-findings statement in feedback."
     )
 
 
