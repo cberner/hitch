@@ -150,6 +150,48 @@
             margin: 0 0 0.75rem;
             padding: 0 0.25rem;
         }
+        .session-list-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            margin: 0 0 0.75rem;
+            padding: 0 0.25rem;
+        }
+        .session-list-header .section-label {
+            margin: 0;
+            padding: 0;
+        }
+        .archived-visibility-form {
+            margin: 0;
+            flex: 0 0 auto;
+        }
+        .archived-visibility-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.45rem;
+            color: var(--text-muted);
+            font-size: 0.82rem;
+            cursor: pointer;
+            user-select: none;
+        }
+        .archived-visibility-toggle input {
+            width: 1rem;
+            height: 1rem;
+            accent-color: var(--accent);
+        }
+        .archived-visibility-submit {
+            margin-left: 0.4rem;
+            font: inherit;
+            color: var(--accent);
+            background: transparent;
+            border: none;
+            padding: 0;
+            cursor: pointer;
+        }
+        html.js .archived-visibility-submit {
+            display: none;
+        }
         .session-list {
             list-style: none;
             padding: 0;
@@ -754,8 +796,14 @@
                 width: 100%;
                 justify-content: center;
             }
+            .session-list-header {
+                align-items: flex-start;
+                flex-direction: column;
+                gap: 0.5rem;
+            }
         }
     </style>
+    <script>document.documentElement.classList.add("js");</script>
 </head>
 <body>
     <header class="topbar">
@@ -785,7 +833,17 @@
         </div>
     </header>
     <main>
-        <p class="section-label">Codex sessions</p>
+        <div class="session-list-header">
+            <p class="section-label">Codex sessions</p>
+            <form class="archived-visibility-form" method="post" action="{{ archived_visibility_url }}" data-archived-visibility-form>
+                {% csrf_token %}
+                <label class="archived-visibility-toggle">
+                    <input type="checkbox" name="show_archived_sessions" value="true" {% if current_show_archived_sessions %}checked{% endif %} data-archived-visibility-toggle>
+                    <span>Show archived</span>
+                </label>
+                <button type="submit" class="archived-visibility-submit" data-archived-visibility-submit>Apply</button>
+            </form>
+        </div>
         {% if sessions %}
         <ul class="session-list">
             {% for session in sessions %}
@@ -886,10 +944,6 @@
             <label>
                 Extra developer prompt
                 <textarea class="extra-system-prompt" name="extra_system_prompt" maxlength="{{ extra_system_prompt_max_len }}" autocomplete="off" placeholder="Optional developer instructions for new sessions">{{ current_extra_system_prompt }}</textarea>
-            </label>
-            <label class="checkbox-label">
-                <span>Show archived sessions</span>
-                <input type="checkbox" name="show_archived_sessions" value="true" {% if current_show_archived_sessions %}checked{% endif %}>
             </label>
             <label class="checkbox-label">
                 <span>Use worktrees</span>
@@ -1503,6 +1557,15 @@
             const settingsCancel = settingsDialog && settingsDialog.querySelector("[data-settings-cancel]");
             settingsOpenButtons.forEach((btn) => btn.addEventListener("click", () => showDialog(settingsDialog)));
             if (settingsCancel) settingsCancel.addEventListener("click", () => hideDialog(settingsDialog));
+
+            const archivedVisibilityForm = document.querySelector("[data-archived-visibility-form]");
+            const archivedVisibilityToggle = document.querySelector("[data-archived-visibility-toggle]");
+            const archivedVisibilitySubmit = document.querySelector("[data-archived-visibility-submit]");
+            if (archivedVisibilityForm && archivedVisibilityToggle && archivedVisibilitySubmit) {
+                archivedVisibilityToggle.addEventListener("change", () => {
+                    requestSubmit(archivedVisibilityForm, archivedVisibilitySubmit);
+                });
+            }
         })();
     </script>
 </body>

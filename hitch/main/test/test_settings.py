@@ -182,8 +182,17 @@ class SettingsDialogRenderTests(TestCase):
         self.assertContains(response, "Extra developer prompt")
         self.assertContains(response, 'name="extra_system_prompt"')
         self.assertContains(response, 'maxlength="2500"')
-        self.assertContains(response, 'name="show_archived_sessions"')
-        self.assertContains(response, "Show archived sessions")
+        self.assertContains(
+            response, f'action="{reverse("update_archived_session_visibility")}"'
+        )
+        self.assertContains(response, "data-archived-visibility-form")
+        self.assertContains(response, "data-archived-visibility-submit")
+        self.assertContains(
+            response,
+            "requestSubmit(archivedVisibilityForm, archivedVisibilitySubmit)",
+        )
+        self.assertContains(response, "Show archived")
+        self.assertNotContains(response, "Show archived sessions")
         self.assertContains(response, 'name="use_worktrees"')
         self.assertContains(response, "Use worktrees")
 
@@ -212,7 +221,7 @@ class SettingsDialogRenderTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_saved_archived_session_visibility_renders_checked(
+    def test_saved_archived_session_visibility_renders_index_toggle_checked(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
@@ -226,6 +235,11 @@ class SettingsDialogRenderTests(TestCase):
 
         self.assertContains(
             response, 'name="show_archived_sessions" value="true" checked'
+        )
+        body = response.content.decode()
+        self.assertLess(
+            body.index("Show archived"),
+            body.index("No sessions found."),
         )
 
     @patch("hitch.main.views.discover_repos")
@@ -724,7 +738,7 @@ class UpdateSettingsViewTests(TestCase):
     def test_saves_archived_session_visibility_to_signed_cookie(self) -> None:
         cases = [
             ({"show_archived_sessions": "true"}, "true"),
-            ({}, "false"),
+            ({"show_archived_sessions": ""}, "false"),
         ]
         for data, expected in cases:
             with self.subTest(expected=expected):
@@ -734,6 +748,14 @@ class UpdateSettingsViewTests(TestCase):
                 self.assertEqual(
                     _cookie_value(response, _SHOW_ARCHIVED_COOKIE), expected
                 )
+
+    def test_preserves_archived_session_visibility_when_not_posted(self) -> None:
+        _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
+
+        response = self.client.post(reverse("update_settings"), data={})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(_cookie_value(response, _SHOW_ARCHIVED_COOKIE), "true")
 
     def test_rejects_unknown_archived_session_visibility(self) -> None:
         _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
@@ -766,6 +788,58 @@ class UpdateSettingsViewTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertNotIn(_USE_WORKTREES_COOKIE, response.cookies)
+
+
+class UpdateArchivedSessionVisibilityViewTests(TestCase):
+    def test_saves_visibility_to_signed_cookie(self) -> None:
+        cases = [
+            ({"show_archived_sessions": "true"}, "true"),
+            ({}, "false"),
+        ]
+        for data, expected in cases:
+            with self.subTest(expected=expected):
+                response = self.client.post(
+                    reverse("update_archived_session_visibility"), data=data
+                )
+
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(response.headers["Location"], reverse("index"))
+                self.assertEqual(
+                    _cookie_value(response, _SHOW_ARCHIVED_COOKIE), expected
+                )
+
+    def test_rejects_unknown_visibility(self) -> None:
+        _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
+
+        response = self.client.post(
+            reverse("update_archived_session_visibility"),
+            data={"show_archived_sessions": "yes"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn(_SHOW_ARCHIVED_COOKIE, response.cookies)
+
+    def test_preserves_other_cookie_settings(self) -> None:
+        _seed_cookies(
+            self.client,
+            **{
+                _MODEL_COOKIE: "gpt-5",
+                _EFFORT_COOKIE: "high",
+                _SANDBOX_COOKIE: "readOnly",
+                _APPROVAL_COOKIE: "deny_all",
+                _USE_WORKTREES_COOKIE: "true",
+            },
+        )
+
+        response = self.client.post(reverse("update_archived_session_visibility"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
+        self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "high")
+        self.assertEqual(_cookie_value(response, _SANDBOX_COOKIE), "readOnly")
+        self.assertEqual(_cookie_value(response, _APPROVAL_COOKIE), "deny_all")
+        self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
+        self.assertEqual(_cookie_value(response, _SHOW_ARCHIVED_COOKIE), "false")
 
 
 class ApprovalModeSettingsTests(TestCase):

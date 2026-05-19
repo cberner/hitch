@@ -221,6 +221,38 @@ class AuthenticatedSettingsTests(TestCase):
         self.assertEqual(_cookie_value(response, _APPROVAL_COOKIE), "deny_all")
         self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
 
+    def test_archived_visibility_update_preserves_other_account_settings(self) -> None:
+        user = _make_user()
+        self.client.force_login(user)
+        UserSettings.objects.create(
+            user=user,
+            model="gpt-5",
+            reasoning_effort="high",
+            sandbox_policy="dangerFullAccess",
+            approval_mode="deny_all",
+            extra_system_prompt="Keep it small.",
+            use_worktrees=True,
+            show_archived_sessions=False,
+            last_selected_repo="/home/user/proj",
+        )
+
+        response = self.client.post(
+            reverse("update_archived_session_visibility"),
+            data={"show_archived_sessions": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        settings = UserSettings.objects.get(user=user)
+        self.assertEqual(settings.model, "gpt-5")
+        self.assertEqual(settings.reasoning_effort, "high")
+        self.assertEqual(settings.sandbox_policy, "dangerFullAccess")
+        self.assertEqual(settings.approval_mode, "deny_all")
+        self.assertEqual(settings.extra_system_prompt, "Keep it small.")
+        self.assertTrue(settings.use_worktrees)
+        self.assertTrue(settings.show_archived_sessions)
+        self.assertEqual(settings.last_selected_repo, "/home/user/proj")
+        self.assertEqual(_cookie_value(response, _SHOW_ARCHIVED_COOKIE), "true")
+
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_index_prefers_account_settings_over_conflicting_cookies(
