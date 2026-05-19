@@ -239,6 +239,7 @@ def index(request: HttpRequest) -> HttpResponse:
             "repos": repos,
             "new_session_url": reverse("new_session"),
             "settings_url": reverse("update_settings"),
+            "archived_visibility_url": reverse("update_archived_session_visibility"),
             "login_url": reverse("login"),
             "logout_url": reverse("logout"),
             "register_url": reverse("register"),
@@ -1077,7 +1078,10 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     approval = request.POST.get("approval_mode", "").strip()
     extra_system_prompt = request.POST.get("extra_system_prompt", "").strip()
     use_worktrees = request.POST.get("use_worktrees", "").strip()
-    show_archived = request.POST.get("show_archived_sessions", "").strip()
+    posted_show_archived = request.POST.get("show_archived_sessions")
+    show_archived = (
+        posted_show_archived.strip() if posted_show_archived is not None else None
+    )
     if len(model) > _MODEL_MAX_LEN:
         return HttpResponseBadRequest("model id is too long")
     if len(extra_system_prompt) > _EXTRA_SYSTEM_PROMPT_MAX_LEN:
@@ -1097,9 +1101,8 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     if use_worktrees not in {"", "true"}:
         return HttpResponseBadRequest("invalid worktree setting")
     use_worktrees = "true" if use_worktrees == "true" else "false"
-    if show_archived not in {"", "true"}:
+    if show_archived is not None and show_archived not in {"", "true"}:
         return HttpResponseBadRequest("invalid archived sessions visibility")
-    show_archived = "true" if show_archived == "true" else "false"
     if model or effort:
         # Cross-check the posted (model, effort) pair against what Codex
         # actually offers so a malformed POST (typo, stale model id, effort
@@ -1119,9 +1122,28 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         approval_mode=approval,
         extra_system_prompt=extra_system_prompt,
         use_worktrees=use_worktrees == "true",
-        show_archived_sessions=show_archived == "true",
+        show_archived_sessions=(
+            stored.show_archived_sessions
+            if show_archived is None
+            else show_archived == "true"
+        ),
         last_selected_repo=stored.last_selected_repo,
     )
+    user = _authenticated_user(request)
+    if user is not None:
+        _save_user_settings(user, values)
+    response = redirect("index")
+    _apply_cookie_updates(response, _settings_cookie_updates(values))
+    return response
+
+
+@require_http_methods(["POST"])
+def update_archived_session_visibility(request: HttpRequest) -> HttpResponse:
+    show_archived = request.POST.get("show_archived_sessions", "").strip()
+    if show_archived not in {"", "true"}:
+        return HttpResponseBadRequest("invalid archived sessions visibility")
+    stored = _stored_settings(request)
+    values = stored._replace(show_archived_sessions=show_archived == "true")
     user = _authenticated_user(request)
     if user is not None:
         _save_user_settings(user, values)

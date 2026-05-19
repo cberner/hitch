@@ -11,6 +11,11 @@ urlpatterns = [
     path("login/", hitch.main.views.login, name="login"),
     path("logout/", hitch.main.views.logout, name="logout"),
     path("settings/", hitch.main.views.update_settings, name="update_settings"),
+    path(
+        "settings/archived-sessions/",
+        hitch.main.views.update_archived_session_visibility,
+        name="update_archived_session_visibility",
+    ),
     path("sessions/new/", hitch.main.views.new_session, name="new_session"),
     path("sessions/<str:session_id>/", hitch.main.views.session, name="session"),
     path(
