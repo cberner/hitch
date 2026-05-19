@@ -77,13 +77,15 @@ intermediate block, so the per-item layout stays identical in both contexts.
         <div class="plan-actions">
             <form method="post" action="{{ send_message_url }}">
                 {% csrf_token %}
+                <input type="hidden" name="plan_action" value="approve">
                 <input type="hidden" name="collaboration_mode" value="default">
-                <button type="submit" name="prompt" value="Implement the plan.">Approve plan</button>
+                <button type="submit" name="prompt" value="{{ plan_approval_prompt }}">Approve plan</button>
             </form>
             <form method="post" action="{{ send_message_url }}">
                 {% csrf_token %}
+                <input type="hidden" name="plan_action" value="revise">
                 <input type="hidden" name="plan_mode" value="true">
-                <button type="submit" name="prompt" value="Revise the plan.">Revise</button>
+                <button type="submit" name="prompt" value="{{ plan_revision_prompt }}">Revise</button>
             </form>
         </div>
         {% endif %}
