@@ -7,6 +7,7 @@ test stays focused on the behavior under examination.
 
 import base64
 import json
+import os
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,11 +18,12 @@ from django.contrib.auth import get_user_model
 from django.core import signing
 from django.test import Client, TestCase
 from django.urls import reverse
-from openai_codex.errors import MethodNotFoundError
+from openai_codex.errors import AppServerError, MethodNotFoundError
 
 from hitch.main import views
 from hitch.main.models import (
     ApprovalRequest,
+    ArchivedSessionTokenUsage,
     CodexInstance,
     SystemAgentRun,
     SystemWorkflow,
@@ -53,6 +55,49 @@ def _rollout_line(
     timestamp: str = "2025-01-05T12:00:00Z",
 ) -> str:
     return json.dumps({"timestamp": timestamp, "type": line_type, "payload": payload})
+
+
+def _token_count_line(
+    *,
+    input_tokens: int,
+    cached_input_tokens: int,
+    output_tokens: int,
+    total_tokens: int,
+    context_tokens: int = 0,
+    model_context_window: int = 0,
+) -> str:
+    return _rollout_line(
+        "event_msg",
+        {
+            "type": "token_count",
+            "info": {
+                "total_token_usage": {
+                    "input_tokens": input_tokens,
+                    "cached_input_tokens": cached_input_tokens,
+                    "output_tokens": output_tokens,
+                    "total_tokens": total_tokens,
+                },
+                "last_token_usage": {
+                    "total_tokens": context_tokens,
+                },
+                "model_context_window": model_context_window,
+            },
+        },
+    )
+
+
+def _make_rollout(
+    testcase: TestCase, lines: list[str], *, archived: bool = False
+) -> Path:
+    temp_dir = tempfile.TemporaryDirectory()
+    testcase.addCleanup(temp_dir.cleanup)
+    parent = Path(temp_dir.name)
+    if archived:
+        parent = parent / "archived_sessions"
+        parent.mkdir()
+    path = parent / "rollout.jsonl"
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
 
 
 def _setup_codex(
@@ -266,6 +311,103 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    def test_session_list_shows_live_token_usage_without_caching(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=400_000,
+                    cached_input_tokens=25_000,
+                    output_tokens=562_654,
+                    total_tokens=987_654,
+                )
+            ],
+        )
+        active = _session("active", name="Active session", path=str(rollout_path))
+        _setup_codex(mock_codex, threads=[active])
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "tokens")
+        self.assertContains(response, "987,654")
+        self.assertEqual(ArchivedSessionTokenUsage.objects.count(), 0)
+
+        rollout_path.write_text(
+            _token_count_line(
+                input_tokens=500_000,
+                cached_input_tokens=30_000,
+                output_tokens=704_567,
+                total_tokens=1_234_567,
+            ),
+            encoding="utf-8",
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, "1,234,567")
+        self.assertNotContains(response, "987,654")
+        self.assertEqual(ArchivedSessionTokenUsage.objects.count(), 0)
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_archived_session_list_token_usage_refreshes_when_rollout_changes(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
+        rollout_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=100_000,
+                    cached_input_tokens=10_000,
+                    output_tokens=23_456,
+                    total_tokens=123_456,
+                )
+            ],
+            archived=True,
+        )
+        os.utime(rollout_path, ns=(1_000_000_000, 1_000_000_000))
+        archived = _session(
+            "archived",
+            name="Archived session",
+            path=str(rollout_path),
+        )
+        _setup_codex(mock_codex, archived_threads=[archived])
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "123,456")
+        cache = ArchivedSessionTokenUsage.objects.get(thread_id="archived")
+        self.assertEqual(cache.total_tokens, 123_456)
+        self.assertEqual(cache.rollout_mtime_ns, 1_000_000_000)
+
+        rollout_path.write_text(
+            _token_count_line(
+                input_tokens=900_000,
+                cached_input_tokens=90_000,
+                output_tokens=99_999,
+                total_tokens=999_999,
+            ),
+            encoding="utf-8",
+        )
+        os.utime(rollout_path, ns=(2_000_000_000, 2_000_000_000))
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, "999,999")
+        self.assertNotContains(response, "123,456")
+        cache.refresh_from_db()
+        self.assertEqual(cache.total_tokens, 999_999)
+        self.assertEqual(cache.rollout_mtime_ns, 2_000_000_000)
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
     def test_hides_archived_sessions_by_default(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -314,6 +456,70 @@ class IndexViewTests(TestCase):
         client = mock_codex.return_value.__enter__.return_value
         client.thread_list.assert_any_call()
         client.thread_list.assert_any_call(archived=True)
+
+    @patch("hitch.main.views.Codex")
+    def test_usage_page_sums_lifetime_token_usage(
+        self, mock_codex: MagicMock
+    ) -> None:
+        active_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=400,
+                    cached_input_tokens=50,
+                    output_tokens=600,
+                    total_tokens=1_000,
+                )
+            ],
+        )
+        archived_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=1_000,
+                    cached_input_tokens=200,
+                    output_tokens=1_500,
+                    total_tokens=2_500,
+                )
+            ],
+            archived=True,
+        )
+        _setup_codex(
+            mock_codex,
+            threads=[_session("active", name="Active session", path=str(active_path))],
+            archived_threads=[
+                _session("archived", name="Archived session", path=str(archived_path))
+            ],
+        )
+
+        response = self.client.get(reverse("usage"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Lifetime")
+        self.assertContains(response, "All sessions")
+        self.assertContains(response, "3,500")
+        self.assertContains(response, "1,400")
+        self.assertContains(response, "2,100")
+        self.assertContains(response, "250")
+        cache = ArchivedSessionTokenUsage.objects.get(thread_id="archived")
+        self.assertEqual(cache.total_tokens, 2_500)
+        client = mock_codex.return_value.__enter__.return_value
+        client.thread_list.assert_any_call()
+        client.thread_list.assert_any_call(archived=True)
+
+    @patch("hitch.main.views.Codex")
+    def test_usage_page_marks_lifetime_unavailable_when_session_list_fails(
+        self, mock_codex: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+
+        response = self.client.get(reverse("usage"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Lifetime")
+        self.assertContains(response, "Lifetime usage unavailable.")
+        self.assertNotContains(response, "All sessions")
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -2229,6 +2435,29 @@ class SetSessionArchivedViewTests(TestCase):
         client.thread_archive.assert_called_once_with("abc")
 
     @patch("hitch.main.views.Codex")
+    def test_archive_clears_existing_token_usage_caches(
+        self, mock_codex: MagicMock
+    ) -> None:
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="abc",
+            total_tokens=100,
+        )
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="abc-child",
+            total_tokens=200,
+        )
+
+        response = self.client.post(
+            reverse("set_session_archived", kwargs={"session_id": "abc"}),
+            data={"archived": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(ArchivedSessionTokenUsage.objects.count(), 0)
+        client = mock_codex.return_value.__enter__.return_value
+        client.thread_archive.assert_called_once_with("abc")
+
+    @patch("hitch.main.views.Codex")
     def test_unarchives_session_and_redirects_to_session(
         self, mock_codex: MagicMock
     ) -> None:
@@ -2245,6 +2474,29 @@ class SetSessionArchivedViewTests(TestCase):
         client = mock_codex.return_value.__enter__.return_value
         client.thread_unarchive.assert_called_once_with("abc")
         client.thread_archive.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    def test_unarchive_clears_existing_token_usage_caches(
+        self, mock_codex: MagicMock
+    ) -> None:
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="abc",
+            total_tokens=100,
+        )
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="abc-child",
+            total_tokens=200,
+        )
+
+        response = self.client.post(
+            reverse("set_session_archived", kwargs={"session_id": "abc"}),
+            data={"archived": "false"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(ArchivedSessionTokenUsage.objects.count(), 0)
+        client = mock_codex.return_value.__enter__.return_value
+        client.thread_unarchive.assert_called_once_with("abc")
 
     @patch("hitch.main.views.Codex")
     def test_unarchives_session_and_redirects_to_index_when_requested(

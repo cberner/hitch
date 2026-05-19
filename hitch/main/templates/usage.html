@@ -121,10 +121,48 @@
             gap: 1rem;
             margin: 0 0 1rem;
         }
+        .usage-section + .usage-section {
+            margin-top: 1.75rem;
+        }
         .usage-plan {
             margin: 0;
             color: var(--text-muted);
             font-size: 0.86rem;
+        }
+        .lifetime-stats {
+            display: grid;
+            grid-template-columns: 1.4fr repeat(3, minmax(0, 1fr));
+            gap: 0.65rem;
+        }
+        .lifetime-stat {
+            display: flex;
+            flex-direction: column;
+            gap: 0.1rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--surface);
+            box-shadow: var(--shadow);
+            padding: 0.85rem 0.95rem;
+            min-width: 0;
+        }
+        .lifetime-label {
+            color: var(--text-faint);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            font-size: 0.66rem;
+            font-weight: 600;
+        }
+        .lifetime-value {
+            color: var(--text);
+            font-size: 1.15rem;
+            font-weight: 650;
+            line-height: 1.25;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+        .lifetime-unit {
+            color: var(--text-muted);
+            font-size: 0.78rem;
         }
         .rate-limit-list {
             display: flex;
@@ -199,6 +237,9 @@
                 flex-direction: column;
                 gap: 0.35rem;
             }
+            .lifetime-stats {
+                grid-template-columns: 1fr;
+            }
             .rate-limit-row-head {
                 align-items: flex-start;
                 flex-direction: column;
@@ -215,41 +256,78 @@
         </div>
     </header>
     <main>
-        <p class="section-label">Quota usage</p>
-        {% if rate_limits %}
-        <div class="usage-header">
-            <h2>{% if rate_limits.limit_name %}{{ rate_limits.limit_name }} rate limits{% else %}Rate limits{% endif %}</h2>
-            {% if rate_limits.plan_type %}
-            <p class="usage-plan">Plan: {{ rate_limits.plan_type }}</p>
+        <section class="usage-section" aria-labelledby="lifetime-title">
+            <p class="section-label">Token usage</p>
+            <div class="usage-header">
+                <h2 id="lifetime-title">Lifetime</h2>
+            </div>
+            {% if lifetime_usage %}
+            <div class="lifetime-stats" aria-label="Lifetime token usage">
+                <div class="lifetime-stat">
+                    <span class="lifetime-label">All sessions</span>
+                    <span class="lifetime-value">{{ lifetime_usage.total }}</span>
+                    <span class="lifetime-unit">tokens</span>
+                </div>
+                <div class="lifetime-stat">
+                    <span class="lifetime-label">Input</span>
+                    <span class="lifetime-value">{{ lifetime_usage.input }}</span>
+                    <span class="lifetime-unit">tokens</span>
+                </div>
+                <div class="lifetime-stat">
+                    <span class="lifetime-label">Output</span>
+                    <span class="lifetime-value">{{ lifetime_usage.output }}</span>
+                    <span class="lifetime-unit">tokens</span>
+                </div>
+                <div class="lifetime-stat">
+                    <span class="lifetime-label">Cached</span>
+                    <span class="lifetime-value">{{ lifetime_usage.cached }}</span>
+                    <span class="lifetime-unit">tokens</span>
+                </div>
+            </div>
+            {% else %}
+            <div class="empty">
+                <p>Lifetime usage unavailable.</p>
+                <p class="hint">Session token usage is not available right now.</p>
+            </div>
             {% endif %}
-        </div>
-        <div class="rate-limit-list" aria-label="Quota usage">
-            {% for window in rate_limits.windows %}
-            <section class="rate-limit-row" aria-labelledby="rate-limit-{{ forloop.counter }}-title">
-                <div class="rate-limit-row-head">
-                    <h3 id="rate-limit-{{ forloop.counter }}-title">{{ window.label }}</h3>
-                    <span class="rate-limit-remaining">{{ window.remaining_percent }}% remaining</span>
-                </div>
-                <div class="rate-limit-bar" role="progressbar"
-                     aria-valuenow="{{ window.remaining_percent }}"
-                     aria-valuemin="0" aria-valuemax="100"
-                     aria-label="{{ window.label }} remaining">
-                    <div class="rate-limit-bar-fill" style="width: {{ window.remaining_percent }}%"></div>
-                </div>
-                <div class="rate-limit-meta">
-                    {% if window.window_duration_label %}{{ window.window_duration_label }} window{% endif %}
-                    {% if window.window_duration_label and window.resets_at %} &middot; {% endif %}
-                    {% if window.resets_at %}resets <time data-resets-at="{{ window.resets_at }}">{{ window.resets_at }}</time>{% endif %}
-                </div>
-            </section>
-            {% endfor %}
-        </div>
-        {% else %}
-        <div class="empty">
-            <p>Usage unavailable.</p>
-            <p class="hint">Quota usage is not available for this Codex configuration.</p>
-        </div>
-        {% endif %}
+        </section>
+        <section class="usage-section">
+            <p class="section-label">Quota usage</p>
+            {% if rate_limits %}
+            <div class="usage-header">
+                <h2 id="quota-title">{% if rate_limits.limit_name %}{{ rate_limits.limit_name }} rate limits{% else %}Rate limits{% endif %}</h2>
+                {% if rate_limits.plan_type %}
+                <p class="usage-plan">Plan: {{ rate_limits.plan_type }}</p>
+                {% endif %}
+            </div>
+            <div class="rate-limit-list" aria-label="Quota usage">
+                {% for window in rate_limits.windows %}
+                <section class="rate-limit-row" aria-labelledby="rate-limit-{{ forloop.counter }}-title">
+                    <div class="rate-limit-row-head">
+                        <h3 id="rate-limit-{{ forloop.counter }}-title">{{ window.label }}</h3>
+                        <span class="rate-limit-remaining">{{ window.remaining_percent }}% remaining</span>
+                    </div>
+                    <div class="rate-limit-bar" role="progressbar"
+                         aria-valuenow="{{ window.remaining_percent }}"
+                         aria-valuemin="0" aria-valuemax="100"
+                         aria-label="{{ window.label }} remaining">
+                        <div class="rate-limit-bar-fill" style="width: {{ window.remaining_percent }}%"></div>
+                    </div>
+                    <div class="rate-limit-meta">
+                        {% if window.window_duration_label %}{{ window.window_duration_label }} window{% endif %}
+                        {% if window.window_duration_label and window.resets_at %} &middot; {% endif %}
+                        {% if window.resets_at %}resets <time data-resets-at="{{ window.resets_at }}">{{ window.resets_at }}</time>{% endif %}
+                    </div>
+                </section>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty">
+                <p>Usage unavailable.</p>
+                <p class="hint">Quota usage is not available for this Codex configuration.</p>
+            </div>
+            {% endif %}
+        </section>
     </main>
     <script>
         (function () {

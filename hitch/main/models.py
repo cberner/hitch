@@ -303,6 +303,29 @@ class UserInputRequest(models.Model):
         )
 
 
+class ArchivedSessionTokenUsage(models.Model):
+    """Cached token usage for archived Codex sessions."""
+
+    thread_id = models.CharField(max_length=128, unique=True)
+    rollout_path = models.CharField(max_length=4096, blank=True, default="")
+    rollout_mtime_ns = models.PositiveBigIntegerField(default=0)
+    input_tokens = models.PositiveBigIntegerField(default=0)
+    cached_input_tokens = models.PositiveBigIntegerField(default=0)
+    output_tokens = models.PositiveBigIntegerField(default=0)
+    total_tokens = models.PositiveBigIntegerField(default=0)
+    context_tokens = models.PositiveBigIntegerField(default=0)
+    model_context_window = models.PositiveBigIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @override
+    def __str__(self) -> str:
+        return (
+            f"ArchivedSessionTokenUsage(thread_id={self.thread_id}, "
+            f"total_tokens={self.total_tokens})"
+        )
+
+
 class UserSettings(models.Model):
     """Per-account mirror of the settings that guests keep in signed cookies."""
 
