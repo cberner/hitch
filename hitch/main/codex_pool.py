@@ -45,6 +45,7 @@ def spawn_new_session(
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
+    enable_memories: bool = False,
     plan_mode: bool = False,
     thread_source: ThreadSource | None = None,
     purpose: str = CodexInstance.PURPOSE_USER,
@@ -63,7 +64,7 @@ def spawn_new_session(
     has an id to redirect to immediately); the prompt itself is run by the
     detached worker.
     """
-    config = AppServerConfig(codex_bin=_codex_bin())
+    config = app_server_config(enable_memories=enable_memories)
     with Codex(config=config) as codex:
         start_kwargs: dict[str, Any] = {
             "cwd": cwd,
@@ -95,6 +96,7 @@ def spawn_new_session(
         reasoning_effort=reasoning_effort,
         sandbox_policy=sandbox_policy,
         approval_mode=approval_mode,
+        enable_memories=enable_memories,
         plan_mode=plan_mode,
         purpose=purpose,
         workflow_id=workflow_id,
@@ -111,9 +113,10 @@ def create_session_thread(
     name: str,
     developer_instructions: str | None = None,
     model: str | None = None,
+    enable_memories: bool = False,
 ) -> str:
     """Create and persist a visible Codex thread without starting a turn."""
-    config = AppServerConfig(codex_bin=_codex_bin())
+    config = app_server_config(enable_memories=enable_memories)
     with Codex(config=config) as codex:
         thread = codex.thread_start(
             cwd=cwd,
@@ -151,6 +154,7 @@ def spawn_turn(
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
+    enable_memories: bool = False,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
     developer_instructions: str | None = None,
@@ -176,6 +180,7 @@ def spawn_turn(
         reasoning_effort=reasoning_effort,
         sandbox_policy=sandbox_policy,
         approval_mode=approval_mode,
+        enable_memories=enable_memories,
         collaboration_mode=collaboration_mode,
         plan_mode=plan_mode,
         purpose=purpose,
@@ -619,6 +624,12 @@ def _codex_bin() -> str | None:
     return shutil.which("codex")
 
 
+def app_server_config(*, enable_memories: bool = False) -> AppServerConfig:
+    memory_value = "true" if enable_memories else "false"
+    overrides = (f"features.memories={memory_value}",)
+    return AppServerConfig(codex_bin=_codex_bin(), config_overrides=overrides)
+
+
 def _spawn_worker(
     *,
     thread_id: str,
@@ -629,6 +640,7 @@ def _spawn_worker(
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
+    enable_memories: bool = False,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
     purpose: str = CodexInstance.PURPOSE_USER,
@@ -647,6 +659,7 @@ def _spawn_worker(
             cwd=cwd,
             prompt=prompt,
             developer_instructions=developer_instructions or "",
+            enable_memories=enable_memories,
             events_path="",
             status=CodexInstance.STATUS_STARTING,
             pid=0,
@@ -667,6 +680,8 @@ def _spawn_worker(
             "sandbox_policy": sandbox_policy,
             "approval_mode": approval_mode,
         }
+        if enable_memories:
+            launch_kwargs["enable_memories"] = True
         if model or plan_mode:
             launch_kwargs["model"] = model
             launch_kwargs["plan_mode"] = plan_mode
@@ -694,6 +709,7 @@ def _launch_worker_process(
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
+    enable_memories: bool = False,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
 ) -> subprocess.Popen[bytes]:
@@ -722,6 +738,8 @@ def _launch_worker_process(
         argv.extend(["--sandbox-policy", sandbox_policy])
     if approval_mode:
         argv.extend(["--approval-mode", approval_mode])
+    if enable_memories:
+        argv.append("--enable-memories")
     if collaboration_mode:
         argv.extend(["--collaboration-mode", collaboration_mode])
     if plan_mode:

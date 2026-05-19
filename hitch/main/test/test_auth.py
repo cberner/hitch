@@ -20,6 +20,7 @@ _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
+_ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 
 
 def _sign(name: str, value: str) -> str:
@@ -104,6 +105,7 @@ class AuthViewTests(TestCase):
                 _USE_WORKTREES_COOKIE: "true",
                 _SHOW_ARCHIVED_COOKIE: "true",
                 _LAST_SELECTED_REPO_COOKIE: "/home/user/proj",
+                _ENABLE_MEMORIES_COOKIE: "true",
             },
         )
 
@@ -122,8 +124,10 @@ class AuthViewTests(TestCase):
         self.assertTrue(settings.use_worktrees)
         self.assertTrue(settings.show_archived_sessions)
         self.assertEqual(settings.last_selected_repo, "/home/user/proj")
+        self.assertTrue(settings.enable_memories)
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
         self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
+        self.assertEqual(_cookie_value(response, _ENABLE_MEMORIES_COOKIE), "true")
         self.assertEqual(
             _cookie_value(response, _LAST_SELECTED_REPO_COOKIE), "/home/user/proj"
         )
@@ -190,6 +194,7 @@ class AuthViewTests(TestCase):
         self.assertEqual(
             _cookie_value(response, _LAST_SELECTED_REPO_COOKIE), "/home/user/stored"
         )
+        self.assertEqual(_cookie_value(response, _ENABLE_MEMORIES_COOKIE), "false")
 
 
 class AuthenticatedSettingsTests(TestCase):
@@ -207,6 +212,7 @@ class AuthenticatedSettingsTests(TestCase):
                 "extra_system_prompt": "  Keep it small.  ",
                 "use_worktrees": "true",
                 "show_archived_sessions": "true",
+                "enable_memories": "true",
             },
         )
 
@@ -217,9 +223,11 @@ class AuthenticatedSettingsTests(TestCase):
         self.assertEqual(settings.extra_system_prompt, "Keep it small.")
         self.assertTrue(settings.use_worktrees)
         self.assertTrue(settings.show_archived_sessions)
+        self.assertTrue(settings.enable_memories)
         self.assertEqual(_cookie_value(response, _SANDBOX_COOKIE), "readOnly")
         self.assertEqual(_cookie_value(response, _APPROVAL_COOKIE), "deny_all")
         self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
+        self.assertEqual(_cookie_value(response, _ENABLE_MEMORIES_COOKIE), "true")
 
     def test_archived_visibility_update_preserves_other_account_settings(self) -> None:
         user = _make_user()
@@ -267,6 +275,7 @@ class AuthenticatedSettingsTests(TestCase):
             approval_mode="deny_all",
             use_worktrees=True,
             last_selected_repo="/home/user/account",
+            enable_memories=True,
         )
         self.client.force_login(user)
         _seed_cookies(
@@ -278,6 +287,7 @@ class AuthenticatedSettingsTests(TestCase):
                 _APPROVAL_COOKIE: "approve_all",
                 _USE_WORKTREES_COOKIE: "false",
                 _LAST_SELECTED_REPO_COOKIE: "/home/user/cookie",
+                _ENABLE_MEMORIES_COOKIE: "false",
             },
         )
         _setup_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
@@ -291,12 +301,14 @@ class AuthenticatedSettingsTests(TestCase):
         self.assertContains(response, 'value="deny_all" selected')
         self.assertContains(response, 'name="use_worktrees" value="true" checked')
         self.assertContains(response, 'value="/home/user/account" selected')
+        self.assertContains(response, 'name="enable_memories" value="true" checked')
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
         self.assertEqual(_cookie_value(response, _SANDBOX_COOKIE), "dangerFullAccess")
         self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
         self.assertEqual(
             _cookie_value(response, _LAST_SELECTED_REPO_COOKIE), "/home/user/account"
         )
+        self.assertEqual(_cookie_value(response, _ENABLE_MEMORIES_COOKIE), "true")
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
@@ -312,6 +324,7 @@ class AuthenticatedSettingsTests(TestCase):
             user=user,
             sandbox_policy="workspaceWrite",
             approval_mode="deny_all",
+            enable_memories=True,
         )
         self.client.force_login(user)
         client = mock_codex.return_value.__enter__.return_value
@@ -332,4 +345,5 @@ class AuthenticatedSettingsTests(TestCase):
             prompt="follow-up",
             sandbox_policy="workspaceWrite",
             approval_mode="deny_all",
+            enable_memories=True,
         )

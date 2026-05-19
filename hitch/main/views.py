@@ -2,7 +2,6 @@ import base64
 import binascii
 import json
 import logging
-import shutil
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -22,7 +21,7 @@ from django.urls import reverse
 from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_http_methods
-from openai_codex import AppServerConfig, AppServerError, Codex
+from openai_codex import AppServerError, Codex
 from openai_codex.generated.v2_all import (
     GetAccountRateLimitsResponse,
     RateLimitSnapshot,
@@ -59,12 +58,12 @@ class SettingsValues(NamedTuple):
     use_worktrees: bool
     show_archived_sessions: bool
     last_selected_repo: str
+    enable_memories: bool
 
 
 class ResolvedSettings(NamedTuple):
     values: SettingsValues
     cookie_updates: dict[str, str]
-
 
 
 class _MessageIntent(NamedTuple):
@@ -120,6 +119,7 @@ _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
+_ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 
 # Roughly one year. Long enough that a user's pick survives across
 # sessions without ever needing a manual revisit; short enough that the
@@ -188,7 +188,10 @@ def index(request: HttpRequest) -> HttpResponse:
     # could record its terminal status (or a row stuck in ``starting``)
     # otherwise stays pending forever, since we don't run a periodic task.
     codex_pool.reconcile_dead()
-    config = AppServerConfig(codex_bin=shutil.which("codex"))
+    initial_settings = _stored_settings(request)
+    config = codex_pool.app_server_config(
+        enable_memories=initial_settings.enable_memories
+    )
     with Codex(config=config) as codex:
         models_data = list(codex.models().data)
         resolved_settings = _resolved_settings(request, models_data)
@@ -255,6 +258,7 @@ def index(request: HttpRequest) -> HttpResponse:
             "extra_system_prompt_max_len": _EXTRA_SYSTEM_PROMPT_MAX_LEN,
             "current_use_worktrees": current_settings.use_worktrees,
             "current_show_archived_sessions": current_settings.show_archived_sessions,
+            "current_enable_memories": current_settings.enable_memories,
             "current_repo": current_repo,
             "name_max_len": _NAME_MAX_LEN,
             "pr_slash_prompt": _PR_SLASH_PROMPT,
@@ -270,8 +274,8 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
     # writing a terminal status would otherwise leave the page in "streaming"
     # mode forever, since the EventSource wouldn't reach an end event.
     codex_pool.reconcile_dead()
-    config = AppServerConfig(codex_bin=shutil.which("codex"))
     settings = _stored_settings(request)
+    config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
     with Codex(config=config) as codex:
         # ``thread/read`` only works for threads already loaded into the
         # app-server's in-memory map. Each request spawns a fresh app-server
@@ -921,6 +925,7 @@ def _stored_settings(request: HttpRequest) -> SettingsValues:
         use_worktrees=_read_cookie(request, _USE_WORKTREES_COOKIE) == "true",
         show_archived_sessions=_read_cookie(request, _SHOW_ARCHIVED_COOKIE) == "true",
         last_selected_repo=_read_cookie(request, _LAST_SELECTED_REPO_COOKIE),
+        enable_memories=_read_cookie(request, _ENABLE_MEMORIES_COOKIE) == "true",
     )
 
 
@@ -939,6 +944,7 @@ def _settings_values_for_user(settings: UserSettings) -> SettingsValues:
         use_worktrees=settings.use_worktrees,
         show_archived_sessions=settings.show_archived_sessions,
         last_selected_repo=settings.last_selected_repo,
+        enable_memories=settings.enable_memories,
     )
 
 
@@ -954,6 +960,7 @@ def _save_user_settings(user: Any, values: SettingsValues) -> UserSettings:
         ("use_worktrees", values.use_worktrees),
         ("show_archived_sessions", values.show_archived_sessions),
         ("last_selected_repo", values.last_selected_repo),
+        ("enable_memories", values.enable_memories),
     ):
         if getattr(settings, field) != value:
             setattr(settings, field, value)
@@ -975,6 +982,7 @@ def _settings_cookie_updates(values: SettingsValues) -> dict[str, str]:
         _USE_WORKTREES_COOKIE: "true" if values.use_worktrees else "false",
         _SHOW_ARCHIVED_COOKIE: "true" if values.show_archived_sessions else "false",
         _LAST_SELECTED_REPO_COOKIE: values.last_selected_repo,
+        _ENABLE_MEMORIES_COOKIE: "true" if values.enable_memories else "false",
     }
 
 
@@ -1025,6 +1033,9 @@ def _valid_cookie_setting_updates(request: HttpRequest) -> dict[str, str | bool]
         and len(last_selected_repo) <= _LAST_SELECTED_REPO_MAX_LEN
     ):
         updates["last_selected_repo"] = last_selected_repo
+    enable_memories = _read_signed_cookie_if_present(request, _ENABLE_MEMORIES_COOKIE)
+    if enable_memories in {"true", "false"}:
+        updates["enable_memories"] = enable_memories == "true"
     return updates
 
 
@@ -1191,6 +1202,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     show_archived = (
         posted_show_archived.strip() if posted_show_archived is not None else None
     )
+    enable_memories = request.POST.get("enable_memories", "").strip()
     if len(model) > _MODEL_MAX_LEN:
         return HttpResponseBadRequest("model id is too long")
     if len(extra_system_prompt) > _EXTRA_SYSTEM_PROMPT_MAX_LEN:
@@ -1212,12 +1224,15 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     use_worktrees = "true" if use_worktrees == "true" else "false"
     if show_archived is not None and show_archived not in {"", "true"}:
         return HttpResponseBadRequest("invalid archived sessions visibility")
+    if enable_memories not in {"", "true"}:
+        return HttpResponseBadRequest("invalid memories setting")
+    enable_memories = "true" if enable_memories == "true" else "false"
     if model or effort:
         # Cross-check the posted (model, effort) pair against what Codex
         # actually offers so a malformed POST (typo, stale model id, effort
         # the chosen model doesn't support) gets a clean 400 instead of
         # quietly poisoning every subsequent turn at runtime.
-        config = AppServerConfig(codex_bin=shutil.which("codex"))
+        config = codex_pool.app_server_config(enable_memories=enable_memories == "true")
         with Codex(config=config) as codex:
             models_data = list(codex.models().data)
         compat_error = _validate_settings_against_models(model, effort, models_data)
@@ -1237,6 +1252,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
             else show_archived == "true"
         ),
         last_selected_repo=stored.last_selected_repo,
+        enable_memories=enable_memories == "true",
     )
     user = _authenticated_user(request)
     if user is not None:
@@ -1302,7 +1318,8 @@ def set_session_name(request: HttpRequest, session_id: str) -> HttpResponse:
         return HttpResponseBadRequest("name is required")
     if len(name) > _NAME_MAX_LEN:
         return HttpResponseBadRequest("name is too long")
-    config = AppServerConfig(codex_bin=shutil.which("codex"))
+    settings = _stored_settings(request)
+    config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
     with Codex(config=config) as codex:
         codex._client.thread_set_name(session_id, name)
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
@@ -1317,7 +1334,8 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
     archived = request.POST.get("archived", "").strip()
     if archived not in {"true", "false"}:
         return HttpResponseBadRequest("archived must be true or false")
-    config = AppServerConfig(codex_bin=shutil.which("codex"))
+    settings = _stored_settings(request)
+    config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
     with Codex(config=config) as codex:
         if archived == "true":
             codex.thread_archive(session_id)
@@ -1389,7 +1407,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     # ``Thread.cwd`` is an ``AbsolutePathBuf`` pydantic RootModel, so unwrap
     # ``.root`` to get the underlying string the worker subprocess expects;
     # also accept a plain str so a future SDK schema change does not break us.
-    config = AppServerConfig(codex_bin=shutil.which("codex"))
+    config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
     with Codex(config=config) as codex:
         resumed = codex._client.thread_resume(session_id)
         thread = resumed.thread
@@ -1444,6 +1462,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             model=workflow_model or None,
             reasoning_effort=workflow_reasoning_effort or None,
             developer_instructions=developer_instructions or None,
+            enable_memories=settings.enable_memories,
             initial_user_message_index=_count_user_entries(thread_entries),
         )
         return redirect("session", session_id=session_id)
@@ -1454,6 +1473,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         "sandbox_policy": sandbox_policy or None,
         "approval_mode": approval_mode,
     }
+    if settings.enable_memories:
+        spawn_kwargs["enable_memories"] = True
     if plan_mode:
         if not collaboration_model:
             return HttpResponseBadRequest("plan mode requires a model")
@@ -1710,7 +1731,10 @@ def new_session(request: HttpRequest) -> HttpResponse:
     # render would have snapped away from; without this, a stale value
     # would ride straight into ``thread_start(model=...)`` and 500 the
     # new-session click.
-    config = AppServerConfig(codex_bin=shutil.which("codex"))
+    initial_settings = _stored_settings(request)
+    config = codex_pool.app_server_config(
+        enable_memories=initial_settings.enable_memories
+    )
     with Codex(config=config) as codex:
         models_data = list(codex.models().data)
     resolved_settings = _resolved_settings(request, models_data)
@@ -1728,6 +1752,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
             name=_PR_SLASH_PROMPT,
             developer_instructions=settings.extra_system_prompt or None,
             model=settings.model or None,
+            enable_memories=settings.enable_memories,
         )
         system_agents.start_pr_qa_workflow(
             main_thread_id=thread_id,
@@ -1737,6 +1762,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
             model=settings.model or None,
             reasoning_effort=settings.reasoning_effort or None,
             developer_instructions=settings.extra_system_prompt or None,
+            enable_memories=settings.enable_memories,
             initial_user_message_index=0,
         )
         remembered_values = settings._replace(last_selected_repo=cwd)
@@ -1770,6 +1796,8 @@ def new_session(request: HttpRequest) -> HttpResponse:
         "sandbox_policy": settings.sandbox_policy or None,
         "approval_mode": settings.approval_mode,
     }
+    if settings.enable_memories:
+        spawn_kwargs["enable_memories"] = True
     if plan_mode:
         spawn_kwargs["plan_mode"] = True
     try:

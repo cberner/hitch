@@ -52,6 +52,7 @@ class PrQaWorkflowTests(TestCase):
             model="gpt-5.4",
             reasoning_effort="high",
             developer_instructions="Use repo conventions.",
+            enable_memories=True,
             initial_user_message_index=2,
         )
 
@@ -65,6 +66,7 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(kwargs["model"], "gpt-5.4")
         self.assertEqual(kwargs["reasoning_effort"], "high")
         self.assertEqual(kwargs["developer_instructions"], "Use repo conventions.")
+        self.assertTrue(kwargs["enable_memories"])
         self.assertEqual(kwargs["workflow_id"], workflow.pk)
         self.assertEqual(kwargs["agent_kind"], system_agents.PR_QA_AGENT_KIND)
         self.assertEqual(kwargs["display_author"], system_agents.QA_DISPLAY_AUTHOR)
