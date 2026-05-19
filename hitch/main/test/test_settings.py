@@ -151,8 +151,14 @@ class SettingsDialogRenderTests(TestCase):
         response = self.client.get(reverse("index"))
 
         self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "data-settings-menu")
+        self.assertContains(response, "data-settings-menu-open")
+        self.assertContains(response, "data-settings-menu-panel")
         self.assertContains(response, "data-settings-dialog")
         self.assertContains(response, 'aria-label="Settings"')
+        self.assertContains(response, ">settings<")
+        self.assertContains(response, f'href="{reverse("usage")}"')
+        self.assertContains(response, ">usage<")
         self.assertContains(response, "GPT-5")
         # Spot-check a couple of reasoning-effort values so a future enum
         # rename can't quietly empty the dropdown.
@@ -296,17 +302,14 @@ class SettingsDialogRenderTests(TestCase):
         self.assertContains(response, "modal-scroll-locked")
         self.assertContains(response, 'document.querySelector("dialog[open]")')
 
-    @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_dialog_renders_rate_limit_windows(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
+    def test_usage_page_renders_rate_limit_windows(self, mock_codex: MagicMock) -> None:
         """When the account/rateLimits/read call returns a snapshot, the
-        dialog must render each present window so a user can see how much
-        of their budget is left before kicking off a new turn."""
+        usage page must render each present window so a user can see how
+        much of their budget is left before kicking off a new turn."""
         _configure_codex(
             mock_codex,
-            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+            models=[],
             rate_limits=_rate_limit_snapshot(
                 primary_used=30,
                 primary_resets_at=1_700_000_000,
@@ -317,13 +320,13 @@ class SettingsDialogRenderTests(TestCase):
                 plan_type="plus",
             ),
         )
-        mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
         # Both windows surface, with "remaining" framing rather than "used"
-        # — the dialog answers "how much budget do I have left?".
+        # -- the page answers "how much budget do I have left?".
+        self.assertContains(response, "Quota usage")
         self.assertContains(response, "Primary")
         self.assertContains(response, "70% remaining")
         self.assertContains(response, "Secondary")
@@ -338,69 +341,62 @@ class SettingsDialogRenderTests(TestCase):
         # Plan label gives context for which plan the limits apply to.
         self.assertContains(response, "plus")
 
-    @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_dialog_hides_rate_limits_when_unsupported(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
+    def test_usage_page_hides_rate_limits_when_unsupported(
+        self, mock_codex: MagicMock
     ) -> None:
         """Local-dev (ollama) and older Codex builds reject the rate-limits
-        method; the dialog must still render with no Rate-limits section."""
+        method; the usage page must still render with an empty state."""
         _configure_codex(
             mock_codex,
-            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+            models=[],
             # explicit MethodNotFound is the typical signal from Codex when
             # the endpoint isn't wired in the current build.
             rate_limits=MethodNotFoundError(-32601, "method not found", None),
         )
-        mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertNotContains(response, 'aria-labelledby="rate-limits-title"')
+        self.assertContains(response, "Usage unavailable.")
         self.assertNotContains(response, "% remaining")
 
-    @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_dialog_hides_rate_limits_on_unexpected_exception(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
+    def test_usage_page_hides_rate_limits_on_unexpected_exception(
+        self, mock_codex: MagicMock
     ) -> None:
         """Non-Codex exceptions (pydantic ValidationError on a malformed
         wire payload, transport hiccups not wrapped as AppServerError) must
-        also be swallowed — a settings dialog that 500s the index over a
-        cosmetic widget is worse than one that hides the widget."""
+        also be swallowed so usage can show an empty state."""
         _configure_codex(
             mock_codex,
-            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+            models=[],
             rate_limits=ValueError("malformed payload"),
         )
-        mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertNotContains(response, 'aria-labelledby="rate-limits-title"')
+        self.assertContains(response, "Usage unavailable.")
         self.assertNotContains(response, "% remaining")
 
-    @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_dialog_hides_rate_limits_when_both_windows_empty(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
+    def test_usage_page_hides_rate_limits_when_both_windows_empty(
+        self, mock_codex: MagicMock
     ) -> None:
         """An account that has no metered usage at all returns a snapshot
-        with both windows unset; skip the section rather than render an
+        with both windows unset; show the empty state rather than render an
         empty header."""
         _configure_codex(
             mock_codex,
-            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+            models=[],
             rate_limits=_rate_limit_snapshot(),
         )
-        mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertNotContains(response, 'aria-labelledby="rate-limits-title"')
+        self.assertContains(response, "Usage unavailable.")
         self.assertNotContains(response, "% remaining")
 
     @patch("hitch.main.views.discover_repos")

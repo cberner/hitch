@@ -10,6 +10,7 @@ urlpatterns = [
     path("register/", hitch.main.views.register, name="register"),
     path("login/", hitch.main.views.login, name="login"),
     path("logout/", hitch.main.views.logout, name="logout"),
+    path("usage/", hitch.main.views.usage, name="usage"),
     path("settings/", hitch.main.views.update_settings, name="update_settings"),
     path(
         "settings/archived-sessions/",
