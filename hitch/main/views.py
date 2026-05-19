@@ -209,7 +209,6 @@ def index(request: HttpRequest) -> HttpResponse:
         threads = list(codex.thread_list().data)
         if current_settings.show_archived_sessions:
             threads.extend(codex.thread_list(archived=True).data)
-        rate_limits = _fetch_rate_limits(codex)
     hidden_thread_ids = system_agents.hidden_thread_ids()
     threads = sorted(threads, key=lambda s: s.updated_at, reverse=True)
     sessions = []
@@ -271,11 +270,27 @@ def index(request: HttpRequest) -> HttpResponse:
             "current_repo": current_repo,
             "name_max_len": _NAME_MAX_LEN,
             "pr_slash_prompt": _PR_SLASH_PROMPT,
-            "rate_limits": rate_limits,
+            "usage_url": reverse("usage"),
         },
     )
     _apply_cookie_updates(response, cookie_updates)
     return response
+
+
+@require_http_methods(["GET"])
+def usage(request: HttpRequest) -> HttpResponse:
+    settings = _stored_settings(request)
+    config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
+    with Codex(config=config) as codex:
+        rate_limits = _fetch_rate_limits(codex)
+    return render(
+        request,
+        "usage.html",
+        {
+            "index_url": reverse("index"),
+            "rate_limits": rate_limits,
+        },
+    )
 
 
 def session(request: HttpRequest, session_id: str) -> HttpResponse:
@@ -1124,8 +1139,8 @@ def _fetch_rate_limits(codex: Codex) -> dict[str, Any] | None:
     The endpoint is meaningful only when Codex is talking to a real OpenAI
     account; local-dev (no auth, custom provider via ollama) and older
     Codex builds will fail with MethodNotFound or an auth error. The
-    settings dialog must still render in those modes, so any failure here
-    swallows into None and the rate-limits section is omitted.
+    usage page must still render in those modes, so any failure here
+    swallows into None and the page shows its empty state.
     """
     try:
         response = codex._client.request(
@@ -1136,7 +1151,7 @@ def _fetch_rate_limits(codex: Codex) -> dict[str, Any] | None:
     except AppServerError:
         return None
     except Exception:
-        logger.exception("failed to fetch account rate limits; omitting from settings dialog")
+        logger.exception("failed to fetch account rate limits; showing usage empty state")
         return None
     return _format_rate_limit_snapshot(response.rate_limits)
 

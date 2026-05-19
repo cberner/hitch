@@ -129,6 +129,45 @@
             height: 20px;
             display: block;
         }
+        .settings-menu {
+            position: relative;
+            display: inline-flex;
+        }
+        .settings-menu-panel {
+            position: absolute;
+            right: 0;
+            top: calc(100% + 0.35rem);
+            z-index: 30;
+            min-width: 9rem;
+            padding: 0.35rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--surface);
+            box-shadow: var(--shadow-lg);
+        }
+        .settings-menu-panel[hidden] { display: none; }
+        .settings-menu-panel button,
+        .settings-menu-panel a {
+            width: 100%;
+            display: block;
+            font: inherit;
+            font-size: 0.9rem;
+            text-align: left;
+            text-decoration: none;
+            border: 0;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text);
+            padding: 0.5rem 0.65rem;
+            cursor: pointer;
+        }
+        .settings-menu-panel button:hover,
+        .settings-menu-panel button:focus,
+        .settings-menu-panel a:hover,
+        .settings-menu-panel a:focus {
+            outline: none;
+            background: var(--surface-2);
+        }
         .brand {
             font-size: 1rem;
             font-weight: 700;
@@ -729,62 +768,6 @@
                 transform: translateX(-50%);
             }
         }
-        .rate-limits {
-            display: flex;
-            flex-direction: column;
-            gap: 0.55rem;
-            padding-top: 0.25rem;
-            border-top: 1px solid var(--border);
-        }
-        .rate-limits-title {
-            font-size: 0.72rem;
-            font-weight: 600;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-            margin: 0;
-        }
-        .rate-limits-plan {
-            font-size: 0.78rem;
-            color: var(--text-faint);
-            margin: -0.3rem 0 0;
-        }
-        .rate-limit-row {
-            display: flex;
-            flex-direction: column;
-            gap: 0.3rem;
-        }
-        .rate-limit-row-head {
-            display: flex;
-            justify-content: space-between;
-            align-items: baseline;
-            gap: 0.5rem;
-            font-size: 0.82rem;
-            color: var(--text);
-        }
-        .rate-limit-row-head .rate-limit-remaining {
-            font-variant-numeric: tabular-nums;
-            color: var(--text-muted);
-            font-size: 0.78rem;
-        }
-        .rate-limit-bar {
-            position: relative;
-            height: 6px;
-            background: var(--surface-2);
-            border-radius: 999px;
-            overflow: hidden;
-        }
-        .rate-limit-bar-fill {
-            position: absolute;
-            inset: 0 auto 0 0;
-            background: var(--accent);
-            border-radius: inherit;
-        }
-        .rate-limit-meta {
-            font-size: 0.72rem;
-            color: var(--text-faint);
-            font-variant-numeric: tabular-nums;
-        }
         @media (max-width: 480px) {
             dialog.new-session {
                 max-width: calc(100% - 1rem);
@@ -823,12 +806,18 @@
                 <button type="button" class="button topbar-action" data-new-session-open>
                     <span class="plus">+</span>New session
                 </button>
-                <button type="button" class="icon-button" data-settings-open aria-label="Settings" title="Settings">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <circle cx="12" cy="12" r="3"></circle>
-                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-                    </svg>
-                </button>
+                <div class="settings-menu" data-settings-menu>
+                    <button type="button" class="icon-button" data-settings-menu-open aria-label="Settings" title="Settings" aria-haspopup="menu" aria-expanded="false">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <circle cx="12" cy="12" r="3"></circle>
+                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                        </svg>
+                    </button>
+                    <div class="settings-menu-panel" role="menu" data-settings-menu-panel hidden>
+                        <button type="button" role="menuitem" data-settings-open>settings</button>
+                        <a href="{{ usage_url }}" role="menuitem">usage</a>
+                    </div>
+                </div>
             </div>
         </div>
     </header>
@@ -953,35 +942,6 @@
                 <span>Enable Codex memories</span>
                 <input type="checkbox" name="enable_memories" value="true" {% if current_enable_memories %}checked{% endif %}>
             </label>
-            {% if rate_limits %}
-            <section class="rate-limits" aria-labelledby="rate-limits-title">
-                <h3 class="rate-limits-title" id="rate-limits-title">
-                    {% if rate_limits.limit_name %}{{ rate_limits.limit_name }} rate limits{% else %}Rate limits{% endif %}
-                </h3>
-                {% if rate_limits.plan_type %}
-                <p class="rate-limits-plan">Plan: {{ rate_limits.plan_type }}</p>
-                {% endif %}
-                {% for window in rate_limits.windows %}
-                <div class="rate-limit-row">
-                    <div class="rate-limit-row-head">
-                        <span>{{ window.label }}</span>
-                        <span class="rate-limit-remaining">{{ window.remaining_percent }}% remaining</span>
-                    </div>
-                    <div class="rate-limit-bar" role="progressbar"
-                         aria-valuenow="{{ window.remaining_percent }}"
-                         aria-valuemin="0" aria-valuemax="100"
-                         aria-label="{{ window.label }} remaining">
-                        <div class="rate-limit-bar-fill" style="width: {{ window.remaining_percent }}%"></div>
-                    </div>
-                    <div class="rate-limit-meta">
-                        {% if window.window_duration_label %}{{ window.window_duration_label }} window{% endif %}
-                        {% if window.window_duration_label and window.resets_at %} · {% endif %}
-                        {% if window.resets_at %}resets <time data-resets-at="{{ window.resets_at }}">{{ window.resets_at }}</time>{% endif %}
-                    </div>
-                </div>
-                {% endfor %}
-            </section>
-            {% endif %}
             <div class="actions">
                 <button type="button" class="button secondary" data-settings-cancel>Cancel</button>
                 <button type="submit" class="button">Save</button>
@@ -1060,15 +1020,6 @@
                 el.title = date.toString();
                 el.textContent = `${absolute.format(date)} (${relativeFromNow(date)})`;
             }
-            for (const el of document.querySelectorAll("time[data-resets-at]")) {
-                const seconds = Number(el.dataset.resetsAt);
-                if (!Number.isFinite(seconds) || seconds <= 0) continue;
-                const date = new Date(seconds * 1000);
-                el.dateTime = date.toISOString();
-                el.title = date.toString();
-                el.textContent = relativeFromNow(date);
-            }
-
             const modalScrollLockClass = "modal-scroll-locked";
             function syncModalScrollLock() {
                 const hasOpenDialog = Boolean(document.querySelector("dialog[open]"));
@@ -1557,9 +1508,38 @@
             }
 
             const settingsDialog = document.querySelector("[data-settings-dialog]");
+            const settingsMenu = document.querySelector("[data-settings-menu]");
+            const settingsMenuButton = settingsMenu && settingsMenu.querySelector("[data-settings-menu-open]");
+            const settingsMenuPanel = settingsMenu && settingsMenu.querySelector("[data-settings-menu-panel]");
             const settingsOpenButtons = document.querySelectorAll("[data-settings-open]");
             const settingsCancel = settingsDialog && settingsDialog.querySelector("[data-settings-cancel]");
-            settingsOpenButtons.forEach((btn) => btn.addEventListener("click", () => showDialog(settingsDialog)));
+            function closeSettingsMenu() {
+                if (!settingsMenuButton || !settingsMenuPanel) return;
+                settingsMenuPanel.hidden = true;
+                settingsMenuButton.setAttribute("aria-expanded", "false");
+            }
+            if (settingsMenuButton && settingsMenuPanel) {
+                settingsMenuButton.addEventListener("click", (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const willOpen = settingsMenuPanel.hidden;
+                    settingsMenuPanel.hidden = !willOpen;
+                    settingsMenuButton.setAttribute("aria-expanded", willOpen ? "true" : "false");
+                });
+                document.addEventListener("click", (event) => {
+                    if (!settingsMenu || settingsMenu.contains(event.target)) return;
+                    closeSettingsMenu();
+                });
+                document.addEventListener("keydown", (event) => {
+                    if (event.key !== "Escape" || settingsMenuPanel.hidden) return;
+                    closeSettingsMenu();
+                    settingsMenuButton.focus();
+                });
+            }
+            settingsOpenButtons.forEach((btn) => btn.addEventListener("click", () => {
+                closeSettingsMenu();
+                showDialog(settingsDialog);
+            }));
             if (settingsCancel) settingsCancel.addEventListener("click", () => hideDialog(settingsDialog));
 
             const archivedVisibilityForm = document.querySelector("[data-archived-visibility-form]");
