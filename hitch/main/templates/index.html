@@ -89,6 +89,12 @@
             align-items: center;
             gap: 0.5rem;
         }
+        .topbar-leading {
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
+            min-width: 0;
+        }
         .logout-form {
             margin: 0;
             display: inline-flex;
@@ -101,7 +107,12 @@
             font-size: 0.82rem;
             color: var(--text-muted);
         }
-        .icon-button {
+        .primary-nav {
+            position: relative;
+            display: flex;
+            align-items: center;
+        }
+        .primary-nav-toggle {
             font: inherit;
             background: transparent;
             color: var(--text-muted);
@@ -109,64 +120,87 @@
             border-radius: 999px;
             width: 38px;
             height: 38px;
-            display: inline-flex;
+            display: none;
             align-items: center;
             justify-content: center;
+            flex-direction: column;
+            gap: 4px;
             cursor: pointer;
             transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
             -webkit-tap-highlight-color: transparent;
         }
-        .icon-button:active { transform: scale(0.95); }
+        .primary-nav-toggle:active { transform: scale(0.95); }
+        .primary-nav-toggle span {
+            width: 18px;
+            height: 2px;
+            border-radius: 999px;
+            background: currentColor;
+            display: block;
+        }
         @media (hover: hover) {
-            .icon-button:hover {
+            .primary-nav-toggle:hover {
                 background: var(--surface-2);
                 color: var(--text);
                 border-color: var(--border);
             }
         }
-        .icon-button svg {
-            width: 20px;
-            height: 20px;
-            display: block;
+        .primary-nav-panel {
+            display: flex;
+            align-items: center;
+            gap: 0.25rem;
         }
-        .settings-menu {
-            position: relative;
+        .primary-nav-panel a,
+        .primary-nav-panel button {
             display: inline-flex;
-        }
-        .settings-menu-panel {
-            position: absolute;
-            right: 0;
-            top: calc(100% + 0.35rem);
-            z-index: 30;
-            min-width: 9rem;
-            padding: 0.35rem;
-            border: 1px solid var(--border);
-            border-radius: var(--radius-sm);
-            background: var(--surface);
-            box-shadow: var(--shadow-lg);
-        }
-        .settings-menu-panel[hidden] { display: none; }
-        .settings-menu-panel button,
-        .settings-menu-panel a {
-            width: 100%;
-            display: block;
+            align-items: center;
+            min-height: 34px;
             font: inherit;
             font-size: 0.9rem;
             text-align: left;
             text-decoration: none;
             border: 0;
-            border-radius: 6px;
+            border-radius: 999px;
             background: transparent;
-            color: var(--text);
-            padding: 0.5rem 0.65rem;
+            color: var(--text-muted);
+            padding: 0.35rem 0.65rem;
             cursor: pointer;
         }
-        .settings-menu-panel button:hover,
-        .settings-menu-panel button:focus,
-        .settings-menu-panel a:hover,
-        .settings-menu-panel a:focus {
+        .primary-nav-panel a:hover,
+        .primary-nav-panel a:focus,
+        .primary-nav-panel button:hover,
+        .primary-nav-panel button:focus {
             outline: none;
             background: var(--surface-2);
+            color: var(--text);
+        }
+        @media (max-width: 640px) {
+            .primary-nav-toggle {
+                display: inline-flex;
+            }
+            .primary-nav-panel {
+                display: none;
+                position: absolute;
+                left: 0;
+                top: calc(100% + 0.35rem);
+                z-index: 30;
+                min-width: 10rem;
+                padding: 0.35rem;
+                border: 1px solid var(--border);
+                border-radius: var(--radius-sm);
+                background: var(--surface);
+                box-shadow: var(--shadow-lg);
+            }
+            .primary-nav-toggle[aria-expanded="true"] + .primary-nav-panel {
+                display: block;
+            }
+            .primary-nav-panel a,
+            .primary-nav-panel button {
+                width: 100%;
+                display: block;
+                border-radius: 6px;
+                color: var(--text);
+                padding: 0.5rem 0.65rem;
+            }
         }
         .brand {
             font-size: 1rem;
@@ -831,7 +865,21 @@
 <body>
     <header class="topbar">
         <div class="topbar-inner">
-            <h1 class="brand">HITCH</h1>
+            <div class="topbar-leading">
+                <nav class="primary-nav" aria-label="Primary" data-nav-menu>
+                    <button type="button" class="primary-nav-toggle" aria-label="Navigation menu" aria-haspopup="true" aria-expanded="false" data-nav-menu-open>
+                        <span aria-hidden="true"></span>
+                        <span aria-hidden="true"></span>
+                        <span aria-hidden="true"></span>
+                    </button>
+                    <div class="primary-nav-panel" data-nav-menu-panel>
+                        <a href="{% url 'index' %}">sessions</a>
+                        <a href="{{ usage_url }}">usage</a>
+                        <button type="button" data-settings-open>settings</button>
+                    </div>
+                </nav>
+                <h1 class="brand">HITCH</h1>
+            </div>
             <div class="topbar-actions">
                 {% if user.is_authenticated %}
                 <span class="account-label" title="{{ user.get_username }}">{{ user.get_username }}</span>
@@ -846,18 +894,6 @@
                 <button type="button" class="button topbar-action" data-new-session-open>
                     <span class="plus">+</span>New session
                 </button>
-                <div class="settings-menu" data-settings-menu>
-                    <button type="button" class="icon-button" data-settings-menu-open aria-label="Settings" title="Settings" aria-haspopup="menu" aria-expanded="false">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                            <circle cx="12" cy="12" r="3"></circle>
-                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
-                        </svg>
-                    </button>
-                    <div class="settings-menu-panel" role="menu" data-settings-menu-panel hidden>
-                        <button type="button" role="menuitem" data-settings-open>settings</button>
-                        <a href="{{ usage_url }}" role="menuitem">usage</a>
-                    </div>
-                </div>
             </div>
         </div>
     </header>
@@ -1554,36 +1590,33 @@
             }
 
             const settingsDialog = document.querySelector("[data-settings-dialog]");
-            const settingsMenu = document.querySelector("[data-settings-menu]");
-            const settingsMenuButton = settingsMenu && settingsMenu.querySelector("[data-settings-menu-open]");
-            const settingsMenuPanel = settingsMenu && settingsMenu.querySelector("[data-settings-menu-panel]");
+            const navMenu = document.querySelector("[data-nav-menu]");
+            const navMenuButton = navMenu && navMenu.querySelector("[data-nav-menu-open]");
             const settingsOpenButtons = document.querySelectorAll("[data-settings-open]");
             const settingsCancel = settingsDialog && settingsDialog.querySelector("[data-settings-cancel]");
-            function closeSettingsMenu() {
-                if (!settingsMenuButton || !settingsMenuPanel) return;
-                settingsMenuPanel.hidden = true;
-                settingsMenuButton.setAttribute("aria-expanded", "false");
+            function closeNavMenu() {
+                if (!navMenuButton) return;
+                navMenuButton.setAttribute("aria-expanded", "false");
             }
-            if (settingsMenuButton && settingsMenuPanel) {
-                settingsMenuButton.addEventListener("click", (event) => {
+            if (navMenuButton) {
+                navMenuButton.addEventListener("click", (event) => {
                     event.preventDefault();
                     event.stopPropagation();
-                    const willOpen = settingsMenuPanel.hidden;
-                    settingsMenuPanel.hidden = !willOpen;
-                    settingsMenuButton.setAttribute("aria-expanded", willOpen ? "true" : "false");
+                    const willOpen = navMenuButton.getAttribute("aria-expanded") !== "true";
+                    navMenuButton.setAttribute("aria-expanded", willOpen ? "true" : "false");
                 });
                 document.addEventListener("click", (event) => {
-                    if (!settingsMenu || settingsMenu.contains(event.target)) return;
-                    closeSettingsMenu();
+                    if (!navMenu || navMenu.contains(event.target)) return;
+                    closeNavMenu();
                 });
                 document.addEventListener("keydown", (event) => {
-                    if (event.key !== "Escape" || settingsMenuPanel.hidden) return;
-                    closeSettingsMenu();
-                    settingsMenuButton.focus();
+                    if (event.key !== "Escape" || navMenuButton.getAttribute("aria-expanded") !== "true") return;
+                    closeNavMenu();
+                    navMenuButton.focus();
                 });
             }
             settingsOpenButtons.forEach((btn) => btn.addEventListener("click", () => {
-                closeSettingsMenu();
+                closeNavMenu();
                 showDialog(settingsDialog);
             }));
             if (settingsCancel) settingsCancel.addEventListener("click", () => hideDialog(settingsDialog));
