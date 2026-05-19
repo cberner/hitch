@@ -1673,6 +1673,28 @@
             }
             .diff-modal-header { padding: 0.75rem; }
             .diff-file-header { padding: 0.5rem 0.65rem; }
+            .diff-file { min-width: 0; }
+            .diff-table { font-size: 0.74rem; }
+            .diff-lineno { display: none; }
+            .diff-marker {
+                width: 2.55rem;
+                min-width: 2.55rem;
+                padding: 0.08rem 0.25rem;
+                background: var(--surface-2);
+                text-align: right;
+                white-space: nowrap;
+                font-variant-numeric: tabular-nums;
+            }
+            .diff-marker::before {
+                content: attr(data-mobile-lineno);
+                margin-right: 0.2rem;
+                color: var(--text-faint);
+                font-weight: 400;
+            }
+            .diff-code {
+                min-width: 24rem;
+                padding-right: 0.65rem;
+            }
         }
     </style>
     <noscript>
@@ -1863,9 +1885,9 @@
                             <tbody>
                                 {% for line in file.lines %}
                                 <tr class="diff-line diff-line-{{ line.kind }}">
-                                    <td class="diff-lineno">{% if line.old_lineno %}{{ line.old_lineno }}{% endif %}</td>
-                                    <td class="diff-lineno">{% if line.new_lineno %}{{ line.new_lineno }}{% endif %}</td>
-                                    <td class="diff-marker">{% if line.kind == "add" %}+{% elif line.kind == "remove" %}-{% endif %}</td>
+                                    <td class="diff-lineno diff-lineno-old">{% if line.old_lineno %}{{ line.old_lineno }}{% endif %}</td>
+                                    <td class="diff-lineno diff-lineno-new">{% if line.new_lineno %}{{ line.new_lineno }}{% endif %}</td>
+                                    <td class="diff-marker" data-mobile-lineno="{% firstof line.new_lineno line.old_lineno %}">{% if line.kind == "add" %}+{% elif line.kind == "remove" %}-{% endif %}</td>
                                     <td class="diff-code">{{ line.html|safe }}</td>
                                 </tr>
                                 {% endfor %}
