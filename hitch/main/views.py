@@ -160,6 +160,11 @@ _LAST_SELECTED_REPO_MAX_LEN = 4096
 # from ``objects.get`` — a 500 for what should be a clean 400.
 _MAX_BIGAUTOFIELD = 2**63 - 1
 _PLAN_SLASH_COMMAND = "/plan"
+_PLAN_APPROVAL_PROMPT = "Implement the plan."
+_PLAN_REVISION_PROMPT = "Revise the plan."
+_PLAN_ACTION_APPROVE = "approve"
+_PLAN_ACTION_REVISE = "revise"
+_VALID_PLAN_ACTIONS = frozenset({"", _PLAN_ACTION_APPROVE, _PLAN_ACTION_REVISE})
 _PR_SLASH_COMMAND = "/pr"
 _PR_SLASH_PROMPT = system_agents.PR_SLASH_DISPLAY_PROMPT
 _PR_SLASH_FINAL_PROMPT = system_agents.PR_SLASH_PROMPT
@@ -402,6 +407,8 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             "next_message_config": _next_message_config(settings, resumed, plan_model),
             "pr_slash_prompt": _PR_SLASH_PROMPT,
             "default_plan_mode": default_plan_mode,
+            "plan_approval_prompt": _PLAN_APPROVAL_PROMPT,
+            "plan_revision_prompt": _PLAN_REVISION_PROMPT,
             "pr_url": pr_url,
             "goal_objective": goal_objective,
             "task_plan": task_plan,
@@ -1546,6 +1553,15 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     if not prompt:
         return HttpResponseBadRequest("prompt is required")
     collaboration_mode = request.POST.get("collaboration_mode", "").strip().lower()
+    plan_action = request.POST.get("plan_action", "").strip().lower()
+    if plan_action not in _VALID_PLAN_ACTIONS:
+        return HttpResponseBadRequest("invalid plan action")
+    if plan_action == _PLAN_ACTION_APPROVE:
+        collaboration_mode = _DEFAULT_COLLABORATION_MODE
+        plan_mode = False
+    elif plan_action == _PLAN_ACTION_REVISE:
+        collaboration_mode = ""
+        plan_mode = True
     if collaboration_mode and collaboration_mode != _DEFAULT_COLLABORATION_MODE:
         return HttpResponseBadRequest("invalid collaboration mode")
     if collaboration_mode and plan_mode and intent.explicit_plan_mode:
@@ -1606,6 +1622,15 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             and not intent.explicit_plan_mode
         ):
             plan_mode = thread_awaits_plan_approval
+        if (
+            thread_awaits_plan_approval
+            and not collaboration_mode
+            and intent.allow_pending_plan_default
+            and not intent.explicit_plan_mode
+            and prompt == _PLAN_APPROVAL_PROMPT
+        ):
+            collaboration_mode = _DEFAULT_COLLABORATION_MODE
+            plan_mode = False
         collaboration_model = (
             _plan_mode_model(codex, resumed, settings)
             if plan_mode or collaboration_mode == _DEFAULT_COLLABORATION_MODE

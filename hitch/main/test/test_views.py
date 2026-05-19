@@ -2065,6 +2065,119 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
+    def test_plan_approve_action_switches_to_default_mode(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        rollout_path = self._make_pending_plan_rollout()
+        self._patch_codex(mock_codex, model="gpt-5.4", path=str(rollout_path))
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={
+                "prompt": "Implement the plan.",
+                "plan_action": "approve",
+                "plan_mode": "true",
+                "default_plan_mode": "true",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="Implement the plan.",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model="gpt-5.4",
+            collaboration_mode="default",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_pending_plan_approval_prompt_switches_to_default_mode(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        rollout_path = self._make_pending_plan_rollout()
+        self._patch_codex(mock_codex, model="gpt-5.4", path=str(rollout_path))
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={
+                "prompt": "Implement the plan.",
+                "plan_mode": "true",
+                "default_plan_mode": "true",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="Implement the plan.",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model="gpt-5.4",
+            collaboration_mode="default",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_plan_revise_action_stays_in_plan_mode(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        rollout_path = self._make_pending_plan_rollout()
+        self._patch_codex(mock_codex, model="gpt-5.4", path=str(rollout_path))
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "Revise the plan.", "plan_action": "revise"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="Revise the plan.",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model="gpt-5.4",
+            plan_mode=True,
+        )
+
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_rejects_invalid_plan_action(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+    ) -> None:
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "Implement the plan.", "plan_action": "ship"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, "invalid plan action", status_code=400)
+        mock_codex.assert_not_called()
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
     def test_plan_slash_command_strips_command_prefix(
         self,
         mock_codex: MagicMock,
