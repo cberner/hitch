@@ -34,6 +34,7 @@ from hitch.main.diffs import build_worktree_diff
 from hitch.main.formatting import looks_like_markdown, render_markdown
 from hitch.main.models import (
     ApprovalRequest,
+    ArchivedSessionTokenUsage,
     CodexInstance,
     UserInputRequest,
     UserSettings,
@@ -191,6 +192,15 @@ _NON_MESSAGE_LABELS = {
     "contextCompaction": "Context compaction",
 }
 
+_TOKEN_USAGE_KEYS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "total_tokens",
+    "context_tokens",
+    "model_context_window",
+)
+
 
 def index(request: HttpRequest) -> HttpResponse:
     # Sweep workers whose pid is gone: a Popen that crashed before a worker
@@ -218,6 +228,7 @@ def index(request: HttpRequest) -> HttpResponse:
         is_archived = _thread_is_archived(thread)
         if is_archived and not current_settings.show_archived_sessions:
             continue
+        token_usage = _token_usage_numbers_for(thread)
         sessions.append(
             {
                 "id": thread.id,
@@ -226,6 +237,11 @@ def index(request: HttpRequest) -> HttpResponse:
                 "display_title": _display_title(thread),
                 "name_value": getattr(thread, "name", None) or "",
                 "is_archived": is_archived,
+                "token_usage_total": (
+                    _format_token_count(token_usage["total_tokens"])
+                    if token_usage is not None
+                    else ""
+                ),
             }
         )
     repos = [str(p) for p in discover_repos()]
@@ -283,12 +299,19 @@ def usage(request: HttpRequest) -> HttpResponse:
     config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
     with Codex(config=config) as codex:
         rate_limits = _fetch_rate_limits(codex)
+        usage_threads = _threads_for_usage(codex)
+        lifetime_usage = (
+            _lifetime_token_usage_for(usage_threads)
+            if usage_threads is not None
+            else None
+        )
     return render(
         request,
         "usage.html",
         {
             "index_url": reverse("index"),
             "rate_limits": rate_limits,
+            "lifetime_usage": lifetime_usage,
         },
     )
 
@@ -463,24 +486,19 @@ def _thread_is_archived(thread: Any) -> bool:
 def _token_usage_for(thread: Any) -> dict[str, str] | None:
     """Return formatted input/cached/output token counts, or None.
 
-    Token usage is only persisted in the on-disk rollout file (as
+    Token usage is only persisted by Codex in the on-disk rollout file (as
     ``TokenCount`` event_msg entries); the SDK ``Thread`` does not carry it.
-    Returns None when the thread has no rollout path or the rollout contains
-    no token_count event yet — the template hides the section in that case.
+    Archived sessions use ``ArchivedSessionTokenUsage`` as a cache once the
+    value has been parsed. Live sessions always parse the current rollout so
+    the page reflects the latest turn.
     """
-    path = getattr(thread, "path", None)
-    if not isinstance(path, str) or not path:
-        return None
-    rollout_path = Path(path)
-    if not rollout_path.is_file():
-        return None
-    usage = rollout.latest_token_usage(rollout_path)
+    usage = _token_usage_numbers_for(thread)
     if usage is None:
         return None
     formatted = {
-        "input": f"{usage['input_tokens']:,}",
-        "cached": f"{usage['cached_input_tokens']:,}",
-        "output": f"{usage['output_tokens']:,}",
+        "input": _format_token_count(usage["input_tokens"]),
+        "cached": _format_token_count(usage["cached_input_tokens"]),
+        "output": _format_token_count(usage["output_tokens"]),
     }
     context_tokens = usage.get("context_tokens", 0)
     context_window = usage.get("model_context_window", 0)
@@ -494,6 +512,148 @@ def _token_usage_for(thread: Any) -> dict[str, str] | None:
             }
         )
     return formatted
+
+
+def _token_usage_numbers_for(thread: Any) -> dict[str, int] | None:
+    if _thread_is_archived(thread):
+        return _archived_token_usage_numbers_for(thread)
+    return _latest_token_usage_numbers_for(thread)
+
+
+def _latest_token_usage_numbers_for(thread: Any) -> dict[str, int] | None:
+    rollout_path = _rollout_path_for(thread)
+    if rollout_path is None:
+        return None
+    usage = rollout.latest_token_usage(rollout_path)
+    if usage is None:
+        return None
+    return {key: usage.get(key, 0) for key in _TOKEN_USAGE_KEYS}
+
+
+def _rollout_path_for(thread: Any) -> Path | None:
+    path = getattr(thread, "path", None)
+    if not isinstance(path, str) or not path:
+        return None
+    rollout_path = Path(path)
+    if not rollout_path.is_file():
+        return None
+    return rollout_path
+
+
+def _rollout_mtime_ns(rollout_path: Path | None) -> int:
+    if rollout_path is None:
+        return 0
+    try:
+        return rollout_path.stat().st_mtime_ns
+    except OSError:
+        return 0
+
+
+def _archived_token_usage_numbers_for(thread: Any) -> dict[str, int] | None:
+    thread_id = getattr(thread, "id", None)
+    if not isinstance(thread_id, str) or not thread_id:
+        return _latest_token_usage_numbers_for(thread)
+    rollout_path = _rollout_path_for(thread)
+    cached = ArchivedSessionTokenUsage.objects.filter(thread_id=thread_id).first()
+    if cached is not None and _cached_token_usage_is_current(cached, rollout_path):
+        return _token_usage_from_cache(cached)
+    usage = _latest_token_usage_numbers_for(thread)
+    if usage is None:
+        return _token_usage_from_cache(cached) if cached is not None else None
+    cached, _created = ArchivedSessionTokenUsage.objects.update_or_create(
+        thread_id=thread_id,
+        defaults=_token_usage_cache_defaults(rollout_path, usage),
+    )
+    return _token_usage_from_cache(cached)
+
+
+def _cached_token_usage_is_current(
+    cache: ArchivedSessionTokenUsage, rollout_path: Path | None
+) -> bool:
+    if rollout_path is None:
+        return True
+    return (
+        cache.rollout_path == str(rollout_path)
+        and cache.rollout_mtime_ns == _rollout_mtime_ns(rollout_path)
+    )
+
+
+def _token_usage_cache_defaults(
+    rollout_path: Path | None, usage: dict[str, int]
+) -> dict[str, str | int]:
+    return {
+        "rollout_path": str(rollout_path) if rollout_path is not None else "",
+        "rollout_mtime_ns": _rollout_mtime_ns(rollout_path),
+        "input_tokens": usage["input_tokens"],
+        "cached_input_tokens": usage["cached_input_tokens"],
+        "output_tokens": usage["output_tokens"],
+        "total_tokens": usage["total_tokens"],
+        "context_tokens": usage["context_tokens"],
+        "model_context_window": usage["model_context_window"],
+    }
+
+
+def _token_usage_from_cache(cache: ArchivedSessionTokenUsage) -> dict[str, int]:
+    return {
+        "input_tokens": cache.input_tokens,
+        "cached_input_tokens": cache.cached_input_tokens,
+        "output_tokens": cache.output_tokens,
+        "total_tokens": cache.total_tokens,
+        "context_tokens": cache.context_tokens,
+        "model_context_window": cache.model_context_window,
+    }
+
+
+def _format_token_count(value: int) -> str:
+    return f"{value:,}"
+
+
+def _threads_for_usage(codex: Codex) -> list[Any] | None:
+    threads: list[Any] = []
+    failed = False
+    try:
+        threads.extend(codex.thread_list().data)
+    except AppServerError:
+        logger.warning("failed to list active sessions for usage page")
+        failed = True
+    try:
+        threads.extend(codex.thread_list(archived=True).data)
+    except AppServerError:
+        logger.warning("failed to list archived sessions for usage page")
+        failed = True
+    if failed:
+        return None
+    return _dedupe_usage_threads(threads)
+
+
+def _dedupe_usage_threads(threads: list[Any]) -> list[Any]:
+    hidden_thread_ids = system_agents.hidden_thread_ids()
+    seen: set[str] = set()
+    deduped: list[Any] = []
+    for thread in threads:
+        thread_id = getattr(thread, "id", None)
+        if isinstance(thread_id, str):
+            if thread_id in hidden_thread_ids or thread_id in seen:
+                continue
+            seen.add(thread_id)
+        deduped.append(thread)
+    return deduped
+
+
+def _lifetime_token_usage_for(threads: list[Any]) -> dict[str, str]:
+    totals = {key: 0 for key in _TOKEN_USAGE_KEYS}
+    for thread in threads:
+        usage = _token_usage_numbers_for(thread)
+        if usage is None:
+            continue
+        for key in _TOKEN_USAGE_KEYS:
+            totals[key] += usage.get(key, 0)
+    return {
+        "total": _format_token_count(totals["total_tokens"]),
+        "input": _format_token_count(totals["input_tokens"]),
+        "output": _format_token_count(totals["output_tokens"]),
+        "cached": _format_token_count(totals["cached_input_tokens"]),
+    }
 
 
 def _next_message_config(
@@ -1367,6 +1527,7 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
             codex.thread_archive(session_id)
         else:
             codex.thread_unarchive(session_id)
+    ArchivedSessionTokenUsage.objects.all().delete()
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return HttpResponse(status=204)
     if request.POST.get("next", "").strip() == "index":
