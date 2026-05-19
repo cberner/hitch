@@ -233,7 +233,15 @@ class PrQaWorkflowTests(TestCase):
         system_agents.on_codex_instance_finished(instance)
 
         mock_spawn.assert_called_once()
-        self.assertEqual(mock_spawn.call_args.kwargs["prompt"], system_agents.PR_SLASH_PROMPT)
+        prompt = mock_spawn.call_args.kwargs["prompt"]
+        self.assertEqual(prompt, system_agents.PR_SLASH_PROMPT)
+        self.assertIn("poll the PR every 2 minutes", prompt)
+        self.assertIn("CI status", prompt)
+        self.assertIn("thumbs up emoji", prompt)
+        self.assertIn("explicit review approval", prompt)
+        self.assertIn("merge conflicts", prompt)
+        self.assertIn("keep looping until CI, review, and mergeability are all clean", prompt)
+        self.assertIn("no results after 30 minutes", prompt)
         self.assertEqual(mock_spawn.call_args.kwargs["model"], "gpt-5.4")
         self.assertEqual(mock_spawn.call_args.kwargs["reasoning_effort"], "high")
         self.assertEqual(
