@@ -181,7 +181,8 @@
         }
         .session-menu[hidden] { display: none; }
         .session-menu form { margin: 0; }
-        .session-menu button {
+        .session-menu button,
+        .session-menu a {
             width: 100%;
             font: inherit;
             font-size: 0.9rem;
@@ -192,11 +193,16 @@
             color: var(--text);
             padding: 0.5rem 0.65rem;
             cursor: pointer;
+            text-decoration: none;
+            display: block;
         }
         .session-menu button:hover,
-        .session-menu button:focus {
+        .session-menu button:focus,
+        .session-menu a:hover,
+        .session-menu a:focus {
             outline: none;
             background: var(--surface-2);
+            text-decoration: none;
         }
         .session-menu button:disabled {
             color: var(--text-faint);
@@ -1713,6 +1719,9 @@
                 <div class="session-menu" role="menu" data-session-menu-panel hidden>
                     <button type="button" role="menuitem" data-edit-title-open>Rename</button>
                     <button type="button" role="menuitem" data-diff-open {% if not diff_view.has_changes %}disabled{% endif %}>View diff</button>
+                    {% if pr_url %}
+                        <a href="{{ pr_url }}" role="menuitem" target="_blank" rel="noopener noreferrer">Open PR</a>
+                    {% endif %}
                     <form method="post" action="{{ set_archived_url }}" role="none">
                         {% csrf_token %}
                         <input type="hidden" name="archived" value="{% if is_archived %}false{% else %}true{% endif %}">

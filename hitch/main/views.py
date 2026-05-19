@@ -2,6 +2,7 @@ import base64
 import binascii
 import json
 import logging
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -163,6 +164,13 @@ _PR_SLASH_PROMPT = system_agents.PR_SLASH_DISPLAY_PROMPT
 _PR_SLASH_FINAL_PROMPT = system_agents.PR_SLASH_PROMPT
 _PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium.value
 _DEFAULT_COLLABORATION_MODE = "default"
+_GITHUB_PR_TOOL_RE = re.compile(
+    r"(?i)(?:^|[/:\s._-])(?:github|mcp__codex_apps__github)(?:$|[/:\s._-]).*"
+    r"(?:_?create[_\s-]?(?:pr|pull[_\s-]?request)|open[_\s-]?(?:pr|pull[_\s-]?request))"
+)
+_GITHUB_PR_URL_RE = re.compile(
+    r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+"
+)
 
 # Friendly labels for non-message thread item types. Anything not in this map
 # falls back to the raw type tag so we never silently drop an item from the UI.
@@ -290,6 +298,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
     is_archived = _thread_is_archived(thread)
     entries = _apply_system_authors(list(_entries_for(thread)), session_id)
     name_value = getattr(thread, "name", None) or ""
+    pr_url = _pr_url_for_thread(thread)
     active_instance = _active_instance_for(session_id)
     active_system_workflow = system_agents.active_workflow_for_thread(session_id)
     # While a worker is running, drop the entries that belong to its
@@ -355,6 +364,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             "next_message_config": _next_message_config(settings, resumed, plan_model),
             "pr_slash_prompt": _PR_SLASH_PROMPT,
             "default_plan_mode": default_plan_mode,
+            "pr_url": pr_url,
             "goal_objective": goal_objective,
             "task_plan": task_plan,
             "diff_view": diff_view,
@@ -1492,6 +1502,65 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
 
 def _thread_awaits_plan_approval(thread: Any) -> bool:
     return _entries_await_plan_approval(list(_entries_for(thread)))
+
+
+def _pr_url_for_thread(thread: Any) -> str | None:
+    """Return the PR opened by the latest completed /pr turn, if any."""
+    for turn in reversed(getattr(thread, "turns", []) or []):
+        items = [thread_item.root for thread_item in getattr(turn, "items", []) or []]
+        if not _is_pr_prompt_turn(items):
+            continue
+        final_idx = _find_final_agent_idx(items)
+        if final_idx == -1:
+            continue
+        urls: list[str] = []
+        for item in items[:final_idx]:
+            if _github_pr_tool_call_used(item):
+                urls.extend(_pr_urls_from_value(_value_for(item, "result")))
+        return urls[-1] if urls else None
+    return None
+
+
+def _is_pr_prompt_turn(items: list[Any]) -> bool:
+    for item in items:
+        if _value_for(item, "type") != "userMessage":
+            continue
+        if _user_message_text(item).strip() in {_PR_SLASH_PROMPT, _PR_SLASH_FINAL_PROMPT}:
+            return True
+    return False
+
+
+def _github_pr_tool_call_used(item: Any) -> bool:
+    if _value_for(item, "type") != "mcpToolCall":
+        return False
+    server = _string_value(_value_for(item, "server"))
+    tool = _string_value(_value_for(item, "tool"))
+    detail = f"{server} / {tool}".strip()
+    return _GITHUB_PR_TOOL_RE.search(detail) is not None
+
+
+def _pr_urls_from_value(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return _GITHUB_PR_URL_RE.findall(value)
+    if isinstance(value, dict):
+        urls: list[str] = []
+        for child in value.values():
+            urls.extend(_pr_urls_from_value(child))
+        return urls
+    if isinstance(value, list | tuple):
+        urls = []
+        for child in value:
+            urls.extend(_pr_urls_from_value(child))
+        return urls
+    text = _string_value(_value_for(value, "text"))
+    if text:
+        return _GITHUB_PR_URL_RE.findall(text)
+    urls = []
+    for attr in ("url", "display_url", "displayUrl", "structured_content", "content"):
+        urls.extend(_pr_urls_from_value(_value_for(value, attr)))
+    return urls
 
 
 def _entries_await_plan_approval(entries: list[dict[str, Any]]) -> bool:
