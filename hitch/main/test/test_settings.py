@@ -15,6 +15,7 @@ _APPROVAL_COOKIE = "hitch_approval_mode"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
+_ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 
 # By default a test model accepts every enum value so tests that don't care
 # about supported-effort filtering can stay terse; tests that exercise the
@@ -788,6 +789,30 @@ class UpdateSettingsViewTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertNotIn(_USE_WORKTREES_COOKIE, response.cookies)
+
+    def test_saves_memories_setting_to_signed_cookie(self) -> None:
+        cases = [
+            ({"enable_memories": "true"}, "true"),
+            ({}, "false"),
+        ]
+        for data, expected in cases:
+            with self.subTest(expected=expected):
+                response = self.client.post(reverse("update_settings"), data=data)
+
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(
+                    _cookie_value(response, _ENABLE_MEMORIES_COOKIE), expected
+                )
+
+    def test_rejects_unknown_memories_setting(self) -> None:
+        _seed_cookies(self.client, **{_ENABLE_MEMORIES_COOKIE: "true"})
+        response = self.client.post(
+            reverse("update_settings"),
+            data={"enable_memories": "yes"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn(_ENABLE_MEMORIES_COOKIE, response.cookies)
 
 
 class UpdateArchivedSessionVisibilityViewTests(TestCase):

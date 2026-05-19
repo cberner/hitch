@@ -97,6 +97,11 @@ def _stub_thread_resume(events: list[SimpleNamespace], turn_id: str = "turn-1") 
 
 
 class SpawnNewSessionTests(TestCase):
+    def test_memories_are_explicitly_disabled_by_default(self) -> None:
+        config = codex_pool.app_server_config()
+
+        self.assertEqual(config.config_overrides, ("features.memories=false",))
+
     @patch("hitch.main.codex_pool._launch_worker_process")
     @patch("hitch.main.codex_pool.Codex")
     def test_creates_thread_then_spawns_worker(
@@ -207,6 +212,36 @@ class SpawnNewSessionTests(TestCase):
             reasoning_effort="high",
             sandbox_policy="workspaceWrite",
             approval_mode="deny_all",
+        )
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.codex_pool.Codex")
+    def test_enable_memories_sets_config_override_and_worker_flag(
+        self, mock_codex: MagicMock, mock_launch: MagicMock
+    ) -> None:
+        _stub_codex_thread_start(mock_codex)
+        mock_launch.return_value = SimpleNamespace(pid=1)
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_new_session(
+                cwd="/repo",
+                prompt="hi",
+                enable_memories=True,
+            )
+
+        self.assertTrue(instance.enable_memories)
+        mock_codex.assert_called_once()
+        config = mock_codex.call_args.kwargs["config"]
+        self.assertEqual(config.config_overrides, ("features.memories=true",))
+        mock_launch.assert_called_once_with(
+            instance_id=instance.pk,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode=None,
+            enable_memories=True,
         )
 
     @patch("hitch.main.codex_pool._launch_worker_process")
@@ -448,6 +483,15 @@ class LaunchWorkerProcessTests(TestCase):
         argv = mock_popen.call_args.args[0]
         self.assertIn("--approval-mode", argv)
         self.assertEqual(argv[argv.index("--approval-mode") + 1], "deny_all")
+
+    @patch("hitch.main.codex_pool.subprocess.Popen")
+    def test_forwards_enable_memories_as_cli_arg(self, mock_popen: MagicMock) -> None:
+        mock_popen.return_value = SimpleNamespace(pid=999)
+
+        codex_pool._launch_worker_process(instance_id=7, enable_memories=True)
+
+        argv = mock_popen.call_args.args[0]
+        self.assertIn("--enable-memories", argv)
 
     @patch("hitch.main.codex_pool.subprocess.Popen")
     def test_forwards_collaboration_mode_as_cli_arg(
@@ -1716,6 +1760,7 @@ class CodexWorkerCommandTests(TestCase):
         *,
         prompt: str = "hi",
         developer_instructions: str = "",
+        enable_memories: bool = False,
     ) -> CodexInstance:
         return CodexInstance.objects.create(
             pid=12345,
@@ -1723,6 +1768,7 @@ class CodexWorkerCommandTests(TestCase):
             cwd="/repo",
             prompt=prompt,
             developer_instructions=developer_instructions,
+            enable_memories=enable_memories,
             events_path=str(events_dir / "events.jsonl"),
             status=CodexInstance.STATUS_STARTING,
         )
@@ -1756,6 +1802,21 @@ class CodexWorkerCommandTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
         self.assertIsNotNone(instance.ended_at)
         self.assertEqual(instance.error, "")
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_enable_memories_row_sets_app_server_override(
+        self, mock_codex: MagicMock
+    ) -> None:
+        events = [_completed_event("turn-1", TurnStatus.completed)]
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.return_value = _stub_thread_resume(events)
+
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(Path(raw), enable_memories=True)
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+
+        config = mock_codex.call_args.kwargs["config"]
+        self.assertEqual(config.config_overrides, ("features.memories=true",))
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_forwards_developer_instructions_on_resume(

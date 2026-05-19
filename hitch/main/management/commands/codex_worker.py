@@ -31,7 +31,6 @@ import dataclasses
 import itertools
 import json
 import logging
-import shutil
 import signal
 import threading
 import time
@@ -44,7 +43,6 @@ from django.core.management.base import BaseCommand, CommandParser
 from django.utils import timezone
 from openai_codex import (
     ApprovalMode,
-    AppServerConfig,
     Codex,
     TextInput,
     Thread,
@@ -75,7 +73,7 @@ from openai_codex.models import Notification
 from pydantic import BaseModel
 
 from hitch.main.codex_events import GOAL_METHODS
-from hitch.main.codex_pool import control_path_for
+from hitch.main.codex_pool import app_server_config, control_path_for
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
 
 logger = logging.getLogger(__name__)
@@ -205,6 +203,7 @@ class Command(BaseCommand):
         parser.add_argument("--model", type=str, default=None)
         parser.add_argument("--sandbox-policy", type=str, default=None)
         parser.add_argument("--approval-mode", type=str, default=None)
+        parser.add_argument("--enable-memories", action="store_true")
         parser.add_argument("--collaboration-mode", type=str, default=None)
         parser.add_argument("--plan-mode", action="store_true")
 
@@ -215,6 +214,7 @@ class Command(BaseCommand):
         model: str | None = options.get("model")
         sandbox_policy: str | None = options.get("sandbox_policy")
         approval_mode: str | None = options.get("approval_mode")
+        enable_memories: bool = options.get("enable_memories", False)
         collaboration_mode: str | None = options.get("collaboration_mode")
         plan_mode: bool = options.get("plan_mode", False)
         instance = CodexInstance.objects.get(pk=instance_id)
@@ -238,6 +238,7 @@ class Command(BaseCommand):
                     reasoning_effort=reasoning_effort,
                     sandbox_policy=sandbox_policy,
                     approval_mode=approval_mode,
+                    enable_memories=enable_memories or instance.enable_memories,
                     collaboration_mode=collaboration_mode,
                     plan_mode=plan_mode,
                     output_schema=instance.output_schema,
@@ -289,11 +290,12 @@ def _run_turn(
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
+    enable_memories: bool = False,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
     output_schema: dict[str, Any] | None = None,
 ) -> Turn | None:
-    config = AppServerConfig(codex_bin=shutil.which("codex"))
+    config = app_server_config(enable_memories=enable_memories)
     effort: ReasoningEffort | None = None
     if reasoning_effort:
         # Unknown strings are ignored rather than crashing the worker — Codex

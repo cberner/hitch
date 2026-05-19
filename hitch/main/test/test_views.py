@@ -39,6 +39,7 @@ _MODEL_COOKIE = "hitch_model"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
+_ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 _PR_PROMPT = (
     "Do a thorough review of the diff. Rebase on master, clean it up, "
     "and then open a PR"
@@ -575,6 +576,36 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
+    def test_forwards_memories_cookie_to_new_session_spawn(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+        _seed_cookies(self.client, **{_ENABLE_MEMORIES_COOKIE: "true"})
+
+        self.client.post(
+            reverse("new_session"),
+            data={"prompt": "do thing", "cwd": self.REPO},
+        )
+
+        mock_spawn.assert_called_once_with(
+            cwd=self.REPO,
+            prompt="do thing",
+            developer_instructions=None,
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            enable_memories=True,
+        )
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
     def test_forwards_approval_mode_cookie_to_spawn(
         self,
         mock_discover: MagicMock,
@@ -721,6 +752,7 @@ class NewSessionViewTests(TestCase):
             name=_PR_PROMPT,
             developer_instructions="Use repo conventions.",
             model="gpt-5.4",
+            enable_memories=False,
         )
         mock_start_workflow.assert_called_once_with(
             main_thread_id="thread-xyz",
@@ -730,6 +762,7 @@ class NewSessionViewTests(TestCase):
             model="gpt-5.4",
             reasoning_effort="high",
             developer_instructions="Use repo conventions.",
+            enable_memories=False,
             initial_user_message_index=0,
         )
 
@@ -763,6 +796,7 @@ class NewSessionViewTests(TestCase):
             name=_PR_PROMPT,
             developer_instructions=None,
             model=None,
+            enable_memories=False,
         )
         mock_start_workflow.assert_called_once_with(
             main_thread_id="thread-xyz",
@@ -772,6 +806,7 @@ class NewSessionViewTests(TestCase):
             model=None,
             reasoning_effort=None,
             developer_instructions=None,
+            enable_memories=False,
             initial_user_message_index=0,
         )
 
@@ -1547,6 +1582,34 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
+    def test_forwards_memories_cookie_to_spawn_turn(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        _seed_cookies(self.client, **{_ENABLE_MEMORIES_COOKIE: "true"})
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="follow-up",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            enable_memories=True,
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
     def test_forwards_approval_mode_cookie_to_spawn_turn(
         self,
         mock_codex: MagicMock,
@@ -1724,6 +1787,7 @@ class SendMessageViewTests(TestCase):
             model="gpt-5.4",
             reasoning_effort=None,
             developer_instructions=None,
+            enable_memories=False,
             initial_user_message_index=1,
         )
 
@@ -1754,6 +1818,7 @@ class SendMessageViewTests(TestCase):
             model="gpt-5.4",
             reasoning_effort=None,
             developer_instructions=None,
+            enable_memories=False,
             initial_user_message_index=1,
         )
 
@@ -1845,6 +1910,7 @@ class SendMessageViewTests(TestCase):
             model="gpt-5.4",
             reasoning_effort=None,
             developer_instructions=None,
+            enable_memories=False,
             initial_user_message_index=0,
         )
 

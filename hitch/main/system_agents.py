@@ -69,6 +69,7 @@ def start_pr_qa_workflow(
     model: str | None = None,
     reasoning_effort: str | None = None,
     developer_instructions: str | None = None,
+    enable_memories: bool = False,
     initial_user_message_index: int = 0,
 ) -> SystemWorkflow:
     """Start a PR workflow by running QA before the work-agent PR prompt."""
@@ -87,6 +88,7 @@ def start_pr_qa_workflow(
                     "model": model or "",
                     "reasoning_effort": reasoning_effort or "",
                     "developer_instructions": developer_instructions or "",
+                    "enable_memories": enable_memories,
                     "next_user_message_index": max(initial_user_message_index, 0),
                 },
             )
@@ -255,6 +257,7 @@ def _spawn_pr_qa_run(workflow: SystemWorkflow) -> SystemAgentRun:
         reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
         approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
         sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
+        enable_memories=_state_bool(workflow, "enable_memories"),
         thread_source=ThreadSource.subagent,
         purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
         workflow_id=workflow.pk,
@@ -323,6 +326,7 @@ def _spawn_workflow_turn(
         developer_instructions=_state_string(workflow, "developer_instructions") or None,
         sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
         approval_mode=_state_string(workflow, "approval_mode") or None,
+        enable_memories=_state_bool(workflow, "enable_memories"),
         purpose=purpose,
         workflow_id=workflow.pk,
         agent_kind=PR_QA_AGENT_KIND if purpose != CodexInstance.PURPOSE_USER else "",
@@ -458,6 +462,10 @@ def _state_string(workflow: SystemWorkflow, key: str) -> str:
 def _state_int(workflow: SystemWorkflow, key: str) -> int:
     value = workflow.state.get(key)
     return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _state_bool(workflow: SystemWorkflow, key: str) -> bool:
+    return workflow.state.get(key) is True
 
 
 def _workflow_for_instance(instance: CodexInstance) -> SystemWorkflow | None:

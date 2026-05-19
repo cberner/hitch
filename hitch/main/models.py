@@ -64,6 +64,7 @@ class CodexInstance(models.Model):
     # app-server in-memory state from the request process that created the
     # thread.
     developer_instructions = models.TextField(blank=True, default="")
+    enable_memories = models.BooleanField(default=False)
     events_path = models.CharField(max_length=4096)
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_STARTING)
     started_at = models.DateTimeField(auto_now_add=True)
@@ -316,6 +317,7 @@ class UserSettings(models.Model):
     use_worktrees = models.BooleanField(default=False)
     show_archived_sessions = models.BooleanField(default=False)
     last_selected_repo = models.CharField(max_length=4096, blank=True, default="")
+    enable_memories = models.BooleanField(default=False)
     updated_at = models.DateTimeField(auto_now=True)
 
     @override
