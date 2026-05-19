@@ -1530,6 +1530,10 @@
             background: transparent;
         }
         @media (prefers-color-scheme: dark) {
+            .diff-line-add td { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+            .diff-line-remove td { background: color-mix(in srgb, var(--danger) 22%, transparent); }
+            .diff-line-add td:first-child { box-shadow: inset 0.22rem 0 0 var(--accent); }
+            .diff-line-remove td:first-child { box-shadow: inset 0.22rem 0 0 var(--danger); }
             .diff-code .c,
             .diff-code .c1,
             .diff-code .cm { color: #8fa197; }
