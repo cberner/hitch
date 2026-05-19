@@ -12,10 +12,10 @@ from django.test import Client, TestCase
 from django.urls import reverse
 from openai_codex.errors import AppServerError
 
-from hitch.main import codex_events
+from hitch.main import codex_events, system_agents
 from hitch.main.diffs import DiffFile, DiffLine, DiffView
 from hitch.main.models import CodexInstance, SystemWorkflow
-from hitch.main.views import _tool_call_detail, _tool_call_status
+from hitch.main.views import _pr_url_for_thread, _tool_call_detail, _tool_call_status
 
 # Used for active-worker rendering tests so the session view's
 # ``reconcile_dead`` sweep doesn't mark the row failed before the assertions
@@ -77,6 +77,22 @@ def _file_change(*paths: str, status: str = "completed") -> SimpleNamespace:
 
 def _tool_call(item_type: str) -> SimpleNamespace:
     return _root(SimpleNamespace(type=item_type))
+
+
+def _mcp_tool_call(
+    server: str,
+    tool: str,
+    result: object | None = None,
+) -> SimpleNamespace:
+    return _root(
+        SimpleNamespace(
+            type="mcpToolCall",
+            server=server,
+            tool=tool,
+            result=result,
+            status=SimpleNamespace(value="completed"),
+        )
+    )
 
 
 def _turn(items: list[SimpleNamespace], started_at: int | None = 1700000000) -> SimpleNamespace:
@@ -168,6 +184,114 @@ def _diff_view() -> DiffView:
     )
 
 
+class PrUrlDetectionTests(TestCase):
+    def test_detects_pr_url_from_latest_pr_turn_github_mcp_result(self) -> None:
+        earlier = "https://github.com/cberner/hitch/pull/93"
+        latest = "https://github.com/cberner/hitch/pull/94"
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message("ordinary follow-up"),
+                        _mcp_tool_call(
+                            "github",
+                            "_create_pull_request",
+                            {"structuredContent": {"display_url": earlier}},
+                        ),
+                        _agent_message("Done."),
+                    ]
+                ),
+                _turn(
+                    [
+                        _user_message(system_agents.PR_SLASH_PROMPT),
+                        _mcp_tool_call(
+                            "github",
+                            "_create_pull_request",
+                            {
+                                "content": [
+                                    {
+                                        "text": json.dumps(
+                                            {"url": earlier, "display_url": latest}
+                                        )
+                                    }
+                                ],
+                            },
+                        ),
+                        _agent_message("Opened the PR."),
+                    ]
+                ),
+            ]
+        )
+
+        self.assertEqual(_pr_url_for_thread(thread), latest)
+
+    def test_ignores_non_pr_turns_and_non_github_tools(self) -> None:
+        url = "https://github.com/cberner/hitch/pull/94"
+        non_pr_thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message("ordinary follow-up"),
+                        _mcp_tool_call("github", "_create_pull_request", {"url": url}),
+                        _agent_message("Done."),
+                    ]
+                )
+            ]
+        )
+        non_github_thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message(system_agents.PR_SLASH_PROMPT),
+                        _mcp_tool_call("linear", "create_issue", {"url": url}),
+                        _agent_message("Done."),
+                    ]
+                )
+            ]
+        )
+
+        self.assertIsNone(_pr_url_for_thread(non_pr_thread))
+        self.assertIsNone(_pr_url_for_thread(non_github_thread))
+
+    def test_ignores_incomplete_pr_turns(self) -> None:
+        url = "https://github.com/cberner/hitch/pull/94"
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message(system_agents.PR_SLASH_PROMPT),
+                        _mcp_tool_call("github", "_create_pull_request", {"url": url}),
+                    ]
+                )
+            ]
+        )
+
+        self.assertIsNone(_pr_url_for_thread(thread))
+
+    def test_latest_completed_pr_turn_without_url_stops_search(self) -> None:
+        stale_url = "https://github.com/cberner/hitch/pull/93"
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message(system_agents.PR_SLASH_PROMPT),
+                        _mcp_tool_call("github", "_create_pull_request", {"url": stale_url}),
+                        _agent_message("Opened the PR."),
+                    ]
+                ),
+                _turn(
+                    [
+                        _user_message(system_agents.PR_SLASH_PROMPT),
+                        _mcp_tool_call("github", "_create_pull_request", {"content": []}),
+                        _agent_message("No PR was opened."),
+                    ]
+                ),
+            ]
+        )
+
+        self.assertIsNone(_pr_url_for_thread(thread))
+
+
 class SessionViewTests(TestCase):
     @patch("hitch.main.views.Codex")
     def test_renders_edit_title_form(self, mock_codex: MagicMock) -> None:
@@ -194,6 +318,45 @@ class SessionViewTests(TestCase):
                 self.assertContains(response, 'name="archived" value="true"')
                 self.assertContains(response, 'role="menuitem">Archive</button>')
                 self.assertNotContains(response, ">Edit</button>")
+
+    @patch("hitch.main.views.Codex")
+    def test_renders_open_pr_menu_link_when_detected(
+        self, mock_codex: MagicMock
+    ) -> None:
+        url = "https://github.com/cberner/hitch/pull/94"
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message(system_agents.PR_SLASH_PROMPT),
+                        _mcp_tool_call("github", "_create_pull_request", {"url": url}),
+                        _agent_message("Opened the PR."),
+                    ]
+                )
+            ]
+        )
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            f'<a href="{url}" role="menuitem" target="_blank" rel="noopener noreferrer">Open PR</a>',
+            html=True,
+        )
+
+    @patch("hitch.main.views.Codex")
+    def test_hides_open_pr_menu_link_without_detected_pr(
+        self, mock_codex: MagicMock
+    ) -> None:
+        thread = _thread([_turn([_user_message("hi"), _agent_message("Hello.")])])
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "Open PR")
 
     @patch("hitch.main.views.Codex")
     def test_next_message_settings_render_under_title(
