@@ -18,9 +18,19 @@ logger = logging.getLogger(__name__)
 
 PR_QA_AGENT_KIND = "pr_qa"
 QA_DISPLAY_AUTHOR = "QA agent"
-PR_SLASH_PROMPT = (
+PR_SLASH_DISPLAY_PROMPT = (
     "Do a thorough review of the diff. Rebase on master, clean it up, "
     "and then open a PR"
+)
+PR_SLASH_PROMPT = (
+    f"{PR_SLASH_DISPLAY_PROMPT}. After opening it, poll the PR every 2 minutes "
+    "until you have CI status and at least one review signal: code review "
+    "comments, a thumbs up emoji on the PR, or an explicit review approval. "
+    "On each poll, check whether the PR has merge conflicts. Address CI "
+    "failures, review comments, merge conflicts, and any other blocking issues; "
+    "push fixes and keep looping until CI, review, and mergeability are all clean. "
+    "Stop and report back if any single polling iteration has no results after "
+    "30 minutes."
 )
 SYSTEM_AGENT_APPROVAL_MODE = "auto_review"
 STEP_QA_RUNNING = "qa_running"

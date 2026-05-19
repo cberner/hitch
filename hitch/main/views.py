@@ -159,7 +159,8 @@ _LAST_SELECTED_REPO_MAX_LEN = 4096
 _MAX_BIGAUTOFIELD = 2**63 - 1
 _PLAN_SLASH_COMMAND = "/plan"
 _PR_SLASH_COMMAND = "/pr"
-_PR_SLASH_PROMPT = system_agents.PR_SLASH_PROMPT
+_PR_SLASH_PROMPT = system_agents.PR_SLASH_DISPLAY_PROMPT
+_PR_SLASH_FINAL_PROMPT = system_agents.PR_SLASH_PROMPT
 _PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium.value
 _DEFAULT_COLLABORATION_MODE = "default"
 
@@ -1545,7 +1546,7 @@ def _message_intent(request: HttpRequest) -> _MessageIntent:
         )
     if command == _PR_SLASH_COMMAND:
         return _MessageIntent(_PR_SLASH_PROMPT, False, False, False)
-    if not plan_mode and prompt == _PR_SLASH_PROMPT:
+    if not plan_mode and prompt in {_PR_SLASH_PROMPT, _PR_SLASH_FINAL_PROMPT}:
         return _MessageIntent(prompt, False, False, False)
     return _MessageIntent(prompt, plan_mode, True, explicit_plan_mode)
 
@@ -1553,7 +1554,10 @@ def _message_intent(request: HttpRequest) -> _MessageIntent:
 def _is_pr_activation(request: HttpRequest) -> bool:
     prompt = request.POST.get("prompt", "").strip()
     parts = prompt.split(maxsplit=1)
-    return bool(parts and parts[0].lower() == _PR_SLASH_COMMAND) or prompt == _PR_SLASH_PROMPT
+    return bool(parts and parts[0].lower() == _PR_SLASH_COMMAND) or prompt in {
+        _PR_SLASH_PROMPT,
+        _PR_SLASH_FINAL_PROMPT,
+    }
 
 
 def _plan_mode_model(codex: Codex, resumed: Any, settings: SettingsValues) -> str | None:
