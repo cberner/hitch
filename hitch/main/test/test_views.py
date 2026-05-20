@@ -20,7 +20,7 @@ from django.test import Client, TestCase
 from django.urls import reverse
 from openai_codex.errors import AppServerError, MethodNotFoundError
 
-from hitch.main import views
+from hitch.main import system_agents, views
 from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
@@ -2471,202 +2471,175 @@ class SendMessageViewTests(TestCase):
 
 class SetSessionNameViewTests(TestCase):
     @patch("hitch.main.views.Codex")
-    def test_updates_name_and_redirects(self, mock_codex: MagicMock) -> None:
-        response = self.client.post(
-            reverse("set_session_name", kwargs={"session_id": "abc"}),
-            data={"name": "  New title  "},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(
-            response.headers["Location"],
-            reverse("session", kwargs={"session_id": "abc"}),
-        )
-        # Whitespace is trimmed before saving.
+    def test_updates_name_and_response_shape(self, mock_codex: MagicMock) -> None:
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_set_name.assert_called_once_with("abc", "New title")
+        cases: list[tuple[str, dict[str, str], bool, int, str | None]] = [
+            (
+                "session redirect trims whitespace",
+                {"name": "  New title  "},
+                False,
+                302,
+                reverse("session", kwargs={"session_id": "abc"}),
+            ),
+            (
+                "index redirect",
+                {"name": "New title", "next": "index"},
+                False,
+                302,
+                reverse("index"),
+            ),
+            (
+                "ajax",
+                {"name": "New title"},
+                True,
+                204,
+                None,
+            ),
+        ]
+        for label, data, ajax, status, location in cases:
+            with self.subTest(label=label):
+                client._client.thread_set_name.reset_mock()
+                url = reverse("set_session_name", kwargs={"session_id": "abc"})
+                if ajax:
+                    response = self.client.post(
+                        url,
+                        data=data,
+                        HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+                    )
+                else:
+                    response = self.client.post(url, data=data)
+
+                self.assertEqual(response.status_code, status)
+                if location is None:
+                    self.assertNotIn("Location", response.headers)
+                else:
+                    self.assertEqual(response.headers["Location"], location)
+                client._client.thread_set_name.assert_called_once_with(
+                    "abc", "New title"
+                )
 
     @patch("hitch.main.views.Codex")
-    def test_updates_name_and_redirects_to_index_when_requested(
-        self, mock_codex: MagicMock
-    ) -> None:
-        response = self.client.post(
-            reverse("set_session_name", kwargs={"session_id": "abc"}),
-            data={"name": "New title", "next": "index"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.headers["Location"], reverse("index"))
-        client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_set_name.assert_called_once_with("abc", "New title")
-
-    @patch("hitch.main.views.Codex")
-    def test_ajax_update_name_returns_no_content(self, mock_codex: MagicMock) -> None:
-        response = self.client.post(
-            reverse("set_session_name", kwargs={"session_id": "abc"}),
-            data={"name": "New title"},
-            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
-        )
-
-        self.assertEqual(response.status_code, 204)
-        self.assertNotIn("Location", response.headers)
-        client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_set_name.assert_called_once_with("abc", "New title")
-
-    @patch("hitch.main.views.Codex")
-    def test_rejects_invalid_input(self, mock_codex: MagicMock) -> None:
+    def test_rejects_invalid_requests(self, mock_codex: MagicMock) -> None:
         # The form caps input client-side; the view enforces the same bounds
         # so a hand-crafted POST can't bypass them.
-        cases = [
-            ({"name": ""}, "empty"),
-            ({"name": "   "}, "whitespace only"),
-            ({"name": "x" * 201}, "over length cap"),
+        cases: list[tuple[str, dict[str, str], str, int]] = [
+            ("post", {"name": ""}, "empty", 400),
+            ("post", {"name": "   "}, "whitespace only", 400),
+            ("post", {"name": "x" * 201}, "over length cap", 400),
+            ("get", {}, "method", 405),
         ]
-        for data, label in cases:
+        for method, data, label, status in cases:
             with self.subTest(label=label):
-                response = self.client.post(
-                    reverse("set_session_name", kwargs={"session_id": "abc"}),
-                    data=data,
-                )
-                self.assertEqual(response.status_code, 400)
-        mock_codex.assert_not_called()
-
-    @patch("hitch.main.views.Codex")
-    def test_rejects_get(self, mock_codex: MagicMock) -> None:
-        response = self.client.get(
-            reverse("set_session_name", kwargs={"session_id": "abc"})
-        )
-
-        self.assertEqual(response.status_code, 405)
+                url = reverse("set_session_name", kwargs={"session_id": "abc"})
+                if method == "post":
+                    response = self.client.post(url, data=data)
+                else:
+                    response = self.client.get(url)
+                self.assertEqual(response.status_code, status)
         mock_codex.assert_not_called()
 
 
 class SetSessionArchivedViewTests(TestCase):
     @patch("hitch.main.views.Codex")
-    def test_archives_session_and_redirects_to_index(
+    def test_updates_archive_state_and_response_shape(
         self, mock_codex: MagicMock
     ) -> None:
-        response = self.client.post(
-            reverse("set_session_archived", kwargs={"session_id": "abc"}),
-            data={"archived": "true"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.headers["Location"], reverse("index"))
         client = mock_codex.return_value.__enter__.return_value
-        client.thread_archive.assert_called_once_with("abc")
-        client.thread_unarchive.assert_not_called()
+        cases: list[
+            tuple[str, dict[str, str], bool, int, str | None, str, bool]
+        ] = [
+            (
+                "archive",
+                {"archived": "true"},
+                False,
+                302,
+                reverse("index"),
+                "thread_archive",
+                True,
+            ),
+            (
+                "archive ajax",
+                {"archived": "true"},
+                True,
+                204,
+                None,
+                "thread_archive",
+                False,
+            ),
+            (
+                "unarchive to session",
+                {"archived": "false"},
+                False,
+                302,
+                reverse("session", kwargs={"session_id": "abc"}),
+                "thread_unarchive",
+                True,
+            ),
+            (
+                "unarchive to index",
+                {"archived": "false", "next": "index"},
+                False,
+                302,
+                reverse("index"),
+                "thread_unarchive",
+                False,
+            ),
+        ]
+        for label, data, ajax, status, location, expected_call, seed_cache in cases:
+            with self.subTest(label=label):
+                ArchivedSessionTokenUsage.objects.all().delete()
+                client.thread_archive.reset_mock()
+                client.thread_unarchive.reset_mock()
+                if seed_cache:
+                    ArchivedSessionTokenUsage.objects.create(
+                        thread_id="abc",
+                        total_tokens=100,
+                    )
+                    ArchivedSessionTokenUsage.objects.create(
+                        thread_id="abc-child",
+                        total_tokens=200,
+                    )
+
+                url = reverse("set_session_archived", kwargs={"session_id": "abc"})
+                if ajax:
+                    response = self.client.post(
+                        url,
+                        data=data,
+                        HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+                    )
+                else:
+                    response = self.client.post(url, data=data)
+
+                self.assertEqual(response.status_code, status)
+                if location is None:
+                    self.assertNotIn("Location", response.headers)
+                else:
+                    self.assertEqual(response.headers["Location"], location)
+                if expected_call == "thread_archive":
+                    client.thread_archive.assert_called_once_with("abc")
+                    client.thread_unarchive.assert_not_called()
+                else:
+                    client.thread_unarchive.assert_called_once_with("abc")
+                    client.thread_archive.assert_not_called()
+                if seed_cache:
+                    self.assertEqual(ArchivedSessionTokenUsage.objects.count(), 0)
 
     @patch("hitch.main.views.Codex")
-    def test_ajax_archive_returns_no_content(self, mock_codex: MagicMock) -> None:
-        response = self.client.post(
-            reverse("set_session_archived", kwargs={"session_id": "abc"}),
-            data={"archived": "true"},
-            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
-        )
-
-        self.assertEqual(response.status_code, 204)
-        self.assertNotIn("Location", response.headers)
-        client = mock_codex.return_value.__enter__.return_value
-        client.thread_archive.assert_called_once_with("abc")
-
-    @patch("hitch.main.views.Codex")
-    def test_archive_clears_existing_token_usage_caches(
-        self, mock_codex: MagicMock
-    ) -> None:
-        ArchivedSessionTokenUsage.objects.create(
-            thread_id="abc",
-            total_tokens=100,
-        )
-        ArchivedSessionTokenUsage.objects.create(
-            thread_id="abc-child",
-            total_tokens=200,
-        )
-
-        response = self.client.post(
-            reverse("set_session_archived", kwargs={"session_id": "abc"}),
-            data={"archived": "true"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(ArchivedSessionTokenUsage.objects.count(), 0)
-        client = mock_codex.return_value.__enter__.return_value
-        client.thread_archive.assert_called_once_with("abc")
-
-    @patch("hitch.main.views.Codex")
-    def test_unarchives_session_and_redirects_to_session(
-        self, mock_codex: MagicMock
-    ) -> None:
-        response = self.client.post(
-            reverse("set_session_archived", kwargs={"session_id": "abc"}),
-            data={"archived": "false"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(
-            response.headers["Location"],
-            reverse("session", kwargs={"session_id": "abc"}),
-        )
-        client = mock_codex.return_value.__enter__.return_value
-        client.thread_unarchive.assert_called_once_with("abc")
-        client.thread_archive.assert_not_called()
-
-    @patch("hitch.main.views.Codex")
-    def test_unarchive_clears_existing_token_usage_caches(
-        self, mock_codex: MagicMock
-    ) -> None:
-        ArchivedSessionTokenUsage.objects.create(
-            thread_id="abc",
-            total_tokens=100,
-        )
-        ArchivedSessionTokenUsage.objects.create(
-            thread_id="abc-child",
-            total_tokens=200,
-        )
-
-        response = self.client.post(
-            reverse("set_session_archived", kwargs={"session_id": "abc"}),
-            data={"archived": "false"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(ArchivedSessionTokenUsage.objects.count(), 0)
-        client = mock_codex.return_value.__enter__.return_value
-        client.thread_unarchive.assert_called_once_with("abc")
-
-    @patch("hitch.main.views.Codex")
-    def test_unarchives_session_and_redirects_to_index_when_requested(
-        self, mock_codex: MagicMock
-    ) -> None:
-        response = self.client.post(
-            reverse("set_session_archived", kwargs={"session_id": "abc"}),
-            data={"archived": "false", "next": "index"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.headers["Location"], reverse("index"))
-        client = mock_codex.return_value.__enter__.return_value
-        client.thread_unarchive.assert_called_once_with("abc")
-        client.thread_archive.assert_not_called()
-
-    @patch("hitch.main.views.Codex")
-    def test_rejects_invalid_input(self, mock_codex: MagicMock) -> None:
-        for data in ({}, {"archived": ""}, {"archived": "yes"}):
-            with self.subTest(data=data):
-                response = self.client.post(
-                    reverse("set_session_archived", kwargs={"session_id": "abc"}),
-                    data=data,
-                )
-                self.assertEqual(response.status_code, 400)
-        mock_codex.assert_not_called()
-
-    @patch("hitch.main.views.Codex")
-    def test_rejects_get(self, mock_codex: MagicMock) -> None:
-        response = self.client.get(
-            reverse("set_session_archived", kwargs={"session_id": "abc"})
-        )
-
-        self.assertEqual(response.status_code, 405)
+    def test_rejects_invalid_archive_requests(self, mock_codex: MagicMock) -> None:
+        cases: list[tuple[str, dict[str, str], int]] = [
+            ("post", {}, 400),
+            ("post", {"archived": ""}, 400),
+            ("post", {"archived": "yes"}, 400),
+            ("get", {}, 405),
+        ]
+        for method, data, status in cases:
+            with self.subTest(method=method, data=data):
+                url = reverse("set_session_archived", kwargs={"session_id": "abc"})
+                if method == "post":
+                    response = self.client.post(url, data=data)
+                else:
+                    response = self.client.get(url)
+                self.assertEqual(response.status_code, status)
         mock_codex.assert_not_called()
 
 
@@ -2695,7 +2668,10 @@ class StopSessionViewTests(TestCase):
         mock_interrupt_instance.assert_called_once_with(42, expected_thread_id="abc")
         mock_interrupt_active.assert_not_called()
 
-    @patch("hitch.main.views.system_agents.stop_active_workflow", return_value=False)
+    @patch(
+        "hitch.main.views.system_agents.stop_active_workflow",
+        wraps=system_agents.stop_active_workflow,
+    )
     @patch("hitch.main.views.codex_pool.interrupt_instance")
     @patch("hitch.main.views.codex_pool.interrupt_active")
     def test_falls_back_to_latest_active_without_instance(
@@ -2707,6 +2683,9 @@ class StopSessionViewTests(TestCase):
         # Older cached page (or a direct curl POST) won't carry the
         # instance field; fall back to "latest active worker for this
         # thread" so the stop click still has a chance to do something.
+        # ``None`` models a double-click after the worker already finished;
+        # the view should still redirect instead of surfacing an error.
+        mock_interrupt_active.return_value = None
         response = self.client.post(
             reverse("stop_session", kwargs={"session_id": "abc"})
         )
@@ -2730,60 +2709,30 @@ class StopSessionViewTests(TestCase):
         mock_interrupt_active.assert_not_called()
 
     @patch("hitch.main.views.codex_pool.interrupt_instance")
-    def test_rejects_non_integer_instance(
-        self, mock_interrupt_instance: MagicMock
+    @patch("hitch.main.views.codex_pool.interrupt_active")
+    def test_rejects_invalid_requests(
+        self, mock_interrupt_active: MagicMock, mock_interrupt_instance: MagicMock
     ) -> None:
-        response = self.client.post(
-            reverse("stop_session", kwargs={"session_id": "abc"}),
-            data={"instance": "not-a-number"},
-        )
-
-        self.assertEqual(response.status_code, 400)
-        mock_interrupt_instance.assert_not_called()
-
-    @patch("hitch.main.views.codex_pool.interrupt_instance")
-    def test_rejects_out_of_range_instance(
-        self, mock_interrupt_instance: MagicMock
-    ) -> None:
-        # Tampered/oversized values must be rejected at the view
-        # boundary so they never reach ``objects.get`` (which would
-        # raise backend-specific OverflowError/DataError and surface
-        # as a 500 instead of a clean 400).
-        cases = [
-            ("0", "zero"),
-            ("-1", "negative"),
-            (str(2**63), "above BigAutoField max"),
+        # Tampered/oversized values must be rejected at the view boundary so
+        # they never reach ``objects.get`` (which would raise backend-specific
+        # OverflowError/DataError and surface as a 500 instead of a clean 400).
+        url = reverse("stop_session", kwargs={"session_id": "abc"})
+        cases: list[tuple[str, dict[str, str], str, int]] = [
+            ("post", {"instance": "not-a-number"}, "non-integer", 400),
+            ("post", {"instance": "0"}, "zero", 400),
+            ("post", {"instance": "-1"}, "negative", 400),
+            ("post", {"instance": str(2**63)}, "above BigAutoField max", 400),
+            ("get", {}, "method", 405),
         ]
-        for value, label in cases:
+        for method, data, label, status in cases:
             with self.subTest(label=label):
-                response = self.client.post(
-                    reverse("stop_session", kwargs={"session_id": "abc"}),
-                    data={"instance": value},
-                )
-                self.assertEqual(response.status_code, 400)
+                if method == "post":
+                    response = self.client.post(url, data=data)
+                else:
+                    response = self.client.get(url)
+                self.assertEqual(response.status_code, status)
+        mock_interrupt_active.assert_not_called()
         mock_interrupt_instance.assert_not_called()
-
-    @patch("hitch.main.views.codex_pool.interrupt_active")
-    def test_no_active_worker_still_redirects(
-        self, mock_interrupt: MagicMock
-    ) -> None:
-        # A double-click after the agent already finished must not 500.
-        mock_interrupt.return_value = None
-
-        response = self.client.post(
-            reverse("stop_session", kwargs={"session_id": "abc"})
-        )
-
-        self.assertEqual(response.status_code, 302)
-
-    @patch("hitch.main.views.codex_pool.interrupt_active")
-    def test_rejects_get(self, mock_interrupt: MagicMock) -> None:
-        response = self.client.get(
-            reverse("stop_session", kwargs={"session_id": "abc"})
-        )
-
-        self.assertEqual(response.status_code, 405)
-        mock_interrupt.assert_not_called()
 
 
 class SessionStreamViewTests(TestCase):
@@ -2819,7 +2768,7 @@ class SessionStreamViewTests(TestCase):
 
     @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
     @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
-    def test_returns_idle_heartbeat_stream_when_no_worker(self) -> None:
+    def test_returns_idle_heartbeat_stream_without_active_worker(self) -> None:
         # Without an active worker the SSE channel stays open emitting
         # heartbeat events with ``working: false`` so the page's connection
         # indicator can show ``connected, idle``. The cap is patched down
@@ -2827,18 +2776,14 @@ class SessionStreamViewTests(TestCase):
         response = self.client.get(self._stream_url("thread-1"))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response["Content-Type"], "text/event-stream")
+        self.assertEqual(response["Cache-Control"], "no-cache")
+        self.assertEqual(response["X-Accel-Buffering"], "no")
         body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
         self.assertIn(b"event: heartbeat", body)
         self.assertIn(b'"working": false', body)
 
-    @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
-    @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
-    def test_idle_stream_when_only_completed_worker_exists(self) -> None:
         # A terminal worker counts as ``no active worker`` for routing
-        # purposes — the idle heartbeat stream is what we serve so the
-        # connection indicator stays accurate without re-tailing the old
-        # events file. The baseline reflects the page's render-time view
-        # (the completed worker's pk, no active).
+        # purposes; the stream should stay idle without re-tailing old events.
         with tempfile.TemporaryDirectory() as raw:
             events_path = str(Path(raw) / "events.jsonl")
             Path(events_path).touch()
@@ -2876,17 +2821,7 @@ class SessionStreamViewTests(TestCase):
         self.assertIn(b"event: heartbeat", body)
         self.assertIn(b'"working": true', body)
 
-    @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
-    @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
-    def test_sets_no_buffering_headers(self) -> None:
-        # SSE needs frame-by-frame delivery; proxies (and Django's own
-        # middleware stack) honour these headers to disable coalescing.
-        response = self.client.get(self._stream_url("thread-1"))
-        self.assertEqual(response["Cache-Control"], "no-cache")
-        self.assertEqual(response["X-Accel-Buffering"], "no")
-        b"".join(response.streaming_content)  # type: ignore[attr-defined]
-
-    def test_reloads_when_worker_appeared_after_page_render(self) -> None:
+    def test_reloads_when_page_render_state_is_stale(self) -> None:
         # The classic out-of-band-spawn race: page rendered with no
         # worker (empty baseline / active), but by the time SSE opens a
         # worker has shown up in the DB. The endpoint must reload the
@@ -2897,15 +2832,21 @@ class SessionStreamViewTests(TestCase):
         body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
         self.assertIn(b'"status": "stale"', body)
 
-    def test_reloads_when_active_worker_completed_before_sse_opens(self) -> None:
         # Inverse race: page rendered expecting a live worker (passes
         # ``active=N`` and ``baseline=N``) but by the time SSE opens the
         # worker has gone terminal. Without the reload the page would
         # show a permanent "Codex is working…" pill and a stale pending
         # bubble for the just-completed turn.
-        inst = self._make(thread_id="thread-1", status=CodexInstance.STATUS_COMPLETED)
+        inst = self._make(
+            thread_id="thread-completed-before-open",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
         response = self.client.get(
-            self._stream_url("thread-1", baseline=str(inst.pk), active=str(inst.pk))
+            self._stream_url(
+                "thread-completed-before-open",
+                baseline=str(inst.pk),
+                active=str(inst.pk),
+            )
         )
         body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
         self.assertIn(b'"status": "stale"', body)
@@ -2966,20 +2907,6 @@ class ResolveApprovalViewTests(TestCase):
             decision=decision,
         )
 
-    def test_records_decision_and_marks_decided_at(self) -> None:
-        approval = self._make_approval()
-
-        response = self.client.post(
-            reverse("resolve_approval", kwargs={"approval_id": approval.pk}),
-            data={"decision": "accept"},
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.content, b"accept")
-        approval.refresh_from_db()
-        self.assertEqual(approval.decision, "accept")
-        self.assertIsNotNone(approval.decided_at)
-
     def test_accepts_each_valid_decision(self) -> None:
         """Pin the wire-string contract — these three values are what
         app-server's approval response schema accepts (``accept`` /
@@ -2993,8 +2920,10 @@ class ResolveApprovalViewTests(TestCase):
                     data={"decision": decision},
                 )
                 self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.content, decision.encode())
                 approval.refresh_from_db()
                 self.assertEqual(approval.decision, decision)
+                self.assertIsNotNone(approval.decided_at)
 
     def test_normalizes_legacy_decision_values(self) -> None:
         """Tabs loaded before a deploy may still POST the old UI values.
@@ -3017,50 +2946,46 @@ class ResolveApprovalViewTests(TestCase):
                 approval.refresh_from_db()
                 self.assertEqual(approval.decision, stored)
 
-    def test_rejects_invalid_decision(self) -> None:
+    def test_rejects_invalid_or_stale_requests(self) -> None:
         """A POST with a value outside the app-server-accepted set must 400
         rather than poison the row — the worker would otherwise round-trip
-        the bogus string into a JSON-RPC response codex rejects."""
-        approval = self._make_approval()
+        the bogus string into a JSON-RPC response codex rejects. Already
+        resolved rows must stay locked so two tabs cannot clobber a choice."""
+        cases: list[
+            tuple[str, ApprovalRequest | None, str, dict[str, str], int, str | None]
+        ] = [
+            (
+                "invalid decision",
+                self._make_approval(),
+                "post",
+                {"decision": "yes please"},
+                400,
+                "",
+            ),
+            ("missing row", None, "post", {"decision": "accept"}, 404, None),
+            (
+                "already resolved",
+                self._make_approval(decision="accept"),
+                "post",
+                {"decision": "decline"},
+                409,
+                "accept",
+            ),
+            ("method", self._make_approval(), "get", {}, 405, ""),
+        ]
+        for label, approval, method, data, status, expected_decision in cases:
+            with self.subTest(label=label):
+                approval_id = approval.pk if approval is not None else 99999999
+                url = reverse("resolve_approval", kwargs={"approval_id": approval_id})
+                if method == "post":
+                    response = self.client.post(url, data=data)
+                else:
+                    response = self.client.get(url)
 
-        response = self.client.post(
-            reverse("resolve_approval", kwargs={"approval_id": approval.pk}),
-            data={"decision": "yes please"},
-        )
-
-        self.assertEqual(response.status_code, 400)
-        approval.refresh_from_db()
-        self.assertEqual(approval.decision, "")
-
-    def test_returns_404_for_missing_approval(self) -> None:
-        response = self.client.post(
-            reverse("resolve_approval", kwargs={"approval_id": 99999999}),
-            data={"decision": "accept"},
-        )
-
-        self.assertEqual(response.status_code, 404)
-
-    def test_returns_409_when_already_resolved(self) -> None:
-        """Two browser tabs racing the same approval must not silently
-        clobber each other. The first POST wins; later POSTs get 409 so
-        the UI knows the choice is locked in."""
-        approval = self._make_approval(decision="accept")
-
-        response = self.client.post(
-            reverse("resolve_approval", kwargs={"approval_id": approval.pk}),
-            data={"decision": "decline"},
-        )
-
-        self.assertEqual(response.status_code, 409)
-        approval.refresh_from_db()
-        self.assertEqual(approval.decision, "accept")
-
-    def test_rejects_get(self) -> None:
-        approval = self._make_approval()
-        response = self.client.get(
-            reverse("resolve_approval", kwargs={"approval_id": approval.pk})
-        )
-        self.assertEqual(response.status_code, 405)
+                self.assertEqual(response.status_code, status)
+                if approval is not None:
+                    approval.refresh_from_db()
+                    self.assertEqual(approval.decision, expected_decision)
 
 
 class ResolveInputRequestViewTests(TestCase):
@@ -3086,44 +3011,47 @@ class ResolveInputRequestViewTests(TestCase):
             response=response,
         )
 
-    def test_records_answers_and_marks_responded_at(self) -> None:
-        input_request = self._make_input_request()
+    def test_records_answer_payloads(self) -> None:
+        structured_answers = {
+            "scope": ["UI", "CLI"],
+            "details": {"choice": "Other", "notes": ["keep history"]},
+            "confirmed": True,
+            "priority": 2,
+            "optional": None,
+        }
+        cases = [
+            (
+                "string answer",
+                {"answers": json.dumps({"scope": "Management command"})},
+                {"answers": {"scope": "Management command"}},
+            ),
+            ("omitted payload", {}, {"answers": {}}),
+            (
+                "trimmed strings",
+                {"answers": json.dumps({" scope ": " UI ", " ": "ignored"})},
+                {"answers": {"scope": "UI"}},
+            ),
+            (
+                "structured values",
+                {"answers": json.dumps(structured_answers)},
+                {"answers": structured_answers},
+            ),
+        ]
+        for label, data, expected_response in cases:
+            with self.subTest(label=label):
+                input_request = self._make_input_request()
 
-        response = self.client.post(
-            reverse("resolve_input_request", kwargs={"input_id": input_request.pk}),
-            data={"answers": json.dumps({"scope": "Management command"})},
-        )
+                response = self.client.post(
+                    reverse(
+                        "resolve_input_request", kwargs={"input_id": input_request.pk}
+                    ),
+                    data=data,
+                )
 
-        self.assertEqual(response.status_code, 200)
-        input_request.refresh_from_db()
-        self.assertEqual(
-            input_request.response,
-            {"answers": {"scope": "Management command"}},
-        )
-        self.assertIsNotNone(input_request.responded_at)
-
-    def test_records_empty_answers_when_payload_is_omitted(self) -> None:
-        input_request = self._make_input_request()
-
-        response = self.client.post(
-            reverse("resolve_input_request", kwargs={"input_id": input_request.pk})
-        )
-
-        self.assertEqual(response.status_code, 200)
-        input_request.refresh_from_db()
-        self.assertEqual(input_request.response, {"answers": {}})
-
-    def test_trims_string_answers_and_ignores_blank_keys(self) -> None:
-        input_request = self._make_input_request()
-
-        response = self.client.post(
-            reverse("resolve_input_request", kwargs={"input_id": input_request.pk}),
-            data={"answers": json.dumps({" scope ": " UI ", " ": "ignored"})},
-        )
-
-        self.assertEqual(response.status_code, 200)
-        input_request.refresh_from_db()
-        self.assertEqual(input_request.response, {"answers": {"scope": "UI"}})
+                self.assertEqual(response.status_code, 200)
+                input_request.refresh_from_db()
+                self.assertEqual(input_request.response, expected_response)
+                self.assertIsNotNone(input_request.responded_at)
 
     def test_rejects_invalid_answers_payload(self) -> None:
         input_request = self._make_input_request()
@@ -3137,25 +3065,6 @@ class ResolveInputRequestViewTests(TestCase):
                     data={"answers": answers},
                 )
                 self.assertEqual(response.status_code, 400)
-
-    def test_accepts_structured_answer_values(self) -> None:
-        input_request = self._make_input_request()
-        answers = {
-            "scope": ["UI", "CLI"],
-            "details": {"choice": "Other", "notes": ["keep history"]},
-            "confirmed": True,
-            "priority": 2,
-            "optional": None,
-        }
-
-        response = self.client.post(
-            reverse("resolve_input_request", kwargs={"input_id": input_request.pk}),
-            data={"answers": json.dumps(answers)},
-        )
-
-        self.assertEqual(response.status_code, 200)
-        input_request.refresh_from_db()
-        self.assertEqual(input_request.response, {"answers": answers})
 
     def test_returns_409_when_already_resolved(self) -> None:
         input_request = self._make_input_request(response={"answers": {"scope": "UI"}})

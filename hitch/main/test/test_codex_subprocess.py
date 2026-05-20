@@ -452,76 +452,37 @@ class LaunchWorkerProcessTests(TestCase):
         self.assertNotIn("--reasoning-effort", argv)
 
     @patch("hitch.main.codex_pool.subprocess.Popen")
-    def test_forwards_reasoning_effort_as_cli_arg(self, mock_popen: MagicMock) -> None:
-        mock_popen.return_value = SimpleNamespace(pid=999)
-
-        codex_pool._launch_worker_process(instance_id=7, reasoning_effort="high")
-
-        argv = mock_popen.call_args.args[0]
-        self.assertIn("--reasoning-effort", argv)
-        self.assertEqual(argv[argv.index("--reasoning-effort") + 1], "high")
-
-    @patch("hitch.main.codex_pool.subprocess.Popen")
-    def test_forwards_sandbox_policy_as_cli_arg(self, mock_popen: MagicMock) -> None:
-        mock_popen.return_value = SimpleNamespace(pid=999)
-
-        codex_pool._launch_worker_process(
-            instance_id=7, sandbox_policy="workspaceWrite"
-        )
-
-        argv = mock_popen.call_args.args[0]
-        self.assertIn("--sandbox-policy", argv)
-        self.assertEqual(
-            argv[argv.index("--sandbox-policy") + 1], "workspaceWrite"
-        )
-
-    @patch("hitch.main.codex_pool.subprocess.Popen")
-    def test_forwards_approval_mode_as_cli_arg(self, mock_popen: MagicMock) -> None:
-        mock_popen.return_value = SimpleNamespace(pid=999)
-
-        codex_pool._launch_worker_process(instance_id=7, approval_mode="deny_all")
-
-        argv = mock_popen.call_args.args[0]
-        self.assertIn("--approval-mode", argv)
-        self.assertEqual(argv[argv.index("--approval-mode") + 1], "deny_all")
-
-    @patch("hitch.main.codex_pool.subprocess.Popen")
-    def test_forwards_enable_memories_as_cli_arg(self, mock_popen: MagicMock) -> None:
-        mock_popen.return_value = SimpleNamespace(pid=999)
-
-        codex_pool._launch_worker_process(instance_id=7, enable_memories=True)
-
-        argv = mock_popen.call_args.args[0]
-        self.assertIn("--enable-memories", argv)
-
-    @patch("hitch.main.codex_pool.subprocess.Popen")
-    def test_forwards_collaboration_mode_as_cli_arg(
+    def test_forwards_optional_cli_args(
         self, mock_popen: MagicMock
     ) -> None:
-        mock_popen.return_value = SimpleNamespace(pid=999)
+        cases: list[tuple[dict[str, Any], list[tuple[str, str | None]]]] = [
+            ({"reasoning_effort": "high"}, [("--reasoning-effort", "high")]),
+            (
+                {"sandbox_policy": "workspaceWrite"},
+                [("--sandbox-policy", "workspaceWrite")],
+            ),
+            ({"approval_mode": "deny_all"}, [("--approval-mode", "deny_all")]),
+            ({"enable_memories": True}, [("--enable-memories", None)]),
+            (
+                {"collaboration_mode": "default"},
+                [("--collaboration-mode", "default")],
+            ),
+            (
+                {"model": "gpt-5.4", "plan_mode": True},
+                [("--model", "gpt-5.4"), ("--plan-mode", None)],
+            ),
+        ]
+        for kwargs, expected_args in cases:
+            with self.subTest(kwargs=kwargs):
+                mock_popen.reset_mock()
+                mock_popen.return_value = SimpleNamespace(pid=999)
+                codex_pool._launch_worker_process(instance_id=7, **kwargs)
 
-        codex_pool._launch_worker_process(
-            instance_id=7, collaboration_mode="default"
-        )
-
-        argv = mock_popen.call_args.args[0]
-        self.assertIn("--collaboration-mode", argv)
-        self.assertEqual(argv[argv.index("--collaboration-mode") + 1], "default")
-
-    @patch("hitch.main.codex_pool.subprocess.Popen")
-    def test_forwards_plan_mode_cli_args(self, mock_popen: MagicMock) -> None:
-        mock_popen.return_value = SimpleNamespace(pid=999)
-
-        codex_pool._launch_worker_process(
-            instance_id=7,
-            model="gpt-5.4",
-            plan_mode=True,
-        )
-
-        argv = mock_popen.call_args.args[0]
-        self.assertIn("--model", argv)
-        self.assertEqual(argv[argv.index("--model") + 1], "gpt-5.4")
-        self.assertIn("--plan-mode", argv)
+                argv = mock_popen.call_args.args[0]
+                for flag, expected_value in expected_args:
+                    self.assertIn(flag, argv)
+                    if expected_value is not None:
+                        self.assertEqual(argv[argv.index(flag) + 1], expected_value)
 
 
 class IsAliveTests(TestCase):
@@ -1911,12 +1872,32 @@ class CodexWorkerCommandTests(TestCase):
         self.assertIsNotNone(instance.ended_at)
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_reasoning_effort_cli_arg_round_trip(self, mock_codex: MagicMock) -> None:
-        """The effort rides into the worker as a CLI arg (no DB or cookie
-        lookup in the subprocess). A known value reaches ``turn(effort=)``;
-        an unknown one (e.g. stale enum after SDK upgrade) is silently
-        dropped so Codex's own default takes over."""
+    def test_typed_cli_args_round_trip_to_turn_kwargs(self, mock_codex: MagicMock) -> None:
+        """Known CLI values reach ``Thread.turn`` as SDK types; stale values
+        are dropped so Codex's own defaults take over."""
         captured: dict[str, object] = {}
+
+        def _assert_value(key: str, expected: object) -> Callable[[dict[str, object]], None]:
+            def _assert(capture: dict[str, object]) -> None:
+                self.assertEqual(capture.get(key), expected)
+
+            return _assert
+
+        def _assert_absent(key: str) -> Callable[[dict[str, object]], None]:
+            def _assert(capture: dict[str, object]) -> None:
+                self.assertNotIn(key, capture)
+
+            return _assert
+
+        def _assert_sandbox_variant(
+            expected_variant: type[object],
+        ) -> Callable[[dict[str, object]], None]:
+            def _assert(capture: dict[str, object]) -> None:
+                policy = capture.get("sandbox_policy")
+                assert isinstance(policy, SandboxPolicy)
+                self.assertIsInstance(policy.root, expected_variant)
+
+            return _assert
 
         def _capture_turn(input_obj: object, **kwargs: object) -> object:
             captured.update(kwargs)
@@ -1928,47 +1909,30 @@ class CodexWorkerCommandTests(TestCase):
         codex_ctx = mock_codex.return_value.__enter__.return_value
         codex_ctx.thread_resume.return_value = SimpleNamespace(turn=_capture_turn)
 
-        cases = [("high", ReasoningEffort.high), ("ludicrous", None)]
-        for cli_value, expected in cases:
-            with self.subTest(cli_value=cli_value):
-                captured.clear()
-                with tempfile.TemporaryDirectory() as raw:
-                    instance = self._make_instance(Path(raw))
-                    call_command(
-                        "codex_worker",
-                        "--instance-id",
-                        str(instance.pk),
-                        "--reasoning-effort",
-                        cli_value,
-                    )
-                self.assertEqual(captured.get("effort"), expected)
-
-    @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_sandbox_policy_cli_arg_round_trip(self, mock_codex: MagicMock) -> None:
-        """The sandbox policy rides into the worker as a CLI arg, same as
-        reasoning effort. A known value reaches ``turn(sandbox_policy=)`` as
-        the matching SandboxPolicy variant; an unknown value (stale cookie
-        after SDK upgrade) is silently dropped so the turn runs under
-        Codex's default policy."""
-        captured: dict[str, object] = {}
-
-        def _capture_turn(input_obj: object, **kwargs: object) -> object:
-            captured.update(kwargs)
-            return SimpleNamespace(
-                id="turn-1",
-                stream=lambda: iter([_completed_event("turn-1", TurnStatus.completed)]),
-            )
-
-        codex_ctx = mock_codex.return_value.__enter__.return_value
-        codex_ctx.thread_resume.return_value = SimpleNamespace(turn=_capture_turn)
-
-        cases = [
-            ("workspaceWrite", WorkspaceWriteSandboxPolicy),
-            ("dangerFullAccess", DangerFullAccessSandboxPolicy),
-            ("phantomPolicy", None),
+        cases: list[tuple[str, str, Callable[[dict[str, object]], None]]] = [
+            ("--reasoning-effort", "high", _assert_value("effort", ReasoningEffort.high)),
+            ("--reasoning-effort", "ludicrous", _assert_absent("effort")),
+            (
+                "--sandbox-policy",
+                "workspaceWrite",
+                _assert_sandbox_variant(WorkspaceWriteSandboxPolicy),
+            ),
+            (
+                "--sandbox-policy",
+                "dangerFullAccess",
+                _assert_sandbox_variant(DangerFullAccessSandboxPolicy),
+            ),
+            ("--sandbox-policy", "phantomPolicy", _assert_absent("sandbox_policy")),
+            ("--approval-mode", "deny_all", _assert_value("approval_mode", ApprovalMode.deny_all)),
+            (
+                "--approval-mode",
+                "auto_review",
+                _assert_value("approval_mode", ApprovalMode.auto_review),
+            ),
+            ("--approval-mode", "phantom_mode", _assert_absent("approval_mode")),
         ]
-        for cli_value, expected_variant in cases:
-            with self.subTest(cli_value=cli_value):
+        for flag, cli_value, assert_capture in cases:
+            with self.subTest(flag=flag, cli_value=cli_value):
                 captured.clear()
                 with tempfile.TemporaryDirectory() as raw:
                     instance = self._make_instance(Path(raw))
@@ -1976,56 +1940,10 @@ class CodexWorkerCommandTests(TestCase):
                         "codex_worker",
                         "--instance-id",
                         str(instance.pk),
-                        "--sandbox-policy",
+                        flag,
                         cli_value,
                     )
-                if expected_variant is None:
-                    self.assertNotIn("sandbox_policy", captured)
-                else:
-                    policy = captured.get("sandbox_policy")
-                    assert isinstance(policy, SandboxPolicy)
-                    self.assertIsInstance(policy.root, expected_variant)
-
-    @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_approval_mode_cli_arg_round_trip(self, mock_codex: MagicMock) -> None:
-        """Approval mode rides in as a CLI arg just like sandbox policy. A
-        known value reaches ``turn(approval_mode=)`` as the matching enum
-        member; an unknown value (stale cookie after SDK upgrade) is
-        silently dropped so the turn runs under Codex's default rather
-        than crashing the worker."""
-        captured: dict[str, object] = {}
-
-        def _capture_turn(input_obj: object, **kwargs: object) -> object:
-            captured.update(kwargs)
-            return SimpleNamespace(
-                id="turn-1",
-                stream=lambda: iter([_completed_event("turn-1", TurnStatus.completed)]),
-            )
-
-        codex_ctx = mock_codex.return_value.__enter__.return_value
-        codex_ctx.thread_resume.return_value = SimpleNamespace(turn=_capture_turn)
-
-        cases = [
-            ("deny_all", ApprovalMode.deny_all),
-            ("auto_review", ApprovalMode.auto_review),
-            ("phantom_mode", None),
-        ]
-        for cli_value, expected in cases:
-            with self.subTest(cli_value=cli_value):
-                captured.clear()
-                with tempfile.TemporaryDirectory() as raw:
-                    instance = self._make_instance(Path(raw))
-                    call_command(
-                        "codex_worker",
-                        "--instance-id",
-                        str(instance.pk),
-                        "--approval-mode",
-                        cli_value,
-                    )
-                if expected is None:
-                    self.assertNotIn("approval_mode", captured)
-                else:
-                    self.assertEqual(captured.get("approval_mode"), expected)
+                assert_capture(captured)
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_user_reviewer_modes_bypass_thread_turn(
@@ -2085,10 +2003,9 @@ class CodexWorkerCommandTests(TestCase):
                 self.assertEqual(params.approvals_reviewer, ApprovalsReviewer.user)
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_plan_mode_posts_collaboration_mode(self, mock_codex: MagicMock) -> None:
-        """Plan mode is exposed by app-server as a raw ``collaborationMode``
-        turn-start field; the installed SDK model may lag that field, so the
-        worker uses the raw params path only for plan turns."""
+    def test_collaboration_modes_post_raw_turn_params(self, mock_codex: MagicMock) -> None:
+        """Collaboration mode is exposed as a raw turn-start field, so these
+        modes use the raw params path instead of the typed ``Thread.turn``."""
         captured_params: dict[str, object] = {}
         codex_ctx = mock_codex.return_value.__enter__.return_value
 
@@ -2106,89 +2023,63 @@ class CodexWorkerCommandTests(TestCase):
             id="thread-1", turn=MagicMock()
         )
 
-        with tempfile.TemporaryDirectory() as raw:
-            instance = self._make_instance(Path(raw))
-            call_command(
-                "codex_worker",
-                "--instance-id",
-                str(instance.pk),
-                "--plan-mode",
-                "--model",
-                "gpt-5.4",
-            )
-
-        codex_ctx.thread_resume.return_value.turn.assert_not_called()
-        params = captured_params["params"]
-        assert isinstance(params, dict)
-        self.assertEqual(
-            params["collaborationMode"],
-            {
-                "mode": "plan",
-                "settings": {
-                    "developer_instructions": None,
-                    "reasoning_effort": "medium",
-                    "model": "gpt-5.4",
+        cases = [
+            (
+                ["--plan-mode", "--model", "gpt-5.4"],
+                {
+                    "mode": "plan",
+                    "settings": {
+                        "developer_instructions": None,
+                        "reasoning_effort": "medium",
+                        "model": "gpt-5.4",
+                    },
                 },
-            },
-        )
-
-    @patch("hitch.main.management.commands.codex_worker.Codex")
-    def test_default_collaboration_mode_posts_collaboration_mode(
-        self, mock_codex: MagicMock
-    ) -> None:
-        captured_params: dict[str, object] = {}
-        codex_ctx = mock_codex.return_value.__enter__.return_value
-
-        def _capture_turn_start(
-            _thread_id: str, _input: object, *, params: object
-        ) -> object:
-            captured_params["params"] = params
-            return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
-
-        codex_ctx._client.turn_start.side_effect = _capture_turn_start
-        codex_ctx._client.next_turn_notification.return_value = _completed_event(
-            "turn-1", TurnStatus.completed
-        )
-        codex_ctx.thread_resume.return_value = SimpleNamespace(
-            id="thread-1", turn=MagicMock()
-        )
-
-        with tempfile.TemporaryDirectory() as raw:
-            instance = self._make_instance(Path(raw))
-            call_command(
-                "codex_worker",
-                "--instance-id",
-                str(instance.pk),
-                "--collaboration-mode",
-                "default",
-                "--model",
-                "gpt-5.4",
-                "--reasoning-effort",
-                "high",
-            )
-
-        codex_ctx.thread_resume.return_value.turn.assert_not_called()
-        params = captured_params["params"]
-        assert isinstance(params, dict)
-        collaboration_mode = params["collaborationMode"]
-        assert isinstance(collaboration_mode, dict)
-        settings = collaboration_mode["settings"]
-        assert isinstance(settings, dict)
-        instructions = settings["developer_instructions"]
-        assert isinstance(instructions, str)
-        self.assertIn("You are now in Default mode", instructions)
-        self.assertIn("previous instructions for other modes", instructions)
-        self.assertEqual(
-            collaboration_mode,
-            {
-                "mode": "default",
-                "settings": {
-                    "developer_instructions": _DEFAULT_COLLABORATION_INSTRUCTIONS,
-                    "reasoning_effort": "high",
-                    "model": "gpt-5.4",
+            ),
+            (
+                [
+                    "--collaboration-mode",
+                    "default",
+                    "--model",
+                    "gpt-5.4",
+                    "--reasoning-effort",
+                    "high",
+                ],
+                {
+                    "mode": "default",
+                    "settings": {
+                        "developer_instructions": _DEFAULT_COLLABORATION_INSTRUCTIONS,
+                        "reasoning_effort": "high",
+                        "model": "gpt-5.4",
+                    },
                 },
-            },
-        )
+            ),
+        ]
+        for extra_args, expected in cases:
+            with self.subTest(mode=expected["mode"]):
+                captured_params.clear()
+                codex_ctx.thread_resume.return_value.turn.reset_mock()
+                with tempfile.TemporaryDirectory() as raw:
+                    instance = self._make_instance(Path(raw))
+                    call_command(
+                        "codex_worker",
+                        "--instance-id",
+                        str(instance.pk),
+                        *extra_args,
+                    )
+
+                codex_ctx.thread_resume.return_value.turn.assert_not_called()
+                params = captured_params["params"]
+                assert isinstance(params, dict)
+                collaboration_mode = params["collaborationMode"]
+                assert isinstance(collaboration_mode, dict)
+                if expected["mode"] == "default":
+                    settings = collaboration_mode["settings"]
+                    assert isinstance(settings, dict)
+                    instructions = settings["developer_instructions"]
+                    assert isinstance(instructions, str)
+                    self.assertIn("You are now in Default mode", instructions)
+                    self.assertIn("previous instructions for other modes", instructions)
+                self.assertEqual(collaboration_mode, expected)
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_plan_mode_forwards_sandbox_and_approval_overrides(
