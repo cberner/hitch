@@ -205,6 +205,29 @@ class SettingsDialogRenderTests(TestCase):
         self.assertContains(response, 'name="use_worktrees"')
         self.assertContains(response, "Use worktrees")
 
+    @patch("hitch.main.views.Codex")
+    def test_usage_page_renders_primary_nav_menu_instead_of_back_link(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _configure_codex(
+            mock_codex,
+            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+        )
+
+        response = self.client.get(reverse("usage"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "data-nav-menu")
+        self.assertContains(response, "data-nav-menu-open")
+        self.assertContains(response, "data-nav-menu-panel")
+        self.assertContains(response, "data-settings-dialog")
+        self.assertContains(response, 'aria-label="Navigation menu"')
+        self.assertContains(response, f'href="{reverse("index")}"')
+        self.assertContains(response, f'href="{reverse("usage")}" aria-current="page"')
+        self.assertContains(response, ">settings<")
+        self.assertContains(response, "GPT-5")
+        self.assertNotContains(response, 'class="back-link"')
+
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_saved_extra_system_prompt_renders_in_dialog(

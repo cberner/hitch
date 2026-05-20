@@ -297,9 +297,15 @@ def index(request: HttpRequest) -> HttpResponse:
 
 @require_http_methods(["GET"])
 def usage(request: HttpRequest) -> HttpResponse:
-    settings = _stored_settings(request)
-    config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
+    initial_settings = _stored_settings(request)
+    config = codex_pool.app_server_config(
+        enable_memories=initial_settings.enable_memories
+    )
     with Codex(config=config) as codex:
+        models_data = _models_for_plan_mode_fallback(codex)
+        resolved_settings = _resolved_settings(request, models_data)
+        current_settings = resolved_settings.values
+        cookie_updates = resolved_settings.cookie_updates
         rate_limits = _fetch_rate_limits(codex)
         usage_threads = _threads_for_usage(codex)
         lifetime_usage = (
@@ -307,15 +313,20 @@ def usage(request: HttpRequest) -> HttpResponse:
             if usage_threads is not None
             else None
         )
-    return render(
+    settings_dialog_context = _settings_dialog_context(current_settings, models_data)
+    response = render(
         request,
         "usage.html",
         {
-            "index_url": reverse("index"),
+            "login_url": reverse("login"),
+            "register_url": reverse("register"),
             "rate_limits": rate_limits,
             "lifetime_usage": lifetime_usage,
+            **settings_dialog_context,
         },
     )
+    _apply_cookie_updates(response, cookie_updates)
+    return response
 
 
 def session(request: HttpRequest, session_id: str) -> HttpResponse:

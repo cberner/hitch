@@ -5,8 +5,10 @@
         <span aria-hidden="true"></span>
     </button>
     <div class="primary-nav-panel" data-nav-menu-panel>
-        <a href="{% url 'index' %}">sessions</a>
-        <a href="{% url 'usage' %}">usage</a>
+        {% with current_route=request.resolver_match.url_name %}
+        <a href="{% url 'index' %}"{% if current_route == "index" or current_route == "session" %} aria-current="page"{% endif %}>sessions</a>
+        <a href="{% url 'usage' %}"{% if current_route == "usage" %} aria-current="page"{% endif %}>usage</a>
+        {% endwith %}
         <button type="button" data-settings-open>settings</button>
         {% if user.is_authenticated %}
         <form class="logout-form" method="post" action="{% url 'logout' %}">

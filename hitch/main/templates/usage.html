@@ -22,6 +22,7 @@
             --accent-soft: rgba(79, 143, 102, 0.10);
             --accent-fg: #ffffff;
             --shadow: 0 1px 2px rgba(28, 37, 46, 0.05);
+            --shadow-lg: 0 8px 24px rgba(28, 37, 46, 0.10);
             --radius: 12px;
             --radius-sm: 8px;
             --safe-top: env(safe-area-inset-top, 0px);
@@ -42,10 +43,15 @@
                 --accent-soft: rgba(111, 178, 134, 0.14);
                 --accent-fg: #0c1814;
                 --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+                --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
             }
         }
         * { box-sizing: border-box; }
         html, body { margin: 0; padding: 0; }
+        html.modal-scroll-locked,
+        body.modal-scroll-locked {
+            overflow: hidden;
+        }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             color: var(--text);
@@ -53,6 +59,7 @@
             line-height: 1.5;
             -webkit-font-smoothing: antialiased;
             -moz-osx-font-smoothing: grayscale;
+            -webkit-tap-highlight-color: transparent;
             min-height: 100vh;
             padding-bottom: calc(2rem + var(--safe-bottom));
         }
@@ -75,6 +82,26 @@
             gap: 0.75rem;
             padding: 0.75rem 1rem;
         }
+        .topbar-leading {
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
+            min-width: 0;
+        }
+        .topbar-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex: 0 0 auto;
+        }
+        .account-label {
+            max-width: 12rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 0.82rem;
+            color: var(--text-muted);
+        }
         .brand {
             font-size: 1rem;
             font-weight: 700;
@@ -82,20 +109,44 @@
             margin: 0;
             color: var(--text);
         }
-        .back-link {
+        {% include "_primary_nav_styles.html" %}
+        .button {
             font: inherit;
-            font-weight: 500;
-            color: var(--text);
-            border: 1px solid var(--border-strong);
-            border-radius: 999px;
-            padding: 0.45rem 0.85rem;
-            text-decoration: none;
-            background: transparent;
             display: inline-flex;
             align-items: center;
-            min-height: 36px;
+            justify-content: center;
+            gap: 0.4rem;
+            min-height: 2.4rem;
+            border: 1px solid var(--accent);
+            border-radius: var(--radius-sm);
+            background: var(--accent);
+            color: var(--accent-fg);
+            padding: 0.55rem 0.8rem;
+            text-decoration: none;
+            cursor: pointer;
+            font-weight: 600;
+            transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
         }
-        .back-link:hover { background: var(--surface-2); }
+        .button:active { transform: scale(0.98); }
+        .button:hover {
+            background: var(--accent-hover);
+            border-color: var(--accent-hover);
+            text-decoration: none;
+        }
+        .button.secondary {
+            background: transparent;
+            color: var(--text);
+            border-color: var(--border-strong);
+        }
+        .button.secondary:hover {
+            background: var(--surface-2);
+            border-color: var(--border-strong);
+        }
+        .account-action {
+            min-height: 2.1rem;
+            padding: 0.35rem 0.65rem;
+            font-size: 0.86rem;
+        }
         main {
             max-width: 760px;
             margin: 0 auto;
@@ -230,8 +281,10 @@
             color: var(--text-faint);
             margin-top: 0.5rem;
         }
+        {% include "_settings_dialog_styles.html" %}
         @media (max-width: 480px) {
             .topbar-inner { padding: 0.7rem 1rem; }
+            .account-label { max-width: 7rem; }
             .usage-header {
                 align-items: flex-start;
                 flex-direction: column;
@@ -251,8 +304,18 @@
 <body>
     <header class="topbar">
         <div class="topbar-inner">
-            <h1 class="brand">HITCH</h1>
-            <a class="back-link" href="{{ index_url }}">Back</a>
+            <div class="topbar-leading">
+                {% include "_primary_nav.html" %}
+                <h1 class="brand">HITCH</h1>
+            </div>
+            <div class="topbar-actions">
+                {% if user.is_authenticated %}
+                <span class="account-label" title="{{ user.get_username }}">{{ user.get_username }}</span>
+                {% else %}
+                <a class="button secondary account-action" href="{{ login_url }}">Log in</a>
+                <a class="button account-action" href="{{ register_url }}">Register</a>
+                {% endif %}
+            </div>
         </div>
     </header>
     <main>
@@ -329,6 +392,7 @@
             {% endif %}
         </section>
     </main>
+    {% include "_settings_dialog.html" %}
     <script>
         (function () {
             const relative = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
@@ -357,6 +421,36 @@
                 el.title = date.toString();
                 el.textContent = relativeFromNow(date);
             }
+
+            const modalScrollLockClass = "modal-scroll-locked";
+            function syncModalScrollLock() {
+                const hasOpenDialog = Boolean(document.querySelector("dialog[open]"));
+                document.documentElement.classList.toggle(modalScrollLockClass, hasOpenDialog);
+                document.body.classList.toggle(modalScrollLockClass, hasOpenDialog);
+            }
+            function showDialog(dialog) {
+                if (!dialog) return;
+                if (typeof dialog.showModal === "function") {
+                    dialog.showModal();
+                } else {
+                    dialog.setAttribute("open", "");
+                }
+                syncModalScrollLock();
+            }
+            function hideDialog(dialog) {
+                if (!dialog) return;
+                if (typeof dialog.close === "function") {
+                    dialog.close();
+                } else {
+                    dialog.removeAttribute("open");
+                }
+                syncModalScrollLock();
+            }
+            for (const dialog of document.querySelectorAll("dialog")) {
+                dialog.addEventListener("close", syncModalScrollLock);
+            }
+
+            {% include "_primary_nav_script.html" %}
         })();
     </script>
 </body>
