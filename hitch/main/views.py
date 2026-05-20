@@ -207,6 +207,34 @@ _TOKEN_USAGE_KEYS = (
 )
 
 
+def _settings_dialog_context(
+    current_settings: SettingsValues, models_data: list[Any]
+) -> dict[str, Any]:
+    return {
+        "settings_url": reverse("update_settings"),
+        "model_options": [
+            {"id": m.id, "display_name": m.display_name} for m in models_data
+        ],
+        "effort_options": [effort.value for effort in ReasoningEffort],
+        "sandbox_options": [
+            {"id": value, "display_name": label}
+            for value, label in _SANDBOX_POLICY_OPTIONS
+        ],
+        "approval_options": [
+            {"id": value, "display_name": label}
+            for value, label in _APPROVAL_MODE_OPTIONS
+        ],
+        "current_model": current_settings.model,
+        "current_effort": current_settings.reasoning_effort,
+        "current_sandbox": current_settings.sandbox_policy,
+        "current_approval": current_settings.approval_mode,
+        "current_extra_system_prompt": current_settings.extra_system_prompt,
+        "extra_system_prompt_max_len": _EXTRA_SYSTEM_PROMPT_MAX_LEN,
+        "current_use_worktrees": current_settings.use_worktrees,
+        "current_enable_memories": current_settings.enable_memories,
+    }
+
+
 def index(request: HttpRequest) -> HttpResponse:
     # Sweep workers whose pid is gone: a Popen that crashed before a worker
     # could record its terminal status (or a row stuck in ``starting``)
@@ -245,18 +273,7 @@ def index(request: HttpRequest) -> HttpResponse:
         )
     repos = [str(p) for p in discover_repos()]
     current_repo = _selected_repo_for_dialog(current_settings.last_selected_repo, repos)
-    model_options = [
-        {"id": m.id, "display_name": m.display_name} for m in models_data
-    ]
-    effort_options = [effort.value for effort in ReasoningEffort]
-    sandbox_options = [
-        {"id": value, "display_name": label}
-        for value, label in _SANDBOX_POLICY_OPTIONS
-    ]
-    approval_options = [
-        {"id": value, "display_name": label}
-        for value, label in _APPROVAL_MODE_OPTIONS
-    ]
+    settings_dialog_context = _settings_dialog_context(current_settings, models_data)
     response = render(
         request,
         "index.html",
@@ -264,28 +281,14 @@ def index(request: HttpRequest) -> HttpResponse:
             "sessions": sessions,
             "repos": repos,
             "new_session_url": reverse("new_session"),
-            "settings_url": reverse("update_settings"),
             "archived_visibility_url": reverse("update_archived_session_visibility"),
             "login_url": reverse("login"),
-            "logout_url": reverse("logout"),
             "register_url": reverse("register"),
-            "model_options": model_options,
-            "effort_options": effort_options,
-            "sandbox_options": sandbox_options,
-            "approval_options": approval_options,
-            "current_model": current_settings.model,
-            "current_effort": current_settings.reasoning_effort,
-            "current_sandbox": current_settings.sandbox_policy,
-            "current_approval": current_settings.approval_mode,
-            "current_extra_system_prompt": current_settings.extra_system_prompt,
-            "extra_system_prompt_max_len": _EXTRA_SYSTEM_PROMPT_MAX_LEN,
-            "current_use_worktrees": current_settings.use_worktrees,
             "current_show_archived_sessions": current_settings.show_archived_sessions,
-            "current_enable_memories": current_settings.enable_memories,
             "current_repo": current_repo,
             "name_max_len": _NAME_MAX_LEN,
             "pr_slash_prompt": _PR_SLASH_PROMPT,
-            "usage_url": reverse("usage"),
+            **settings_dialog_context,
         },
     )
     _apply_cookie_updates(response, cookie_updates)
@@ -320,8 +323,10 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
     # writing a terminal status would otherwise leave the page in "streaming"
     # mode forever, since the EventSource wouldn't reach an end event.
     codex_pool.reconcile_dead()
-    settings = _stored_settings(request)
-    config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
+    initial_settings = _stored_settings(request)
+    config = codex_pool.app_server_config(
+        enable_memories=initial_settings.enable_memories
+    )
     with Codex(config=config) as codex:
         # ``thread/read`` only works for threads already loaded into the
         # app-server's in-memory map. Each request spawns a fresh app-server
@@ -331,7 +336,11 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
         # so a follow-up ``thread/read`` would just be a redundant round-trip.
         resumed = codex._client.thread_resume(session_id)
         thread = resumed.thread
-        plan_model = _plan_mode_model(codex, resumed, settings)
+        models_data = _models_for_plan_mode_fallback(codex)
+        resolved_settings = _resolved_settings(request, models_data)
+        settings = resolved_settings.values
+        cookie_updates = resolved_settings.cookie_updates
+        plan_model = _plan_mode_model_from_models(resumed, settings, models_data)
     is_archived = _thread_is_archived(thread)
     entries = _apply_system_authors(list(_entries_for(thread)), session_id)
     name_value = getattr(thread, "name", None) or ""
@@ -352,6 +361,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
         codex_events.latest_task_plan_for_instance(active_instance)
     )
     diff_view = build_worktree_diff(_thread_cwd(thread))
+    settings_dialog_context = _settings_dialog_context(settings, models_data)
     active_worker_status_text = _active_worker_status_text(active_instance)
     workflow_status_text = _workflow_status_text(active_system_workflow)
     live_status_text = active_worker_status_text or (
@@ -359,7 +369,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
         if active_system_workflow is not None and active_instance is None
         else ""
     )
-    return render(
+    response = render(
         request,
         "session.html",
         {
@@ -417,8 +427,11 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             "goal_objective": goal_objective,
             "task_plan": task_plan,
             "diff_view": diff_view,
+            **settings_dialog_context,
         },
     )
+    _apply_cookie_updates(response, cookie_updates)
+    return response
 
 
 @require_http_methods(["GET", "POST"])
@@ -1454,7 +1467,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     user = _authenticated_user(request)
     if user is not None:
         _save_user_settings(user, values)
-    response = redirect("index")
+    response = redirect(_safe_next_url(request) or "index")
     _apply_cookie_updates(response, _settings_cookie_updates(values))
     return response
 
@@ -1854,10 +1867,16 @@ def _is_pr_activation(request: HttpRequest) -> bool:
 
 
 def _plan_mode_model(codex: Codex, resumed: Any, settings: SettingsValues) -> str | None:
+    models_data = _models_for_plan_mode_fallback(codex)
+    return _plan_mode_model_from_models(resumed, settings, models_data)
+
+
+def _plan_mode_model_from_models(
+    resumed: Any, settings: SettingsValues, models_data: list[Any]
+) -> str | None:
     resumed_model = getattr(resumed, "model", "")
     if isinstance(resumed_model, str) and resumed_model.strip():
         return resumed_model.strip()
-    models_data = _models_for_plan_mode_fallback(codex)
     if settings.model:
         valid_ids = {m.id for m in models_data}
         if not valid_ids or settings.model in valid_ids:

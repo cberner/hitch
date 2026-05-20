@@ -1,0 +1,61 @@
+<dialog class="new-session" data-settings-dialog aria-labelledby="settings-title">
+    <form method="post" action="{{ settings_url }}">
+        {% csrf_token %}
+        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+        <h2 id="settings-title">Settings</h2>
+        <label>
+            Model
+            {% if model_options %}
+            <select name="model">
+                {% for option in model_options %}
+                <option value="{{ option.id }}" {% if option.id == current_model %}selected{% endif %}>{{ option.display_name }}</option>
+                {% endfor %}
+            </select>
+            {% else %}
+            <input type="text" name="model" value="{{ current_model }}" placeholder="Codex returned no models" autocomplete="off">
+            {% endif %}
+        </label>
+        <label>
+            Reasoning effort
+            <select name="reasoning_effort">
+                <option value="" {% if not current_effort %}selected{% endif %}>Model default</option>
+                {% for option in effort_options %}
+                <option value="{{ option }}" {% if option == current_effort %}selected{% endif %}>{{ option }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            Sandbox policy
+            <select name="sandbox_policy">
+                <option value="" {% if not current_sandbox %}selected{% endif %}>Codex default</option>
+                {% for option in sandbox_options %}
+                <option value="{{ option.id }}" {% if option.id == current_sandbox %}selected{% endif %}>{{ option.display_name }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            Approval mode
+            <select name="approval_mode">
+                {% for option in approval_options %}
+                <option value="{{ option.id }}" {% if option.id == current_approval %}selected{% endif %}>{{ option.display_name }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <label>
+            Extra developer prompt
+            <textarea class="extra-system-prompt" name="extra_system_prompt" maxlength="{{ extra_system_prompt_max_len }}" autocomplete="off" placeholder="Optional developer instructions for new sessions">{{ current_extra_system_prompt }}</textarea>
+        </label>
+        <label class="checkbox-label">
+            <span>Use worktrees</span>
+            <input type="checkbox" name="use_worktrees" value="true" {% if current_use_worktrees %}checked{% endif %}>
+        </label>
+        <label class="checkbox-label">
+            <span>Enable Codex memories</span>
+            <input type="checkbox" name="enable_memories" value="true" {% if current_enable_memories %}checked{% endif %}>
+        </label>
+        <div class="actions">
+            <button type="button" class="button secondary" data-settings-cancel>Cancel</button>
+            <button type="submit" class="button">Save</button>
+        </div>
+    </form>
+</dialog>

@@ -163,6 +163,10 @@ def _seed_cookies(client: Client, **values: str) -> None:
         client.cookies[name] = _sign(name, value)
 
 
+def _cookie_value(response: HttpResponse, name: str) -> str:
+    return signing.get_cookie_signer(salt=name).unsign(response.cookies[name].value)
+
+
 def _diff_view() -> DiffView:
     return DiffView(
         files=[
@@ -293,6 +297,55 @@ class PrUrlDetectionTests(TestCase):
 
 
 class SessionViewTests(TestCase):
+    @patch("hitch.main.views.Codex")
+    def test_renders_primary_nav_menu_instead_of_back_link(
+        self, mock_codex: MagicMock
+    ) -> None:
+        thread = _thread([_turn([_user_message("hi")])])
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "data-nav-menu")
+        self.assertContains(response, "data-nav-menu-open")
+        self.assertContains(response, "data-nav-menu-panel")
+        self.assertContains(response, 'aria-label="Navigation menu"')
+        self.assertContains(response, f'href="{reverse("index")}"')
+        self.assertContains(response, f'href="{reverse("usage")}"')
+        self.assertContains(response, ">settings<")
+        self.assertContains(response, "data-settings-dialog")
+        self.assertNotContains(response, 'class="back-link"')
+
+    @patch("hitch.main.views.Codex")
+    def test_settings_dialog_uses_resolved_settings(
+        self, mock_codex: MagicMock
+    ) -> None:
+        thread = _thread([_turn([_user_message("hi")])])
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.return_value.thread = thread
+        client.models.return_value.data = [
+            SimpleNamespace(
+                id="gpt-current",
+                display_name="GPT Current",
+                is_default=True,
+                default_reasoning_effort=SimpleNamespace(value="medium"),
+                supported_reasoning_efforts=[],
+            )
+        ]
+        _seed_cookies(
+            self.client,
+            hitch_model="stale-model",
+            hitch_reasoning_effort="high",
+        )
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'value="gpt-current" selected')
+        self.assertEqual(_cookie_value(response, "hitch_model"), "gpt-current")
+        self.assertEqual(_cookie_value(response, "hitch_reasoning_effort"), "medium")
+
     @patch("hitch.main.views.Codex")
     def test_renders_edit_title_form(self, mock_codex: MagicMock) -> None:
         """The edit form is pre-populated with the current name when set, and
