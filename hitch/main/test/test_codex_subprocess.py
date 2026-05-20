@@ -55,6 +55,7 @@ from hitch.main.management.commands.codex_worker import (
 from hitch.main.models import (
     ApprovalRequest,
     CodexInstance,
+    SystemAgentRun,
     SystemWorkflow,
     UserInputRequest,
 )
@@ -3205,6 +3206,71 @@ class StreamForInstanceTests(TestCase):
             status=SystemWorkflow.STATUS_RUNNING,
             step="qa_running",
         )
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            Path(events_path).write_text(
+                json.dumps(
+                    {
+                        "method": codex_events.GOAL_UPDATED_METHOD,
+                        "payload": {
+                            "threadId": "hidden-thread",
+                            "goal": {
+                                "objective": "Review the diff",
+                                "tokensUsed": 99,
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            instance = _make_streaming_instance(
+                events_path,
+                thread_id="hidden-thread",
+                pid=_LIVE_PID,
+            )
+            instance.purpose = CodexInstance.PURPOSE_SYSTEM_AGENT
+            instance.workflow_id = workflow.pk
+            instance.agent_kind = "pr_qa"
+            instance.display_author = "QA agent"
+            instance.save(
+                update_fields=[
+                    "purpose",
+                    "workflow_id",
+                    "agent_kind",
+                    "display_author",
+                ]
+            )
+            SystemAgentRun.objects.create(
+                workflow=workflow,
+                agent_kind="pr_qa",
+                thread_id="hidden-thread",
+                instance=instance,
+                status=SystemAgentRun.STATUS_RUNNING,
+            )
+
+            frames = list(
+                streaming.system_workflow_stream(
+                    "thread-workflow", baseline_id=None, workflow_id=workflow.pk
+                )
+            )
+
+        heartbeats = [f for f in frames if f.startswith(b"event: heartbeat")]
+        self.assertGreaterEqual(len(heartbeats), 1)
+        self.assertIn(b'"working": true', heartbeats[0])
+        self.assertIn(b'"statusText": "QA agent working...99 tokens"', heartbeats[0])
+
+    @patch("hitch.main.streaming._HEARTBEAT_INTERVAL", 0.0)
+    @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.005)
+    @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
+    def test_system_workflow_stream_resends_status_heartbeat(self) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-workflow",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step="qa_running",
+        )
 
         frames = list(
             streaming.system_workflow_stream(
@@ -3213,8 +3279,8 @@ class StreamForInstanceTests(TestCase):
         )
 
         heartbeats = [f for f in frames if f.startswith(b"event: heartbeat")]
-        self.assertGreaterEqual(len(heartbeats), 1)
-        self.assertIn(b'"working": true', heartbeats[0])
+        self.assertGreater(len(heartbeats), 1)
+        self.assertIn(b'"statusText": "QA agent working..."', heartbeats[-1])
 
     def test_system_workflow_stream_ends_when_workflow_stops(self) -> None:
         workflow = SystemWorkflow.objects.create(
@@ -3263,6 +3329,68 @@ class StreamForInstanceTests(TestCase):
         self.assertIn(b"turn/completed", data_frames[1])
         self.assertTrue(frames[-1].startswith(b"event: end"))
         self.assertIn(b'"completed"', frames[-1])
+
+    def test_qa_instance_heartbeat_reports_goal_tokens(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            Path(events_path).write_text(
+                json.dumps(
+                    {
+                        "method": codex_events.GOAL_UPDATED_METHOD,
+                        "payload": {
+                            "threadId": "thread-1",
+                            "goal": {
+                                "objective": "Review the diff",
+                                "tokensUsed": 1200,
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            instance = _make_streaming_instance(
+                events_path,
+                status=CodexInstance.STATUS_COMPLETED,
+            )
+            instance.display_author = "QA agent"
+            instance.save(update_fields=["display_author"])
+
+            frames = list(streaming.stream_for_instance(instance))
+
+        heartbeats = [f for f in frames if f.startswith(b"event: heartbeat")]
+        self.assertIn(b'"statusText": "QA agent working...1.2K tokens"', heartbeats[0])
+
+    def test_qa_instance_status_text_falls_back_without_tokens(self) -> None:
+        instance = _make_streaming_instance(
+            "/tmp/hitch-test-missing-qa-progress.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+        instance.display_author = "QA agent"
+        instance.save(update_fields=["display_author"])
+
+        self.assertEqual(
+            streaming.qa_agent_status_text_for_instance(instance),
+            "QA agent working...",
+        )
+
+    def test_compact_token_count_formatter(self) -> None:
+        self.assertEqual(streaming._format_compact_token_count(-1), "0")
+        self.assertEqual(streaming._format_compact_token_count(999), "999")
+        self.assertEqual(streaming._format_compact_token_count(1200), "1.2K")
+        self.assertEqual(streaming._format_compact_token_count(1250), "1.3K")
+        self.assertEqual(streaming._format_compact_token_count(10_500), "11K")
+        self.assertEqual(streaming._format_compact_token_count(999_950), "1M")
+        self.assertEqual(streaming._format_compact_token_count(13_000_000), "13M")
+        self.assertEqual(streaming._format_compact_token_count(1_000_000_000), "1B")
+
+    def test_system_workflow_status_text_handles_non_qa_workflow(self) -> None:
+        workflow = cast(SystemWorkflow, SimpleNamespace(kind="other"))
+
+        self.assertEqual(
+            streaming.system_workflow_status_text(workflow),
+            "Hitch system agent is working...",
+        )
 
     def test_terminates_when_status_flips_to_failed(self) -> None:
         # A worker that ended with a failure status still flushes its events

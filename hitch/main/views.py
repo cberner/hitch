@@ -358,6 +358,13 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
         codex_events.latest_task_plan_for_instance(active_instance)
     )
     diff_view = build_worktree_diff(_thread_cwd(thread))
+    active_worker_status_text = _active_worker_status_text(active_instance)
+    workflow_status_text = _workflow_status_text(active_system_workflow)
+    live_status_text = active_worker_status_text or (
+        workflow_status_text
+        if active_system_workflow is not None and active_instance is None
+        else ""
+    )
     return render(
         request,
         "session.html",
@@ -393,7 +400,9 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             ),
             "active_worker": active_instance is not None,
             "active_system_workflow": active_system_workflow,
-            "workflow_status_text": _workflow_status_text(active_system_workflow),
+            "workflow_status_text": workflow_status_text,
+            "active_worker_status_text": active_worker_status_text,
+            "live_status_text": live_status_text,
             # Carried into the Stop button so the click targets the
             # specific worker the page is streaming, not "whichever
             # worker is latest at click time" — overlapping turns can
@@ -816,11 +825,11 @@ def _pending_user_author(active: CodexInstance | None) -> str:
 
 
 def _workflow_status_text(workflow: Any | None) -> str:
-    if workflow is None:
-        return ""
-    if getattr(workflow, "kind", "") == "pr_qa":
-        return "QA agent is reviewing..."
-    return "Hitch system agent is working..."
+    return streaming.system_workflow_status_text(workflow)
+
+
+def _active_worker_status_text(active: CodexInstance | None) -> str:
+    return streaming.qa_agent_status_text_for_instance(active)
 
 
 def _apply_system_authors(

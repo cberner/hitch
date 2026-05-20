@@ -24,8 +24,8 @@ import time
 from collections.abc import Generator, Iterator
 from pathlib import Path
 
-from hitch.main import codex_pool
-from hitch.main.models import CodexInstance, SystemWorkflow
+from hitch.main import codex_events, codex_pool
+from hitch.main.models import CodexInstance, SystemAgentRun, SystemWorkflow
 
 # Cadence at which we re-poll the events file when it has no new bytes. Short
 # enough that streamed deltas surface in near-real-time; long enough not to
@@ -60,6 +60,14 @@ _IDLE_MAX_STREAM_SECONDS = 5 * 60
 # the case where the subprocess never started writing.
 _FILE_APPEAR_TIMEOUT = 30.0
 
+_QA_AGENT_DISPLAY_AUTHOR = "QA agent"
+_QA_AGENT_KIND = "pr_qa"
+_COMPACT_TOKEN_UNITS = (
+    (1_000_000_000, "B"),
+    (1_000_000, "M"),
+    (1_000, "K"),
+)
+
 
 def stream_for_instance(instance: CodexInstance) -> Iterator[bytes]:
     """Yield SSE frames (as bytes) for a single CodexInstance.
@@ -68,7 +76,10 @@ def stream_for_instance(instance: CodexInstance) -> Iterator[bytes]:
     EventSource explicitly rather than relying on the connection close.
     """
     yield b"retry: 2000\n\n"
-    yield _heartbeat_frame(working=True)
+    yield _heartbeat_frame(
+        working=True,
+        status_text=qa_agent_status_text_for_instance(instance),
+    )
 
     path = Path(instance.events_path)
     started = time.monotonic()
@@ -81,7 +92,10 @@ def stream_for_instance(instance: CodexInstance) -> Iterator[bytes]:
             yield _end_frame("missing")
             return
         if time.monotonic() - last_heartbeat >= _HEARTBEAT_INTERVAL:
-            yield _heartbeat_frame(working=True)
+            yield _heartbeat_frame(
+                working=True,
+                status_text=qa_agent_status_text_for_instance(instance),
+            )
             last_heartbeat = time.monotonic()
         time.sleep(_POLL_INTERVAL)
 
@@ -112,7 +126,10 @@ def stream_for_instance(instance: CodexInstance) -> Iterator[bytes]:
                 return
 
             if time.monotonic() - last_heartbeat >= _HEARTBEAT_INTERVAL:
-                yield _heartbeat_frame(working=True)
+                yield _heartbeat_frame(
+                    working=True,
+                    status_text=qa_agent_status_text_for_instance(instance),
+                )
                 last_heartbeat = time.monotonic()
             time.sleep(_POLL_INTERVAL)
 
@@ -161,24 +178,28 @@ def system_workflow_stream(
 ) -> Iterator[bytes]:
     """Heartbeat stream while a hidden system workflow owns the main thread."""
     yield b"retry: 2000\n\n"
-    yield _heartbeat_frame(working=True)
+    workflow = _running_system_workflow(session_id, workflow_id)
+    yield _heartbeat_frame(
+        working=True,
+        status_text=system_workflow_status_text(workflow),
+    )
     deadline = time.monotonic() + _IDLE_MAX_STREAM_SECONDS
     last_heartbeat = time.monotonic()
     while True:
         if codex_pool.latest_id_for_thread(session_id) != baseline_id:
             yield _end_frame("active")
             return
-        if not SystemWorkflow.objects.filter(
-            pk=workflow_id,
-            main_thread_id=session_id,
-            status=SystemWorkflow.STATUS_RUNNING,
-        ).exists():
+        workflow = _running_system_workflow(session_id, workflow_id)
+        if workflow is None:
             yield _end_frame("workflow")
             return
         if time.monotonic() > deadline:
             return
         if time.monotonic() - last_heartbeat >= _HEARTBEAT_INTERVAL:
-            yield _heartbeat_frame(working=True)
+            yield _heartbeat_frame(
+                working=True,
+                status_text=system_workflow_status_text(workflow),
+            )
             last_heartbeat = time.monotonic()
         time.sleep(_IDLE_POLL_INTERVAL)
 
@@ -214,9 +235,85 @@ def _end_frame(status: str) -> bytes:
     return b"event: end\ndata: " + json.dumps({"status": status}).encode("utf-8") + b"\n\n"
 
 
-def _heartbeat_frame(*, working: bool) -> bytes:
-    payload = json.dumps({"working": working}).encode("utf-8")
+def _heartbeat_frame(*, working: bool, status_text: str = "") -> bytes:
+    payload_data: dict[str, bool | str] = {"working": working}
+    if status_text:
+        payload_data["statusText"] = status_text
+    payload = json.dumps(payload_data).encode("utf-8")
     return b"event: heartbeat\ndata: " + payload + b"\n\n"
+
+
+def qa_agent_status_text_for_instance(instance: CodexInstance | None) -> str:
+    if instance is None or not _is_qa_agent_instance(instance):
+        return ""
+    tokens_used = codex_events.latest_goal_tokens_for_instance(instance)
+    if tokens_used is None:
+        return "QA agent working..."
+    return f"QA agent working...{_format_compact_token_count(tokens_used)} tokens"
+
+
+def system_workflow_status_text(workflow: SystemWorkflow | None) -> str:
+    if workflow is None:
+        return ""
+    if workflow.kind != SystemWorkflow.KIND_PR_QA:
+        return "Hitch system agent is working..."
+    instance = _running_system_agent_instance(workflow.pk)
+    status_text = qa_agent_status_text_for_instance(instance)
+    return status_text or "QA agent working..."
+
+
+def _is_qa_agent_instance(instance: CodexInstance) -> bool:
+    return (
+        instance.display_author == _QA_AGENT_DISPLAY_AUTHOR
+        or instance.agent_kind == _QA_AGENT_KIND
+    )
+
+
+def _format_compact_token_count(value: int) -> str:
+    value = max(0, value)
+    for index, (scale, suffix) in enumerate(_COMPACT_TOKEN_UNITS):
+        if value < scale:
+            continue
+        amount = _format_compact_token_amount(value, scale)
+        if amount == "1000" and index > 0:
+            next_scale, next_suffix = _COMPACT_TOKEN_UNITS[index - 1]
+            return _format_compact_token_amount(value, next_scale) + next_suffix
+        return amount + suffix
+    return str(value)
+
+
+def _format_compact_token_amount(value: int, scale: int) -> str:
+    if value >= 10 * scale:
+        return str((value + scale // 2) // scale)
+    tenths = (value * 10 + scale // 2) // scale
+    whole, fraction = divmod(tenths, 10)
+    if fraction == 0:
+        return str(whole)
+    return f"{whole}.{fraction}"
+
+
+def _running_system_workflow(
+    session_id: str,
+    workflow_id: int,
+) -> SystemWorkflow | None:
+    return SystemWorkflow.objects.filter(
+        pk=workflow_id,
+        main_thread_id=session_id,
+        status=SystemWorkflow.STATUS_RUNNING,
+    ).first()
+
+
+def _running_system_agent_instance(workflow_id: int) -> CodexInstance | None:
+    run = (
+        SystemAgentRun.objects.filter(
+            workflow_id=workflow_id,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+        .select_related("instance")
+        .order_by("-created_at")
+        .first()
+    )
+    return run.instance if run is not None else None
 
 
 def _is_done(instance_id: int) -> bool:

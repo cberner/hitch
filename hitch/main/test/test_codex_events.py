@@ -125,6 +125,50 @@ class LatestGoalFromEventPathsTests(SimpleTestCase):
 
         self.assertIsNone(goal)
 
+    def test_latest_goal_tokens_uses_latest_goal_update(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            codex_events.GOAL_UPDATED_METHOD,
+                            {
+                                "threadId": "thread-1",
+                                "goal": {
+                                    "objective": "Initial review",
+                                    "tokensUsed": 10,
+                                },
+                            },
+                            event_seq=1,
+                        ),
+                        _event(
+                            codex_events.GOAL_UPDATED_METHOD,
+                            {
+                                "threadId": "thread-1",
+                                "goal": {
+                                    "objective": "Current review",
+                                    "tokens_used": 2500,
+                                },
+                            },
+                            event_seq=2,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            tokens = codex_events.latest_goal_tokens_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertEqual(tokens, 2500)
+
+    def test_latest_goal_tokens_for_instance_handles_missing_instance(self) -> None:
+        self.assertIsNone(codex_events.latest_goal_tokens_for_instance(None))
+
     def test_accepts_recorded_at_alias_and_ignores_bad_order_fields(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "events.jsonl"
