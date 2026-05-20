@@ -233,7 +233,6 @@ def index(request: HttpRequest) -> HttpResponse:
         is_archived = _thread_is_archived(thread)
         if is_archived and not current_settings.show_archived_sessions:
             continue
-        token_usage = _token_usage_numbers_for(thread)
         sessions.append(
             {
                 "id": thread.id,
@@ -242,11 +241,6 @@ def index(request: HttpRequest) -> HttpResponse:
                 "display_title": _display_title(thread),
                 "name_value": getattr(thread, "name", None) or "",
                 "is_archived": is_archived,
-                "token_usage_total": (
-                    _format_token_count(token_usage["total_tokens"])
-                    if token_usage is not None
-                    else ""
-                ),
             }
         )
     repos = [str(p) for p in discover_repos()]

@@ -336,7 +336,7 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_session_list_shows_live_token_usage_without_caching(
+    def test_session_list_omits_token_usage(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         rollout_path = _make_rollout(
@@ -357,8 +357,9 @@ class IndexViewTests(TestCase):
         response = self.client.get(reverse("index"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "tokens")
-        self.assertContains(response, "987,654")
+        self.assertContains(response, "Active session")
+        self.assertNotContains(response, 'aria-label="Token usage"')
+        self.assertNotContains(response, "987,654")
         self.assertEqual(ArchivedSessionTokenUsage.objects.count(), 0)
 
         rollout_path.write_text(
@@ -373,16 +374,14 @@ class IndexViewTests(TestCase):
 
         response = self.client.get(reverse("index"))
 
-        self.assertContains(response, "1,234,567")
+        self.assertNotContains(response, "1,234,567")
         self.assertNotContains(response, "987,654")
         self.assertEqual(ArchivedSessionTokenUsage.objects.count(), 0)
 
-    @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_archived_session_list_token_usage_refreshes_when_rollout_changes(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
+    def test_usage_page_archived_token_usage_refreshes_when_rollout_changes(
+        self, mock_codex: MagicMock
     ) -> None:
-        _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
         rollout_path = _make_rollout(
             self,
             [
@@ -402,9 +401,8 @@ class IndexViewTests(TestCase):
             path=str(rollout_path),
         )
         _setup_codex(mock_codex, archived_threads=[archived])
-        mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "123,456")
@@ -423,7 +421,7 @@ class IndexViewTests(TestCase):
         )
         os.utime(rollout_path, ns=(2_000_000_000, 2_000_000_000))
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("usage"))
 
         self.assertContains(response, "999,999")
         self.assertNotContains(response, "123,456")
