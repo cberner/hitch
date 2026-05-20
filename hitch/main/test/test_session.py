@@ -311,6 +311,8 @@ class SessionViewTests(TestCase):
         self.assertContains(response, "data-nav-menu-open")
         self.assertContains(response, "data-nav-menu-panel")
         self.assertContains(response, 'aria-label="Navigation menu"')
+        self.assertContains(response, f'href="{reverse("index")}#new-session"')
+        self.assertContains(response, ">new session<")
         self.assertContains(response, f'href="{reverse("index")}"')
         self.assertContains(response, f'href="{reverse("usage")}"')
         self.assertContains(response, ">settings<")
