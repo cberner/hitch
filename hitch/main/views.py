@@ -351,6 +351,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
     # restores the canonical view.
     entries = _trim_in_progress_turn(entries, active_instance)
     default_plan_mode = _entries_await_plan_approval(entries)
+    _mark_pending_plan_actions(entries)
     token_usage = _token_usage_for(thread)
     goal_objective = codex_events.latest_goal_for_thread(session_id)
     task_plan = _task_plan_context(
@@ -1765,15 +1766,34 @@ def _pr_urls_from_value(value: Any) -> list[str]:
 
 
 def _entries_await_plan_approval(entries: list[dict[str, Any]]) -> bool:
+    return _pending_plan_entry(entries) is not None
+
+
+def _pending_plan_entry(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
     for entry in reversed(entries):
         kind = entry.get("kind")
         if kind in {"intermediate", "approval_declined", "tool_call", "thinking", "user"}:
             continue
         if kind == "plan":
-            return True
+            return entry
         if kind == "agent":
-            return False
-    return False
+            return None
+    return None
+
+
+def _mark_pending_plan_actions(entries: list[dict[str, Any]]) -> None:
+    _clear_plan_actions(entries)
+    pending_plan = _pending_plan_entry(entries)
+    if pending_plan is not None:
+        pending_plan["show_plan_actions"] = True
+
+
+def _clear_plan_actions(entries: list[dict[str, Any]]) -> None:
+    for entry in entries:
+        if entry.get("kind") == "plan":
+            entry["show_plan_actions"] = False
+        elif entry.get("kind") == "intermediate":
+            _clear_plan_actions(entry.get("items", []))
 
 
 def _count_user_entries(entries: list[dict[str, Any]]) -> int:

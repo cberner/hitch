@@ -962,6 +962,64 @@ class RolloutFileViewTests(TestCase):
         self.assertIn("Debug the login CSRF issue", body)
 
     @patch("hitch.main.views.Codex")
+    def test_resolved_plan_card_hides_approval_actions(
+        self, mock_codex: MagicMock
+    ) -> None:
+        plan = "# Fix Login CSRF Redirect Failure\n\n## Summary\nRead the CSRF cookie at submit time."
+        rollout_lines = [
+            _rollout_line(
+                "event_msg",
+                {"type": "user_message", "message": "Debug the login CSRF issue"},
+            ),
+            _rollout_line(
+                "event_msg",
+                {
+                    "type": "item_completed",
+                    "item": {"type": "Plan", "id": "turn-plan", "text": plan},
+                },
+            ),
+            _rollout_line(
+                "response_item",
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": f"<proposed_plan>\n{plan}\n</proposed_plan>",
+                        }
+                    ],
+                    "phase": "final_answer",
+                },
+            ),
+            _rollout_line(
+                "event_msg",
+                {"type": "user_message", "message": "Implement the plan."},
+            ),
+            _rollout_line(
+                "response_item",
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Done."}],
+                    "phase": "final_answer",
+                },
+            ),
+        ]
+        rollout_path = _make_rollout(self, rollout_lines)
+        _patch_thread(self, mock_codex, _thread([], path=str(rollout_path)))
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'class="plan-card"')
+        self.assertContains(response, "Fix Login CSRF Redirect Failure")
+        self.assertNotContains(response, "Approve plan")
+        self.assertNotContains(response, 'name="plan_action" value="approve"')
+        self.assertContains(response, 'data-initial-plan-mode="false"')
+        self.assertContains(response, 'name="default_plan_mode" value=""')
+
+    @patch("hitch.main.views.Codex")
     def test_falls_back_to_sdk_on_rollout_failure_modes(
         self, mock_codex: MagicMock
     ) -> None:

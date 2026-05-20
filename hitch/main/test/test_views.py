@@ -198,6 +198,31 @@ class PendingPlanStateTests(TestCase):
 
         self.assertFalse(views._entries_await_plan_approval(entries))
 
+    def test_only_latest_pending_plan_is_actionable(self) -> None:
+        entries = [
+            {"kind": "user", "text": "Plan it"},
+            {"kind": "plan", "text": "# Old Plan"},
+            {"kind": "user", "text": "Revise"},
+            {"kind": "plan", "text": "# Current Plan"},
+        ]
+
+        views._mark_pending_plan_actions(entries)
+
+        self.assertFalse(entries[1]["show_plan_actions"])
+        self.assertTrue(entries[3]["show_plan_actions"])
+
+    def test_agent_answer_clears_plan_actions(self) -> None:
+        entries = [
+            {"kind": "user", "text": "Plan it"},
+            {"kind": "plan", "text": "# Plan"},
+            {"kind": "user", "text": "Implement the plan"},
+            {"kind": "agent", "text": "Done"},
+        ]
+
+        views._mark_pending_plan_actions(entries)
+
+        self.assertFalse(entries[1]["show_plan_actions"])
+
 
 class IndexViewTests(TestCase):
     @patch("hitch.main.views.discover_repos")
