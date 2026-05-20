@@ -710,125 +710,114 @@ class UpdateSettingsViewTests(TestCase):
         self.assertEqual(response.status_code, 405)
 
     @patch("hitch.main.views.Codex")
-    def test_saves_sandbox_policy_to_signed_cookie(
+    def test_saves_optional_signed_cookie_settings(
         self, mock_codex: MagicMock
     ) -> None:
         _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
-        response = self.client.post(
-            reverse("update_settings"),
-            data={
-                "model": "gpt-5",
-                "reasoning_effort": "high",
-                "sandbox_policy": "workspaceWrite",
-            },
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(
-            _cookie_value(response, _SANDBOX_COOKIE), "workspaceWrite"
-        )
-
-    def test_rejects_unknown_sandbox_policy(self) -> None:
-        _seed_cookies(self.client, **{_SANDBOX_COOKIE: "readOnly"})
-        response = self.client.post(
-            reverse("update_settings"),
-            data={
-                "model": "",
-                "reasoning_effort": "",
-                "sandbox_policy": "evilMode",
-            },
-        )
-
-        self.assertEqual(response.status_code, 400)
-        # Reject must not stomp the previously-saved policy.
-        self.assertNotIn(_SANDBOX_COOKIE, response.cookies)
-
-    def test_allows_empty_sandbox_policy(self) -> None:
-        response = self.client.post(
-            reverse("update_settings"),
-            data={"model": "", "reasoning_effort": "", "sandbox_policy": ""},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(_cookie_value(response, _SANDBOX_COOKIE), "")
-
-    def test_saves_archived_session_visibility_to_signed_cookie(self) -> None:
-        cases = [
-            ({"show_archived_sessions": "true"}, "true"),
-            ({"show_archived_sessions": ""}, "false"),
+        cases: list[tuple[str, dict[str, str], dict[str, str], str, str]] = [
+            (
+                "sandbox policy",
+                {
+                    "model": "gpt-5",
+                    "reasoning_effort": "high",
+                    "sandbox_policy": "workspaceWrite",
+                },
+                {},
+                _SANDBOX_COOKIE,
+                "workspaceWrite",
+            ),
+            (
+                "empty sandbox policy",
+                {"model": "", "reasoning_effort": "", "sandbox_policy": ""},
+                {},
+                _SANDBOX_COOKIE,
+                "",
+            ),
+            (
+                "show archived enabled",
+                {"show_archived_sessions": "true"},
+                {},
+                _SHOW_ARCHIVED_COOKIE,
+                "true",
+            ),
+            (
+                "show archived disabled",
+                {"show_archived_sessions": ""},
+                {},
+                _SHOW_ARCHIVED_COOKIE,
+                "false",
+            ),
+            (
+                "show archived preserved",
+                {},
+                {_SHOW_ARCHIVED_COOKIE: "true"},
+                _SHOW_ARCHIVED_COOKIE,
+                "true",
+            ),
+            (
+                "worktrees enabled",
+                {"use_worktrees": "true"},
+                {},
+                _USE_WORKTREES_COOKIE,
+                "true",
+            ),
+            ("worktrees disabled", {}, {}, _USE_WORKTREES_COOKIE, "false"),
+            (
+                "memories enabled",
+                {"enable_memories": "true"},
+                {},
+                _ENABLE_MEMORIES_COOKIE,
+                "true",
+            ),
+            ("memories disabled", {}, {}, _ENABLE_MEMORIES_COOKIE, "false"),
         ]
-        for data, expected in cases:
-            with self.subTest(expected=expected):
-                response = self.client.post(reverse("update_settings"), data=data)
+        for label, data, seed, cookie, expected in cases:
+            with self.subTest(label=label):
+                client = Client()
+                if seed:
+                    _seed_cookies(client, **seed)
+
+                response = client.post(reverse("update_settings"), data=data)
 
                 self.assertEqual(response.status_code, 302)
-                self.assertEqual(
-                    _cookie_value(response, _SHOW_ARCHIVED_COOKIE), expected
-                )
+                self.assertEqual(_cookie_value(response, cookie), expected)
 
-    def test_preserves_archived_session_visibility_when_not_posted(self) -> None:
-        _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
-
-        response = self.client.post(reverse("update_settings"), data={})
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(_cookie_value(response, _SHOW_ARCHIVED_COOKIE), "true")
-
-    def test_rejects_unknown_archived_session_visibility(self) -> None:
-        _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
-        response = self.client.post(
-            reverse("update_settings"),
-            data={"show_archived_sessions": "yes"},
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertNotIn(_SHOW_ARCHIVED_COOKIE, response.cookies)
-
-    def test_saves_worktree_setting_to_signed_cookie(self) -> None:
-        cases = [
-            ({"use_worktrees": "true"}, "true"),
-            ({}, "false"),
+    def test_rejects_unknown_optional_setting_values(self) -> None:
+        cases: list[tuple[str, str, str, dict[str, str]]] = [
+            (
+                "sandbox policy",
+                _SANDBOX_COOKIE,
+                "readOnly",
+                {"model": "", "reasoning_effort": "", "sandbox_policy": "evilMode"},
+            ),
+            (
+                "archived visibility",
+                _SHOW_ARCHIVED_COOKIE,
+                "true",
+                {"show_archived_sessions": "yes"},
+            ),
+            (
+                "worktree setting",
+                _USE_WORKTREES_COOKIE,
+                "true",
+                {"use_worktrees": "yes"},
+            ),
+            (
+                "memories setting",
+                _ENABLE_MEMORIES_COOKIE,
+                "true",
+                {"enable_memories": "yes"},
+            ),
         ]
-        for data, expected in cases:
-            with self.subTest(expected=expected):
-                response = self.client.post(reverse("update_settings"), data=data)
+        for label, cookie, saved_value, data in cases:
+            with self.subTest(label=label):
+                client = Client()
+                _seed_cookies(client, **{cookie: saved_value})
 
-                self.assertEqual(response.status_code, 302)
-                self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), expected)
+                response = client.post(reverse("update_settings"), data=data)
 
-    def test_rejects_unknown_worktree_setting(self) -> None:
-        _seed_cookies(self.client, **{_USE_WORKTREES_COOKIE: "true"})
-        response = self.client.post(
-            reverse("update_settings"),
-            data={"use_worktrees": "yes"},
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertNotIn(_USE_WORKTREES_COOKIE, response.cookies)
-
-    def test_saves_memories_setting_to_signed_cookie(self) -> None:
-        cases = [
-            ({"enable_memories": "true"}, "true"),
-            ({}, "false"),
-        ]
-        for data, expected in cases:
-            with self.subTest(expected=expected):
-                response = self.client.post(reverse("update_settings"), data=data)
-
-                self.assertEqual(response.status_code, 302)
-                self.assertEqual(
-                    _cookie_value(response, _ENABLE_MEMORIES_COOKIE), expected
-                )
-
-    def test_rejects_unknown_memories_setting(self) -> None:
-        _seed_cookies(self.client, **{_ENABLE_MEMORIES_COOKIE: "true"})
-        response = self.client.post(
-            reverse("update_settings"),
-            data={"enable_memories": "yes"},
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertNotIn(_ENABLE_MEMORIES_COOKIE, response.cookies)
+                self.assertEqual(response.status_code, 400)
+                self.assertNotIn(cookie, response.cookies)
 
 
 class UpdateArchivedSessionVisibilityViewTests(TestCase):
@@ -903,32 +892,43 @@ class ApprovalModeSettingsTests(TestCase):
                 self.assertEqual(response.status_code, 302)
                 self.assertEqual(_cookie_value(response, _APPROVAL_COOKIE), mode)
 
-    def test_rejects_unknown_approval_mode(self) -> None:
-        _seed_cookies(self.client, **{_APPROVAL_COOKIE: "deny_all"})
-        response = self.client.post(
-            reverse("update_settings"),
-            data={
-                "model": "",
-                "reasoning_effort": "",
-                "approval_mode": "evilMode",
-            },
-        )
-
-        self.assertEqual(response.status_code, 400)
-        # Reject must not stomp the previously-saved choice.
-        self.assertNotIn(_APPROVAL_COOKIE, response.cookies)
-
-    def test_empty_approval_mode_snaps_to_safe_default(self) -> None:
+    def test_handles_unknown_and_empty_approval_mode(self) -> None:
         """A form post without the approval dropdown (e.g. an older client,
         a hand-crafted POST) must persist the safe default rather than an
-        empty value the worker can't interpret."""
-        response = self.client.post(
-            reverse("update_settings"),
-            data={"model": "", "reasoning_effort": "", "approval_mode": ""},
-        )
+        empty value the worker can't interpret. Unknown values are rejected
+        without stomping the existing cookie."""
+        cases: list[tuple[str, dict[str, str], dict[str, str], int, str | None]] = [
+            (
+                "unknown",
+                {_APPROVAL_COOKIE: "deny_all"},
+                {"model": "", "reasoning_effort": "", "approval_mode": "evilMode"},
+                400,
+                None,
+            ),
+            (
+                "empty",
+                {},
+                {"model": "", "reasoning_effort": "", "approval_mode": ""},
+                302,
+                "auto_review",
+            ),
+        ]
+        for label, seed, data, status, expected_cookie in cases:
+            with self.subTest(label=label):
+                client = Client()
+                if seed:
+                    _seed_cookies(client, **seed)
 
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(_cookie_value(response, _APPROVAL_COOKIE), "auto_review")
+                response = client.post(reverse("update_settings"), data=data)
+
+                self.assertEqual(response.status_code, status)
+                if expected_cookie is None:
+                    self.assertNotIn(_APPROVAL_COOKIE, response.cookies)
+                else:
+                    self.assertEqual(
+                        _cookie_value(response, _APPROVAL_COOKIE),
+                        expected_cookie,
+                    )
 
 
 class ApprovalModeDialogTests(TestCase):
