@@ -256,26 +256,27 @@ def _maybe_start_auto_pr_workflow(instance: CodexInstance) -> None:
         or instance.status != CodexInstance.STATUS_COMPLETED
     ):
         return
-    if not CodexInstance.objects.filter(
-        pk=instance.pk,
-        auto_pr_triggered_at__isnull=True,
-    ).exists():
-        return
-    start_pr_qa_workflow(
-        main_thread_id=instance.thread_id,
-        cwd=instance.cwd,
-        sandbox_policy=instance.sandbox_policy or None,
-        approval_mode=instance.approval_mode or SYSTEM_AGENT_APPROVAL_MODE,
-        model=instance.model or None,
-        reasoning_effort=instance.reasoning_effort or None,
-        developer_instructions=instance.developer_instructions or None,
-        enable_memories=instance.enable_memories,
-        initial_user_message_index=(instance.user_message_index or 0) + 1,
-    )
-    CodexInstance.objects.filter(
+    claimed = CodexInstance.objects.filter(
         pk=instance.pk,
         auto_pr_triggered_at__isnull=True,
     ).update(auto_pr_triggered_at=timezone.now())
+    if not claimed:
+        return
+    try:
+        start_pr_qa_workflow(
+            main_thread_id=instance.thread_id,
+            cwd=instance.cwd,
+            sandbox_policy=instance.sandbox_policy or None,
+            approval_mode=instance.approval_mode or SYSTEM_AGENT_APPROVAL_MODE,
+            model=instance.model or None,
+            reasoning_effort=instance.reasoning_effort or None,
+            developer_instructions=instance.developer_instructions or None,
+            enable_memories=instance.enable_memories,
+            initial_user_message_index=(instance.user_message_index or 0) + 1,
+        )
+    except Exception:
+        CodexInstance.objects.filter(pk=instance.pk).update(auto_pr_triggered_at=None)
+        raise
 
 
 def _handle_system_agent_finished(instance: CodexInstance) -> None:

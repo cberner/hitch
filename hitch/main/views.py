@@ -41,6 +41,7 @@ from hitch.main.models import (
     Project,
     ProposedTask,
     SessionMetadata,
+    SystemAgentRun,
     SystemWorkflow,
     UserInputRequest,
     UserSettings,
@@ -615,6 +616,7 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
         plan_model = _plan_mode_model_from_models(resumed, settings, models_data)
     is_archived = _thread_is_archived(thread)
     entries = _apply_system_authors(list(_entries_for(thread)), session_id)
+    entries = _apply_qa_approval_messages(entries, session_id)
     name_value = getattr(thread, "name", None) or ""
     projects = list(Project.objects.all())
     metadata_by_thread = _metadata_by_thread_id([thread])
@@ -1291,6 +1293,79 @@ def _apply_system_author(
                 item, system_authors, user_message_index
             )
     return user_message_index
+
+
+def _apply_qa_approval_messages(
+    entries: list[dict[str, Any]], session_id: str
+) -> list[dict[str, Any]]:
+    approvals = sorted(_qa_approval_entries(session_id), key=lambda item: item[0])
+    if not approvals:
+        return entries
+    result: list[dict[str, Any]] = []
+    user_message_index = 0
+    pending = approvals.copy()
+    for entry in entries:
+        if entry.get("kind") == "user":
+            while pending and pending[0][0] == user_message_index:
+                _index, approval = pending.pop(0)
+                result.append(approval)
+            user_message_index += 1
+        result.append(entry)
+    result.extend(approval for _index, approval in pending)
+    return result
+
+
+def _qa_approval_entries(session_id: str) -> Iterator[tuple[int, dict[str, Any]]]:
+    workflows = (
+        SystemWorkflow.objects.filter(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id=session_id,
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_PROMPT_SPAWNED,
+        )
+        .order_by("created_at")
+        .prefetch_related("agent_runs")
+    )
+    for workflow in workflows:
+        next_user_message_index = workflow.state.get("next_user_message_index")
+        if not isinstance(next_user_message_index, int):
+            continue
+        run = _approved_qa_run(workflow)
+        if run is None:
+            continue
+        feedback = _qa_feedback_text(workflow, run)
+        text = "QA agent approved the diff."
+        if feedback:
+            text = f"{text}\n\n{feedback}"
+        yield max(next_user_message_index - 1, 0), {
+            "kind": "agent",
+            "display_author": system_agents.QA_DISPLAY_AUTHOR,
+            "text": text,
+            "timestamp": int(workflow.updated_at.timestamp()),
+        }
+
+
+def _approved_qa_run(workflow: SystemWorkflow) -> SystemAgentRun | None:
+    runs = sorted(
+        workflow.agent_runs.all(),
+        key=lambda item: item.created_at,
+        reverse=True,
+    )
+    for run in runs:
+        if run.status != SystemAgentRun.STATUS_COMPLETED:
+            continue
+        output = run.output if isinstance(run.output, dict) else {}
+        if output.get("lgtm") is True:
+            return run
+    return None
+
+
+def _qa_feedback_text(workflow: SystemWorkflow, run: SystemAgentRun) -> str:
+    feedback = workflow.state.get("last_feedback")
+    if not isinstance(feedback, str) or not feedback.strip():
+        output = run.output if isinstance(run.output, dict) else {}
+        feedback = output.get("feedback")
+    return feedback.strip() if isinstance(feedback, str) else ""
 
 
 @require_http_methods(["GET"])
