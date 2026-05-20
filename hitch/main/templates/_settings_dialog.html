@@ -53,6 +53,18 @@
             <span>Enable Codex memories</span>
             <input type="checkbox" name="enable_memories" value="true" {% if current_enable_memories %}checked{% endif %}>
         </label>
+        <label>
+            Project
+            <select name="selected_project">
+                <option value="" {% if not current_project_id %}selected{% endif %}>All projects</option>
+                {% for project in projects %}
+                <option value="{{ project.pk }}" {% if project.pk == current_project_id %}selected{% endif %}>{{ project.name }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <div class="settings-link-row">
+            <a class="button secondary" href="{{ new_project_url }}">Create project</a>
+        </div>
         <div class="actions">
             <button type="button" class="button secondary" data-settings-cancel>Cancel</button>
             <button type="submit" class="button">Save</button>

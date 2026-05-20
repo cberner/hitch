@@ -36,10 +36,12 @@ from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
     CodexInstance,
+    Project,
+    SessionMetadata,
     UserInputRequest,
     UserSettings,
 )
-from hitch.main.repos import discover_repos
+from hitch.main.repos import discover_repos, git_common_dir, same_repo_or_worktree
 from hitch.main.worktrees import (
     WorktreeCleanupError,
     WorktreeCreationError,
@@ -60,6 +62,7 @@ class SettingsValues(NamedTuple):
     use_worktrees: bool
     show_archived_sessions: bool
     last_selected_repo: str
+    selected_project_id: int | None
     enable_memories: bool
 
 
@@ -121,6 +124,7 @@ _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
+_SELECTED_PROJECT_COOKIE = "hitch_selected_project_id"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 
 # Roughly one year. Long enough that a user's pick survives across
@@ -151,6 +155,7 @@ _MINUTES_PER_DAY = 24 * _MINUTES_PER_HOUR
 # set on the edit form so a client without HTML validation cannot push an
 # unbounded blob through.
 _NAME_MAX_LEN = 200
+_PROJECT_NAME_MAX_LEN = 200
 _LAST_SELECTED_REPO_MAX_LEN = 4096
 
 # Upper bound for ``CodexInstance.pk`` validation. The project sets
@@ -210,8 +215,11 @@ _TOKEN_USAGE_KEYS = (
 def _settings_dialog_context(
     current_settings: SettingsValues, models_data: list[Any]
 ) -> dict[str, Any]:
+    projects = list(Project.objects.all())
+    current_project = _selected_project_for_settings(current_settings, projects)
     return {
         "settings_url": reverse("update_settings"),
+        "new_project_url": reverse("new_project"),
         "model_options": [
             {"id": m.id, "display_name": m.display_name} for m in models_data
         ],
@@ -232,6 +240,9 @@ def _settings_dialog_context(
         "extra_system_prompt_max_len": _EXTRA_SYSTEM_PROMPT_MAX_LEN,
         "current_use_worktrees": current_settings.use_worktrees,
         "current_enable_memories": current_settings.enable_memories,
+        "projects": projects,
+        "current_project": current_project,
+        "current_project_id": current_project.pk if current_project is not None else "",
     }
 
 
@@ -278,12 +289,18 @@ def index(request: HttpRequest) -> HttpResponse:
             threads.extend(_all_threads(codex, archived=True))
     hidden_thread_ids = system_agents.hidden_thread_ids()
     threads = sorted(threads, key=lambda s: s.updated_at, reverse=True)
+    projects = list(Project.objects.all())
+    current_project = _selected_project_for_settings(current_settings, projects)
+    metadata_by_thread = _metadata_by_thread_id(threads)
     sessions = []
     for thread in threads:
         if thread.id in hidden_thread_ids:
             continue
         is_archived = _thread_is_archived(thread)
         if is_archived and not current_settings.show_archived_sessions:
+            continue
+        session_project = _project_for_thread(thread, metadata_by_thread, projects)
+        if current_project is not None and session_project != current_project:
             continue
         sessions.append(
             {
@@ -293,10 +310,13 @@ def index(request: HttpRequest) -> HttpResponse:
                 "display_title": _display_title(thread),
                 "name_value": getattr(thread, "name", None) or "",
                 "is_archived": is_archived,
+                "project": session_project,
             }
         )
     repos = [str(p) for p in discover_repos()]
-    current_repo = _selected_repo_for_dialog(current_settings.last_selected_repo, repos)
+    current_repo = _selected_repo_for_dialog(
+        current_settings.last_selected_repo, repos, current_project
+    )
     settings_dialog_context = _settings_dialog_context(current_settings, models_data)
     response = render(
         request,
@@ -304,12 +324,14 @@ def index(request: HttpRequest) -> HttpResponse:
         {
             "sessions": sessions,
             "repos": repos,
+            "has_projects": bool(projects),
             "new_session_url": reverse("new_session"),
             "archived_visibility_url": reverse("update_archived_session_visibility"),
             "login_url": reverse("login"),
             "register_url": reverse("register"),
             "current_show_archived_sessions": current_settings.show_archived_sessions,
             "current_repo": current_repo,
+            "current_project": current_project,
             "name_max_len": _NAME_MAX_LEN,
             "pr_slash_prompt": _PR_SLASH_PROMPT,
             **settings_dialog_context,
@@ -379,6 +401,9 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
     is_archived = _thread_is_archived(thread)
     entries = _apply_system_authors(list(_entries_for(thread)), session_id)
     name_value = getattr(thread, "name", None) or ""
+    projects = list(Project.objects.all())
+    metadata_by_thread = _metadata_by_thread_id([thread])
+    session_project = _project_for_thread(thread, metadata_by_thread, projects)
     pr_url = _pr_url_for_thread(thread)
     active_instance = _active_instance_for(session_id)
     active_system_workflow = system_agents.active_workflow_for_thread(session_id)
@@ -416,6 +441,9 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             "set_name_url": reverse("set_session_name", kwargs={"session_id": session_id}),
             "set_archived_url": reverse(
                 "set_session_archived", kwargs={"session_id": session_id}
+            ),
+            "set_project_url": reverse(
+                "set_session_project", kwargs={"session_id": session_id}
             ),
             "is_archived": is_archived,
             "send_message_url": reverse("send_message", kwargs={"session_id": session_id}),
@@ -462,6 +490,9 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
             "goal_objective": goal_objective,
             "task_plan": task_plan,
             "diff_view": diff_view,
+            "projects": projects,
+            "session_project": session_project,
+            "session_project_id": session_project.pk if session_project is not None else "",
             **settings_dialog_context,
         },
     )
@@ -776,8 +807,116 @@ def _option_label(
     return next((label for option_value, label in options if option_value == value), value)
 
 
-def _selected_repo_for_dialog(saved_repo: str, repos: list[str]) -> str:
+def _selected_repo_for_dialog(
+    saved_repo: str, repos: list[str], selected_project: Project | None = None
+) -> str:
+    if selected_project is not None and selected_project.repo_path in repos:
+        return selected_project.repo_path
     return saved_repo if saved_repo in repos else ""
+
+
+def _selected_project_for_settings(
+    settings: SettingsValues, projects: list[Project] | None = None
+) -> Project | None:
+    if settings.selected_project_id is None:
+        return None
+    candidates = projects if projects is not None else list(Project.objects.all())
+    return next(
+        (project for project in candidates if project.pk == settings.selected_project_id),
+        None,
+    )
+
+
+def _metadata_by_thread_id(threads: list[Any]) -> dict[str, SessionMetadata]:
+    thread_ids = [
+        thread.id
+        for thread in threads
+        if isinstance(getattr(thread, "id", None), str) and thread.id
+    ]
+    if not thread_ids:
+        return {}
+    return SessionMetadata.objects.in_bulk(thread_ids, field_name="thread_id")
+
+
+def _project_for_thread(
+    thread: Any,
+    metadata_by_thread: dict[str, SessionMetadata],
+    projects: list[Project],
+) -> Project | None:
+    thread_id = getattr(thread, "id", "")
+    metadata = metadata_by_thread.get(thread_id) if isinstance(thread_id, str) else None
+    if metadata is not None and (metadata.project_id is not None or metadata.project_cleared):
+        return metadata.project
+    cwd = _thread_cwd(thread)
+    if not cwd:
+        return None
+    return _project_for_cwd(cwd, projects)
+
+
+def _project_for_cwd(cwd: str, projects: list[Project]) -> Project | None:
+    return next(
+        (
+            project
+            for project in projects
+            if same_repo_or_worktree(cwd, project.repo_path, project.git_common_dir)
+        ),
+        None,
+    )
+
+
+def _associate_existing_sessions_with_project(project: Project, request: HttpRequest) -> None:
+    settings = _stored_settings(request)
+    config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
+    try:
+        with Codex(config=config) as codex:
+            threads = _all_threads(codex)
+            try:
+                threads.extend(_all_threads(codex, archived=True))
+            except AppServerError:
+                logger.warning("failed to list archived sessions while creating project")
+    except AppServerError:
+        logger.warning("failed to list sessions while creating project")
+        return
+    hidden_thread_ids = system_agents.hidden_thread_ids()
+    seen: set[str] = set()
+    for thread in threads:
+        thread_id = getattr(thread, "id", None)
+        if not isinstance(thread_id, str) or not thread_id or thread_id in seen:
+            continue
+        seen.add(thread_id)
+        if thread_id in hidden_thread_ids:
+            continue
+        cwd = _thread_cwd(thread)
+        if not cwd or not same_repo_or_worktree(cwd, project.repo_path, project.git_common_dir):
+            continue
+        metadata = SessionMetadata.objects.filter(thread_id=thread_id).first()
+        if metadata is not None and metadata.project_cleared:
+            continue
+        SessionMetadata.objects.update_or_create(
+            thread_id=thread_id,
+            defaults={"cwd": cwd, "project": project, "project_cleared": False},
+        )
+
+
+def _matching_project_exists(repo_path: str, repo_common_dir: str) -> bool:
+    for project in Project.objects.all():
+        if project.repo_path == repo_path:
+            return True
+        if repo_common_dir and project.git_common_dir == repo_common_dir:
+            return True
+        if same_repo_or_worktree(repo_path, project.repo_path, project.git_common_dir):
+            return True
+    return False
+
+
+def _creatable_project_repos(discovered_repos: list[str]) -> list[str]:
+    creatable: list[str] = []
+    for repo_path in discovered_repos:
+        repo_common_dir = str(git_common_dir(repo_path) or "")
+        if _matching_project_exists(repo_path, repo_common_dir):
+            continue
+        creatable.append(repo_path)
+    return creatable
 
 
 def _active_instance_for(session_id: str) -> CodexInstance | None:
@@ -1170,6 +1309,7 @@ def _stored_settings(request: HttpRequest) -> SettingsValues:
         use_worktrees=_read_cookie(request, _USE_WORKTREES_COOKIE) == "true",
         show_archived_sessions=_read_cookie(request, _SHOW_ARCHIVED_COOKIE) == "true",
         last_selected_repo=_read_cookie(request, _LAST_SELECTED_REPO_COOKIE),
+        selected_project_id=_read_selected_project_cookie(request),
         enable_memories=_read_cookie(request, _ENABLE_MEMORIES_COOKIE) == "true",
     )
 
@@ -1189,6 +1329,7 @@ def _settings_values_for_user(settings: UserSettings) -> SettingsValues:
         use_worktrees=settings.use_worktrees,
         show_archived_sessions=settings.show_archived_sessions,
         last_selected_repo=settings.last_selected_repo,
+        selected_project_id=settings.selected_project_id,
         enable_memories=settings.enable_memories,
     )
 
@@ -1205,6 +1346,7 @@ def _save_user_settings(user: Any, values: SettingsValues) -> UserSettings:
         ("use_worktrees", values.use_worktrees),
         ("show_archived_sessions", values.show_archived_sessions),
         ("last_selected_repo", values.last_selected_repo),
+        ("selected_project_id", values.selected_project_id),
         ("enable_memories", values.enable_memories),
     ):
         if getattr(settings, field) != value:
@@ -1227,6 +1369,9 @@ def _settings_cookie_updates(values: SettingsValues) -> dict[str, str]:
         _USE_WORKTREES_COOKIE: "true" if values.use_worktrees else "false",
         _SHOW_ARCHIVED_COOKIE: "true" if values.show_archived_sessions else "false",
         _LAST_SELECTED_REPO_COOKIE: values.last_selected_repo,
+        _SELECTED_PROJECT_COOKIE: (
+            str(values.selected_project_id) if values.selected_project_id is not None else ""
+        ),
         _ENABLE_MEMORIES_COOKIE: "true" if values.enable_memories else "false",
     }
 
@@ -1243,8 +1388,8 @@ def _import_cookie_settings_to_user(request: HttpRequest, user: Any) -> UserSett
     return settings
 
 
-def _valid_cookie_setting_updates(request: HttpRequest) -> dict[str, str | bool]:
-    updates: dict[str, str | bool] = {}
+def _valid_cookie_setting_updates(request: HttpRequest) -> dict[str, str | bool | int | None]:
+    updates: dict[str, str | bool | int | None] = {}
     model = _read_signed_cookie_if_present(request, _MODEL_COOKIE)
     if model is not None and len(model) <= _MODEL_MAX_LEN:
         updates["model"] = model
@@ -1278,6 +1423,9 @@ def _valid_cookie_setting_updates(request: HttpRequest) -> dict[str, str | bool]
         and len(last_selected_repo) <= _LAST_SELECTED_REPO_MAX_LEN
     ):
         updates["last_selected_repo"] = last_selected_repo
+    selected_project_raw = _read_signed_cookie_if_present(request, _SELECTED_PROJECT_COOKIE)
+    if selected_project_raw is not None:
+        updates["selected_project_id"] = _valid_selected_project_id(selected_project_raw)
     enable_memories = _read_signed_cookie_if_present(request, _ENABLE_MEMORIES_COOKIE)
     if enable_memories in {"true", "false"}:
         updates["enable_memories"] = enable_memories == "true"
@@ -1292,6 +1440,24 @@ def _read_signed_cookie_if_present(request: HttpRequest, name: str) -> str | Non
     except Exception:
         return None
     return (value or "").strip()
+
+
+def _read_selected_project_cookie(request: HttpRequest) -> int | None:
+    return _valid_selected_project_id(
+        _read_signed_cookie_if_present(request, _SELECTED_PROJECT_COOKIE)
+    )
+
+
+def _valid_selected_project_id(raw: str | None) -> int | None:
+    if raw is None or raw == "":
+        return None
+    try:
+        project_id = int(raw)
+    except ValueError:
+        return None
+    if project_id < 1 or project_id > _MAX_BIGAUTOFIELD:
+        return None
+    return project_id if Project.objects.filter(pk=project_id).exists() else None
 
 
 def _read_cookie(request: HttpRequest, name: str) -> str:
@@ -1447,6 +1613,9 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     show_archived = (
         posted_show_archived.strip() if posted_show_archived is not None else None
     )
+    selected_project, selected_project_error = _posted_project(request.POST.get("selected_project", ""))
+    if selected_project_error is not None:
+        return HttpResponseBadRequest(selected_project_error)
     enable_memories = request.POST.get("enable_memories", "").strip()
     if len(model) > _MODEL_MAX_LEN:
         return HttpResponseBadRequest("model id is too long")
@@ -1497,6 +1666,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
             else show_archived == "true"
         ),
         last_selected_repo=stored.last_selected_repo,
+        selected_project_id=selected_project.pk if selected_project is not None else None,
         enable_memories=enable_memories == "true",
     )
     user = _authenticated_user(request)
@@ -1520,6 +1690,73 @@ def update_archived_session_visibility(request: HttpRequest) -> HttpResponse:
     response = redirect("index")
     _apply_cookie_updates(response, _settings_cookie_updates(values))
     return response
+
+
+@require_http_methods(["GET", "POST"])
+def new_project(request: HttpRequest) -> HttpResponse:
+    discovered_repos = [str(p) for p in discover_repos()]
+    repos = _creatable_project_repos(discovered_repos)
+    if request.method == "GET":
+        return render(
+            request,
+            "project_form.html",
+            {
+                "repos": repos,
+                "name_max_len": _PROJECT_NAME_MAX_LEN,
+                "index_url": reverse("index"),
+            },
+        )
+
+    name = request.POST.get("name", "").strip()
+    repo_path = request.POST.get("repo_path", "").strip()
+    if not name:
+        return HttpResponseBadRequest("project name is required")
+    if len(name) > _PROJECT_NAME_MAX_LEN:
+        return HttpResponseBadRequest("project name is too long")
+    if not repo_path:
+        return HttpResponseBadRequest("repository is required")
+    if repo_path not in set(discovered_repos):
+        return HttpResponseBadRequest("repository must be a discovered repository")
+    repo_common_dir = str(git_common_dir(repo_path) or "")
+    if _matching_project_exists(repo_path, repo_common_dir):
+        return HttpResponseBadRequest("project already exists for repository")
+
+    project = Project.objects.create(
+        name=name,
+        repo_path=repo_path,
+        git_common_dir=repo_common_dir,
+    )
+    _associate_existing_sessions_with_project(project, request)
+
+    stored = _stored_settings(request)
+    values = stored._replace(selected_project_id=project.pk, last_selected_repo=repo_path)
+    user = _authenticated_user(request)
+    if user is not None:
+        _save_user_settings(user, values)
+    response = redirect("index")
+    _apply_cookie_updates(response, _settings_cookie_updates(values))
+    return response
+
+
+@require_http_methods(["POST"])
+def set_session_project(request: HttpRequest, session_id: str) -> HttpResponse:
+    project, error = _posted_project(request.POST.get("project", ""))
+    if error is not None:
+        return HttpResponseBadRequest(error)
+    settings = _stored_settings(request)
+    config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
+    with Codex(config=config) as codex:
+        resumed = codex._client.thread_resume(session_id)
+        cwd = _thread_cwd(resumed.thread) or ""
+    SessionMetadata.objects.update_or_create(
+        thread_id=session_id,
+        defaults={
+            "cwd": cwd,
+            "project": project,
+            "project_cleared": project is None,
+        },
+    )
+    return redirect("session", session_id=session_id)
 
 
 def _validate_settings_against_models(
@@ -1554,6 +1791,22 @@ def _validate_settings_against_models(
                     f"model {effective.id!r}"
                 )
     return None
+
+
+def _posted_project(raw: str | None) -> tuple[Project | None, str | None]:
+    value = (raw or "").strip()
+    if not value:
+        return None, None
+    try:
+        project_id = int(value)
+    except ValueError:
+        return None, "invalid project"
+    if project_id < 1 or project_id > _MAX_BIGAUTOFIELD:
+        return None, "invalid project"
+    project = Project.objects.filter(pk=project_id).first()
+    if project is None:
+        return None, "invalid project"
+    return project, None
 
 
 @require_http_methods(["POST"])
@@ -2093,6 +2346,8 @@ def new_session(request: HttpRequest) -> HttpResponse:
     cookie_updates = resolved_settings.cookie_updates
     if plan_mode and not settings.model:
         return HttpResponseBadRequest("plan mode requires a model")
+    projects = list(Project.objects.all())
+    source_project = _project_for_cwd(cwd, projects)
 
     session_cwd = cwd
     # PR workflows review the selected repo's current diff; a fresh managed
@@ -2116,6 +2371,10 @@ def new_session(request: HttpRequest) -> HttpResponse:
             enable_memories=settings.enable_memories,
             initial_user_message_index=0,
         )
+        SessionMetadata.objects.update_or_create(
+            thread_id=thread_id,
+            defaults={"cwd": session_cwd, "project": source_project, "project_cleared": False},
+        )
         remembered_values = settings._replace(last_selected_repo=cwd)
         user = _authenticated_user(request)
         if user is not None:
@@ -2134,6 +2393,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
         except WorktreeCreationError as exc:
             return HttpResponseBadRequest(str(exc))
         session_cwd = str(managed_worktree.path)
+    session_project = _project_for_cwd(session_cwd, projects) or source_project
 
     # Detach a worker subprocess so the initial turn keeps running past a
     # Django restart. The thread itself is created synchronously to give the
@@ -2162,6 +2422,10 @@ def new_session(request: HttpRequest) -> HttpResponse:
                     "failed to clean up managed worktree %s", managed_worktree.path
                 )
         raise
+    SessionMetadata.objects.update_or_create(
+        thread_id=instance.thread_id,
+        defaults={"cwd": session_cwd, "project": session_project, "project_cleared": False},
+    )
     remembered_values = settings._replace(last_selected_repo=cwd)
     user = _authenticated_user(request)
     if user is not None:

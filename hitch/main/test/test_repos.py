@@ -1,9 +1,20 @@
+import subprocess
 import tempfile
 from pathlib import Path
 
 from django.test import TestCase
 
-from hitch.main.repos import discover_repos
+from hitch.main.repos import discover_repos, git_common_dir, same_repo_or_worktree
+
+
+def _git(cwd: Path, *args: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    return result.stdout.strip()
 
 
 class DiscoverReposTests(TestCase):
@@ -62,3 +73,21 @@ class DiscoverReposTests(TestCase):
         with tempfile.TemporaryDirectory() as raw_home:
             missing = Path(raw_home) / "does-not-exist"
             self.assertEqual(discover_repos(missing), [])
+
+    def test_git_common_dir_matches_linked_worktree_to_source_repo(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            root = Path(raw_root)
+            repo = root / "repo"
+            worktree = root / "feature-worktree"
+            repo.mkdir()
+            _git(repo, "init")
+            _git(repo, "config", "user.email", "dev@example.com")
+            _git(repo, "config", "user.name", "Dev")
+            (repo / "README.md").write_text("hello\n")
+            _git(repo, "add", "README.md")
+            _git(repo, "commit", "-m", "initial")
+            _git(repo, "worktree", "add", "-b", "feature", str(worktree), "HEAD")
+
+            self.assertEqual(git_common_dir(repo), git_common_dir(worktree))
+            self.assertTrue(same_repo_or_worktree(worktree, repo, str(git_common_dir(repo))))
+            self.assertTrue(same_repo_or_worktree(repo, repo, str(git_common_dir(repo))))

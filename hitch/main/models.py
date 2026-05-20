@@ -22,6 +22,49 @@ from django.conf import settings
 from django.db import models
 
 
+class Project(models.Model):
+    """A git repository grouping for visible Codex sessions."""
+
+    name = models.CharField(max_length=200)
+    repo_path = models.CharField(max_length=4096, unique=True)
+    git_common_dir = models.CharField(max_length=4096, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name", "repo_path"]
+
+    @override
+    def __str__(self) -> str:
+        return self.name
+
+
+class SessionMetadata(models.Model):
+    """Local metadata for a Codex thread that Hitch does not own on disk."""
+
+    thread_id = models.CharField(max_length=128, unique=True)
+    cwd = models.CharField(max_length=4096, blank=True, default="")
+    project = models.ForeignKey(
+        Project,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="sessions",
+    )
+    project_cleared = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["project", "-updated_at"]),
+        ]
+
+    @override
+    def __str__(self) -> str:
+        return f"SessionMetadata(thread_id={self.thread_id}, project={self.project_id})"
+
+
 class CodexInstance(models.Model):
     """One row per spawned Codex worker subprocess.
 
@@ -340,6 +383,13 @@ class UserSettings(models.Model):
     use_worktrees = models.BooleanField(default=False)
     show_archived_sessions = models.BooleanField(default=False)
     last_selected_repo = models.CharField(max_length=4096, blank=True, default="")
+    selected_project = models.ForeignKey(
+        Project,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="selected_by_settings",
+    )
     enable_memories = models.BooleanField(default=False)
     updated_at = models.DateTimeField(auto_now=True)
 
