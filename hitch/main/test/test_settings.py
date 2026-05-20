@@ -156,6 +156,8 @@ class SettingsDialogRenderTests(TestCase):
         self.assertContains(response, "data-nav-menu-panel")
         self.assertContains(response, "data-settings-dialog")
         self.assertContains(response, 'aria-label="Navigation menu"')
+        self.assertContains(response, f'href="{reverse("index")}#new-session"')
+        self.assertContains(response, ">new session<")
         self.assertContains(response, f'href="{reverse("index")}"')
         self.assertContains(response, ">sessions<")
         self.assertContains(response, ">settings<")

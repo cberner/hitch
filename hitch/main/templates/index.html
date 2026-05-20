@@ -1213,13 +1213,13 @@
                 if ((parts[0] || "").toLowerCase() !== "/pr") return null;
                 return prPrompt;
             }
-            setNewSessionPlanMode(false);
-            newSessionOpenButtons.forEach((btn) => btn.addEventListener("click", () => {
+            function openNewSessionDialog() {
                 showDialog(newSessionDialog);
                 scheduleKeyboardAdjustedDialog();
                 if (newSessionInput) newSessionInput.focus();
                 scheduleKeyboardAdjustedDialog();
-            }));
+            }
+            setNewSessionPlanMode(false);
             if (newSessionDialog) {
                 newSessionDialog.addEventListener("close", () => {
                     clearKeyboardAdjustedDialog(newSessionDialog);
@@ -1290,6 +1290,30 @@
             }
 
             {% include "_primary_nav_script.html" %}
+            function isPlainPrimaryClick(event) {
+                return event.button === 0
+                    && !event.altKey
+                    && !event.ctrlKey
+                    && !event.metaKey
+                    && !event.shiftKey;
+            }
+            function preserveHashForLink(target) {
+                if (!(target instanceof HTMLAnchorElement) || !target.hash) return;
+                const url = new URL(target.href);
+                if (url.origin === window.location.origin && url.pathname === window.location.pathname) {
+                    window.history.pushState(null, "", url.hash);
+                }
+            }
+            newSessionOpenButtons.forEach((btn) => btn.addEventListener("click", (event) => {
+                if (!isPlainPrimaryClick(event)) return;
+                event.preventDefault();
+                closeNavMenu();
+                preserveHashForLink(event.currentTarget);
+                openNewSessionDialog();
+            }));
+            if (window.location.hash === "#new-session") {
+                openNewSessionDialog();
+            }
 
             const archivedVisibilityForm = document.querySelector("[data-archived-visibility-form]");
             const archivedVisibilityToggle = document.querySelector("[data-archived-visibility-toggle]");
