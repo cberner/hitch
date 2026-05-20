@@ -398,30 +398,6 @@
             color: var(--text-muted);
             font-size: 0.72rem;
         }
-        .session-token-usage {
-            flex: 0 0 7.5rem;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-            align-items: flex-end;
-            gap: 0.1rem;
-            padding: 0.9rem 0.5rem 0.9rem 0;
-            color: var(--text-muted);
-            font-variant-numeric: tabular-nums;
-        }
-        .session-token-label {
-            color: var(--text-faint);
-            text-transform: uppercase;
-            letter-spacing: 0.06em;
-            font-size: 0.66rem;
-            font-weight: 600;
-        }
-        .session-token-value {
-            color: var(--text);
-            font-size: 0.9rem;
-            font-weight: 600;
-            white-space: nowrap;
-        }
         .session-row-menu {
             position: relative;
             flex: 0 0 auto;
@@ -638,12 +614,6 @@
             .session a.session-link {
                 flex: 1 1 calc(100% - 2.8rem);
                 padding-bottom: 0.35rem;
-            }
-            .session-token-usage {
-                order: 3;
-                flex: 1 0 100%;
-                align-items: flex-start;
-                padding: 0 1rem 0.85rem;
             }
             .session-row-menu {
                 order: 2;
@@ -923,12 +893,6 @@
                             {% if session.is_archived %}<span class="archive-badge">Archived</span>{% endif %}
                         </div>
                     </a>
-                    <div class="session-token-usage" aria-label="Token usage">
-                        <span class="session-token-label">tokens</span>
-                        <span class="session-token-value">
-                            {% if session.token_usage_total %}{{ session.token_usage_total }}{% else %}--{% endif %}
-                        </span>
-                    </div>
                     <div class="session-row-menu" data-session-menu>
                         <button type="button" class="session-action" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false" data-session-menu-open>...</button>
                         <div class="session-menu" role="menu" data-session-menu-panel hidden>
