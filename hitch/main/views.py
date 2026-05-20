@@ -235,6 +235,30 @@ def _settings_dialog_context(
     }
 
 
+def _all_threads(codex: Codex, *, archived: bool = False) -> list[Any]:
+    """Return every thread from Codex's paginated thread list."""
+    threads: list[Any] = []
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    while True:
+        kwargs: dict[str, Any] = {}
+        if archived:
+            kwargs["archived"] = True
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        response = codex.thread_list(**kwargs)
+        threads.extend(response.data)
+        next_cursor = getattr(response, "next_cursor", None)
+        if not isinstance(next_cursor, str) or not next_cursor:
+            break
+        if next_cursor in seen_cursors:
+            logger.warning("thread list returned duplicate cursor; stopping pagination")
+            break
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    return threads
+
+
 def index(request: HttpRequest) -> HttpResponse:
     # Sweep workers whose pid is gone: a Popen that crashed before a worker
     # could record its terminal status (or a row stuck in ``starting``)
@@ -249,9 +273,9 @@ def index(request: HttpRequest) -> HttpResponse:
         resolved_settings = _resolved_settings(request, models_data)
         current_settings = resolved_settings.values
         cookie_updates = resolved_settings.cookie_updates
-        threads = list(codex.thread_list().data)
+        threads = _all_threads(codex)
         if current_settings.show_archived_sessions:
-            threads.extend(codex.thread_list(archived=True).data)
+            threads.extend(_all_threads(codex, archived=True))
     hidden_thread_ids = system_agents.hidden_thread_ids()
     threads = sorted(threads, key=lambda s: s.updated_at, reverse=True)
     sessions = []
@@ -647,12 +671,12 @@ def _threads_for_usage(codex: Codex) -> list[Any] | None:
     threads: list[Any] = []
     failed = False
     try:
-        threads.extend(codex.thread_list().data)
+        threads.extend(_all_threads(codex))
     except AppServerError:
         logger.warning("failed to list active sessions for usage page")
         failed = True
     try:
-        threads.extend(codex.thread_list(archived=True).data)
+        threads.extend(_all_threads(codex, archived=True))
     except AppServerError:
         logger.warning("failed to list archived sessions for usage page")
         failed = True

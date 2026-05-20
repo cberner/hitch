@@ -278,6 +278,56 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    def test_paginates_sessions_before_hiding_system_agent_threads(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        hidden = _session("qa-thread", preview="Hidden QA", updated_at=2000)
+        visible = _session(
+            "visible-next-page", preview="Visible next page", updated_at=1000
+        )
+        client = _setup_codex(mock_codex)
+
+        def thread_list(
+            *, archived: bool | None = None, cursor: str | None = None, **_: Any
+        ) -> SimpleNamespace:
+            if archived:
+                return SimpleNamespace(data=[])
+            if cursor == "page-2":
+                return SimpleNamespace(data=[visible])
+            return SimpleNamespace(data=[hidden], next_cursor="page-2")
+
+        client.thread_list.side_effect = thread_list
+        mock_discover.return_value = []
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="visible-next-page",
+            cwd="/repo",
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="qa-thread",
+            cwd="/repo",
+            prompt="qa",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind="pr_qa",
+            thread_id="qa-thread",
+            instance=instance,
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Visible next page")
+        self.assertNotContains(response, "Hidden QA")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
     def test_new_session_dialog_adjusts_for_mobile_keyboard(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
