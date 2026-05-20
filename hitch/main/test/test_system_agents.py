@@ -74,6 +74,8 @@ class PrQaWorkflowTests(TestCase):
         self.assertIn("Apply the same review standards as Codex /review", kwargs["prompt"])
         self.assertIn("Do not stop at the first issue", kwargs["prompt"])
         self.assertIn("shortest useful file/line reference", kwargs["prompt"])
+        self.assertIn("just qa-browser-setup", kwargs["prompt"])
+        self.assertIn("Playwright/Chromium", kwargs["prompt"])
         self.assertIn("diff --git", kwargs["prompt"])
 
         run = SystemAgentRun.objects.get(workflow=workflow)

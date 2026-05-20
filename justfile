@@ -44,5 +44,11 @@ format:
   uv run ruff format .
   uv run ruff check --select I --fix
 
+qa-browser-setup: sync
+  uv run playwright install --with-deps chromium
+
+qa-browser-check: qa-browser-setup
+  uv run python -c "from playwright.sync_api import sync_playwright; p = sync_playwright().start(); browser = p.chromium.launch(headless=True); browser.close(); p.stop()"
+
 sync:
   uv sync --all-groups

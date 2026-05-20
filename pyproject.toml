@@ -35,6 +35,7 @@ dev = [
     "django-stubs>=6.0,<7.0",
     "django-stubs-ext>=6.0,<7.0",
     "mypy==1.15.0",
+    "playwright>=1.60.0",
     "ruff>=0.11.4,<0.12",
     "setuptools==70.0.0",
 ]
