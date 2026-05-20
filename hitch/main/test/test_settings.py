@@ -651,6 +651,24 @@ class UpdateSettingsViewTests(TestCase):
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "")
         self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "")
 
+    def test_redirects_to_safe_next_url(self) -> None:
+        session_url = reverse("session", kwargs={"session_id": "abc"})
+
+        response = self.client.post(
+            reverse("update_settings"), data={"next": session_url}
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], session_url)
+
+    def test_rejects_unsafe_next_url(self) -> None:
+        response = self.client.post(
+            reverse("update_settings"), data={"next": "https://example.invalid/"}
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], reverse("index"))
+
     def test_saves_extra_system_prompt_to_signed_cookie(self) -> None:
         response = self.client.post(
             reverse("update_settings"),

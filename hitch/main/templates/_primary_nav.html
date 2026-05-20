@@ -1,0 +1,18 @@
+<nav class="primary-nav" aria-label="Primary" data-nav-menu>
+    <button type="button" class="primary-nav-toggle" aria-label="Navigation menu" aria-haspopup="true" aria-expanded="false" data-nav-menu-open>
+        <span aria-hidden="true"></span>
+        <span aria-hidden="true"></span>
+        <span aria-hidden="true"></span>
+    </button>
+    <div class="primary-nav-panel" data-nav-menu-panel>
+        <a href="{% url 'index' %}">sessions</a>
+        <a href="{% url 'usage' %}">usage</a>
+        <button type="button" data-settings-open>settings</button>
+        {% if user.is_authenticated %}
+        <form class="logout-form" method="post" action="{% url 'logout' %}">
+            {% csrf_token %}
+            <button type="submit">Log out</button>
+        </form>
+        {% endif %}
+    </div>
+</nav>
