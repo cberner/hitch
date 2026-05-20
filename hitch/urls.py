@@ -24,6 +24,11 @@ urlpatterns = [
         name="generate_key_result_tasks",
     ),
     path(
+        "okrs/task-generation/<int:workflow_id>/log/",
+        hitch.main.views.okr_task_generation_log,
+        name="okr_task_generation_log",
+    ),
+    path(
         "okrs/proposed-tasks/<int:task_id>/outcome/",
         hitch.main.views.update_proposed_task_outcome,
         name="update_proposed_task_outcome",

@@ -88,6 +88,9 @@
             min-height: 100vh;
             padding-bottom: calc(7rem + var(--safe-bottom) + var(--composer-keyboard-offset));
         }
+        body.read-only {
+            padding-bottom: calc(2rem + var(--safe-bottom));
+        }
         a { color: var(--link); text-decoration: none; }
         a:hover { text-decoration: underline; }
 
@@ -1040,6 +1043,9 @@
             order: 1;
             flex: 0 1 min(32rem, calc(100% - 10rem));
         }
+        body.read-only .live-work {
+            bottom: calc(1rem + var(--safe-bottom));
+        }
         .live-status {
             display: inline-flex;
             align-items: center;
@@ -1151,6 +1157,9 @@
             border-color: var(--accent-hover);
         }
         .jump-latest[hidden] { display: none; }
+        body.read-only .jump-latest {
+            bottom: calc(1.9rem + var(--safe-bottom));
+        }
         .composer textarea {
             flex: 1;
             font: inherit;
@@ -1653,6 +1662,9 @@
                 width: calc(100vw - 1rem);
                 flex-wrap: wrap;
             }
+            body.read-only .live-work {
+                bottom: calc(0.75rem + var(--safe-bottom));
+            }
             .live-work[data-slash-menu-open="true"] {
                 bottom: calc(8rem + var(--safe-bottom) + var(--composer-keyboard-offset));
                 justify-content: flex-start;
@@ -1674,6 +1686,9 @@
             .jump-latest {
                 right: 0.75rem;
                 bottom: calc(5.4rem + var(--safe-bottom) + var(--composer-keyboard-offset));
+            }
+            body.read-only .jump-latest {
+                bottom: calc(1.55rem + var(--safe-bottom));
             }
             .diff-modal { width: calc(100vw - 0.75rem); }
             .diff-layout { grid-template-columns: 1fr; }
@@ -1721,11 +1736,12 @@
         <style>.edit-title[hidden] { display: block; }</style>
     </noscript>
 </head>
-<body>
+<body{% if read_only %} class="read-only"{% endif %}>
     <header class="topbar">
         <div class="topbar-inner">
             {% include "_primary_nav.html" %}
             <div class="topbar-title">{{ display_title }}</div>
+            {% if not read_only %}
             <div class="topbar-menu" data-session-menu>
                 <button type="button" class="topbar-action" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false" data-session-menu-open>...</button>
                 <div class="session-menu" role="menu" data-session-menu-panel hidden>
@@ -1742,9 +1758,10 @@
                     </form>
                 </div>
             </div>
+            {% endif %}
         </div>
     </header>
-    <main data-session-main class="{% if task_plan.visible %}has-task-plan{% endif %}">
+    <main data-session-main data-stream-url="{{ stream_url }}" class="{% if task_plan.visible %}has-task-plan{% endif %}">
         <aside class="task-plan"
                data-task-plan
                data-recorded-at="{% if task_plan %}{{ task_plan.recorded_at }}{% else %}0{% endif %}"
@@ -1774,6 +1791,7 @@
             </div>
         </aside>
         <div class="session-head">
+            {% if not read_only %}
             <div class="edit-title" data-edit-title hidden>
                 <form method="post" action="{{ set_name_url }}">
                     {% csrf_token %}
@@ -1781,6 +1799,7 @@
                     <button type="submit">Save</button>
                 </form>
             </div>
+            {% endif %}
             <p class="meta">
                 <span class="meta-item"><span class="meta-label">id</span><code>{{ thread.id }}</code></span>
                 <span class="meta-item"><span class="meta-label">cwd</span><code>{{ thread.cwd }}</code></span>
@@ -1796,7 +1815,7 @@
                 <span class="usage-item"><span class="usage-label">cached</span><span class="usage-value">{{ token_usage.cached }}</span></span>
             </p>
             {% endif %}
-            {% if not active_worker and not active_system_workflow %}
+            {% if not read_only and not active_worker and not active_system_workflow %}
             <p class="next-message" aria-label="Settings for the next message" data-next-message-config>
                 {% for item in next_message_config %}
                 <span class="next-message-item"
@@ -1836,6 +1855,7 @@
             <div class="entry"
                  data-live-root
                  data-active-author="{{ pending_user_author }}"
+                 data-read-only="{{ read_only|yesno:'true,false' }}"
                  data-approval-url-template="{{ approval_url_template }}"
                  data-input-url-template="{{ input_url_template }}"></div>
             {% endif %}
@@ -1871,6 +1891,7 @@
     <button type="button" class="jump-latest" data-jump-latest aria-label="Jump to latest message" hidden>↓</button>
     {% endif %}
 
+    {% if not read_only %}
     {% include "_settings_dialog.html" %}
 
     <dialog class="new-session" data-move-project-dialog aria-labelledby="move-project-title">
@@ -1892,6 +1913,7 @@
             </div>
         </form>
     </dialog>
+    {% endif %}
 
     {% if diff_view.has_changes %}
     <dialog class="diff-modal" data-diff-modal aria-labelledby="diff-modal-title">
@@ -1945,6 +1967,7 @@
     </dialog>
     {% endif %}
 
+    {% if not read_only %}
     <form class="composer"
           method="post"
           action="{{ send_message_url }}"
@@ -1990,6 +2013,7 @@
             {% endif %}
         </div>
     </form>
+    {% endif %}
 
     <script>
         (function () {
@@ -2479,12 +2503,12 @@
         // when the stream ends we reload so the canonical rollout-based
         // render replaces the scratch UI in one step.
         (function () {
-            const composer = document.querySelector("[data-composer]");
+            const streamSource = document.querySelector("[data-stream-url]");
             const indicator = document.querySelector("[data-live-status]");
             const liveWork = document.querySelector("[data-live-work]");
             const liveGoal = document.querySelector("[data-live-goal]");
             const liveGoalText = document.querySelector("[data-live-goal-text]");
-            const streamUrl = composer && composer.dataset.streamUrl;
+            const streamUrl = streamSource && streamSource.dataset.streamUrl;
             if (!streamUrl || !indicator) return;
 
             const STATE_TEXT = {
@@ -2578,6 +2602,7 @@
             }, 1000);
 
             const liveRoot = document.querySelector("[data-live-root]");
+            const READ_ONLY = liveRoot && liveRoot.dataset.readOnly === "true";
             // The Django ``resolve_approval`` URL is templated with a
             // placeholder pk of ``0`` server-side; the JS swaps in the
             // real ApprovalRequest id when a decision is posted.
@@ -3220,6 +3245,13 @@
                 detail.className = "approval-detail";
                 detail.textContent = approvalDetail(payload.method, payload.params);
                 box.appendChild(detail);
+                if (READ_ONLY) {
+                    wrap.appendChild(box);
+                    insertBeforeLive(wrap);
+                    approvals.set(id, { node: wrap, box, actions: null, resolved: false });
+                    followRenderedContent();
+                    return;
+                }
                 const actions = document.createElement("div");
                 actions.className = "approval-actions";
                 const buttons = [
@@ -3257,6 +3289,34 @@
                 header.className = "input-request-header";
                 header.textContent = "Input requested";
                 box.appendChild(header);
+                if (READ_ONLY) {
+                    for (const question of questions) {
+                        const qid = typeof question.id === "string" ? question.id : "";
+                        if (!qid) continue;
+                        const qbox = document.createElement("div");
+                        qbox.className = "input-question";
+                        const qheader = document.createElement("div");
+                        qheader.className = "input-question-header";
+                        qheader.textContent = typeof question.header === "string" ? question.header : "";
+                        if (qheader.textContent) qbox.appendChild(qheader);
+                        const title = document.createElement("div");
+                        title.className = "input-question-title";
+                        title.textContent = typeof question.question === "string" ? question.question : qid;
+                        qbox.appendChild(title);
+                        box.appendChild(qbox);
+                    }
+                    wrap.appendChild(box);
+                    insertBeforeLive(wrap);
+                    inputRequests.set(id, {
+                        node: wrap,
+                        box,
+                        actions: null,
+                        answers: {},
+                        resolved: false,
+                    });
+                    followRenderedContent();
+                    return;
+                }
                 const answers = {};
                 for (const question of questions) {
                     const qid = typeof question.id === "string" ? question.id : "";
@@ -3421,7 +3481,7 @@
                 if (entry.resolved) return;
                 entry.resolved = true;
                 entry.box.classList.add("resolved");
-                if (entry.actions.parentNode) entry.actions.remove();
+                if (entry.actions && entry.actions.parentNode) entry.actions.remove();
                 const note = document.createElement("div");
                 note.className = "approval-resolution";
                 note.textContent = "Decision: " + (payload.decision || "decline");
@@ -3438,7 +3498,7 @@
                 for (const control of entry.box.querySelectorAll("button, input")) {
                     control.disabled = true;
                 }
-                if (entry.actions.parentNode) entry.actions.remove();
+                if (entry.actions && entry.actions.parentNode) entry.actions.remove();
                 const note = document.createElement("div");
                 note.className = "approval-resolution";
                 note.textContent = "Answers submitted";

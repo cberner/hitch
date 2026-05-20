@@ -3,7 +3,7 @@ import binascii
 import json
 import logging
 import re
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, NamedTuple
 from urllib.parse import urlencode
@@ -12,6 +12,7 @@ from django.contrib.auth import login as auth_login
 from django.contrib.auth import logout as auth_logout
 from django.contrib.auth.forms import AuthenticationForm, UserCreationForm
 from django.http import (
+    Http404,
     HttpRequest,
     HttpResponse,
     HttpResponseBadRequest,
@@ -466,6 +467,24 @@ def okrs(request: HttpRequest) -> HttpResponse:
     return response
 
 
+@require_http_methods(["GET"])
+def okr_task_generation_log(request: HttpRequest, workflow_id: int) -> HttpResponse:
+    workflow = _okr_task_generation_workflow_for_log(request, workflow_id)
+    run = (
+        workflow.agent_runs.exclude(thread_id="")
+        .order_by("-created_at")
+        .first()
+    )
+    if run is None:
+        raise Http404("task generation log not found")
+    return _render_session_detail(
+        request,
+        run.thread_id,
+        read_only=True,
+        display_title="Task generation log",
+    )
+
+
 def _validated_okr_title(raw_title: str) -> tuple[str, str | None]:
     title = raw_title.strip()
     if not title:
@@ -579,6 +598,9 @@ def _attach_okr_task_generation_state(objectives: list[Objective]) -> None:
     workflows_by_thread: dict[str, SystemWorkflow] = {}
     for workflow in workflows:
         workflows_by_thread.setdefault(workflow.main_thread_id, workflow)
+    log_urls_by_workflow_id = _okr_task_generation_log_urls(
+        workflows_by_thread.values()
+    )
     for objective in objectives:
         for key_result in objective.key_results.all():
             latest_workflow: SystemWorkflow | None = workflows_by_thread.get(
@@ -589,9 +611,84 @@ def _attach_okr_task_generation_state(objectives: list[Objective]) -> None:
                 latest_workflow is not None
                 and latest_workflow.status == SystemWorkflow.STATUS_RUNNING
             )
+            key_result.task_generation_log_url = (  # type: ignore[attr-defined]
+                log_urls_by_workflow_id.get(latest_workflow.pk)
+                if latest_workflow is not None
+                else ""
+            )
+
+
+def _okr_task_generation_log_urls(
+    workflows: Iterable[SystemWorkflow],
+) -> dict[int, str]:
+    workflow_ids = [workflow.pk for workflow in workflows]
+    if not workflow_ids:
+        return {}
+    runs = (
+        SystemAgentRun.objects.filter(workflow_id__in=workflow_ids)
+        .exclude(thread_id="")
+        .order_by("workflow_id", "-created_at")
+    )
+    urls: dict[int, str] = {}
+    for run in runs:
+        urls.setdefault(
+            run.workflow_id,
+            reverse("okr_task_generation_log", kwargs={"workflow_id": run.workflow_id}),
+        )
+    return urls
+
+
+def _okr_task_generation_workflow_for_log(
+    request: HttpRequest, workflow_id: int
+) -> SystemWorkflow:
+    if workflow_id < 1 or workflow_id > _MAX_BIGAUTOFIELD:
+        raise Http404("task generation log not found")
+    project = _active_project_from_request(request)
+    if project is None:
+        raise Http404("task generation log not found")
+    workflow = (
+        SystemWorkflow.objects.filter(
+            pk=workflow_id,
+            kind=system_agents.OKR_TASK_AGENT_KIND,
+        )
+        .first()
+    )
+    if workflow is None:
+        raise Http404("task generation log not found")
+    key_result_id = _workflow_state_int(workflow, "key_result_id")
+    key_result = (
+        KeyResult.objects.select_related("objective__project")
+        .filter(pk=key_result_id, objective__project=project)
+        .first()
+    )
+    if key_result is None:
+        raise Http404("task generation log not found")
+    return workflow
+
+
+def _workflow_state_int(workflow: SystemWorkflow, key: str) -> int:
+    value = workflow.state.get(key)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return 0
+    return 0
 
 
 def session(request: HttpRequest, session_id: str) -> HttpResponse:
+    return _render_session_detail(request, session_id)
+
+
+def _render_session_detail(
+    request: HttpRequest,
+    session_id: str,
+    *,
+    read_only: bool = False,
+    display_title: str | None = None,
+) -> HttpResponse:
     # Sweep stuck workers before reading status: a worker that died without
     # writing a terminal status would otherwise leave the page in "streaming"
     # mode forever, since the EventSource wouldn't reach an end event.
@@ -652,7 +749,8 @@ def session(request: HttpRequest, session_id: str) -> HttpResponse:
         {
             "thread": thread,
             "entries": entries,
-            "display_title": _display_title(thread),
+            "display_title": display_title or _display_title(thread),
+            "read_only": read_only,
             "name_value": name_value,
             "name_max_len": _NAME_MAX_LEN,
             "set_name_url": reverse("set_session_name", kwargs={"session_id": session_id}),
