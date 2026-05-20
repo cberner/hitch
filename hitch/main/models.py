@@ -102,6 +102,61 @@ class KeyResult(models.Model):
         return self.title
 
 
+class ProposedTask(models.Model):
+    """A generated task proposal for accomplishing a key result."""
+
+    OUTCOME_UNSET = ""
+    OUTCOME_ACCEPTED = "accepted"
+    OUTCOME_REJECTED = "rejected"
+    OUTCOME_COMPLETED = "completed"
+    OUTCOME_SUPERSEDED = "superseded"
+
+    OUTCOME_CHOICES = (
+        (OUTCOME_UNSET, "Not set"),
+        (OUTCOME_ACCEPTED, "Accepted"),
+        (OUTCOME_REJECTED, "Rejected"),
+        (OUTCOME_COMPLETED, "Completed"),
+        (OUTCOME_SUPERSEDED, "Superseded"),
+    )
+
+    key_result = models.ForeignKey(
+        KeyResult,
+        on_delete=models.CASCADE,
+        related_name="proposed_tasks",
+    )
+    source_workflow = models.ForeignKey(
+        "SystemWorkflow",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="proposed_tasks",
+    )
+    title = models.CharField(max_length=200)
+    description = models.TextField(blank=True, default="")
+    success_criteria = models.TextField(blank=True, default="")
+    rationale = models.TextField(blank=True, default="")
+    outcome_status = models.CharField(
+        max_length=32,
+        choices=OUTCOME_CHOICES,
+        blank=True,
+        default=OUTCOME_UNSET,
+    )
+    outcome_notes = models.TextField(blank=True, default="")
+    sort_order = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at", "sort_order", "id"]
+        indexes = [
+            models.Index(fields=["key_result", "created_at"]),
+        ]
+
+    @override
+    def __str__(self) -> str:
+        return self.title
+
+
 class SessionMetadata(models.Model):
     """Local metadata for a Codex thread that Hitch does not own on disk."""
 
@@ -213,6 +268,7 @@ class SystemWorkflow(models.Model):
     """Durable state for Hitch-managed system-agent workflows."""
 
     KIND_PR_QA = "pr_qa"
+    KIND_OKR_TASK_GENERATION = "okr_task_generation"
 
     STATUS_RUNNING = "running"
     STATUS_BLOCKED = "blocked"
