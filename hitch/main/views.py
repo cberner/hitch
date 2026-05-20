@@ -36,6 +36,8 @@ from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
     CodexInstance,
+    KeyResult,
+    Objective,
     Project,
     SessionMetadata,
     UserInputRequest,
@@ -156,6 +158,7 @@ _MINUTES_PER_DAY = 24 * _MINUTES_PER_HOUR
 # unbounded blob through.
 _NAME_MAX_LEN = 200
 _PROJECT_NAME_MAX_LEN = 200
+_OKR_TITLE_MAX_LEN = 200
 _LAST_SELECTED_REPO_MAX_LEN = 4096
 
 # Upper bound for ``CodexInstance.pk`` validation. The project sets
@@ -373,6 +376,91 @@ def usage(request: HttpRequest) -> HttpResponse:
     )
     _apply_cookie_updates(response, cookie_updates)
     return response
+
+
+@require_http_methods(["GET"])
+def okrs(request: HttpRequest) -> HttpResponse:
+    initial_settings = _stored_settings(request)
+    config = codex_pool.app_server_config(
+        enable_memories=initial_settings.enable_memories
+    )
+    with Codex(config=config) as codex:
+        models_data = _models_for_plan_mode_fallback(codex)
+        resolved_settings = _resolved_settings(request, models_data)
+        current_settings = resolved_settings.values
+        cookie_updates = resolved_settings.cookie_updates
+    current_project = _selected_project_for_settings(current_settings)
+    objectives = (
+        list(
+            Objective.objects.filter(project=current_project).prefetch_related(
+                "key_results"
+            )
+        )
+        if current_project is not None
+        else []
+    )
+    settings_dialog_context = _settings_dialog_context(current_settings, models_data)
+    response = render(
+        request,
+        "okrs.html",
+        {
+            "login_url": reverse("login"),
+            "register_url": reverse("register"),
+            "objectives": objectives,
+            "objective_create_url": reverse("create_objective"),
+            "title_max_len": _OKR_TITLE_MAX_LEN,
+            **settings_dialog_context,
+        },
+    )
+    _apply_cookie_updates(response, cookie_updates)
+    return response
+
+
+def _validated_okr_title(raw_title: str) -> tuple[str, str | None]:
+    title = raw_title.strip()
+    if not title:
+        return "", "title is required"
+    if len(title) > _OKR_TITLE_MAX_LEN:
+        return "", "title is too long"
+    return title, None
+
+
+@require_http_methods(["POST"])
+def create_objective(request: HttpRequest) -> HttpResponse:
+    project = _active_project_from_request(request)
+    if project is None:
+        return HttpResponseBadRequest("active project is required")
+    title, error = _validated_okr_title(request.POST.get("title", ""))
+    if error is not None:
+        return HttpResponseBadRequest(error)
+    Objective.objects.create(
+        project=project,
+        title=title,
+        description=request.POST.get("description", "").strip(),
+    )
+    return redirect("okrs")
+
+
+@require_http_methods(["POST"])
+def create_key_result(request: HttpRequest, objective_id: int) -> HttpResponse:
+    project = _active_project_from_request(request)
+    if project is None:
+        return HttpResponseBadRequest("active project is required")
+    if objective_id < 1 or objective_id > _MAX_BIGAUTOFIELD:
+        return HttpResponseBadRequest("objective is required")
+    objective = Objective.objects.filter(pk=objective_id, project=project).first()
+    if objective is None:
+        return HttpResponseBadRequest("objective is required")
+    title, error = _validated_okr_title(request.POST.get("title", ""))
+    if error is not None:
+        return HttpResponseBadRequest(error)
+    KeyResult.objects.create(
+        objective=objective,
+        title=title,
+        description=request.POST.get("description", "").strip(),
+        work_instructions=request.POST.get("work_instructions", "").strip(),
+    )
+    return redirect("okrs")
 
 
 def session(request: HttpRequest, session_id: str) -> HttpResponse:
@@ -825,6 +913,10 @@ def _selected_project_for_settings(
         (project for project in candidates if project.pk == settings.selected_project_id),
         None,
     )
+
+
+def _active_project_from_request(request: HttpRequest) -> Project | None:
+    return _selected_project_for_settings(_stored_settings(request))
 
 
 def _metadata_by_thread_id(threads: list[Any]) -> dict[str, SessionMetadata]:
