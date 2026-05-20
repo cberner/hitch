@@ -546,6 +546,9 @@
             flex-direction: column;
             gap: 0.4rem;
         }
+        dialog.new-session [hidden] {
+            display: none !important;
+        }
         dialog.new-session .new-session-prompt-row {
             display: grid;
             grid-template-columns: 2.6rem minmax(0, 1fr);
@@ -782,18 +785,27 @@
                 </div>
             </div>
             <label>
-                Repository
+                Project
+                <select name="project" required data-new-session-project>
+                    {% for project in new_session_projects %}
+                    <option value="{{ project.pk }}"{% if project.pk == current_new_session_project_id %} selected{% endif %}>{{ project.name }}</option>
+                    {% endfor %}
+                    <option value="{{ bare_repo_project_value }}"{% if not current_new_session_project_id %} selected{% endif %}>&lt;bare repo&gt;</option>
+                </select>
+            </label>
+            <div class="new-session-field" data-new-session-repo-field {% if current_new_session_project_id %}hidden{% endif %}>
+                <label for="new-session-cwd">Repository</label>
                 {% if repos %}
-                <select name="cwd" required>
+                <select id="new-session-cwd" name="cwd" required data-new-session-repo>
                     {% for repo in repos %}
                     <option value="{{ repo }}"{% if repo == current_repo %} selected{% endif %}>{{ repo }}</option>
                     {% endfor %}
                 </select>
                 {% else %}
-                <select name="cwd" required disabled></select>
+                <select id="new-session-cwd" name="cwd" required disabled data-new-session-repo></select>
                 <p class="empty-repos">No git repositories found within two levels of your home directory.</p>
                 {% endif %}
-            </label>
+            </div>
             <div class="actions">
                 <button type="button" class="button secondary" data-new-session-cancel>Cancel</button>
                 <button type="submit" class="button" data-new-session-submit {% if not repos %}disabled{% endif %}>Start session</button>
@@ -1194,10 +1206,14 @@
             const newSessionSubmit = newSessionDialog && newSessionDialog.querySelector("[data-new-session-submit]");
             const newSessionInput = newSessionForm && newSessionForm.querySelector("textarea[name='prompt']");
             const newSessionPlanModeInput = newSessionForm && newSessionForm.querySelector("[data-plan-mode-input]");
+            const newSessionProjectSelect = newSessionForm && newSessionForm.querySelector("[data-new-session-project]");
+            const newSessionRepoField = newSessionForm && newSessionForm.querySelector("[data-new-session-repo-field]");
+            const newSessionRepoSelect = newSessionForm && newSessionForm.querySelector("[data-new-session-repo]");
             const newSessionSlashCommand = newSessionForm && newSessionForm.querySelector("[data-slash-command]");
             const newSessionSlashTrigger = newSessionForm && newSessionForm.querySelector("[data-slash-trigger]");
             const newSessionSlashMenu = newSessionForm && newSessionForm.querySelector("[data-slash-menu]");
             const newSessionSlashPlan = newSessionForm && newSessionForm.querySelector("[data-slash-plan]");
+            const bareRepoProjectValue = "{{ bare_repo_project_value|escapejs }}";
             const prPrompt = "{{ pr_slash_prompt|escapejs }}";
             function isSuperEnter(event) {
                 const hasSuper = event.metaKey
@@ -1212,6 +1228,12 @@
                 } else {
                     submitter.click();
                 }
+            }
+            function syncNewSessionProjectFields() {
+                if (!newSessionProjectSelect) return;
+                const bareRepoSelected = newSessionProjectSelect.value === bareRepoProjectValue;
+                if (newSessionRepoField) newSessionRepoField.hidden = !bareRepoSelected;
+                if (newSessionRepoSelect) newSessionRepoSelect.required = bareRepoSelected;
             }
             function setNewSessionPlanMode(enabled) {
                 if (!newSessionForm) return;
@@ -1245,12 +1267,14 @@
                 return prPrompt;
             }
             function openNewSessionDialog() {
+                syncNewSessionProjectFields();
                 showDialog(newSessionDialog);
                 scheduleKeyboardAdjustedDialog();
                 if (newSessionInput) newSessionInput.focus();
                 scheduleKeyboardAdjustedDialog();
             }
             setNewSessionPlanMode(false);
+            syncNewSessionProjectFields();
             if (newSessionDialog) {
                 newSessionDialog.addEventListener("close", () => {
                     clearKeyboardAdjustedDialog(newSessionDialog);
@@ -1296,6 +1320,9 @@
                         closeNewSessionSlashMenu();
                     }
                 });
+            }
+            if (newSessionProjectSelect) {
+                newSessionProjectSelect.addEventListener("change", syncNewSessionProjectFields);
             }
             if (newSessionForm) {
                 newSessionForm.addEventListener("keydown", (event) => {
