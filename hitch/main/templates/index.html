@@ -95,10 +95,6 @@
             gap: 0.85rem;
             min-width: 0;
         }
-        .primary-nav-panel .logout-form {
-            margin: 0;
-            display: inline-flex;
-        }
         .account-label {
             max-width: 12rem;
             overflow: hidden;
@@ -107,105 +103,7 @@
             font-size: 0.82rem;
             color: var(--text-muted);
         }
-        .primary-nav {
-            position: relative;
-            display: flex;
-            align-items: center;
-        }
-        .primary-nav-toggle {
-            font: inherit;
-            background: transparent;
-            color: var(--text-muted);
-            border: 1px solid transparent;
-            border-radius: 999px;
-            width: 38px;
-            height: 38px;
-            display: none;
-            align-items: center;
-            justify-content: center;
-            flex-direction: column;
-            gap: 4px;
-            cursor: pointer;
-            transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
-            -webkit-tap-highlight-color: transparent;
-        }
-        .primary-nav-toggle:active { transform: scale(0.95); }
-        .primary-nav-toggle span {
-            width: 18px;
-            height: 2px;
-            border-radius: 999px;
-            background: currentColor;
-            display: block;
-        }
-        @media (hover: hover) {
-            .primary-nav-toggle:hover {
-                background: var(--surface-2);
-                color: var(--text);
-                border-color: var(--border);
-            }
-        }
-        .primary-nav-panel {
-            display: flex;
-            align-items: center;
-            gap: 0.25rem;
-        }
-        .primary-nav-panel a,
-        .primary-nav-panel button {
-            display: inline-flex;
-            align-items: center;
-            min-height: 34px;
-            font: inherit;
-            font-size: 0.9rem;
-            text-align: left;
-            text-decoration: none;
-            border: 0;
-            border-radius: 999px;
-            background: transparent;
-            color: var(--text-muted);
-            padding: 0.35rem 0.65rem;
-            cursor: pointer;
-        }
-        .primary-nav-panel a:hover,
-        .primary-nav-panel a:focus,
-        .primary-nav-panel button:hover,
-        .primary-nav-panel button:focus {
-            outline: none;
-            background: var(--surface-2);
-            color: var(--text);
-        }
-        @media (max-width: 640px) {
-            .primary-nav-toggle {
-                display: inline-flex;
-            }
-            .primary-nav-panel {
-                display: none;
-                position: absolute;
-                left: 0;
-                top: calc(100% + 0.35rem);
-                z-index: 30;
-                min-width: 10rem;
-                padding: 0.35rem;
-                border: 1px solid var(--border);
-                border-radius: var(--radius-sm);
-                background: var(--surface);
-                box-shadow: var(--shadow-lg);
-            }
-            .primary-nav-toggle[aria-expanded="true"] + .primary-nav-panel {
-                display: block;
-            }
-            .primary-nav-panel a,
-            .primary-nav-panel button {
-                width: 100%;
-                display: block;
-                border-radius: 6px;
-                color: var(--text);
-                padding: 0.5rem 0.65rem;
-            }
-            .primary-nav-panel .logout-form {
-                display: block;
-                width: 100%;
-            }
-        }
+        {% include "_primary_nav_styles.html" %}
         .brand {
             font-size: 1rem;
             font-weight: 700;
@@ -625,85 +523,7 @@
             }
         }
 
-        dialog.new-session {
-            border: 1px solid var(--border);
-            border-radius: 16px;
-            padding: 0;
-            background: var(--surface);
-            color: var(--text);
-            box-shadow: var(--shadow-lg);
-            max-width: min(520px, calc(100% - 1.5rem));
-            max-height: calc(100vh - 2rem - var(--safe-top) - var(--safe-bottom));
-            max-height: calc(100dvh - 2rem - var(--safe-top) - var(--safe-bottom));
-            width: 100%;
-            overflow-y: auto;
-            overscroll-behavior: contain;
-            -webkit-overflow-scrolling: touch;
-        }
-        dialog.new-session::backdrop {
-            background: rgba(15, 14, 12, 0.5);
-            backdrop-filter: blur(2px);
-        }
-        dialog.new-session form {
-            display: flex;
-            flex-direction: column;
-            gap: 1rem;
-            padding: 1.25rem;
-        }
-        dialog.new-session h2 {
-            margin: 0;
-            font-size: 1.05rem;
-            font-weight: 600;
-            color: var(--text);
-        }
-        dialog.new-session label {
-            display: flex;
-            flex-direction: column;
-            gap: 0.4rem;
-            font-size: 0.82rem;
-            font-weight: 500;
-            color: var(--text-muted);
-        }
-        dialog.new-session label.checkbox-label {
-            flex-direction: row;
-            align-items: center;
-            justify-content: space-between;
-            color: var(--text);
-            gap: 0.75rem;
-        }
-        dialog.new-session input[type="checkbox"] {
-            width: 1.1rem;
-            height: 1.1rem;
-            accent-color: var(--accent);
-            flex: 0 0 auto;
-        }
-        dialog.new-session textarea,
-        dialog.new-session select,
-        dialog.new-session input[type="text"] {
-            font: inherit;
-            font-size: 0.95rem;
-            border: 1px solid var(--border-strong);
-            border-radius: var(--radius-sm);
-            padding: 0.65rem 0.75rem;
-            background: var(--bg);
-            color: var(--text);
-            transition: border-color 0.12s ease, box-shadow 0.12s ease;
-        }
-        dialog.new-session textarea:focus,
-        dialog.new-session select:focus,
-        dialog.new-session input[type="text"]:focus {
-            outline: none;
-            border-color: var(--accent);
-            box-shadow: 0 0 0 3px var(--accent-soft);
-        }
-        dialog.new-session textarea {
-            min-height: 9rem;
-            resize: vertical;
-            line-height: 1.5;
-        }
-        dialog.new-session textarea.extra-system-prompt {
-            min-height: 5rem;
-        }
+        {% include "_settings_dialog_styles.html" %}
         dialog.new-session .new-session-field {
             display: flex;
             flex-direction: column;
@@ -792,12 +612,6 @@
             font-weight: 600;
             font-size: 0.9rem;
         }
-        dialog.new-session .actions {
-            display: flex;
-            justify-content: flex-end;
-            gap: 0.5rem;
-            flex-wrap: wrap;
-        }
         dialog.new-session .empty-repos {
             color: var(--danger);
             font-size: 0.82rem;
@@ -818,16 +632,6 @@
             }
         }
         @media (max-width: 480px) {
-            dialog.new-session {
-                max-width: calc(100% - 1rem);
-                border-radius: 16px;
-            }
-            dialog.new-session form { padding: 1.1rem; }
-            dialog.new-session .actions { flex-direction: column-reverse; }
-            dialog.new-session .actions .button {
-                width: 100%;
-                justify-content: center;
-            }
             .session-list-header {
                 gap: 0.65rem;
             }
@@ -1485,37 +1289,7 @@
                 });
             }
 
-            const settingsDialog = document.querySelector("[data-settings-dialog]");
-            const navMenu = document.querySelector("[data-nav-menu]");
-            const navMenuButton = navMenu && navMenu.querySelector("[data-nav-menu-open]");
-            const settingsOpenButtons = document.querySelectorAll("[data-settings-open]");
-            const settingsCancel = settingsDialog && settingsDialog.querySelector("[data-settings-cancel]");
-            function closeNavMenu() {
-                if (!navMenuButton) return;
-                navMenuButton.setAttribute("aria-expanded", "false");
-            }
-            if (navMenuButton) {
-                navMenuButton.addEventListener("click", (event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    const willOpen = navMenuButton.getAttribute("aria-expanded") !== "true";
-                    navMenuButton.setAttribute("aria-expanded", willOpen ? "true" : "false");
-                });
-                document.addEventListener("click", (event) => {
-                    if (!navMenu || navMenu.contains(event.target)) return;
-                    closeNavMenu();
-                });
-                document.addEventListener("keydown", (event) => {
-                    if (event.key !== "Escape" || navMenuButton.getAttribute("aria-expanded") !== "true") return;
-                    closeNavMenu();
-                    navMenuButton.focus();
-                });
-            }
-            settingsOpenButtons.forEach((btn) => btn.addEventListener("click", () => {
-                closeNavMenu();
-                showDialog(settingsDialog);
-            }));
-            if (settingsCancel) settingsCancel.addEventListener("click", () => hideDialog(settingsDialog));
+            {% include "_primary_nav_script.html" %}
 
             const archivedVisibilityForm = document.querySelector("[data-archived-visibility-form]");
             const archivedVisibilityToggle = document.querySelector("[data-archived-visibility-toggle]");

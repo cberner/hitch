@@ -1,0 +1,30 @@
+            const settingsDialog = document.querySelector("[data-settings-dialog]");
+            const navMenu = document.querySelector("[data-nav-menu]");
+            const navMenuButton = navMenu && navMenu.querySelector("[data-nav-menu-open]");
+            const settingsOpenButtons = document.querySelectorAll("[data-settings-open]");
+            const settingsCancel = settingsDialog && settingsDialog.querySelector("[data-settings-cancel]");
+            function closeNavMenu() {
+                if (!navMenuButton) return;
+                navMenuButton.setAttribute("aria-expanded", "false");
+            }
+            if (navMenuButton) {
+                navMenuButton.addEventListener("click", (event) => {
+                    event.preventDefault();
+                    const willOpen = navMenuButton.getAttribute("aria-expanded") !== "true";
+                    navMenuButton.setAttribute("aria-expanded", willOpen ? "true" : "false");
+                });
+                document.addEventListener("click", (event) => {
+                    if (!navMenu || navMenu.contains(event.target)) return;
+                    closeNavMenu();
+                });
+                document.addEventListener("keydown", (event) => {
+                    if (event.key !== "Escape" || navMenuButton.getAttribute("aria-expanded") !== "true") return;
+                    closeNavMenu();
+                    navMenuButton.focus();
+                });
+            }
+            settingsOpenButtons.forEach((btn) => btn.addEventListener("click", () => {
+                closeNavMenu();
+                showDialog(settingsDialog);
+            }));
+            if (settingsCancel) settingsCancel.addEventListener("click", () => hideDialog(settingsDialog));
