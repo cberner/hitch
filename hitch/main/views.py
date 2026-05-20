@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 from django.contrib.auth import login as auth_login
 from django.contrib.auth import logout as auth_logout
 from django.contrib.auth.forms import AuthenticationForm, UserCreationForm
+from django.db.models import Prefetch
 from django.http import (
     Http404,
     HttpRequest,
@@ -273,6 +274,46 @@ def _settings_dialog_context(
     }
 
 
+def _new_session_dialog_context(
+    current_settings: SettingsValues,
+    current_project: Project | None,
+    projects: list[Project],
+) -> dict[str, Any]:
+    repos = [str(p) for p in discover_repos()]
+    repo_set = set(repos)
+    saved_repo = (
+        current_settings.last_selected_repo
+        if current_settings.last_selected_repo in repo_set
+        else ""
+    )
+    new_session_projects = [
+        project for project in projects if project.repo_path in repo_set
+    ]
+    current_new_session_project = _new_session_project_for_dialog(
+        current_project, saved_repo, new_session_projects
+    )
+    current_new_session_auto_pr = _effective_auto_pr_enabled(
+        current_new_session_project,
+        global_enabled=current_settings.auto_pr_enabled,
+    )
+    return {
+        "repos": repos,
+        "new_session_projects": new_session_projects,
+        "new_session_url": reverse("new_session"),
+        "current_repo": _selected_repo_for_dialog(
+            saved_repo, repos, current_new_session_project
+        ),
+        "current_new_session_project_id": (
+            current_new_session_project.pk
+            if current_new_session_project is not None
+            else ""
+        ),
+        "current_new_session_auto_pr": current_new_session_auto_pr,
+        "bare_repo_project_value": _BARE_REPO_PROJECT_VALUE,
+        "pr_slash_prompt": _PR_SLASH_PROMPT,
+    }
+
+
 def _all_threads(codex: Codex, *, archived: bool = False) -> list[Any]:
     """Return every thread from Codex's paginated thread list."""
     threads: list[Any] = []
@@ -340,52 +381,24 @@ def index(request: HttpRequest) -> HttpResponse:
                 "project": session_project,
             }
         )
-    repos = [str(p) for p in discover_repos()]
-    repo_set = set(repos)
-    saved_repo = (
-        current_settings.last_selected_repo
-        if current_settings.last_selected_repo in repo_set
-        else ""
-    )
-    new_session_projects = [
-        project for project in projects if project.repo_path in repo_set
-    ]
-    current_new_session_project = _new_session_project_for_dialog(
-        current_project, saved_repo, new_session_projects
-    )
-    current_new_session_auto_pr = _effective_auto_pr_enabled(
-        current_new_session_project,
-        global_enabled=current_settings.auto_pr_enabled,
-    )
-    current_repo = _selected_repo_for_dialog(
-        saved_repo, repos, current_new_session_project
-    )
     settings_dialog_context = _settings_dialog_context(current_settings, models_data)
+    new_session_dialog_context = _new_session_dialog_context(
+        current_settings, current_project, projects
+    )
     response = render(
         request,
         "index.html",
         {
             "sessions": sessions,
-            "repos": repos,
-            "new_session_projects": new_session_projects,
             "has_projects": bool(projects),
-            "new_session_url": reverse("new_session"),
             "archived_visibility_url": reverse("update_archived_session_visibility"),
             "login_url": reverse("login"),
             "register_url": reverse("register"),
             "current_show_archived_sessions": current_settings.show_archived_sessions,
-            "current_repo": current_repo,
-            "current_new_session_project_id": (
-                current_new_session_project.pk
-                if current_new_session_project is not None
-                else ""
-            ),
-            "current_new_session_auto_pr": current_new_session_auto_pr,
             "current_project": current_project,
-            "bare_repo_project_value": _BARE_REPO_PROJECT_VALUE,
             "name_max_len": _NAME_MAX_LEN,
-            "pr_slash_prompt": _PR_SLASH_PROMPT,
             **settings_dialog_context,
+            **new_session_dialog_context,
         },
     )
     _apply_cookie_updates(response, cookie_updates)
@@ -429,6 +442,11 @@ def usage(request: HttpRequest) -> HttpResponse:
 @require_http_methods(["GET"])
 def okrs(request: HttpRequest) -> HttpResponse:
     codex_pool.reconcile_dead()
+    show_hidden_tasks = request.GET.get("show_hidden_tasks", "").strip() in {
+        "1",
+        "true",
+        "on",
+    }
     initial_settings = _stored_settings(request)
     config = codex_pool.app_server_config(
         enable_memories=initial_settings.enable_memories
@@ -438,18 +456,26 @@ def okrs(request: HttpRequest) -> HttpResponse:
         resolved_settings = _resolved_settings(request, models_data)
         current_settings = resolved_settings.values
         cookie_updates = resolved_settings.cookie_updates
-    current_project = _selected_project_for_settings(current_settings)
-    objectives = (
-        list(
-            Objective.objects.filter(project=current_project).prefetch_related(
-                "key_results__proposed_tasks"
+        current_project = _selected_project_for_settings(current_settings)
+        objectives = (
+            list(
+                Objective.objects.filter(project=current_project).prefetch_related(
+                    Prefetch(
+                        "key_results__proposed_tasks",
+                        queryset=ProposedTask.objects.select_related("session"),
+                    )
+                )
             )
+            if current_project is not None
+            else []
         )
-        if current_project is not None
-        else []
-    )
+        _refresh_proposed_task_pr_state(codex, objectives)
+    _attach_proposed_task_display_state(objectives, show_hidden_tasks)
     _attach_okr_task_generation_state(objectives)
     settings_dialog_context = _settings_dialog_context(current_settings, models_data)
+    new_session_dialog_context = _new_session_dialog_context(
+        current_settings, current_project, settings_dialog_context["projects"]
+    )
     response = render(
         request,
         "okrs.html",
@@ -458,9 +484,11 @@ def okrs(request: HttpRequest) -> HttpResponse:
             "register_url": reverse("register"),
             "objectives": objectives,
             "objective_create_url": reverse("create_objective"),
-            "proposed_task_outcome_choices": ProposedTask.OUTCOME_CHOICES,
+            "proposed_task_rejected_status": ProposedTask.OUTCOME_REJECTED,
+            "show_hidden_tasks": show_hidden_tasks,
             "title_max_len": _OKR_TITLE_MAX_LEN,
             **settings_dialog_context,
+            **new_session_dialog_context,
         },
     )
     _apply_cookie_updates(response, cookie_updates)
@@ -492,6 +520,108 @@ def _validated_okr_title(raw_title: str) -> tuple[str, str | None]:
     if len(title) > _OKR_TITLE_MAX_LEN:
         return "", "title is too long"
     return title, None
+
+
+def _proposed_task_session_prompt(task: ProposedTask) -> str:
+    parts = [
+        "Do this ProposedTask.",
+        "",
+        f"Title: {task.title}",
+    ]
+    if task.description:
+        parts.extend(["", f"Description:\n{task.description}"])
+    if task.success_criteria:
+        parts.extend(["", f"Success criteria:\n{task.success_criteria}"])
+    if task.rationale:
+        parts.extend(["", f"Rationale:\n{task.rationale}"])
+    return "\n".join(parts)
+
+
+def _attach_proposed_task_display_state(
+    objectives: list[Objective], show_hidden_tasks: bool
+) -> None:
+    for objective in objectives:
+        for key_result in objective.key_results.all():
+            tasks = list(key_result.proposed_tasks.all())
+            for task in tasks:
+                task.session_prompt = _proposed_task_session_prompt(task)  # type: ignore[attr-defined]
+            visible_tasks = (
+                tasks
+                if show_hidden_tasks
+                else [task for task in tasks if not task.outcome_status]
+            )
+            key_result.visible_proposed_tasks = visible_tasks  # type: ignore[attr-defined]
+            key_result.hidden_proposed_task_count = len(tasks) - len(  # type: ignore[attr-defined]
+                visible_tasks
+            )
+
+
+def _refresh_proposed_task_pr_state(codex: Codex, objectives: list[Objective]) -> None:
+    tasks_by_thread: dict[str, list[ProposedTask]] = {}
+    for objective in objectives:
+        for key_result in objective.key_results.all():
+            for task in key_result.proposed_tasks.all():
+                if (
+                    task.session_id is None
+                    or task.outcome_status
+                    not in {
+                        ProposedTask.OUTCOME_ACCEPTED,
+                        ProposedTask.OUTCOME_PR_OPENED,
+                    }
+                ):
+                    continue
+                session = task.session
+                if session is None:
+                    continue
+                tasks_by_thread.setdefault(session.thread_id, []).append(task)
+    for thread_id, tasks in tasks_by_thread.items():
+        try:
+            thread = codex._client.thread_resume(thread_id).thread
+        except AppServerError:
+            logger.info("could not refresh PR state for proposed task session %s", thread_id)
+            continue
+        pr_url = _pr_url_for_thread(thread)
+        _mark_proposed_tasks_pr_opened(thread_id, pr_url, tasks)
+
+
+def _mark_proposed_tasks_pr_opened(
+    session_id: str, pr_url: str | None, tasks: list[ProposedTask] | None = None
+) -> None:
+    if not pr_url:
+        return
+    if tasks is None:
+        ProposedTask.objects.filter(
+            session__thread_id=session_id,
+            outcome_status__in=[
+                ProposedTask.OUTCOME_ACCEPTED,
+                ProposedTask.OUTCOME_PR_OPENED,
+            ],
+        ).update(
+            outcome_status=ProposedTask.OUTCOME_PR_OPENED,
+            pr_url=pr_url,
+            updated_at=timezone.now(),
+        )
+        return
+    for task in tasks:
+        if task.outcome_status not in {
+            ProposedTask.OUTCOME_ACCEPTED,
+            ProposedTask.OUTCOME_PR_OPENED,
+        }:
+            continue
+        if (
+            task.outcome_status == ProposedTask.OUTCOME_PR_OPENED
+            and task.pr_url == pr_url
+        ):
+            continue
+        task.outcome_status = ProposedTask.OUTCOME_PR_OPENED
+        task.pr_url = pr_url
+        task.save(update_fields=["outcome_status", "pr_url", "updated_at"])
+
+
+def _redirect_to_okrs_from_post(request: HttpRequest) -> HttpResponse:
+    if request.POST.get("show_hidden_tasks", "").strip() in {"1", "true", "on"}:
+        return redirect(f"{reverse('okrs')}?{urlencode({'show_hidden_tasks': '1'})}")
+    return redirect("okrs")
 
 
 @require_http_methods(["POST"])
@@ -571,10 +701,15 @@ def update_proposed_task_outcome(request: HttpRequest, task_id: int) -> HttpResp
     valid_statuses = {choice[0] for choice in ProposedTask.OUTCOME_CHOICES}
     if outcome_status not in valid_statuses:
         return HttpResponseBadRequest("outcome status is invalid")
+    outcome_notes = request.POST.get(
+        "reason", request.POST.get("outcome_notes", "")
+    ).strip()
+    if outcome_status == ProposedTask.OUTCOME_REJECTED and not outcome_notes:
+        return HttpResponseBadRequest("reason is required")
     task.outcome_status = outcome_status
-    task.outcome_notes = request.POST.get("outcome_notes", "").strip()
+    task.outcome_notes = outcome_notes
     task.save(update_fields=["outcome_status", "outcome_notes", "updated_at"])
-    return redirect("okrs")
+    return _redirect_to_okrs_from_post(request)
 
 
 def _attach_okr_task_generation_state(objectives: list[Objective]) -> None:
@@ -719,6 +854,7 @@ def _render_session_detail(
     metadata_by_thread = _metadata_by_thread_id([thread])
     session_project = _project_for_thread(thread, metadata_by_thread, projects)
     pr_url = _pr_url_for_thread(thread)
+    _mark_proposed_tasks_pr_opened(session_id, pr_url)
     active_instance = _active_instance_for(session_id)
     active_system_workflow = system_agents.active_workflow_for_thread(session_id)
     # While a worker is running, drop the entries that belong to its
@@ -2286,6 +2422,44 @@ def _posted_new_session_target(
     return _NewSessionTarget(project.repo_path, project, False), None
 
 
+def _posted_proposed_task_for_new_session(
+    request: HttpRequest, target: _NewSessionTarget
+) -> tuple[ProposedTask | None, str | None]:
+    raw_task_id = request.POST.get("proposed_task", "").strip()
+    if not raw_task_id:
+        return None, None
+    try:
+        task_id = int(raw_task_id)
+    except ValueError:
+        return None, "proposed task is required"
+    if task_id < 1 or task_id > _MAX_BIGAUTOFIELD:
+        return None, "proposed task is required"
+    task = (
+        ProposedTask.objects.select_related("key_result__objective__project")
+        .filter(pk=task_id)
+        .first()
+    )
+    if task is None:
+        return None, "proposed task is required"
+    task_project = task.key_result.objective.project
+    if target.project is not None and target.project != task_project:
+        return None, "proposed task does not match project"
+    if target.project_cleared and target.cwd != task_project.repo_path:
+        return None, "proposed task does not match project"
+    return task, None
+
+
+def _accept_proposed_task_for_session(
+    task: ProposedTask | None, session_metadata: SessionMetadata
+) -> None:
+    if task is None:
+        return
+    task.outcome_status = ProposedTask.OUTCOME_ACCEPTED
+    task.session = session_metadata
+    task.pr_url = ""
+    task.save(update_fields=["outcome_status", "session", "pr_url", "updated_at"])
+
+
 def _posted_auto_pr_override(raw: str | None, *, default: bool) -> tuple[bool, str | None]:
     if raw is None:
         return default, None
@@ -2828,6 +3002,11 @@ def new_session(request: HttpRequest) -> HttpResponse:
     target, target_error = _posted_new_session_target(request, projects)
     if target_error is not None or target is None:
         return HttpResponseBadRequest(target_error or "invalid project")
+    proposed_task, proposed_task_error = _posted_proposed_task_for_new_session(
+        request, target
+    )
+    if proposed_task_error is not None:
+        return HttpResponseBadRequest(proposed_task_error)
     cwd = target.cwd
     if not prompt:
         return HttpResponseBadRequest("prompt is required")
@@ -2888,7 +3067,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
             enable_memories=settings.enable_memories,
             initial_user_message_index=0,
         )
-        SessionMetadata.objects.update_or_create(
+        session_metadata, _created = SessionMetadata.objects.update_or_create(
             thread_id=thread_id,
             defaults={
                 "cwd": session_cwd,
@@ -2897,6 +3076,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
                 "auto_pr_enabled": False,
             },
         )
+        _accept_proposed_task_for_session(proposed_task, session_metadata)
         remembered_values = settings._replace(last_selected_repo=cwd)
         user = _authenticated_user(request)
         if user is not None:
@@ -2950,7 +3130,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
                     "failed to clean up managed worktree %s", managed_worktree.path
                 )
         raise
-    SessionMetadata.objects.update_or_create(
+    session_metadata, _created = SessionMetadata.objects.update_or_create(
         thread_id=instance.thread_id,
         defaults={
             "cwd": session_cwd,
@@ -2959,6 +3139,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
             "auto_pr_enabled": auto_pr_enabled,
         },
     )
+    _accept_proposed_task_for_session(proposed_task, session_metadata)
     remembered_values = settings._replace(last_selected_repo=cwd)
     user = _authenticated_user(request)
     if user is not None:

@@ -108,6 +108,7 @@ class ProposedTask(models.Model):
     OUTCOME_UNSET = ""
     OUTCOME_ACCEPTED = "accepted"
     OUTCOME_REJECTED = "rejected"
+    OUTCOME_PR_OPENED = "pr_opened"
     OUTCOME_COMPLETED = "completed"
     OUTCOME_SUPERSEDED = "superseded"
 
@@ -115,6 +116,7 @@ class ProposedTask(models.Model):
         (OUTCOME_UNSET, "Not set"),
         (OUTCOME_ACCEPTED, "Accepted"),
         (OUTCOME_REJECTED, "Rejected"),
+        (OUTCOME_PR_OPENED, "PR opened"),
         (OUTCOME_COMPLETED, "Completed"),
         (OUTCOME_SUPERSEDED, "Superseded"),
     )
@@ -142,6 +144,14 @@ class ProposedTask(models.Model):
         default=OUTCOME_UNSET,
     )
     outcome_notes = models.TextField(blank=True, default="")
+    session = models.ForeignKey(
+        "SessionMetadata",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="proposed_tasks",
+    )
+    pr_url = models.URLField(max_length=512, blank=True, default="")
     sort_order = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

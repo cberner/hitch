@@ -1075,9 +1075,10 @@ class OKRViewTests(TestCase):
     def _select_project(self, project: Project) -> None:
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
 
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_okrs_page_lists_selected_project_objectives_with_nested_key_results(
-        self, mock_codex: MagicMock
+        self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _setup_codex(mock_codex)
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -1106,12 +1107,17 @@ class OKRViewTests(TestCase):
         self.assertContains(response, "Use the GitHub connector.")
         self.assertContains(response, "Extra instructions to help generate and perform tasks.")
         self.assertContains(response, "Generate tasks")
+        self.assertContains(response, "Show hidden tasks")
         self.assertNotContains(response, "Hidden objective")
 
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.reconcile_dead")
     def test_okrs_page_reconciles_dead_workers_before_rendering_state(
-        self, mock_reconcile: MagicMock, mock_codex: MagicMock
+        self,
+        mock_reconcile: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
     ) -> None:
         _setup_codex(mock_codex)
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -1122,9 +1128,10 @@ class OKRViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         mock_reconcile.assert_called_once()
 
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_okrs_page_lists_proposed_tasks_and_generation_status(
-        self, mock_codex: MagicMock
+        self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _setup_codex(mock_codex)
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -1149,18 +1156,48 @@ class OKRViewTests(TestCase):
         )
         self._select_project(project)
 
-        response = self.client.get(reverse("okrs"))
+        response = self.client.get(reverse("okrs"), data={"show_hidden_tasks": "1"})
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Add task model")
         self.assertContains(response, "Tasks render on the OKR page.")
+        self.assertContains(response, "Outcome:")
+        self.assertContains(response, "Accepted")
         self.assertContains(response, "Useful scope.")
         self.assertContains(response, "Last generation: blocked")
         self.assertContains(response, "task planning output was not valid JSON")
 
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_okrs_page_hides_completed_proposed_tasks_by_default(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex)
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        objective = Objective.objects.create(project=project, title="Improve planning")
+        key_result = KeyResult.objects.create(objective=objective, title="Draft plan")
+        ProposedTask.objects.create(key_result=key_result, title="Pending task")
+        ProposedTask.objects.create(
+            key_result=key_result,
+            title="Rejected task",
+            outcome_status=ProposedTask.OUTCOME_REJECTED,
+            outcome_notes="Not useful.",
+        )
+        self._select_project(project)
+
+        response = self.client.get(reverse("okrs"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Pending task")
+        self.assertContains(response, "Do it")
+        self.assertContains(response, "Reject")
+        self.assertContains(response, "1 hidden task")
+        self.assertNotContains(response, "Rejected task")
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_okrs_page_links_running_task_generation_log(
-        self, mock_codex: MagicMock
+        self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _setup_codex(mock_codex)
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -1207,9 +1244,10 @@ class OKRViewTests(TestCase):
             f'href="{log_url}"',
         )
 
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_okrs_page_without_selected_project_has_no_create_forms(
-        self, mock_codex: MagicMock
+        self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _setup_codex(mock_codex)
         Project.objects.create(name="Hitch", repo_path="/repo")
@@ -1376,6 +1414,40 @@ class OKRViewTests(TestCase):
         self.assertEqual(task.outcome_status, ProposedTask.OUTCOME_COMPLETED)
         self.assertEqual(task.outcome_notes, "Worked well.")
 
+    def test_update_proposed_task_outcome_saves_reject_reason(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        objective = Objective.objects.create(project=project, title="Improve planning")
+        key_result = KeyResult.objects.create(objective=objective, title="Draft plan")
+        task = ProposedTask.objects.create(key_result=key_result, title="Add model")
+        self._select_project(project)
+
+        response = self.client.post(
+            reverse("update_proposed_task_outcome", kwargs={"task_id": task.pk}),
+            data={
+                "outcome_status": ProposedTask.OUTCOME_REJECTED,
+                "reason": "Too broad.",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        task.refresh_from_db()
+        self.assertEqual(task.outcome_status, ProposedTask.OUTCOME_REJECTED)
+        self.assertEqual(task.outcome_notes, "Too broad.")
+
+    def test_update_proposed_task_outcome_requires_reject_reason(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        objective = Objective.objects.create(project=project, title="Improve planning")
+        key_result = KeyResult.objects.create(objective=objective, title="Draft plan")
+        task = ProposedTask.objects.create(key_result=key_result, title="Add model")
+        self._select_project(project)
+
+        response = self.client.post(
+            reverse("update_proposed_task_outcome", kwargs={"task_id": task.pk}),
+            data={"outcome_status": ProposedTask.OUTCOME_REJECTED},
+        )
+
+        self.assertContains(response, "reason is required", status_code=400)
+
     def test_update_proposed_task_outcome_rejects_invalid_status(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         objective = Objective.objects.create(project=project, title="Improve planning")
@@ -1426,6 +1498,35 @@ class OKRViewTests(TestCase):
         )
 
         self.assertContains(response, "proposed task is required", status_code=400)
+
+    def test_marks_associated_proposed_task_when_pr_opens(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        objective = Objective.objects.create(project=project, title="Improve planning")
+        key_result = KeyResult.objects.create(objective=objective, title="Draft plan")
+        session = SessionMetadata.objects.create(thread_id="thread-xyz", cwd="/repo")
+        task = ProposedTask.objects.create(
+            key_result=key_result,
+            title="Add model",
+            outcome_status=ProposedTask.OUTCOME_ACCEPTED,
+            session=session,
+        )
+        completed = ProposedTask.objects.create(
+            key_result=key_result,
+            title="Completed task",
+            outcome_status=ProposedTask.OUTCOME_COMPLETED,
+            session=session,
+        )
+
+        views._mark_proposed_tasks_pr_opened(
+            "thread-xyz", "https://github.com/cberner/hitch/pull/94"
+        )
+
+        task.refresh_from_db()
+        completed.refresh_from_db()
+        self.assertEqual(task.outcome_status, ProposedTask.OUTCOME_PR_OPENED)
+        self.assertEqual(task.pr_url, "https://github.com/cberner/hitch/pull/94")
+        self.assertEqual(completed.outcome_status, ProposedTask.OUTCOME_COMPLETED)
+        self.assertEqual(completed.pr_url, "")
 
     def test_rejects_invalid_okr_posts(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -1519,6 +1620,38 @@ class NewSessionViewTests(TestCase):
             sandbox_policy=None,
             approval_mode="auto_review",
         )
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_accepts_and_associates_proposed_task(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        objective = Objective.objects.create(project=project, title="Improve planning")
+        key_result = KeyResult.objects.create(objective=objective, title="Draft plan")
+        task = ProposedTask.objects.create(key_result=key_result, title="Add model")
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Do this ProposedTask.",
+                "cwd": self.REPO,
+                "proposed_task": str(task.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        task.refresh_from_db()
+        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
+        self.assertEqual(task.outcome_status, ProposedTask.OUTCOME_ACCEPTED)
+        self.assertEqual(task.session, metadata)
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")

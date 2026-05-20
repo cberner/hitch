@@ -111,6 +111,7 @@ class OkrTaskGenerationWorkflowTests(TestCase):
         self.assertIn("senior software engineering manager", kwargs["prompt"])
         self.assertIn("Generate task proposals", kwargs["prompt"])
         self.assertIn("Keep existing OKR rendering stable", kwargs["prompt"])
+        self.assertIn("Reject reason: Too broad.", kwargs["prompt"])
         self.assertIn("Too broad.", kwargs["prompt"])
         self.assertIn("small, but logically consistent pieces", kwargs["prompt"])
         self.assertIn("tagging system", kwargs["prompt"])
