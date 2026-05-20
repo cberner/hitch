@@ -1,6 +1,9 @@
-"""Discover local git repositories under the user's home directory."""
+"""Discover and identify local git repositories."""
 
+import subprocess
 from pathlib import Path
+
+_GIT_TIMEOUT_SECONDS = 10
 
 
 def discover_repos(home: Path | None = None, *, max_depth: int = 2) -> list[Path]:
@@ -37,3 +40,50 @@ def _walk(directory: Path, *, depth: int, max_depth: int, found: dict[Path, Path
             found.setdefault(key, entry)
             continue
         _walk(entry, depth=depth + 1, max_depth=max_depth, found=found)
+
+
+def git_common_dir(cwd: str | Path) -> Path | None:
+    """Return the resolved git common dir for ``cwd``, or None if unavailable."""
+    path = Path(cwd).expanduser()
+    output = _git_output(path, ["rev-parse", "--git-common-dir"])
+    if not output:
+        return None
+    common = Path(output.strip())
+    if not common.is_absolute():
+        common = path / common
+    return _resolved_path(common)
+
+
+def same_repo_or_worktree(cwd: str | Path, repo_path: str | Path, repo_common_dir: str = "") -> bool:
+    """Return whether ``cwd`` is ``repo_path`` or a worktree of it."""
+    cwd_path = _resolved_path(Path(cwd).expanduser())
+    repo = _resolved_path(Path(repo_path).expanduser())
+    if cwd_path == repo:
+        return True
+    expected_common = Path(repo_common_dir) if repo_common_dir else git_common_dir(repo)
+    actual_common = git_common_dir(cwd_path)
+    if expected_common is None or actual_common is None:
+        return False
+    return _resolved_path(expected_common) == _resolved_path(actual_common)
+
+
+def _git_output(cwd: Path, args: list[str]) -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(cwd), *args],
+            capture_output=True,
+            check=False,
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.decode("utf-8", errors="replace")
+
+
+def _resolved_path(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except OSError:
+        return path

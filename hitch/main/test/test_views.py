@@ -25,6 +25,8 @@ from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
     CodexInstance,
+    Project,
+    SessionMetadata,
     SystemAgentRun,
     SystemWorkflow,
     UserInputRequest,
@@ -238,6 +240,21 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "No sessions found.")
         self.assertContains(response, "New session")
         self.assertContains(response, "No git repositories found")
+        self.assertContains(response, "Create project")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_hides_project_banner_when_project_exists(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        Project.objects.create(name="Hitch", repo_path="/repo")
+        _setup_codex(mock_codex)
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "Create a project to group sessions")
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -383,6 +400,49 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "data-archive-undo")
         self.assertLess(body.index("Newer session"), body.index("Middle session"))
         self.assertLess(body.index("Middle session"), body.index("Older session"))
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_selected_project_filters_sessions(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other = Project.objects.create(name="Other", repo_path="/other")
+        sessions = [
+            _session("matching", name="Matching", cwd="/repo"),
+            _session("other", name="Other session", cwd="/other"),
+        ]
+        _setup_codex(mock_codex, threads=sessions)
+        mock_discover.return_value = [Path("/repo"), Path("/other")]
+        SessionMetadata.objects.create(thread_id="matching", cwd="/repo", project=project)
+        SessionMetadata.objects.create(thread_id="other", cwd="/other", project=other)
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Matching")
+        self.assertContains(response, "Hitch sessions")
+        self.assertContains(response, 'name="selected_project"')
+        self.assertNotContains(response, "Other session")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_no_project_metadata_prevents_cwd_project_inference(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _setup_codex(mock_codex, threads=[_session("cleared", name="Cleared", cwd="/repo")])
+        mock_discover.return_value = [Path("/repo")]
+        SessionMetadata.objects.create(
+            thread_id="cleared", cwd="/repo", project=None, project_cleared=True
+        )
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "Cleared")
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -695,6 +755,156 @@ class IndexViewTests(TestCase):
         self.assertContains(response, ">bare-id<")
 
 
+class ProjectViewTests(TestCase):
+    @patch("hitch.main.views.discover_repos")
+    def test_new_project_form_lists_discovered_repos(self, mock_discover: MagicMock) -> None:
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.get(reverse("new_project"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Create project")
+        self.assertContains(response, 'name="repo_path"')
+        self.assertContains(response, "/repo")
+
+    @patch("hitch.main.views.discover_repos")
+    def test_new_project_form_hides_repos_that_already_have_projects(
+        self, mock_discover: MagicMock
+    ) -> None:
+        Project.objects.create(name="Existing", repo_path="/repo")
+        mock_discover.return_value = [Path("/repo"), Path("/other")]
+
+        response = self.client.get(reverse("new_project"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, '<option value="/repo">/repo</option>', html=True)
+        self.assertContains(response, '<option value="/other">/other</option>', html=True)
+
+    @patch("hitch.main.views.git_common_dir")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_project_form_hides_repos_with_existing_git_common_dir(
+        self, mock_discover: MagicMock, mock_common_dir: MagicMock
+    ) -> None:
+        Project.objects.create(
+            name="Existing",
+            repo_path="/repo",
+            git_common_dir="/repo/.git",
+        )
+        mock_discover.return_value = [Path("/repo-worktree")]
+        mock_common_dir.return_value = Path("/repo/.git")
+
+        response = self.client.get(reverse("new_project"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "/repo-worktree")
+        self.assertContains(response, "No git repositories without projects")
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.discover_repos")
+    def test_creates_project_selects_it_and_associates_existing_sessions(
+        self, mock_discover: MagicMock, mock_codex: MagicMock
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        _setup_codex(
+            mock_codex,
+            threads=[
+                _session("match", name="Match", cwd="/repo"),
+                _session("miss", name="Miss", cwd="/other"),
+            ],
+        )
+
+        response = self.client.post(
+            reverse("new_project"),
+            data={"name": "Hitch", "repo_path": "/repo"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        project = Project.objects.get()
+        self.assertEqual(project.name, "Hitch")
+        self.assertEqual(project.repo_path, "/repo")
+        self.assertEqual(_cookie_value(response, "hitch_selected_project_id"), str(project.pk))
+        self.assertEqual(SessionMetadata.objects.get(thread_id="match").project, project)
+        self.assertFalse(SessionMetadata.objects.filter(thread_id="miss").exists())
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.git_common_dir")
+    @patch("hitch.main.views.discover_repos")
+    def test_rejects_project_with_existing_git_common_dir(
+        self,
+        mock_discover: MagicMock,
+        mock_common_dir: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        Project.objects.create(
+            name="Source",
+            repo_path="/repo",
+            git_common_dir="/repo/.git",
+        )
+        mock_discover.return_value = [Path("/repo-worktree")]
+        mock_common_dir.return_value = Path("/repo/.git")
+        _setup_codex(mock_codex)
+
+        response = self.client.post(
+            reverse("new_project"),
+            data={"name": "Worktree", "repo_path": "/repo-worktree"},
+        )
+
+        self.assertContains(
+            response,
+            "project already exists for repository",
+            status_code=400,
+        )
+        self.assertEqual(Project.objects.count(), 1)
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.discover_repos")
+    def test_project_creation_preserves_manually_cleared_sessions(
+        self, mock_discover: MagicMock, mock_codex: MagicMock
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        _setup_codex(
+            mock_codex,
+            threads=[
+                _session("cleared", name="Cleared", cwd="/repo"),
+                _session("ordinary", name="Ordinary", cwd="/repo"),
+            ],
+        )
+        SessionMetadata.objects.create(
+            thread_id="cleared",
+            cwd="/repo",
+            project=None,
+            project_cleared=True,
+        )
+        SessionMetadata.objects.create(thread_id="ordinary", cwd="/repo", project=None)
+
+        response = self.client.post(
+            reverse("new_project"),
+            data={"name": "Hitch", "repo_path": "/repo"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        project = Project.objects.get()
+        self.assertIsNone(SessionMetadata.objects.get(thread_id="cleared").project)
+        self.assertTrue(SessionMetadata.objects.get(thread_id="cleared").project_cleared)
+        self.assertEqual(SessionMetadata.objects.get(thread_id="ordinary").project, project)
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.discover_repos")
+    def test_rejects_invalid_project_posts(
+        self, mock_discover: MagicMock, mock_codex: MagicMock
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        _setup_codex(mock_codex)
+
+        for data, message in (
+            ({"name": "", "repo_path": "/repo"}, "project name is required"),
+            ({"name": "Hitch", "repo_path": "/etc"}, "repository must be a discovered repository"),
+        ):
+            with self.subTest(message=message):
+                response = self.client.post(reverse("new_project"), data=data)
+                self.assertContains(response, message, status_code=400)
+
+
 class NewSessionViewTests(TestCase):
     REPO = "/home/user/proj"
 
@@ -780,6 +990,83 @@ class NewSessionViewTests(TestCase):
         settings = UserSettings.objects.get(user=user)
         self.assertEqual(settings.last_selected_repo, other_repo)
         self.assertEqual(_cookie_value(response, _LAST_SELECTED_REPO_COOKIE), other_repo)
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_assigns_new_session_to_selected_project(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "do thing", "cwd": self.REPO},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
+        self.assertEqual(metadata.cwd, self.REPO)
+        self.assertEqual(metadata.project, project)
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_project_comes_from_posted_repository(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        repo_a = self.REPO
+        repo_b = "/home/user/other"
+        project_a = Project.objects.create(name="Project A", repo_path=repo_a)
+        project_b = Project.objects.create(name="Project B", repo_path=repo_b)
+        mock_discover.return_value = [Path(repo_a), Path(repo_b)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+        _seed_cookies(self.client, hitch_selected_project_id=str(project_a.pk))
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "do thing", "cwd": repo_b},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
+        self.assertEqual(metadata.cwd, repo_b)
+        self.assertEqual(metadata.project, project_b)
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_in_unprojected_repo_ignores_selected_project(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        repo_b = "/home/user/other"
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        mock_discover.return_value = [Path(self.REPO), Path(repo_b)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "do thing", "cwd": repo_b},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertIsNone(SessionMetadata.objects.get(thread_id="thread-xyz").project)
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
@@ -1088,6 +1375,36 @@ class NewSessionViewTests(TestCase):
             enable_memories=False,
             initial_user_message_index=0,
         )
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.create_session_thread")
+    @patch("hitch.main.views.discover_repos")
+    def test_pr_new_session_project_comes_from_posted_repository(
+        self,
+        mock_discover: MagicMock,
+        mock_create_thread: MagicMock,
+        mock_codex: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        repo_b = "/home/user/other"
+        project_a = Project.objects.create(name="Project A", repo_path=self.REPO)
+        project_b = Project.objects.create(name="Project B", repo_path=repo_b)
+        mock_discover.return_value = [Path(self.REPO), Path(repo_b)]
+        mock_create_thread.return_value = "thread-xyz"
+        _setup_codex(mock_codex, models=[])
+        _seed_cookies(self.client, hitch_selected_project_id=str(project_a.pk))
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "/pr", "cwd": repo_b},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
+        self.assertEqual(metadata.cwd, repo_b)
+        self.assertEqual(metadata.project, project_b)
+        mock_start_workflow.assert_called_once()
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")

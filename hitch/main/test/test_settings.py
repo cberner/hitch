@@ -2,11 +2,14 @@ import base64
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from django.contrib.auth import get_user_model
 from django.core import signing
 from django.test import Client, TestCase
 from django.urls import reverse
 from openai_codex.errors import MethodNotFoundError
 from openai_codex.generated.v2_all import ReasoningEffort
+
+from hitch.main.models import Project, UserSettings
 
 _MODEL_COOKIE = "hitch_model"
 _EFFORT_COOKIE = "hitch_reasoning_effort"
@@ -15,6 +18,7 @@ _APPROVAL_COOKIE = "hitch_approval_mode"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
+_SELECTED_PROJECT_COOKIE = "hitch_selected_project_id"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 
 # By default a test model accepts every enum value so tests that don't care
@@ -206,6 +210,9 @@ class SettingsDialogRenderTests(TestCase):
         self.assertNotContains(response, "Show archived sessions")
         self.assertContains(response, 'name="use_worktrees"')
         self.assertContains(response, "Use worktrees")
+        self.assertContains(response, 'name="selected_project"')
+        self.assertContains(response, "All projects")
+        self.assertContains(response, "Create project")
 
     @patch("hitch.main.views.Codex")
     def test_usage_page_renders_primary_nav_menu_instead_of_back_link(
@@ -739,6 +746,7 @@ class UpdateSettingsViewTests(TestCase):
         self, mock_codex: MagicMock
     ) -> None:
         _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
         cases: list[tuple[str, dict[str, str], dict[str, str], str, str]] = [
             (
                 "sandbox policy",
@@ -795,6 +803,20 @@ class UpdateSettingsViewTests(TestCase):
                 "true",
             ),
             ("memories disabled", {}, {}, _ENABLE_MEMORIES_COOKIE, "false"),
+            (
+                "selected project",
+                {"selected_project": str(project.pk)},
+                {},
+                _SELECTED_PROJECT_COOKIE,
+                str(project.pk),
+            ),
+            (
+                "all projects",
+                {"selected_project": ""},
+                {_SELECTED_PROJECT_COOKIE: str(project.pk)},
+                _SELECTED_PROJECT_COOKIE,
+                "",
+            ),
         ]
         for label, data, seed, cookie, expected in cases:
             with self.subTest(label=label):
@@ -832,6 +854,12 @@ class UpdateSettingsViewTests(TestCase):
                 _ENABLE_MEMORIES_COOKIE,
                 "true",
                 {"enable_memories": "yes"},
+            ),
+            (
+                "selected project",
+                _SELECTED_PROJECT_COOKIE,
+                "1",
+                {"selected_project": "999"},
             ),
         ]
         for label, cookie, saved_value, data in cases:
@@ -895,6 +923,45 @@ class UpdateArchivedSessionVisibilityViewTests(TestCase):
         self.assertEqual(_cookie_value(response, _APPROVAL_COOKIE), "deny_all")
         self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
         self.assertEqual(_cookie_value(response, _SHOW_ARCHIVED_COOKIE), "false")
+
+
+class SelectedProjectCookieImportTests(TestCase):
+    def test_login_empty_selected_project_cookie_clears_account_project(self) -> None:
+        user_model = get_user_model()
+        user = user_model.objects.create_user("dev@example.com", password="StrongPass123!")
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        UserSettings.objects.create(user=user, selected_project=project)
+        _seed_cookies(self.client, **{_SELECTED_PROJECT_COOKIE: ""})
+
+        response = self.client.post(
+            reverse("login"),
+            data={"username": "dev@example.com", "password": "StrongPass123!"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        settings = UserSettings.objects.get(user=user)
+        self.assertIsNone(settings.selected_project)
+        self.assertEqual(_cookie_value(response, _SELECTED_PROJECT_COOKIE), "")
+
+    def test_login_stale_selected_project_cookie_clears_account_project(self) -> None:
+        user_model = get_user_model()
+        user = user_model.objects.create_user("dev@example.com", password="StrongPass123!")
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        stale = Project.objects.create(name="Old", repo_path="/old")
+        stale_id = stale.pk
+        stale.delete()
+        UserSettings.objects.create(user=user, selected_project=project)
+        _seed_cookies(self.client, **{_SELECTED_PROJECT_COOKIE: str(stale_id)})
+
+        response = self.client.post(
+            reverse("login"),
+            data={"username": "dev@example.com", "password": "StrongPass123!"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        settings = UserSettings.objects.get(user=user)
+        self.assertIsNone(settings.selected_project)
+        self.assertEqual(_cookie_value(response, _SELECTED_PROJECT_COOKIE), "")
 
 
 class ApprovalModeSettingsTests(TestCase):

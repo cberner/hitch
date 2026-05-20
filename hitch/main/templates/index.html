@@ -137,6 +137,23 @@
             margin: 0;
             padding: 0;
         }
+        .project-banner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+            margin: 0 0 1rem;
+            padding: 0.85rem 1rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--surface);
+            box-shadow: var(--shadow);
+        }
+        .project-banner p {
+            margin: 0;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
         .archived-visibility-form {
             margin: 0;
             flex: 0 0 auto;
@@ -635,6 +652,13 @@
             .session-list-header {
                 gap: 0.65rem;
             }
+            .project-banner {
+                align-items: stretch;
+                flex-direction: column;
+            }
+            .project-banner .button {
+                justify-content: center;
+            }
             .archived-visibility-toggle {
                 font-size: 0.78rem;
             }
@@ -663,8 +687,14 @@
         </div>
     </header>
     <main>
+        {% if not has_projects %}
+        <div class="project-banner">
+            <p>Create a project to group sessions by repository.</p>
+            <a class="button" href="{{ new_project_url }}">Create project</a>
+        </div>
+        {% endif %}
         <div class="session-list-header">
-            <p class="section-label">Codex sessions</p>
+            <p class="section-label">{% if current_project %}{{ current_project.name }} sessions{% else %}Codex sessions{% endif %}</p>
             <form class="archived-visibility-form" method="post" action="{{ archived_visibility_url }}" data-archived-visibility-form>
                 {% csrf_token %}
                 <label class="archived-visibility-toggle">
@@ -684,6 +714,7 @@
                         <div class="session-title" data-session-title>{{ session.display_title }}</div>
                         <div class="session-meta">
                             <span class="meta-item"><span class="meta-label">cwd</span><code>{{ session.cwd }}</code></span>
+                            {% if session.project %}<span class="meta-item"><span class="meta-label">project</span>{{ session.project.name }}</span>{% endif %}
                             <span class="meta-item"><time data-updated-at="{{ session.updated_at }}">{{ session.updated_at }}</time></span>
                             {% if session.is_archived %}<span class="archive-badge">Archived</span>{% endif %}
                         </div>

@@ -1731,6 +1731,7 @@
                 <div class="session-menu" role="menu" data-session-menu-panel hidden>
                     <button type="button" role="menuitem" data-edit-title-open>Rename</button>
                     <button type="button" role="menuitem" data-diff-open {% if not diff_view.has_changes %}disabled{% endif %}>View diff</button>
+                    <button type="button" role="menuitem" data-move-project-open>Move to project</button>
                     {% if pr_url %}
                         <a href="{{ pr_url }}" role="menuitem" target="_blank" rel="noopener noreferrer">Open PR</a>
                     {% endif %}
@@ -1872,6 +1873,26 @@
 
     {% include "_settings_dialog.html" %}
 
+    <dialog class="new-session" data-move-project-dialog aria-labelledby="move-project-title">
+        <form method="post" action="{{ set_project_url }}">
+            {% csrf_token %}
+            <h2 id="move-project-title">Move to project</h2>
+            <label>
+                Project
+                <select name="project">
+                    <option value="" {% if not session_project_id %}selected{% endif %}>No project</option>
+                    {% for project in projects %}
+                    <option value="{{ project.pk }}" {% if project.pk == session_project_id %}selected{% endif %}>{{ project.name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <div class="actions">
+                <button type="button" class="button secondary" data-move-project-cancel>Cancel</button>
+                <button type="submit" class="button">Save</button>
+            </div>
+        </form>
+    </dialog>
+
     {% if diff_view.has_changes %}
     <dialog class="diff-modal" data-diff-modal aria-labelledby="diff-modal-title">
         <div class="diff-shell">
@@ -2011,6 +2032,9 @@
             // Session actions menu and inline rename form.
             const editPanel = document.querySelector("[data-edit-title]");
             const editButton = document.querySelector("[data-edit-title-open]");
+            const moveProjectButton = document.querySelector("[data-move-project-open]");
+            const moveProjectDialog = document.querySelector("[data-move-project-dialog]");
+            const moveProjectCancel = document.querySelector("[data-move-project-cancel]");
             const menu = document.querySelector("[data-session-menu]");
             const menuButton = document.querySelector("[data-session-menu-open]");
             const menuPanel = document.querySelector("[data-session-menu-panel]");
@@ -2046,6 +2070,17 @@
                     }
                     editPanel.scrollIntoView({ behavior: "smooth", block: "center" });
                 });
+            }
+            if (moveProjectButton && moveProjectDialog) {
+                moveProjectButton.addEventListener("click", () => {
+                    closeMenu();
+                    showDialog(moveProjectDialog);
+                    const select = moveProjectDialog.querySelector("select[name='project']");
+                    if (select) select.focus();
+                });
+            }
+            if (moveProjectCancel && moveProjectDialog) {
+                moveProjectCancel.addEventListener("click", () => hideDialog(moveProjectDialog));
             }
 
             const diffModal = document.querySelector("[data-diff-modal]");

@@ -17,6 +17,7 @@ urlpatterns = [
         hitch.main.views.update_archived_session_visibility,
         name="update_archived_session_visibility",
     ),
+    path("projects/new/", hitch.main.views.new_project, name="new_project"),
     path("sessions/new/", hitch.main.views.new_session, name="new_session"),
     path("sessions/<str:session_id>/", hitch.main.views.session, name="session"),
     path(
@@ -28,6 +29,11 @@ urlpatterns = [
         "sessions/<str:session_id>/archive/",
         hitch.main.views.set_session_archived,
         name="set_session_archived",
+    ),
+    path(
+        "sessions/<str:session_id>/project/",
+        hitch.main.views.set_session_project,
+        name="set_session_project",
     ),
     path(
         "sessions/<str:session_id>/message/",

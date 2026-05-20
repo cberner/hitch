@@ -14,7 +14,7 @@ from openai_codex.errors import AppServerError
 
 from hitch.main import codex_events, system_agents
 from hitch.main.diffs import DiffFile, DiffLine, DiffView
-from hitch.main.models import CodexInstance, SystemAgentRun, SystemWorkflow
+from hitch.main.models import CodexInstance, Project, SessionMetadata, SystemAgentRun, SystemWorkflow
 from hitch.main.views import _pr_url_for_thread, _tool_call_detail, _tool_call_status
 
 # Used for active-worker rendering tests so the session view's
@@ -373,6 +373,53 @@ class SessionViewTests(TestCase):
                 self.assertContains(response, 'name="archived" value="true"')
                 self.assertContains(response, 'role="menuitem">Archive</button>')
                 self.assertNotContains(response, ">Edit</button>")
+
+    @patch("hitch.main.views.Codex")
+    def test_renders_move_to_project_menu_and_dialog(self, mock_codex: MagicMock) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/tmp/demo")
+        SessionMetadata.objects.create(thread_id="thread-1", cwd="/tmp/demo", project=project)
+        thread = _thread([_turn([_user_message("hi")])])
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Move to project")
+        self.assertContains(
+            response,
+            reverse("set_session_project", kwargs={"session_id": "thread-1"}),
+        )
+        self.assertContains(response, 'name="project"')
+        self.assertContains(response, f'value="{project.pk}" selected')
+
+    @patch("hitch.main.views.Codex")
+    def test_set_session_project_moves_and_clears_project(
+        self, mock_codex: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/tmp/demo")
+        thread = _thread([_turn([_user_message("hi")])])
+        _patch_thread(self, mock_codex, thread)
+
+        response = self.client.post(
+            reverse("set_session_project", kwargs={"session_id": "thread-1"}),
+            data={"project": str(project.pk)},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        metadata = SessionMetadata.objects.get(thread_id="thread-1")
+        self.assertEqual(metadata.project, project)
+        self.assertEqual(metadata.cwd, "/tmp/demo")
+        self.assertFalse(metadata.project_cleared)
+
+        response = self.client.post(
+            reverse("set_session_project", kwargs={"session_id": "thread-1"}),
+            data={"project": ""},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        metadata.refresh_from_db()
+        self.assertIsNone(metadata.project)
+        self.assertTrue(metadata.project_cleared)
 
     @patch("hitch.main.views.Codex")
     def test_renders_open_pr_menu_link_when_detected(
