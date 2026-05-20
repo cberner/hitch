@@ -167,6 +167,13 @@
             gap: 1rem;
             margin: 0 0 1rem;
         }
+        .page-header-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+            justify-content: flex-end;
+        }
         h2,
         h3,
         h4 {
@@ -190,6 +197,36 @@
             color: var(--text-muted);
             font-size: 0.86rem;
             white-space: nowrap;
+        }
+        .hidden-task-toggle-form {
+            margin: 0;
+        }
+        .hidden-task-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.45rem;
+            color: var(--text-muted);
+            font-size: 0.82rem;
+            cursor: pointer;
+            user-select: none;
+            white-space: nowrap;
+        }
+        .hidden-task-toggle input {
+            width: 1rem;
+            height: 1rem;
+            accent-color: var(--accent);
+        }
+        .hidden-task-toggle-submit {
+            margin-left: 0.4rem;
+            font: inherit;
+            color: var(--accent);
+            background: transparent;
+            border: none;
+            padding: 0;
+            cursor: pointer;
+        }
+        html.js .hidden-task-toggle-submit {
+            display: none;
         }
         .okr-section + .okr-section {
             margin-top: 1.5rem;
@@ -350,15 +387,24 @@
             color: var(--text);
             font-weight: 600;
         }
-        .outcome-form {
-            display: grid;
-            grid-template-columns: minmax(8rem, 12rem) 1fr auto;
+        .proposed-task-outcome a {
+            color: var(--accent);
+            text-decoration: none;
+            font-weight: 600;
+        }
+        .proposed-task-outcome a:hover {
+            text-decoration: underline;
+        }
+        .proposed-task-actions {
+            display: flex;
             gap: 0.5rem;
-            align-items: end;
+            flex-wrap: wrap;
             margin-top: 0.7rem;
         }
-        .outcome-form textarea {
-            min-height: 2.35rem;
+        .hidden-task-count {
+            margin: 0.65rem 0 0;
+            color: var(--text-faint);
+            font-size: 0.82rem;
         }
         .empty {
             text-align: center;
@@ -375,6 +421,108 @@
             margin-top: 0.5rem;
         }
         {% include "_settings_dialog_styles.html" %}
+        dialog.new-session .new-session-field {
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+        }
+        dialog.new-session [hidden] {
+            display: none !important;
+        }
+        dialog.new-session .new-session-prompt-row {
+            display: grid;
+            grid-template-columns: 2.6rem minmax(0, 1fr);
+            align-items: start;
+            gap: 0.5rem;
+        }
+        dialog.new-session .new-session-prompt-row textarea {
+            width: 100%;
+        }
+        dialog.new-session .new-session-command {
+            position: relative;
+        }
+        dialog.new-session .slash-trigger {
+            width: 2.6rem;
+            min-width: 2.6rem;
+            height: 2.6rem;
+            padding: 0;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--surface);
+            color: var(--text-muted);
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            font: inherit;
+            font-size: 1.1rem;
+            font-weight: 700;
+            line-height: 1;
+            cursor: pointer;
+            transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+        }
+        dialog.new-session .slash-trigger:hover,
+        dialog.new-session .slash-trigger[aria-expanded="true"] {
+            background: var(--surface-2);
+            border-color: var(--accent);
+            color: var(--text);
+        }
+        dialog.new-session form[data-plan-mode="true"] .slash-trigger {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: var(--accent-fg);
+        }
+        dialog.new-session .slash-menu {
+            position: absolute;
+            left: 0;
+            top: calc(100% + 0.4rem);
+            z-index: 35;
+            width: min(18rem, calc(100vw - 2rem));
+            padding: 0.35rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--surface);
+            box-shadow: var(--shadow-lg);
+        }
+        dialog.new-session .slash-menu[hidden] { display: none; }
+        dialog.new-session .slash-menu button {
+            width: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            gap: 0.15rem;
+            min-height: 0;
+            padding: 0.55rem 0.65rem;
+            border: 0;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text);
+            text-align: left;
+            font: inherit;
+            cursor: pointer;
+        }
+        dialog.new-session .slash-menu button:hover,
+        dialog.new-session .slash-menu button:focus {
+            outline: none;
+            background: var(--surface-2);
+        }
+        dialog.new-session .slash-menu button[aria-checked="true"] {
+            background: var(--accent-soft);
+        }
+        dialog.new-session .slash-menu-title {
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+        dialog.new-session .empty-repos {
+            color: var(--text-muted);
+            font-size: 0.82rem;
+            margin: 0;
+            font-weight: 400;
+        }
+        .reject-task-title {
+            margin: 0;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
         @media (max-width: 480px) {
             .topbar-inner { padding: 0.7rem 1rem; }
             .account-label { max-width: 7rem; }
@@ -383,10 +531,12 @@
                 flex-direction: column;
                 gap: 0.35rem;
             }
+            .page-header-actions {
+                align-items: flex-start;
+                justify-content: flex-start;
+            }
             .project-name { white-space: normal; }
-            .key-result-head-row,
-            .outcome-form {
-                grid-template-columns: 1fr;
+            .key-result-head-row {
                 flex-direction: column;
             }
             .key-result-actions {
@@ -401,6 +551,7 @@
             }
         }
     </style>
+    <script>document.documentElement.classList.add("js");</script>
 </head>
 <body>
     <header class="topbar">
@@ -425,7 +576,16 @@
             <div class="page-header">
                 <h2 id="okrs-title">Objectives and key results</h2>
                 {% if current_project %}
-                <p class="project-name">{{ current_project.name }}</p>
+                <div class="page-header-actions">
+                    <form class="hidden-task-toggle-form" method="get" action="{% url 'okrs' %}" data-hidden-task-toggle-form>
+                        <label class="hidden-task-toggle">
+                            <input type="checkbox" name="show_hidden_tasks" value="1" data-hidden-task-toggle{% if show_hidden_tasks %} checked{% endif %}>
+                            Show hidden tasks
+                        </label>
+                        <button type="submit" class="hidden-task-toggle-submit" data-hidden-task-toggle-submit>Apply</button>
+                    </form>
+                    <p class="project-name">{{ current_project.name }}</p>
+                </div>
                 {% endif %}
             </div>
             {% if current_project %}
@@ -492,9 +652,9 @@
                                 {% if key_result.task_generation_workflow.state.error %}- {{ key_result.task_generation_workflow.state.error }}{% endif %}
                             </p>
                             {% endif %}
-                            {% if key_result.proposed_tasks.all %}
+                            {% if key_result.visible_proposed_tasks %}
                             <ul class="proposed-task-list">
-                                {% for task in key_result.proposed_tasks.all %}
+                                {% for task in key_result.visible_proposed_tasks %}
                                 <li class="proposed-task">
                                     <h5>{{ task.title }}</h5>
                                     {% if task.description %}
@@ -506,25 +666,49 @@
                                     {% if task.rationale %}
                                     <p><strong>Rationale:</strong> {{ task.rationale }}</p>
                                     {% endif %}
-                                    <form class="outcome-form" method="post" action="{% url 'update_proposed_task_outcome' task.pk %}">
-                                        {% csrf_token %}
-                                        <label class="field">
-                                            Outcome
-                                            <select name="outcome_status">
-                                                {% for status_value, status_label in proposed_task_outcome_choices %}
-                                                <option value="{{ status_value }}"{% if status_value == task.outcome_status %} selected{% endif %}>{{ status_label }}</option>
-                                                {% endfor %}
-                                            </select>
-                                        </label>
-                                        <label class="field">
-                                            Notes
-                                            <textarea name="outcome_notes">{{ task.outcome_notes }}</textarea>
-                                        </label>
-                                        <button type="submit" class="button secondary">Save</button>
-                                    </form>
+                                    {% if task.outcome_status %}
+                                    <p class="proposed-task-outcome">
+                                        <strong>Outcome:</strong> {{ task.get_outcome_status_display }}
+                                        {% if task.pr_url %}
+                                        - <a href="{{ task.pr_url }}" target="_blank" rel="noopener noreferrer">Open PR</a>
+                                        {% endif %}
+                                    </p>
+                                    {% if task.session %}
+                                    <p class="proposed-task-outcome">
+                                        <strong>Session:</strong>
+                                        <a href="{% url 'session' task.session.thread_id %}">{{ task.session.thread_id }}</a>
+                                    </p>
+                                    {% endif %}
+                                    {% if task.outcome_notes %}
+                                    <p>
+                                        <strong>{% if task.outcome_status == proposed_task_rejected_status %}Reject reason{% else %}Outcome notes{% endif %}:</strong>
+                                        {{ task.outcome_notes }}
+                                    </p>
+                                    {% endif %}
+                                    {% else %}
+                                    <div class="proposed-task-actions">
+                                        <button
+                                            type="button"
+                                            class="button"
+                                            data-proposed-task-do
+                                            data-proposed-task-id="{{ task.pk }}"
+                                            data-proposed-task-prompt="{{ task.session_prompt }}"
+                                        >Do it</button>
+                                        <button
+                                            type="button"
+                                            class="button secondary"
+                                            data-proposed-task-reject
+                                            data-reject-url="{% url 'update_proposed_task_outcome' task.pk %}"
+                                            data-task-title="{{ task.title }}"
+                                        >Reject</button>
+                                    </div>
+                                    {% endif %}
                                 </li>
                                 {% endfor %}
                             </ul>
+                            {% endif %}
+                            {% if key_result.hidden_proposed_task_count and not show_hidden_tasks %}
+                            <p class="hidden-task-count">{{ key_result.hidden_proposed_task_count }} hidden task{{ key_result.hidden_proposed_task_count|pluralize }}</p>
                             {% endif %}
                         </li>
                         {% endfor %}
@@ -562,6 +746,82 @@
         {% endif %}
     </main>
     {% include "_settings_dialog.html" %}
+    <dialog class="new-session" data-new-session-dialog aria-labelledby="new-session-title">
+        <form method="post" action="{{ new_session_url }}">
+            {% csrf_token %}
+            <input type="hidden" name="plan_mode" value="" data-plan-mode-input>
+            <input type="hidden" name="proposed_task" value="" data-proposed-task-input>
+            <h2 id="new-session-title">Start a new session</h2>
+            <div class="new-session-field">
+                <label for="new-session-prompt">Prompt</label>
+                <div class="new-session-prompt-row">
+                    <div class="new-session-command" data-slash-command>
+                        <button type="button" class="slash-trigger" aria-label="Slash commands" aria-haspopup="menu" aria-expanded="false" aria-pressed="false" data-slash-trigger>/</button>
+                        <div class="slash-menu" role="menu" data-slash-menu hidden>
+                            <button type="button" role="menuitemcheckbox" aria-checked="false" data-slash-plan>
+                                <span class="slash-menu-title">Plan mode</span>
+                            </button>
+                        </div>
+                    </div>
+                    <textarea id="new-session-prompt" name="prompt" required autocomplete="off" placeholder="Describe what you want the agent to do..."></textarea>
+                </div>
+            </div>
+            <label>
+                Project
+                <select name="project" required data-new-session-project>
+                    {% for project in new_session_projects %}
+                    <option
+                        value="{{ project.pk }}"{% if project.pk == current_new_session_project_id %} selected{% endif %}
+                        data-auto-pr-default="{% if project.auto_pr_mode == project_auto_pr_on %}true{% elif project.auto_pr_mode == project_auto_pr_off %}false{% elif current_auto_pr %}true{% else %}false{% endif %}"
+                    >{{ project.name }}</option>
+                    {% endfor %}
+                    <option
+                        value="{{ bare_repo_project_value }}"{% if not current_new_session_project_id %} selected{% endif %}
+                        data-auto-pr-default="{% if current_auto_pr %}true{% else %}false{% endif %}"
+                    >&lt;bare repo&gt;</option>
+                </select>
+            </label>
+            <div class="new-session-field" data-new-session-repo-field {% if current_new_session_project_id %}hidden{% endif %}>
+                <label for="new-session-cwd">Repository</label>
+                {% if repos %}
+                <select id="new-session-cwd" name="cwd" required data-new-session-repo>
+                    {% for repo in repos %}
+                    <option value="{{ repo }}"{% if repo == current_repo %} selected{% endif %}>{{ repo }}</option>
+                    {% endfor %}
+                </select>
+                {% else %}
+                <select id="new-session-cwd" name="cwd" required disabled data-new-session-repo></select>
+                <p class="empty-repos">No git repositories found within two levels of your home directory.</p>
+                {% endif %}
+            </div>
+            <label class="checkbox-label">
+                <span>Auto-PR</span>
+                <input type="hidden" name="auto_pr" value="false">
+                <input type="checkbox" name="auto_pr" value="true" data-new-session-auto-pr {% if current_new_session_auto_pr %}checked{% endif %}>
+            </label>
+            <div class="actions">
+                <button type="button" class="button secondary" data-new-session-cancel>Cancel</button>
+                <button type="submit" class="button" data-new-session-submit {% if not repos %}disabled{% endif %}>Start session</button>
+            </div>
+        </form>
+    </dialog>
+    <dialog class="new-session" data-reject-task-dialog aria-labelledby="reject-task-title">
+        <form method="post" data-reject-task-form>
+            {% csrf_token %}
+            <input type="hidden" name="outcome_status" value="{{ proposed_task_rejected_status }}">
+            <input type="hidden" name="show_hidden_tasks" value="{% if show_hidden_tasks %}1{% endif %}">
+            <h2 id="reject-task-title">Reject task</h2>
+            <p class="reject-task-title" data-reject-task-title></p>
+            <label>
+                Reason
+                <textarea name="reason" required autocomplete="off"></textarea>
+            </label>
+            <div class="actions">
+                <button type="button" class="button secondary" data-reject-task-cancel>Cancel</button>
+                <button type="submit" class="button">Submit</button>
+            </div>
+        </form>
+    </dialog>
     <script>
         (function () {
             const modalScrollLockClass = "modal-scroll-locked";
@@ -593,6 +853,218 @@
             }
 
             {% include "_primary_nav_script.html" %}
+            const newSessionDialog = document.querySelector("[data-new-session-dialog]");
+            const newSessionOpenButtons = document.querySelectorAll("[data-new-session-open]");
+            const newSessionCancel = newSessionDialog && newSessionDialog.querySelector("[data-new-session-cancel]");
+            const newSessionForm = newSessionDialog && newSessionDialog.querySelector("form");
+            const newSessionSubmit = newSessionDialog && newSessionDialog.querySelector("[data-new-session-submit]");
+            const newSessionInput = newSessionForm && newSessionForm.querySelector("textarea[name='prompt']");
+            const proposedTaskInput = newSessionForm && newSessionForm.querySelector("[data-proposed-task-input]");
+            const newSessionPlanModeInput = newSessionForm && newSessionForm.querySelector("[data-plan-mode-input]");
+            const newSessionProjectSelect = newSessionForm && newSessionForm.querySelector("[data-new-session-project]");
+            const newSessionRepoField = newSessionForm && newSessionForm.querySelector("[data-new-session-repo-field]");
+            const newSessionRepoSelect = newSessionForm && newSessionForm.querySelector("[data-new-session-repo]");
+            const newSessionAutoPr = newSessionForm && newSessionForm.querySelector("[data-new-session-auto-pr]");
+            const newSessionSlashCommand = newSessionForm && newSessionForm.querySelector("[data-slash-command]");
+            const newSessionSlashTrigger = newSessionForm && newSessionForm.querySelector("[data-slash-trigger]");
+            const newSessionSlashMenu = newSessionForm && newSessionForm.querySelector("[data-slash-menu]");
+            const newSessionSlashPlan = newSessionForm && newSessionForm.querySelector("[data-slash-plan]");
+            const bareRepoProjectValue = "{{ bare_repo_project_value|escapejs }}";
+            const prPrompt = "{{ pr_slash_prompt|escapejs }}";
+
+            function isSuperEnter(event) {
+                const hasSuper = event.metaKey
+                    || (event.getModifierState && event.getModifierState("Meta"))
+                    || (event.getModifierState && event.getModifierState("OS"));
+                return event.key === "Enter" && hasSuper;
+            }
+            function requestSubmit(form, submitter) {
+                if (!form || !submitter || submitter.disabled) return;
+                if (typeof form.requestSubmit === "function") {
+                    form.requestSubmit(submitter);
+                } else {
+                    submitter.click();
+                }
+            }
+            function syncNewSessionProjectFields() {
+                if (!newSessionProjectSelect) return;
+                const bareRepoSelected = newSessionProjectSelect.value === bareRepoProjectValue;
+                if (newSessionRepoField) newSessionRepoField.hidden = !bareRepoSelected;
+                if (newSessionRepoSelect) newSessionRepoSelect.required = bareRepoSelected;
+                if (newSessionAutoPr) {
+                    const option = newSessionProjectSelect.selectedOptions && newSessionProjectSelect.selectedOptions[0];
+                    newSessionAutoPr.checked = option && option.dataset.autoPrDefault === "true";
+                }
+            }
+            function setNewSessionPlanMode(enabled) {
+                if (!newSessionForm) return;
+                newSessionForm.dataset.planMode = enabled ? "true" : "false";
+                if (newSessionPlanModeInput) newSessionPlanModeInput.value = enabled ? "true" : "";
+                if (newSessionSlashTrigger) newSessionSlashTrigger.setAttribute("aria-pressed", enabled ? "true" : "false");
+                if (newSessionSlashPlan) newSessionSlashPlan.setAttribute("aria-checked", enabled ? "true" : "false");
+            }
+            function closeNewSessionSlashMenu() {
+                if (!newSessionSlashMenu || !newSessionSlashTrigger) return;
+                newSessionSlashMenu.hidden = true;
+                newSessionSlashTrigger.setAttribute("aria-expanded", "false");
+            }
+            function openNewSessionSlashMenu() {
+                if (!newSessionSlashMenu || !newSessionSlashTrigger) return;
+                newSessionSlashMenu.hidden = false;
+                newSessionSlashTrigger.setAttribute("aria-expanded", "true");
+            }
+            function parseNewSessionPlanCommand() {
+                if (!newSessionInput) return null;
+                const text = newSessionInput.value.trim();
+                const parts = text.split(/\s+/, 2);
+                if ((parts[0] || "").toLowerCase() !== "/plan") return null;
+                return text.slice(parts[0].length).trim();
+            }
+            function parseNewSessionPrCommand() {
+                if (!newSessionInput) return null;
+                const text = newSessionInput.value.trim();
+                const parts = text.split(/\s+/, 2);
+                if ((parts[0] || "").toLowerCase() !== "/pr") return null;
+                return prPrompt;
+            }
+            function openNewSessionDialog(prompt, proposedTaskId) {
+                syncNewSessionProjectFields();
+                setNewSessionPlanMode(false);
+                if (newSessionInput && typeof prompt === "string") newSessionInput.value = prompt;
+                if (proposedTaskInput) proposedTaskInput.value = proposedTaskId || "";
+                showDialog(newSessionDialog);
+                if (newSessionInput) newSessionInput.focus();
+            }
+            setNewSessionPlanMode(false);
+            syncNewSessionProjectFields();
+            if (newSessionDialog) {
+                newSessionDialog.addEventListener("close", closeNewSessionSlashMenu);
+            }
+            if (newSessionCancel) newSessionCancel.addEventListener("click", () => hideDialog(newSessionDialog));
+            if (newSessionSlashTrigger && newSessionSlashMenu) {
+                newSessionSlashTrigger.addEventListener("click", () => {
+                    if (newSessionSlashMenu.hidden) {
+                        openNewSessionSlashMenu();
+                    } else {
+                        closeNewSessionSlashMenu();
+                    }
+                });
+            }
+            if (newSessionSlashPlan) {
+                newSessionSlashPlan.addEventListener("click", () => {
+                    const enabled = newSessionForm && newSessionForm.dataset.planMode !== "true";
+                    setNewSessionPlanMode(Boolean(enabled));
+                    if (enabled && newSessionInput && newSessionInput.value.trim() === "/") {
+                        newSessionInput.value = "";
+                    }
+                    closeNewSessionSlashMenu();
+                    if (newSessionInput) newSessionInput.focus();
+                });
+            }
+            document.addEventListener("click", (event) => {
+                if (!newSessionSlashCommand || !newSessionSlashMenu || newSessionSlashMenu.hidden) return;
+                if (!newSessionSlashCommand.contains(event.target)) closeNewSessionSlashMenu();
+            });
+            document.addEventListener("keydown", (event) => {
+                if (event.key !== "Escape") return;
+                if (!newSessionSlashMenu || newSessionSlashMenu.hidden) return;
+                closeNewSessionSlashMenu();
+                if (newSessionSlashTrigger) newSessionSlashTrigger.focus();
+            });
+            if (newSessionInput) {
+                newSessionInput.addEventListener("input", () => {
+                    if (newSessionInput.value.trim() === "/") {
+                        openNewSessionSlashMenu();
+                    } else {
+                        closeNewSessionSlashMenu();
+                    }
+                });
+            }
+            if (newSessionProjectSelect) {
+                newSessionProjectSelect.addEventListener("change", syncNewSessionProjectFields);
+            }
+            if (newSessionForm) {
+                newSessionForm.addEventListener("keydown", (event) => {
+                    if (!isSuperEnter(event)) return;
+                    event.preventDefault();
+                    requestSubmit(newSessionForm, newSessionSubmit);
+                });
+                newSessionForm.addEventListener("submit", (event) => {
+                    const prCommandPrompt = parseNewSessionPrCommand();
+                    const commandPrompt = prCommandPrompt === null ? parseNewSessionPlanCommand() : null;
+                    if (prCommandPrompt !== null && newSessionInput) {
+                        setNewSessionPlanMode(false);
+                        newSessionInput.value = prCommandPrompt;
+                    } else if (commandPrompt !== null && newSessionInput) {
+                        setNewSessionPlanMode(true);
+                        newSessionInput.value = commandPrompt;
+                        if (!commandPrompt) {
+                            event.preventDefault();
+                            newSessionInput.focus();
+                        }
+                    }
+                });
+            }
+
+            function isPlainPrimaryClick(event) {
+                return event.button === 0
+                    && !event.altKey
+                    && !event.ctrlKey
+                    && !event.metaKey
+                    && !event.shiftKey;
+            }
+            function preserveHashForLink(target) {
+                if (!(target instanceof HTMLAnchorElement) || !target.hash) return;
+                const url = new URL(target.href);
+                if (url.origin === window.location.origin && url.pathname === window.location.pathname) {
+                    window.history.pushState(null, "", url.hash);
+                }
+            }
+            newSessionOpenButtons.forEach((btn) => btn.addEventListener("click", (event) => {
+                if (!isPlainPrimaryClick(event)) return;
+                event.preventDefault();
+                closeNavMenu();
+                preserveHashForLink(event.currentTarget);
+                openNewSessionDialog("", "");
+            }));
+            if (window.location.hash === "#new-session") {
+                openNewSessionDialog("", "");
+            }
+
+            document.querySelectorAll("[data-proposed-task-do]").forEach((button) => {
+                button.addEventListener("click", () => {
+                    openNewSessionDialog(
+                        button.dataset.proposedTaskPrompt || "",
+                        button.dataset.proposedTaskId || "",
+                    );
+                });
+            });
+
+            const rejectTaskDialog = document.querySelector("[data-reject-task-dialog]");
+            const rejectTaskForm = rejectTaskDialog && rejectTaskDialog.querySelector("[data-reject-task-form]");
+            const rejectTaskTitle = rejectTaskDialog && rejectTaskDialog.querySelector("[data-reject-task-title]");
+            const rejectTaskReason = rejectTaskForm && rejectTaskForm.querySelector("textarea[name='reason']");
+            const rejectTaskCancel = rejectTaskDialog && rejectTaskDialog.querySelector("[data-reject-task-cancel]");
+            document.querySelectorAll("[data-proposed-task-reject]").forEach((button) => {
+                button.addEventListener("click", () => {
+                    if (!rejectTaskDialog || !rejectTaskForm) return;
+                    rejectTaskForm.action = button.dataset.rejectUrl || "";
+                    if (rejectTaskTitle) rejectTaskTitle.textContent = button.dataset.taskTitle || "";
+                    if (rejectTaskReason) rejectTaskReason.value = "";
+                    showDialog(rejectTaskDialog);
+                    if (rejectTaskReason) rejectTaskReason.focus();
+                });
+            });
+            if (rejectTaskCancel) rejectTaskCancel.addEventListener("click", () => hideDialog(rejectTaskDialog));
+
+            const hiddenTaskToggleForm = document.querySelector("[data-hidden-task-toggle-form]");
+            const hiddenTaskToggle = document.querySelector("[data-hidden-task-toggle]");
+            const hiddenTaskToggleSubmit = document.querySelector("[data-hidden-task-toggle-submit]");
+            if (hiddenTaskToggleForm && hiddenTaskToggle && hiddenTaskToggleSubmit) {
+                hiddenTaskToggle.addEventListener("change", () => {
+                    requestSubmit(hiddenTaskToggleForm, hiddenTaskToggleSubmit);
+                });
+            }
         })();
     </script>
 </body>

@@ -619,7 +619,7 @@ def _okr_task_generation_prompt(
         "Use past proposed tasks and their outcomes to tailor the list to the "
         "user's feedback. Repeat patterns from accepted or completed tasks when "
         "they fit; avoid or adjust patterns from rejected or superseded tasks; "
-        "honor outcome notes over your own assumptions.\n\n"
+        "honor rejection reasons and outcome notes over your own assumptions.\n\n"
         f"Project: {project.name}\n"
         f"Repository cwd: {project.repo_path}\n\n"
         "Objective:\n"
@@ -666,6 +666,11 @@ def _prior_task_sections(
 
 
 def _format_proposed_task_context(key_result: KeyResult, task: ProposedTask) -> str:
+    notes_label = (
+        "Reject reason"
+        if task.outcome_status == ProposedTask.OUTCOME_REJECTED
+        else "Outcome notes"
+    )
     return (
         f"KR: {key_result.title}\n"
         f"Task: {task.title}\n"
@@ -673,7 +678,7 @@ def _format_proposed_task_context(key_result: KeyResult, task: ProposedTask) -> 
         f"Success criteria: {task.success_criteria or '(none)'}\n"
         f"Rationale: {task.rationale or '(none)'}\n"
         f"Outcome status: {task.outcome_status or '(not set)'}\n"
-        f"Outcome notes: {task.outcome_notes or '(none)'}"
+        f"{notes_label}: {task.outcome_notes or '(none)'}"
     )
 
 
