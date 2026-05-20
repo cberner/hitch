@@ -647,6 +647,22 @@ class PrQaWorkflowTests(TestCase):
         instance.refresh_from_db()
         self.assertIsNone(instance.auto_pr_triggered_at)
 
+    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    def test_auto_pr_claims_turn_before_starting_workflow(
+        self, mock_start: MagicMock
+    ) -> None:
+        instance = _instance(auto_pr_enabled=True)
+
+        def assert_claimed(**_kwargs: object) -> None:
+            instance.refresh_from_db()
+            self.assertIsNotNone(instance.auto_pr_triggered_at)
+
+        mock_start.side_effect = assert_claimed
+
+        system_agents.on_codex_instance_finished(instance)
+
+        mock_start.assert_called_once()
+
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_auto_pr_skips_completed_plan_mode_turn(self, mock_spawn: MagicMock) -> None:
         instance = _instance(auto_pr_enabled=True, plan_mode=True)
