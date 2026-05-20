@@ -11,6 +11,13 @@ urlpatterns = [
     path("login/", hitch.main.views.login, name="login"),
     path("logout/", hitch.main.views.logout, name="logout"),
     path("usage/", hitch.main.views.usage, name="usage"),
+    path("okrs/", hitch.main.views.okrs, name="okrs"),
+    path("okrs/objectives/", hitch.main.views.create_objective, name="create_objective"),
+    path(
+        "okrs/objectives/<int:objective_id>/key-results/",
+        hitch.main.views.create_key_result,
+        name="create_key_result",
+    ),
     path("settings/", hitch.main.views.update_settings, name="update_settings"),
     path(
         "settings/archived-sessions/",

@@ -39,6 +39,55 @@ class Project(models.Model):
         return self.name
 
 
+class Objective(models.Model):
+    """A project-level outcome that groups key results."""
+
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name="objectives",
+    )
+    title = models.CharField(max_length=200)
+    description = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        indexes = [
+            models.Index(fields=["project", "created_at"]),
+        ]
+
+    @override
+    def __str__(self) -> str:
+        return self.title
+
+
+class KeyResult(models.Model):
+    """A measurable result nested under an objective."""
+
+    objective = models.ForeignKey(
+        Objective,
+        on_delete=models.CASCADE,
+        related_name="key_results",
+    )
+    title = models.CharField(max_length=200)
+    description = models.TextField(blank=True, default="")
+    work_instructions = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        indexes = [
+            models.Index(fields=["objective", "created_at"]),
+        ]
+
+    @override
+    def __str__(self) -> str:
+        return self.title
+
+
 class SessionMetadata(models.Model):
     """Local metadata for a Codex thread that Hitch does not own on disk."""
 

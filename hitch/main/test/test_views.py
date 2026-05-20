@@ -25,6 +25,8 @@ from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
     CodexInstance,
+    KeyResult,
+    Objective,
     Project,
     SessionMetadata,
     SystemAgentRun,
@@ -903,6 +905,182 @@ class ProjectViewTests(TestCase):
             with self.subTest(message=message):
                 response = self.client.post(reverse("new_project"), data=data)
                 self.assertContains(response, message, status_code=400)
+
+
+class OKRModelTests(TestCase):
+    def test_project_objectives_and_key_results_cascade(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        objective = Objective.objects.create(project=project, title="Ship OKRs")
+        KeyResult.objects.create(objective=objective, title="Create UI")
+
+        project.delete()
+
+        self.assertEqual(Objective.objects.count(), 0)
+        self.assertEqual(KeyResult.objects.count(), 0)
+
+    def test_objective_and_key_result_string_values_are_titles(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        objective = Objective.objects.create(project=project, title="Ship OKRs")
+        key_result = KeyResult.objects.create(objective=objective, title="Create UI")
+
+        self.assertEqual(str(objective), "Ship OKRs")
+        self.assertEqual(str(key_result), "Create UI")
+
+
+class OKRViewTests(TestCase):
+    def _select_project(self, project: Project) -> None:
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+
+    @patch("hitch.main.views.Codex")
+    def test_okrs_page_lists_selected_project_objectives_with_nested_key_results(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex)
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other = Project.objects.create(name="Other", repo_path="/other")
+        objective = Objective.objects.create(
+            project=project,
+            title="Improve review flow",
+            description="Make PR reviews faster.",
+        )
+        KeyResult.objects.create(
+            objective=objective,
+            title="Open PR from session",
+            description="The workflow creates a pull request.",
+            work_instructions="Use the GitHub connector.",
+        )
+        Objective.objects.create(project=other, title="Hidden objective")
+        self._select_project(project)
+
+        response = self.client.get(reverse("okrs"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, f'href="{reverse("okrs")}" aria-current="page"')
+        self.assertContains(response, "Improve review flow")
+        self.assertContains(response, "Make PR reviews faster.")
+        self.assertContains(response, "Open PR from session")
+        self.assertContains(response, "Use the GitHub connector.")
+        self.assertContains(response, "Extra instructions to help generate and perform tasks.")
+        self.assertNotContains(response, "Hidden objective")
+
+    @patch("hitch.main.views.Codex")
+    def test_okrs_page_without_selected_project_has_no_create_forms(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex)
+        Project.objects.create(name="Hitch", repo_path="/repo")
+
+        response = self.client.get(reverse("okrs"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "No active project selected.")
+        self.assertNotContains(response, 'action="/okrs/objectives/"')
+        self.assertNotContains(response, ">OKRs</a>")
+
+    def test_create_objective_for_selected_project(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        self._select_project(project)
+
+        response = self.client.post(
+            reverse("create_objective"),
+            data={"title": "Improve planning", "description": "Make plans concrete."},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        objective = Objective.objects.get()
+        self.assertEqual(objective.project, project)
+        self.assertEqual(objective.title, "Improve planning")
+        self.assertEqual(objective.description, "Make plans concrete.")
+
+    def test_create_key_result_for_selected_project_objective(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        objective = Objective.objects.create(project=project, title="Improve planning")
+        self._select_project(project)
+
+        response = self.client.post(
+            reverse("create_key_result", kwargs={"objective_id": objective.pk}),
+            data={
+                "title": "Draft OKR plan",
+                "description": "The plan captures scope.",
+                "work_instructions": "Use concise task prompts.",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        key_result = KeyResult.objects.get()
+        self.assertEqual(key_result.objective, objective)
+        self.assertEqual(key_result.title, "Draft OKR plan")
+        self.assertEqual(key_result.description, "The plan captures scope.")
+        self.assertEqual(key_result.work_instructions, "Use concise task prompts.")
+
+    def test_create_key_result_rejects_objective_from_another_project(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other = Project.objects.create(name="Other", repo_path="/other")
+        objective = Objective.objects.create(project=other, title="Other objective")
+        self._select_project(project)
+
+        response = self.client.post(
+            reverse("create_key_result", kwargs={"objective_id": objective.pk}),
+            data={"title": "Should fail"},
+        )
+
+        self.assertContains(response, "objective is required", status_code=400)
+        self.assertEqual(KeyResult.objects.count(), 0)
+
+    def test_rejects_invalid_okr_posts(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        objective = Objective.objects.create(project=project, title="Objective")
+        self._select_project(project)
+
+        for url, data, message in (
+            (reverse("create_objective"), {"title": ""}, "title is required"),
+            (
+                reverse("create_objective"),
+                {"title": "x" * 201},
+                "title is too long",
+            ),
+            (
+                reverse("create_key_result", kwargs={"objective_id": objective.pk}),
+                {"title": ""},
+                "title is required",
+            ),
+        ):
+            with self.subTest(message=message):
+                response = self.client.post(url, data=data)
+                self.assertContains(response, message, status_code=400)
+
+    def test_rejects_create_without_active_project(self) -> None:
+        response = self.client.post(
+            reverse("create_objective"),
+            data={"title": "Improve planning"},
+        )
+
+        self.assertContains(response, "active project is required", status_code=400)
+
+    def test_rejects_key_result_create_without_active_project(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        objective = Objective.objects.create(project=project, title="Objective")
+
+        response = self.client.post(
+            reverse("create_key_result", kwargs={"objective_id": objective.pk}),
+            data={"title": "Improve planning"},
+        )
+
+        self.assertContains(response, "active project is required", status_code=400)
+
+    def test_rejects_out_of_range_objective_id_before_orm_lookup(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        self._select_project(project)
+
+        response = self.client.post(
+            reverse(
+                "create_key_result",
+                kwargs={"objective_id": views._MAX_BIGAUTOFIELD + 1},
+            ),
+            data={"title": "Should fail"},
+        )
+
+        self.assertContains(response, "objective is required", status_code=400)
 
 
 class NewSessionViewTests(TestCase):
