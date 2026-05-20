@@ -39,7 +39,9 @@ from hitch.main.models import (
     KeyResult,
     Objective,
     Project,
+    ProposedTask,
     SessionMetadata,
+    SystemWorkflow,
     UserInputRequest,
     UserSettings,
 )
@@ -424,6 +426,7 @@ def usage(request: HttpRequest) -> HttpResponse:
 
 @require_http_methods(["GET"])
 def okrs(request: HttpRequest) -> HttpResponse:
+    codex_pool.reconcile_dead()
     initial_settings = _stored_settings(request)
     config = codex_pool.app_server_config(
         enable_memories=initial_settings.enable_memories
@@ -437,12 +440,13 @@ def okrs(request: HttpRequest) -> HttpResponse:
     objectives = (
         list(
             Objective.objects.filter(project=current_project).prefetch_related(
-                "key_results"
+                "key_results__proposed_tasks"
             )
         )
         if current_project is not None
         else []
     )
+    _attach_okr_task_generation_state(objectives)
     settings_dialog_context = _settings_dialog_context(current_settings, models_data)
     response = render(
         request,
@@ -452,6 +456,7 @@ def okrs(request: HttpRequest) -> HttpResponse:
             "register_url": reverse("register"),
             "objectives": objectives,
             "objective_create_url": reverse("create_objective"),
+            "proposed_task_outcome_choices": ProposedTask.OUTCOME_CHOICES,
             "title_max_len": _OKR_TITLE_MAX_LEN,
             **settings_dialog_context,
         },
@@ -505,6 +510,84 @@ def create_key_result(request: HttpRequest, objective_id: int) -> HttpResponse:
         work_instructions=request.POST.get("work_instructions", "").strip(),
     )
     return redirect("okrs")
+
+
+@require_http_methods(["POST"])
+def generate_key_result_tasks(request: HttpRequest, key_result_id: int) -> HttpResponse:
+    project = _active_project_from_request(request)
+    if project is None:
+        return HttpResponseBadRequest("active project is required")
+    if key_result_id < 1 or key_result_id > _MAX_BIGAUTOFIELD:
+        return HttpResponseBadRequest("key result is required")
+    key_result = (
+        KeyResult.objects.select_related("objective__project")
+        .filter(pk=key_result_id, objective__project=project)
+        .first()
+    )
+    if key_result is None:
+        return HttpResponseBadRequest("key result is required")
+    try:
+        system_agents.start_okr_task_generation_workflow(key_result=key_result)
+    except KeyResult.DoesNotExist:
+        return HttpResponseBadRequest("key result is required")
+    return redirect("okrs")
+
+
+@require_http_methods(["POST"])
+def update_proposed_task_outcome(request: HttpRequest, task_id: int) -> HttpResponse:
+    project = _active_project_from_request(request)
+    if project is None:
+        return HttpResponseBadRequest("active project is required")
+    if task_id < 1 or task_id > _MAX_BIGAUTOFIELD:
+        return HttpResponseBadRequest("proposed task is required")
+    task = (
+        ProposedTask.objects.select_related("key_result__objective__project")
+        .filter(pk=task_id, key_result__objective__project=project)
+        .first()
+    )
+    if task is None:
+        return HttpResponseBadRequest("proposed task is required")
+    outcome_status = request.POST.get("outcome_status", "")
+    valid_statuses = {choice[0] for choice in ProposedTask.OUTCOME_CHOICES}
+    if outcome_status not in valid_statuses:
+        return HttpResponseBadRequest("outcome status is invalid")
+    task.outcome_status = outcome_status
+    task.outcome_notes = request.POST.get("outcome_notes", "").strip()
+    task.save(update_fields=["outcome_status", "outcome_notes", "updated_at"])
+    return redirect("okrs")
+
+
+def _attach_okr_task_generation_state(objectives: list[Objective]) -> None:
+    key_result_ids = [
+        key_result.pk
+        for objective in objectives
+        for key_result in objective.key_results.all()
+    ]
+    if not key_result_ids:
+        return
+    workflows = (
+        SystemWorkflow.objects.filter(
+            kind=system_agents.OKR_TASK_AGENT_KIND,
+            main_thread_id__in=[
+                system_agents._okr_task_main_thread_id(key_result_id)
+                for key_result_id in key_result_ids
+            ],
+        )
+        .order_by("main_thread_id", "-created_at")
+    )
+    workflows_by_thread: dict[str, SystemWorkflow] = {}
+    for workflow in workflows:
+        workflows_by_thread.setdefault(workflow.main_thread_id, workflow)
+    for objective in objectives:
+        for key_result in objective.key_results.all():
+            latest_workflow: SystemWorkflow | None = workflows_by_thread.get(
+                system_agents._okr_task_main_thread_id(key_result.pk)
+            )
+            key_result.task_generation_workflow = latest_workflow  # type: ignore[attr-defined]
+            key_result.task_generation_running = (  # type: ignore[attr-defined]
+                latest_workflow is not None
+                and latest_workflow.status == SystemWorkflow.STATUS_RUNNING
+            )
 
 
 def session(request: HttpRequest, session_id: str) -> HttpResponse:

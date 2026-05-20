@@ -18,6 +18,16 @@ urlpatterns = [
         hitch.main.views.create_key_result,
         name="create_key_result",
     ),
+    path(
+        "okrs/key-results/<int:key_result_id>/generate-tasks/",
+        hitch.main.views.generate_key_result_tasks,
+        name="generate_key_result_tasks",
+    ),
+    path(
+        "okrs/proposed-tasks/<int:task_id>/outcome/",
+        hitch.main.views.update_proposed_task_outcome,
+        name="update_proposed_task_outcome",
+    ),
     path("settings/", hitch.main.views.update_settings, name="update_settings"),
     path(
         "settings/archived-sessions/",

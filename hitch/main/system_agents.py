@@ -13,12 +13,14 @@ from openai_codex.generated.v2_all import ThreadSource
 
 from hitch.main import codex_pool
 from hitch.main.diffs import build_worktree_diff_text
-from hitch.main.models import CodexInstance, SystemAgentRun, SystemWorkflow
+from hitch.main.models import CodexInstance, KeyResult, ProposedTask, SystemAgentRun, SystemWorkflow
 
 logger = logging.getLogger(__name__)
 
 PR_QA_AGENT_KIND = "pr_qa"
+OKR_TASK_AGENT_KIND = SystemWorkflow.KIND_OKR_TASK_GENERATION
 QA_DISPLAY_AUTHOR = "QA agent"
+OKR_TASK_DISPLAY_AUTHOR = "Task planning agent"
 PR_SLASH_DISPLAY_PROMPT = (
     "Do a thorough review of the diff. Rebase on master, clean it up, "
     "and then open a PR"
@@ -39,6 +41,11 @@ STEP_FEEDBACK_RUNNING = "feedback_running"
 STEP_BLOCKED = "blocked"
 STEP_MAX_ITERATIONS_REACHED = "max_iterations_reached"
 STEP_PR_PROMPT_SPAWNED = "pr_prompt_spawned"
+STEP_OKR_TASKS_RUNNING = "okr_tasks_running"
+STEP_OKR_TASKS_SAVED = "okr_tasks_saved"
+
+_OKR_TASK_INLINE_CONTEXT_CHARS = 14_000
+_OKR_TASK_TITLE_MAX_LEN = 200
 
 _QA_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -47,6 +54,33 @@ _QA_OUTPUT_SCHEMA: dict[str, Any] = {
     "properties": {
         "feedback": {"type": "string"},
         "lgtm": {"type": "boolean"},
+    },
+}
+
+_OKR_TASK_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["tasks"],
+    "properties": {
+        "tasks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "title",
+                    "description",
+                    "success_criteria",
+                    "rationale",
+                ],
+                "properties": {
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "success_criteria": {"type": "string"},
+                    "rationale": {"type": "string"},
+                },
+            },
+        }
     },
 }
 
@@ -117,6 +151,44 @@ def start_pr_qa_workflow(
         _spawn_pr_qa_run(workflow)
     except Exception as exc:
         _block_workflow(workflow, f"failed to start QA agent: {exc!r}")
+    return workflow
+
+
+def start_okr_task_generation_workflow(*, key_result: KeyResult) -> SystemWorkflow:
+    key_result = (
+        KeyResult.objects.select_related("objective__project")
+        .filter(pk=key_result.pk)
+        .get()
+    )
+    main_thread_id = _okr_task_main_thread_id(key_result.pk)
+    try:
+        with transaction.atomic():
+            workflow = SystemWorkflow.objects.create(
+                kind=OKR_TASK_AGENT_KIND,
+                main_thread_id=main_thread_id,
+                cwd=key_result.objective.project.repo_path,
+                status=SystemWorkflow.STATUS_RUNNING,
+                step=STEP_OKR_TASKS_RUNNING,
+                state={"key_result_id": key_result.pk},
+            )
+    except IntegrityError:
+        existing_workflow = SystemWorkflow.objects.filter(
+            kind=OKR_TASK_AGENT_KIND,
+            main_thread_id=main_thread_id,
+            status=SystemWorkflow.STATUS_RUNNING,
+        ).first()
+        if existing_workflow is None:
+            raise
+        return existing_workflow
+
+    try:
+        _spawn_okr_task_generation_run(workflow, key_result)
+    except Exception as exc:
+        _block_workflow(
+            workflow,
+            f"failed to start task planning agent: {exc!r}",
+            surface_to_thread=False,
+        )
     return workflow
 
 
@@ -213,6 +285,9 @@ def _handle_system_agent_finished(instance: CodexInstance) -> None:
     if run.status in (SystemAgentRun.STATUS_COMPLETED, SystemAgentRun.STATUS_FAILED):
         return
     workflow = run.workflow
+    if workflow.kind == OKR_TASK_AGENT_KIND:
+        _handle_okr_task_agent_finished(instance, run, workflow)
+        return
     if workflow.kind != SystemWorkflow.KIND_PR_QA:
         return
     if (
@@ -290,6 +365,68 @@ def _handle_system_feedback_finished(instance: CodexInstance) -> None:
         _block_workflow(workflow, f"failed to restart QA agent: {exc!r}")
 
 
+def _handle_okr_task_agent_finished(
+    instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
+) -> None:
+    if (
+        workflow.status != SystemWorkflow.STATUS_RUNNING
+        or workflow.step != STEP_OKR_TASKS_RUNNING
+    ):
+        return
+    if instance.status != CodexInstance.STATUS_COMPLETED:
+        _fail_run_and_block_workflow(
+            run,
+            f"task planning worker failed: {instance.error}",
+            surface_to_thread=False,
+        )
+        return
+
+    raw_output = _final_agent_text(instance.events_path)
+    parsed = _parse_okr_task_output(raw_output)
+    if parsed is None:
+        _fail_run_and_block_workflow(
+            run,
+            "task planning output was not valid JSON",
+            raw_output,
+            surface_to_thread=False,
+        )
+        return
+
+    key_result = (
+        KeyResult.objects.select_related("objective__project")
+        .filter(pk=_state_int(workflow, "key_result_id"))
+        .first()
+    )
+    if key_result is None:
+        _fail_run_and_block_workflow(
+            run,
+            "task planning key result no longer exists",
+            raw_output,
+            surface_to_thread=False,
+        )
+        return
+
+    with transaction.atomic():
+        for idx, task in enumerate(parsed["tasks"]):
+            ProposedTask.objects.create(
+                key_result=key_result,
+                source_workflow=workflow,
+                title=task["title"][:_OKR_TASK_TITLE_MAX_LEN],
+                description=task["description"],
+                success_criteria=task["success_criteria"],
+                rationale=task["rationale"],
+                sort_order=idx,
+            )
+        run.status = SystemAgentRun.STATUS_COMPLETED
+        run.output = parsed
+        run.raw_output = raw_output
+        run.save(update_fields=["status", "output", "raw_output", "updated_at"])
+        workflow.status = SystemWorkflow.STATUS_COMPLETED
+        workflow.step = STEP_OKR_TASKS_SAVED
+        workflow.state = {**workflow.state, "saved_task_count": len(parsed["tasks"])}
+        workflow.save(update_fields=["status", "step", "state", "updated_at"])
+
+
 def _spawn_pr_qa_run(workflow: SystemWorkflow) -> SystemAgentRun:
     diff_text = build_worktree_diff_text(workflow.cwd)
     prompt = _qa_prompt(workflow.cwd, diff_text)
@@ -317,6 +454,41 @@ def _spawn_pr_qa_run(workflow: SystemWorkflow) -> SystemAgentRun:
             "thread_id": instance.thread_id,
             "status": SystemAgentRun.STATUS_RUNNING,
             "input": {"cwd": workflow.cwd, "diff_chars": len(diff_text)},
+        },
+    )
+    return run
+
+
+def _spawn_okr_task_generation_run(
+    workflow: SystemWorkflow, key_result: KeyResult
+) -> SystemAgentRun:
+    prompt, context_files = _okr_task_generation_prompt(workflow, key_result)
+    if context_files:
+        workflow.state = {**workflow.state, "context_files": context_files}
+        workflow.save(update_fields=["state", "updated_at"])
+    instance = codex_pool.spawn_new_session(
+        cwd=workflow.cwd,
+        prompt=prompt,
+        approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
+        thread_source=ThreadSource.subagent,
+        purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        workflow_id=workflow.pk,
+        agent_kind=OKR_TASK_AGENT_KIND,
+        display_author=OKR_TASK_DISPLAY_AUTHOR,
+        output_schema=_OKR_TASK_OUTPUT_SCHEMA,
+    )
+    run, _created = SystemAgentRun.objects.get_or_create(
+        instance=instance,
+        defaults={
+            "workflow": workflow,
+            "agent_kind": OKR_TASK_AGENT_KIND,
+            "thread_id": instance.thread_id,
+            "status": SystemAgentRun.STATUS_RUNNING,
+            "input": {
+                "cwd": workflow.cwd,
+                "key_result_id": key_result.pk,
+                "context_files": context_files,
+            },
         },
     )
     return run
@@ -412,6 +584,124 @@ def _qa_prompt(cwd: str, diff_text: str) -> str:
     )
 
 
+def _okr_task_generation_prompt(
+    workflow: SystemWorkflow, key_result: KeyResult
+) -> tuple[str, list[str]]:
+    objective = key_result.objective
+    project = objective.project
+    sibling_key_results = list(
+        objective.key_results.prefetch_related("proposed_tasks").order_by(
+            "created_at", "id"
+        )
+    )
+    prior_task_sections = _prior_task_sections(key_result, sibling_key_results)
+    inline_prior, overflow_prior = _split_task_context(prior_task_sections)
+    context_files = _write_okr_task_context_files(workflow, overflow_prior)
+    context_file_text = (
+        "\n".join(f"- {path}" for path in context_files) if context_files else "(none)"
+    )
+    sibling_text = "\n".join(
+        _format_key_result_context(kr, is_target=(kr.pk == key_result.pk))
+        for kr in sibling_key_results
+    )
+    return (
+        "You are Hitch's task planning agent for an OKR workflow.\n\n"
+        "Act like a senior software engineering manager doing practical planning "
+        "for a general software project. Create a task list that accomplishes "
+        "the target key result, supports the objective, and must not regress the "
+        "other key results in the same objective.\n\n"
+        "Split tasks into small, but logically consistent pieces. For example, "
+        "for a blogging platform, one task might be the tagging system, another "
+        "might be a basic comment implementation, with a follow-on task to add "
+        "rich text to the comments. Avoid both vague umbrella tasks and tiny "
+        "implementation chores that would not stand alone as meaningful work.\n\n"
+        "Use past proposed tasks and their outcomes to tailor the list to the "
+        "user's feedback. Repeat patterns from accepted or completed tasks when "
+        "they fit; avoid or adjust patterns from rejected or superseded tasks; "
+        "honor outcome notes over your own assumptions.\n\n"
+        f"Project: {project.name}\n"
+        f"Repository cwd: {project.repo_path}\n\n"
+        "Objective:\n"
+        f"Title: {objective.title}\n"
+        f"Description: {objective.description or '(none)'}\n\n"
+        "Key results in this objective:\n"
+        f"{sibling_text or '(none)'}\n\n"
+        "Past proposed tasks and outcomes included inline:\n"
+        f"{inline_prior or '(none)'}\n\n"
+        "Additional past proposed task context files:\n"
+        f"{context_file_text}\n\n"
+        "Return only JSON matching this shape: "
+        '{"tasks": [{"title": string, "description": string, '
+        '"success_criteria": string, "rationale": string}]}. '
+        "Each title must be concise. Each description should explain the work "
+        "without assuming a specific framework unless the OKR context does. "
+        "Success criteria should be observable completion checks."
+    ), context_files
+
+
+def _format_key_result_context(key_result: KeyResult, *, is_target: bool) -> str:
+    label = "Target KR" if is_target else "Sibling KR"
+    return (
+        f"- {label}: {key_result.title}\n"
+        f"  Description: {key_result.description or '(none)'}\n"
+        f"  Work instructions: {key_result.work_instructions or '(none)'}"
+    )
+
+
+def _prior_task_sections(
+    target_key_result: KeyResult, key_results: list[KeyResult]
+) -> list[tuple[bool, str]]:
+    sections: list[tuple[bool, str]] = []
+    for key_result in key_results:
+        for task in key_result.proposed_tasks.all():
+            important = (
+                key_result.pk == target_key_result.pk
+                or bool(task.outcome_status)
+                or bool(task.outcome_notes.strip())
+            )
+            sections.append((important, _format_proposed_task_context(key_result, task)))
+    sections.sort(key=lambda item: (not item[0],))
+    return sections
+
+
+def _format_proposed_task_context(key_result: KeyResult, task: ProposedTask) -> str:
+    return (
+        f"KR: {key_result.title}\n"
+        f"Task: {task.title}\n"
+        f"Description: {task.description or '(none)'}\n"
+        f"Success criteria: {task.success_criteria or '(none)'}\n"
+        f"Rationale: {task.rationale or '(none)'}\n"
+        f"Outcome status: {task.outcome_status or '(not set)'}\n"
+        f"Outcome notes: {task.outcome_notes or '(none)'}"
+    )
+
+
+def _split_task_context(sections: list[tuple[bool, str]]) -> tuple[str, list[str]]:
+    inline_parts: list[str] = []
+    overflow: list[str] = []
+    used_chars = 0
+    for _important, section in sections:
+        section_chars = len(section) + 2
+        if used_chars + section_chars <= _OKR_TASK_INLINE_CONTEXT_CHARS:
+            inline_parts.append(section)
+            used_chars += section_chars
+        else:
+            overflow.append(section)
+    return "\n\n".join(inline_parts), overflow
+
+
+def _write_okr_task_context_files(
+    workflow: SystemWorkflow, sections: list[str]
+) -> list[str]:
+    if not sections:
+        return []
+    directory = codex_pool.events_dir() / "okr_task_context" / str(workflow.pk)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "prior_tasks.txt"
+    path.write_text("\n\n---\n\n".join(sections), encoding="utf-8")
+    return [str(path)]
+
+
 def _parse_qa_output(raw_output: str) -> dict[str, Any] | None:
     text = raw_output.strip()
     if text.startswith("```"):
@@ -432,6 +722,58 @@ def _parse_qa_output(raw_output: str) -> dict[str, Any] | None:
     if not isinstance(feedback, str) or not isinstance(lgtm, bool):
         return None
     return {"feedback": feedback, "lgtm": lgtm}
+
+
+def _parse_okr_task_output(raw_output: str) -> dict[str, Any] | None:
+    text = _strip_json_markdown_fence(raw_output)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    tasks = parsed.get("tasks")
+    if not isinstance(tasks, list):
+        return None
+    normalized_tasks: list[dict[str, str]] = []
+    for task in tasks:
+        if not isinstance(task, dict):
+            return None
+        title = task.get("title")
+        description = task.get("description")
+        success_criteria = task.get("success_criteria")
+        rationale = task.get("rationale")
+        if not isinstance(title, str):
+            return None
+        if not isinstance(description, str):
+            return None
+        if not isinstance(success_criteria, str):
+            return None
+        if not isinstance(rationale, str):
+            return None
+        if not title.strip():
+            return None
+        normalized_tasks.append(
+            {
+                "title": title.strip(),
+                "description": description.strip(),
+                "success_criteria": success_criteria.strip(),
+                "rationale": rationale.strip(),
+            }
+        )
+    return {"tasks": normalized_tasks}
+
+
+def _strip_json_markdown_fence(raw_output: str) -> str:
+    text = raw_output.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    return text
 
 
 def _final_agent_text(events_path: str) -> str:
@@ -467,14 +809,18 @@ def _final_agent_text(events_path: str) -> str:
 
 
 def _fail_run_and_block_workflow(
-    run: SystemAgentRun, error: str, raw_output: str = ""
+    run: SystemAgentRun,
+    error: str,
+    raw_output: str = "",
+    *,
+    surface_to_thread: bool = True,
 ) -> None:
     run.status = SystemAgentRun.STATUS_FAILED
     run.error = error
     run.raw_output = raw_output
     run.save(update_fields=["status", "error", "raw_output", "updated_at"])
     workflow = run.workflow
-    _block_workflow(workflow, error)
+    _block_workflow(workflow, error, surface_to_thread=surface_to_thread)
 
 
 def _block_workflow(
@@ -513,6 +859,10 @@ def _state_int(workflow: SystemWorkflow, key: str) -> int:
 
 def _state_bool(workflow: SystemWorkflow, key: str) -> bool:
     return workflow.state.get(key) is True
+
+
+def _okr_task_main_thread_id(key_result_id: int) -> str:
+    return f"okr-key-result:{key_result_id}"
 
 
 def _workflow_for_instance(instance: CodexInstance) -> SystemWorkflow | None:

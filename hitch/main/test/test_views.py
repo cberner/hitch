@@ -28,6 +28,7 @@ from hitch.main.models import (
     KeyResult,
     Objective,
     Project,
+    ProposedTask,
     SessionMetadata,
     SystemAgentRun,
     SystemWorkflow,
@@ -1050,9 +1051,24 @@ class OKRModelTests(TestCase):
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         objective = Objective.objects.create(project=project, title="Ship OKRs")
         key_result = KeyResult.objects.create(objective=objective, title="Create UI")
+        task = ProposedTask.objects.create(
+            key_result=key_result,
+            title="Build task generation",
+        )
 
         self.assertEqual(str(objective), "Ship OKRs")
         self.assertEqual(str(key_result), "Create UI")
+        self.assertEqual(str(task), "Build task generation")
+
+    def test_proposed_tasks_cascade_with_key_result(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        objective = Objective.objects.create(project=project, title="Ship OKRs")
+        key_result = KeyResult.objects.create(objective=objective, title="Create UI")
+        ProposedTask.objects.create(key_result=key_result, title="Build task generation")
+
+        key_result.delete()
+
+        self.assertEqual(ProposedTask.objects.count(), 0)
 
 
 class OKRViewTests(TestCase):
@@ -1089,7 +1105,58 @@ class OKRViewTests(TestCase):
         self.assertContains(response, "Open PR from session")
         self.assertContains(response, "Use the GitHub connector.")
         self.assertContains(response, "Extra instructions to help generate and perform tasks.")
+        self.assertContains(response, "Generate tasks")
         self.assertNotContains(response, "Hidden objective")
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.reconcile_dead")
+    def test_okrs_page_reconciles_dead_workers_before_rendering_state(
+        self, mock_reconcile: MagicMock, mock_codex: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex)
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        self._select_project(project)
+
+        response = self.client.get(reverse("okrs"))
+
+        self.assertEqual(response.status_code, 200)
+        mock_reconcile.assert_called_once()
+
+    @patch("hitch.main.views.Codex")
+    def test_okrs_page_lists_proposed_tasks_and_generation_status(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex)
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        objective = Objective.objects.create(project=project, title="Improve planning")
+        key_result = KeyResult.objects.create(objective=objective, title="Draft plan")
+        ProposedTask.objects.create(
+            key_result=key_result,
+            title="Add task model",
+            description="Store generated tasks.",
+            success_criteria="Tasks render on the OKR page.",
+            rationale="The KR needs persisted proposals.",
+            outcome_status=ProposedTask.OUTCOME_ACCEPTED,
+            outcome_notes="Useful scope.",
+        )
+        SystemWorkflow.objects.create(
+            kind=system_agents.OKR_TASK_AGENT_KIND,
+            main_thread_id=system_agents._okr_task_main_thread_id(key_result.pk),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_BLOCKED,
+            step="blocked",
+            state={"error": "task planning output was not valid JSON"},
+        )
+        self._select_project(project)
+
+        response = self.client.get(reverse("okrs"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Add task model")
+        self.assertContains(response, "Tasks render on the OKR page.")
+        self.assertContains(response, "Useful scope.")
+        self.assertContains(response, "Last generation: blocked")
+        self.assertContains(response, "task planning output was not valid JSON")
 
     @patch("hitch.main.views.Codex")
     def test_okrs_page_without_selected_project_has_no_create_forms(
@@ -1154,6 +1221,162 @@ class OKRViewTests(TestCase):
 
         self.assertContains(response, "objective is required", status_code=400)
         self.assertEqual(KeyResult.objects.count(), 0)
+
+    @patch("hitch.main.views.system_agents.start_okr_task_generation_workflow")
+    def test_generate_key_result_tasks_starts_workflow(self, mock_start: MagicMock) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        objective = Objective.objects.create(project=project, title="Improve planning")
+        key_result = KeyResult.objects.create(objective=objective, title="Draft plan")
+        self._select_project(project)
+
+        response = self.client.post(
+            reverse(
+                "generate_key_result_tasks",
+                kwargs={"key_result_id": key_result.pk},
+            )
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_start.assert_called_once()
+        self.assertEqual(mock_start.call_args.kwargs["key_result"], key_result)
+
+    @patch("hitch.main.views.system_agents.start_okr_task_generation_workflow")
+    def test_generate_key_result_tasks_rejects_other_project(
+        self, mock_start: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other = Project.objects.create(name="Other", repo_path="/other")
+        objective = Objective.objects.create(project=other, title="Hidden")
+        key_result = KeyResult.objects.create(objective=objective, title="Hidden KR")
+        self._select_project(project)
+
+        response = self.client.post(
+            reverse(
+                "generate_key_result_tasks",
+                kwargs={"key_result_id": key_result.pk},
+            )
+        )
+
+        self.assertContains(response, "key result is required", status_code=400)
+        mock_start.assert_not_called()
+
+    @patch("hitch.main.views.system_agents.start_okr_task_generation_workflow")
+    def test_generate_key_result_tasks_rejects_without_active_project(
+        self, mock_start: MagicMock
+    ) -> None:
+        response = self.client.post(
+            reverse("generate_key_result_tasks", kwargs={"key_result_id": 1})
+        )
+
+        self.assertContains(response, "active project is required", status_code=400)
+        mock_start.assert_not_called()
+
+    @patch("hitch.main.views.system_agents.start_okr_task_generation_workflow")
+    def test_generate_key_result_tasks_rejects_out_of_range_id(
+        self, mock_start: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        self._select_project(project)
+
+        response = self.client.post(
+            reverse(
+                "generate_key_result_tasks",
+                kwargs={"key_result_id": views._MAX_BIGAUTOFIELD + 1},
+            )
+        )
+
+        self.assertContains(response, "key result is required", status_code=400)
+        mock_start.assert_not_called()
+
+    @patch("hitch.main.views.system_agents.start_okr_task_generation_workflow")
+    def test_generate_key_result_tasks_handles_stale_key_result(
+        self, mock_start: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        objective = Objective.objects.create(project=project, title="Improve planning")
+        key_result = KeyResult.objects.create(objective=objective, title="Draft plan")
+        self._select_project(project)
+        mock_start.side_effect = KeyResult.DoesNotExist
+
+        response = self.client.post(
+            reverse(
+                "generate_key_result_tasks",
+                kwargs={"key_result_id": key_result.pk},
+            )
+        )
+
+        self.assertContains(response, "key result is required", status_code=400)
+
+    def test_update_proposed_task_outcome(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        objective = Objective.objects.create(project=project, title="Improve planning")
+        key_result = KeyResult.objects.create(objective=objective, title="Draft plan")
+        task = ProposedTask.objects.create(key_result=key_result, title="Add model")
+        self._select_project(project)
+
+        response = self.client.post(
+            reverse("update_proposed_task_outcome", kwargs={"task_id": task.pk}),
+            data={
+                "outcome_status": ProposedTask.OUTCOME_COMPLETED,
+                "outcome_notes": "Worked well.",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        task.refresh_from_db()
+        self.assertEqual(task.outcome_status, ProposedTask.OUTCOME_COMPLETED)
+        self.assertEqual(task.outcome_notes, "Worked well.")
+
+    def test_update_proposed_task_outcome_rejects_invalid_status(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        objective = Objective.objects.create(project=project, title="Improve planning")
+        key_result = KeyResult.objects.create(objective=objective, title="Draft plan")
+        task = ProposedTask.objects.create(key_result=key_result, title="Add model")
+        self._select_project(project)
+
+        response = self.client.post(
+            reverse("update_proposed_task_outcome", kwargs={"task_id": task.pk}),
+            data={"outcome_status": "invalid"},
+        )
+
+        self.assertContains(response, "outcome status is invalid", status_code=400)
+
+    def test_update_proposed_task_outcome_rejects_without_active_project(self) -> None:
+        response = self.client.post(
+            reverse("update_proposed_task_outcome", kwargs={"task_id": 1}),
+            data={"outcome_status": ProposedTask.OUTCOME_ACCEPTED},
+        )
+
+        self.assertContains(response, "active project is required", status_code=400)
+
+    def test_update_proposed_task_outcome_rejects_out_of_range_id(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        self._select_project(project)
+
+        response = self.client.post(
+            reverse(
+                "update_proposed_task_outcome",
+                kwargs={"task_id": views._MAX_BIGAUTOFIELD + 1},
+            ),
+            data={"outcome_status": ProposedTask.OUTCOME_ACCEPTED},
+        )
+
+        self.assertContains(response, "proposed task is required", status_code=400)
+
+    def test_update_proposed_task_outcome_rejects_other_project_task(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other = Project.objects.create(name="Other", repo_path="/other")
+        objective = Objective.objects.create(project=other, title="Hidden")
+        key_result = KeyResult.objects.create(objective=objective, title="Hidden KR")
+        task = ProposedTask.objects.create(key_result=key_result, title="Hidden task")
+        self._select_project(project)
+
+        response = self.client.post(
+            reverse("update_proposed_task_outcome", kwargs={"task_id": task.pk}),
+            data={"outcome_status": ProposedTask.OUTCOME_ACCEPTED},
+        )
+
+        self.assertContains(response, "proposed task is required", status_code=400)
 
     def test_rejects_invalid_okr_posts(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")

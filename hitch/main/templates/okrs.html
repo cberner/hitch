@@ -216,6 +216,7 @@
             font-weight: 500;
         }
         input[type="text"],
+        select,
         textarea {
             width: 100%;
             font: inherit;
@@ -231,10 +232,14 @@
             min-height: 5.5rem;
         }
         input[type="text"]:focus,
+        select:focus,
         textarea:focus {
             outline: none;
             border-color: var(--accent);
             box-shadow: 0 0 0 3px var(--accent-soft);
+        }
+        select {
+            min-height: 2.35rem;
         }
         .helper {
             margin: 0;
@@ -280,6 +285,20 @@
             border-top: 1px solid var(--border);
             padding-top: 0.75rem;
         }
+        .key-result-head-row {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 0.75rem;
+        }
+        .key-result-actions {
+            flex: 0 0 auto;
+        }
+        .generation-status {
+            margin: 0.45rem 0 0;
+            color: var(--text-faint);
+            font-size: 0.82rem;
+        }
         .work-instructions {
             margin: 0.45rem 0 0;
             color: var(--text-muted);
@@ -293,6 +312,44 @@
         .key-result-form {
             border-top: 1px solid var(--border);
             padding-top: 0.85rem;
+        }
+        .proposed-task-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.55rem;
+            margin: 0.75rem 0 0;
+            padding: 0;
+            list-style: none;
+        }
+        .proposed-task {
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 0.75rem;
+            background: var(--bg);
+        }
+        .proposed-task h5 {
+            margin: 0 0 0.35rem;
+            font-size: 0.9rem;
+        }
+        .proposed-task p {
+            margin: 0.35rem 0 0;
+            color: var(--text-muted);
+            font-size: 0.84rem;
+            white-space: pre-wrap;
+        }
+        .proposed-task strong {
+            color: var(--text);
+            font-weight: 600;
+        }
+        .outcome-form {
+            display: grid;
+            grid-template-columns: minmax(8rem, 12rem) 1fr auto;
+            gap: 0.5rem;
+            align-items: end;
+            margin-top: 0.7rem;
+        }
+        .outcome-form textarea {
+            min-height: 2.35rem;
         }
         .empty {
             text-align: center;
@@ -318,6 +375,17 @@
                 gap: 0.35rem;
             }
             .project-name { white-space: normal; }
+            .key-result-head-row,
+            .outcome-form {
+                grid-template-columns: 1fr;
+                flex-direction: column;
+            }
+            .key-result-actions {
+                width: 100%;
+            }
+            .key-result-actions .button {
+                width: 100%;
+            }
         }
     </style>
 </head>
@@ -385,14 +453,62 @@
                     <ul class="key-result-list">
                         {% for key_result in objective.key_results.all %}
                         <li class="key-result">
-                            <div class="key-result-head">
-                                <h4>{{ key_result.title }}</h4>
-                                {% if key_result.description %}
-                                <p class="description">{{ key_result.description }}</p>
-                                {% endif %}
+                            <div class="key-result-head-row">
+                                <div class="key-result-head">
+                                    <h4>{{ key_result.title }}</h4>
+                                    {% if key_result.description %}
+                                    <p class="description">{{ key_result.description }}</p>
+                                    {% endif %}
+                                </div>
+                                <form class="key-result-actions" method="post" action="{% url 'generate_key_result_tasks' key_result.pk %}">
+                                    {% csrf_token %}
+                                    <button type="submit" class="button secondary"{% if key_result.task_generation_running %} disabled{% endif %}>
+                                        {% if key_result.task_generation_running %}Generating...{% else %}Generate tasks{% endif %}
+                                    </button>
+                                </form>
                             </div>
                             {% if key_result.work_instructions %}
                             <p class="work-instructions"><strong>Work instructions:</strong> {{ key_result.work_instructions }}</p>
+                            {% endif %}
+                            {% if key_result.task_generation_workflow and key_result.task_generation_workflow.status != "running" %}
+                            <p class="generation-status">
+                                Last generation: {{ key_result.task_generation_workflow.get_status_display }}
+                                {% if key_result.task_generation_workflow.state.error %}- {{ key_result.task_generation_workflow.state.error }}{% endif %}
+                            </p>
+                            {% endif %}
+                            {% if key_result.proposed_tasks.all %}
+                            <ul class="proposed-task-list">
+                                {% for task in key_result.proposed_tasks.all %}
+                                <li class="proposed-task">
+                                    <h5>{{ task.title }}</h5>
+                                    {% if task.description %}
+                                    <p>{{ task.description }}</p>
+                                    {% endif %}
+                                    {% if task.success_criteria %}
+                                    <p><strong>Success criteria:</strong> {{ task.success_criteria }}</p>
+                                    {% endif %}
+                                    {% if task.rationale %}
+                                    <p><strong>Rationale:</strong> {{ task.rationale }}</p>
+                                    {% endif %}
+                                    <form class="outcome-form" method="post" action="{% url 'update_proposed_task_outcome' task.pk %}">
+                                        {% csrf_token %}
+                                        <label class="field">
+                                            Outcome
+                                            <select name="outcome_status">
+                                                {% for status_value, status_label in proposed_task_outcome_choices %}
+                                                <option value="{{ status_value }}"{% if status_value == task.outcome_status %} selected{% endif %}>{{ status_label }}</option>
+                                                {% endfor %}
+                                            </select>
+                                        </label>
+                                        <label class="field">
+                                            Notes
+                                            <textarea name="outcome_notes">{{ task.outcome_notes }}</textarea>
+                                        </label>
+                                        <button type="submit" class="button secondary">Save</button>
+                                    </form>
+                                </li>
+                                {% endfor %}
+                            </ul>
                             {% endif %}
                         </li>
                         {% endfor %}
