@@ -198,6 +198,26 @@ class AuthViewTests(TestCase):
 
 
 class AuthenticatedSettingsTests(TestCase):
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_index_places_logout_in_primary_nav(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        user = _make_user()
+        self.client.force_login(user)
+        _setup_codex(mock_codex)
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        body = response.content.decode()
+        nav_start = body.index('<nav class="primary-nav"')
+        nav_end = body.index("</nav>", nav_start)
+        nav_html = body[nav_start:nav_end]
+        logout_pos = nav_html.index(f'action="{reverse("logout")}"')
+        self.assertLess(nav_html.index(">settings</button>"), logout_pos)
+        self.assertIn(">Log out</button>", nav_html)
+
     def test_update_settings_writes_database_and_cookie_mirror(self) -> None:
         user = _make_user()
         self.client.force_login(user)
