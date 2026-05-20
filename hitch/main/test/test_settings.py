@@ -17,6 +17,7 @@ _SANDBOX_COOKIE = "hitch_sandbox_policy"
 _APPROVAL_COOKIE = "hitch_approval_mode"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
+_AUTO_PR_COOKIE = "hitch_auto_pr"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _SELECTED_PROJECT_COOKIE = "hitch_selected_project_id"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
@@ -210,9 +211,15 @@ class SettingsDialogRenderTests(TestCase):
         self.assertNotContains(response, "Show archived sessions")
         self.assertContains(response, 'name="use_worktrees"')
         self.assertContains(response, "Use worktrees")
+        self.assertContains(response, 'name="auto_pr"')
+        self.assertContains(response, "Auto-PR")
         self.assertContains(response, 'name="selected_project"')
         self.assertContains(response, "All projects")
         self.assertContains(response, "Create project")
+        self.assertContains(response, "Edit project")
+        self.assertContains(response, "data-project-edit-dialog")
+        self.assertContains(response, 'name="auto_pr_mode"')
+        self.assertContains(response, "Follow global")
 
     @patch("hitch.main.views.Codex")
     def test_usage_page_renders_primary_nav_menu_instead_of_back_link(
@@ -298,6 +305,45 @@ class SettingsDialogRenderTests(TestCase):
         response = self.client.get(reverse("index"))
 
         self.assertContains(response, 'name="use_worktrees" value="true" checked')
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_saved_auto_pr_setting_renders_checked(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _seed_cookies(self.client, **{_AUTO_PR_COOKIE: "true"})
+        _configure_codex(
+            mock_codex,
+            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+        )
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, 'name="auto_pr" value="true" checked')
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_project_auto_pr_setting_renders_in_edit_modal(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(
+            name="Hitch",
+            repo_path="/repo",
+            auto_pr_mode=Project.AUTO_PR_OFF,
+        )
+        _seed_cookies(self.client, **{_SELECTED_PROJECT_COOKIE: str(project.pk)})
+        _configure_codex(
+            mock_codex,
+            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+        )
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, 'data-project-auto-pr-mode="off"')
+        self.assertContains(response, 'value="off" selected')
+        self.assertContains(response, 'data-project-edit-open')
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -796,6 +842,14 @@ class UpdateSettingsViewTests(TestCase):
             ),
             ("worktrees disabled", {}, {}, _USE_WORKTREES_COOKIE, "false"),
             (
+                "auto-PR enabled",
+                {"auto_pr": "true"},
+                {},
+                _AUTO_PR_COOKIE,
+                "true",
+            ),
+            ("auto-PR disabled", {}, {}, _AUTO_PR_COOKIE, "false"),
+            (
                 "memories enabled",
                 {"enable_memories": "true"},
                 {},
@@ -854,6 +908,12 @@ class UpdateSettingsViewTests(TestCase):
                 _ENABLE_MEMORIES_COOKIE,
                 "true",
                 {"enable_memories": "yes"},
+            ),
+            (
+                "auto-PR setting",
+                _AUTO_PR_COOKIE,
+                "true",
+                {"auto_pr": "yes"},
             ),
             (
                 "selected project",

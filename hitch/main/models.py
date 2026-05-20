@@ -25,9 +25,23 @@ from django.db import models
 class Project(models.Model):
     """A git repository grouping for visible Codex sessions."""
 
+    AUTO_PR_FOLLOW_GLOBAL: ClassVar[str] = "follow_global"
+    AUTO_PR_ON: ClassVar[str] = "on"
+    AUTO_PR_OFF: ClassVar[str] = "off"
+    AUTO_PR_CHOICES: ClassVar[tuple[tuple[str, str], ...]] = (
+        (AUTO_PR_FOLLOW_GLOBAL, "Follow global"),
+        (AUTO_PR_ON, "On"),
+        (AUTO_PR_OFF, "Off"),
+    )
+
     name = models.CharField(max_length=200)
     repo_path = models.CharField(max_length=4096, unique=True)
     git_common_dir = models.CharField(max_length=4096, blank=True, default="")
+    auto_pr_mode = models.CharField(
+        max_length=16,
+        choices=AUTO_PR_CHOICES,
+        default=AUTO_PR_FOLLOW_GLOBAL,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -101,6 +115,7 @@ class SessionMetadata(models.Model):
         related_name="sessions",
     )
     project_cleared = models.BooleanField(default=False)
+    auto_pr_enabled = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -157,6 +172,13 @@ class CodexInstance(models.Model):
     # thread.
     developer_instructions = models.TextField(blank=True, default="")
     enable_memories = models.BooleanField(default=False)
+    model = models.CharField(max_length=256, blank=True, default="")
+    reasoning_effort = models.CharField(max_length=32, blank=True, default="")
+    sandbox_policy = models.CharField(max_length=32, blank=True, default="")
+    approval_mode = models.CharField(max_length=32, blank=True, default="")
+    plan_mode = models.BooleanField(default=False)
+    auto_pr_enabled = models.BooleanField(default=False)
+    auto_pr_triggered_at = models.DateTimeField(null=True, blank=True)
     events_path = models.CharField(max_length=4096)
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_STARTING)
     started_at = models.DateTimeField(auto_now_add=True)
@@ -430,6 +452,7 @@ class UserSettings(models.Model):
     approval_mode = models.CharField(max_length=32, blank=True, default="auto_review")
     extra_system_prompt = models.TextField(blank=True, default="")
     use_worktrees = models.BooleanField(default=False)
+    auto_pr_enabled = models.BooleanField(default=False)
     show_archived_sessions = models.BooleanField(default=False)
     last_selected_repo = models.CharField(max_length=4096, blank=True, default="")
     selected_project = models.ForeignKey(

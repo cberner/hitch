@@ -54,6 +54,7 @@ def spawn_new_session(
     display_author: str = "",
     output_schema: dict[str, Any] | None = None,
     user_message_index: int | None = 0,
+    auto_pr_enabled: bool = False,
 ) -> CodexInstance:
     """Create a fresh Codex thread and detach a worker to run the initial prompt.
 
@@ -93,6 +94,7 @@ def spawn_new_session(
         prompt=prompt,
         developer_instructions=developer_instructions,
         model=model if plan_mode else None,
+        stored_model=model,
         reasoning_effort=reasoning_effort,
         sandbox_policy=sandbox_policy,
         approval_mode=approval_mode,
@@ -104,6 +106,7 @@ def spawn_new_session(
         display_author=display_author,
         output_schema=output_schema,
         user_message_index=user_message_index,
+        auto_pr_enabled=auto_pr_enabled,
     )
 
 
@@ -151,7 +154,9 @@ def spawn_turn(
     cwd: str,
     prompt: str,
     model: str | None = None,
+    stored_model: str | None = None,
     reasoning_effort: str | None = None,
+    stored_reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
     enable_memories: bool = False,
@@ -164,6 +169,7 @@ def spawn_turn(
     display_author: str = "",
     output_schema: dict[str, Any] | None = None,
     user_message_index: int | None = None,
+    auto_pr_enabled: bool = False,
 ) -> CodexInstance:
     """Detach a worker that resumes an existing thread to run one prompt."""
     if developer_instructions is None:
@@ -177,7 +183,9 @@ def spawn_turn(
         prompt=prompt,
         developer_instructions=developer_instructions or None,
         model=model,
+        stored_model=stored_model,
         reasoning_effort=reasoning_effort,
+        stored_reasoning_effort=stored_reasoning_effort,
         sandbox_policy=sandbox_policy,
         approval_mode=approval_mode,
         enable_memories=enable_memories,
@@ -189,6 +197,7 @@ def spawn_turn(
         display_author=display_author,
         output_schema=output_schema,
         user_message_index=user_message_index,
+        auto_pr_enabled=auto_pr_enabled,
     )
 
 
@@ -637,7 +646,9 @@ def _spawn_worker(
     prompt: str,
     developer_instructions: str | None = None,
     model: str | None = None,
+    stored_model: str | None = None,
     reasoning_effort: str | None = None,
+    stored_reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
     enable_memories: bool = False,
@@ -649,6 +660,7 @@ def _spawn_worker(
     display_author: str = "",
     output_schema: dict[str, Any] | None = None,
     user_message_index: int | None = None,
+    auto_pr_enabled: bool = False,
 ) -> CodexInstance:
     target_dir = events_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -660,6 +672,17 @@ def _spawn_worker(
             prompt=prompt,
             developer_instructions=developer_instructions or "",
             enable_memories=enable_memories,
+            model=(stored_model if stored_model is not None else model) or "",
+            reasoning_effort=(
+                stored_reasoning_effort
+                if stored_reasoning_effort is not None
+                else reasoning_effort
+            )
+            or "",
+            sandbox_policy=sandbox_policy or "",
+            approval_mode=approval_mode or "",
+            plan_mode=plan_mode,
+            auto_pr_enabled=auto_pr_enabled,
             events_path="",
             status=CodexInstance.STATUS_STARTING,
             pid=0,

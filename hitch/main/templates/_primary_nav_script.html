@@ -3,9 +3,36 @@
             const navMenuButton = navMenu && navMenu.querySelector("[data-nav-menu-open]");
             const settingsOpenButtons = document.querySelectorAll("[data-settings-open]");
             const settingsCancel = settingsDialog && settingsDialog.querySelector("[data-settings-cancel]");
+            const settingsProjectSelect = settingsDialog && settingsDialog.querySelector("[data-settings-project-select]");
+            const projectEditOpen = settingsDialog && settingsDialog.querySelector("[data-project-edit-open]");
+            const projectEditDialog = document.querySelector("[data-project-edit-dialog]");
+            const projectEditCancel = projectEditDialog && projectEditDialog.querySelector("[data-project-edit-cancel]");
+            const projectEditId = projectEditDialog && projectEditDialog.querySelector("[data-project-edit-id]");
+            const projectEditName = projectEditDialog && projectEditDialog.querySelector("[data-project-edit-name]");
+            const projectEditRepo = projectEditDialog && projectEditDialog.querySelector("[data-project-edit-repo]");
+            const projectEditAutoPrMode = projectEditDialog && projectEditDialog.querySelector("[data-project-edit-auto-pr-mode]");
             function closeNavMenu() {
                 if (!navMenuButton) return;
                 navMenuButton.setAttribute("aria-expanded", "false");
+            }
+            function selectedProjectOption() {
+                if (!settingsProjectSelect) return null;
+                const option = settingsProjectSelect.selectedOptions && settingsProjectSelect.selectedOptions[0];
+                return option && option.value ? option : null;
+            }
+            function syncProjectEditButton() {
+                if (projectEditOpen) projectEditOpen.disabled = !selectedProjectOption();
+            }
+            function populateProjectEditDialog() {
+                const option = selectedProjectOption();
+                if (!option) return false;
+                if (projectEditId) projectEditId.value = option.value;
+                if (projectEditName) projectEditName.value = option.dataset.projectName || "";
+                if (projectEditRepo) projectEditRepo.value = option.dataset.projectRepoPath || "";
+                if (projectEditAutoPrMode) {
+                    projectEditAutoPrMode.value = option.dataset.projectAutoPrMode || "follow_global";
+                }
+                return true;
             }
             if (navMenuButton) {
                 navMenuButton.addEventListener("click", (event) => {
@@ -25,6 +52,17 @@
             }
             settingsOpenButtons.forEach((btn) => btn.addEventListener("click", () => {
                 closeNavMenu();
+                syncProjectEditButton();
                 showDialog(settingsDialog);
             }));
             if (settingsCancel) settingsCancel.addEventListener("click", () => hideDialog(settingsDialog));
+            if (settingsProjectSelect) settingsProjectSelect.addEventListener("change", syncProjectEditButton);
+            syncProjectEditButton();
+            if (projectEditOpen) {
+                projectEditOpen.addEventListener("click", () => {
+                    if (!populateProjectEditDialog()) return;
+                    showDialog(projectEditDialog);
+                    if (projectEditName) projectEditName.focus();
+                });
+            }
+            if (projectEditCancel) projectEditCancel.addEventListener("click", () => hideDialog(projectEditDialog));

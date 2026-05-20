@@ -25,6 +25,7 @@ urlpatterns = [
         name="update_archived_session_visibility",
     ),
     path("projects/new/", hitch.main.views.new_project, name="new_project"),
+    path("projects/edit/", hitch.main.views.edit_project, name="edit_project"),
     path("sessions/new/", hitch.main.views.new_session, name="new_session"),
     path("sessions/<str:session_id>/", hitch.main.views.session, name="session"),
     path(

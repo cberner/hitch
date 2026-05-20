@@ -62,6 +62,7 @@ class SettingsValues(NamedTuple):
     approval_mode: str
     extra_system_prompt: str
     use_worktrees: bool
+    auto_pr_enabled: bool
     show_archived_sessions: bool
     last_selected_repo: str
     selected_project_id: int | None
@@ -130,6 +131,7 @@ _SANDBOX_COOKIE = "hitch_sandbox_policy"
 _APPROVAL_COOKIE = "hitch_approval_mode"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
+_AUTO_PR_COOKIE = "hitch_auto_pr"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
 _SELECTED_PROJECT_COOKIE = "hitch_selected_project_id"
@@ -167,6 +169,7 @@ _NAME_MAX_LEN = 200
 _PROJECT_NAME_MAX_LEN = 200
 _OKR_TITLE_MAX_LEN = 200
 _LAST_SELECTED_REPO_MAX_LEN = 4096
+_VALID_PROJECT_AUTO_PR_MODES = {value for value, _label in Project.AUTO_PR_CHOICES}
 
 # Upper bound for ``CodexInstance.pk`` validation. The project sets
 # ``DEFAULT_AUTO_FIELD = BigAutoField``, which is a signed 64-bit
@@ -230,6 +233,7 @@ def _settings_dialog_context(
     return {
         "settings_url": reverse("update_settings"),
         "new_project_url": reverse("new_project"),
+        "edit_project_url": reverse("edit_project"),
         "model_options": [
             {"id": m.id, "display_name": m.display_name} for m in models_data
         ],
@@ -249,10 +253,19 @@ def _settings_dialog_context(
         "current_extra_system_prompt": current_settings.extra_system_prompt,
         "extra_system_prompt_max_len": _EXTRA_SYSTEM_PROMPT_MAX_LEN,
         "current_use_worktrees": current_settings.use_worktrees,
+        "current_auto_pr": current_settings.auto_pr_enabled,
         "current_enable_memories": current_settings.enable_memories,
         "projects": projects,
         "current_project": current_project,
         "current_project_id": current_project.pk if current_project is not None else "",
+        "project_name_max_len": _PROJECT_NAME_MAX_LEN,
+        "project_auto_pr_options": [
+            {"id": value, "display_name": label}
+            for value, label in Project.AUTO_PR_CHOICES
+        ],
+        "project_auto_pr_follow_global": Project.AUTO_PR_FOLLOW_GLOBAL,
+        "project_auto_pr_on": Project.AUTO_PR_ON,
+        "project_auto_pr_off": Project.AUTO_PR_OFF,
     }
 
 
@@ -336,6 +349,10 @@ def index(request: HttpRequest) -> HttpResponse:
     current_new_session_project = _new_session_project_for_dialog(
         current_project, saved_repo, new_session_projects
     )
+    current_new_session_auto_pr = _effective_auto_pr_enabled(
+        current_new_session_project,
+        global_enabled=current_settings.auto_pr_enabled,
+    )
     current_repo = _selected_repo_for_dialog(
         saved_repo, repos, current_new_session_project
     )
@@ -359,6 +376,7 @@ def index(request: HttpRequest) -> HttpResponse:
                 if current_new_session_project is not None
                 else ""
             ),
+            "current_new_session_auto_pr": current_new_session_auto_pr,
             "current_project": current_project,
             "bare_repo_project_value": _BARE_REPO_PROJECT_VALUE,
             "name_max_len": _NAME_MAX_LEN,
@@ -994,6 +1012,18 @@ def _project_for_cwd(cwd: str, projects: list[Project]) -> Project | None:
     )
 
 
+def _effective_auto_pr_enabled(
+    project: Project | None, *, global_enabled: bool
+) -> bool:
+    if project is None:
+        return global_enabled
+    if project.auto_pr_mode == Project.AUTO_PR_ON:
+        return True
+    if project.auto_pr_mode == Project.AUTO_PR_OFF:
+        return False
+    return global_enabled
+
+
 def _associate_existing_sessions_with_project(project: Project, request: HttpRequest) -> None:
     settings = _stored_settings(request)
     config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
@@ -1437,6 +1467,7 @@ def _stored_settings(request: HttpRequest) -> SettingsValues:
         approval_mode=_read_cookie(request, _APPROVAL_COOKIE),
         extra_system_prompt=_read_extra_system_prompt_cookie(request),
         use_worktrees=_read_cookie(request, _USE_WORKTREES_COOKIE) == "true",
+        auto_pr_enabled=_read_cookie(request, _AUTO_PR_COOKIE) == "true",
         show_archived_sessions=_read_cookie(request, _SHOW_ARCHIVED_COOKIE) == "true",
         last_selected_repo=_read_cookie(request, _LAST_SELECTED_REPO_COOKIE),
         selected_project_id=_read_selected_project_cookie(request),
@@ -1457,6 +1488,7 @@ def _settings_values_for_user(settings: UserSettings) -> SettingsValues:
         approval_mode=settings.approval_mode,
         extra_system_prompt=settings.extra_system_prompt,
         use_worktrees=settings.use_worktrees,
+        auto_pr_enabled=settings.auto_pr_enabled,
         show_archived_sessions=settings.show_archived_sessions,
         last_selected_repo=settings.last_selected_repo,
         selected_project_id=settings.selected_project_id,
@@ -1474,6 +1506,7 @@ def _save_user_settings(user: Any, values: SettingsValues) -> UserSettings:
         ("approval_mode", values.approval_mode),
         ("extra_system_prompt", values.extra_system_prompt),
         ("use_worktrees", values.use_worktrees),
+        ("auto_pr_enabled", values.auto_pr_enabled),
         ("show_archived_sessions", values.show_archived_sessions),
         ("last_selected_repo", values.last_selected_repo),
         ("selected_project_id", values.selected_project_id),
@@ -1497,6 +1530,7 @@ def _settings_cookie_updates(values: SettingsValues) -> dict[str, str]:
             values.extra_system_prompt
         ),
         _USE_WORKTREES_COOKIE: "true" if values.use_worktrees else "false",
+        _AUTO_PR_COOKIE: "true" if values.auto_pr_enabled else "false",
         _SHOW_ARCHIVED_COOKIE: "true" if values.show_archived_sessions else "false",
         _LAST_SELECTED_REPO_COOKIE: values.last_selected_repo,
         _SELECTED_PROJECT_COOKIE: (
@@ -1545,6 +1579,9 @@ def _valid_cookie_setting_updates(request: HttpRequest) -> dict[str, str | bool 
     use_worktrees = _read_signed_cookie_if_present(request, _USE_WORKTREES_COOKIE)
     if use_worktrees in {"true", "false"}:
         updates["use_worktrees"] = use_worktrees == "true"
+    auto_pr = _read_signed_cookie_if_present(request, _AUTO_PR_COOKIE)
+    if auto_pr in {"true", "false"}:
+        updates["auto_pr_enabled"] = auto_pr == "true"
     last_selected_repo = _read_signed_cookie_if_present(
         request, _LAST_SELECTED_REPO_COOKIE
     )
@@ -1739,6 +1776,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     approval = request.POST.get("approval_mode", "").strip()
     extra_system_prompt = request.POST.get("extra_system_prompt", "").strip()
     use_worktrees = request.POST.get("use_worktrees", "").strip()
+    auto_pr = request.POST.get("auto_pr", "").strip()
     posted_show_archived = request.POST.get("show_archived_sessions")
     show_archived = (
         posted_show_archived.strip() if posted_show_archived is not None else None
@@ -1766,6 +1804,9 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     if use_worktrees not in {"", "true"}:
         return HttpResponseBadRequest("invalid worktree setting")
     use_worktrees = "true" if use_worktrees == "true" else "false"
+    if auto_pr not in {"", "true"}:
+        return HttpResponseBadRequest("invalid auto-PR setting")
+    auto_pr = "true" if auto_pr == "true" else "false"
     if show_archived is not None and show_archived not in {"", "true"}:
         return HttpResponseBadRequest("invalid archived sessions visibility")
     if enable_memories not in {"", "true"}:
@@ -1790,6 +1831,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         approval_mode=approval,
         extra_system_prompt=extra_system_prompt,
         use_worktrees=use_worktrees == "true",
+        auto_pr_enabled=auto_pr == "true",
         show_archived_sessions=(
             stored.show_archived_sessions
             if show_archived is None
@@ -1866,6 +1908,34 @@ def new_project(request: HttpRequest) -> HttpResponse:
     response = redirect("index")
     _apply_cookie_updates(response, _settings_cookie_updates(values))
     return response
+
+
+@require_http_methods(["POST"])
+def edit_project(request: HttpRequest) -> HttpResponse:
+    project, project_error = _posted_project(request.POST.get("project", ""))
+    if project_error is not None:
+        return HttpResponseBadRequest(project_error)
+    if project is None:
+        return HttpResponseBadRequest("project is required")
+    name = request.POST.get("name", "").strip()
+    auto_pr_mode = request.POST.get("auto_pr_mode", "").strip()
+    if not name:
+        return HttpResponseBadRequest("project name is required")
+    if len(name) > _PROJECT_NAME_MAX_LEN:
+        return HttpResponseBadRequest("project name is too long")
+    if auto_pr_mode not in _VALID_PROJECT_AUTO_PR_MODES:
+        return HttpResponseBadRequest("invalid project auto-PR setting")
+
+    updates: list[str] = []
+    if project.name != name:
+        project.name = name
+        updates.append("name")
+    if project.auto_pr_mode != auto_pr_mode:
+        project.auto_pr_mode = auto_pr_mode
+        updates.append("auto_pr_mode")
+    if updates:
+        project.save(update_fields=[*updates, "updated_at"])
+    return redirect(_safe_next_url(request) or "index")
 
 
 @require_http_methods(["POST"])
@@ -1958,6 +2028,17 @@ def _posted_new_session_target(
     if error is not None or project is None:
         return None, error or "invalid project"
     return _NewSessionTarget(project.repo_path, project, False), None
+
+
+def _posted_auto_pr_override(raw: str | None, *, default: bool) -> tuple[bool, str | None]:
+    if raw is None:
+        return default, None
+    value = raw.strip().lower()
+    if value in {"", "false"}:
+        return False, None
+    if value == "true":
+        return True, None
+    return False, "invalid auto-PR setting"
 
 
 @require_http_methods(["POST"])
@@ -2110,6 +2191,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     # elevated permissions or stricter escalation handling.
     sandbox_policy = _effective_sandbox_policy(settings)
     approval_mode = _effective_approval_mode(settings)
+    auto_pr_enabled = _auto_pr_enabled_for_session(session_id)
     if pr_activation:
         previous_instance = codex_pool.latest_for_thread(session_id)
         developer_instructions = (
@@ -2143,6 +2225,16 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     }
     if settings.enable_memories:
         spawn_kwargs["enable_memories"] = True
+    if auto_pr_enabled:
+        auto_pr_model = _string_value(getattr(resumed, "model", None)) or settings.model
+        auto_pr_reasoning_effort = (
+            _string_value(getattr(resumed, "reasoning_effort", None))
+            or settings.reasoning_effort
+        )
+        spawn_kwargs["auto_pr_enabled"] = True
+        spawn_kwargs["user_message_index"] = _count_user_entries(thread_entries)
+        spawn_kwargs["stored_model"] = auto_pr_model or None
+        spawn_kwargs["stored_reasoning_effort"] = auto_pr_reasoning_effort or None
     if plan_mode:
         if not collaboration_model:
             return HttpResponseBadRequest("plan mode requires a model")
@@ -2259,6 +2351,12 @@ def _count_user_entries(entries: list[dict[str, Any]]) -> int:
         elif entry.get("kind") == "intermediate":
             count += _count_user_entries(entry.get("items", []))
     return count
+
+
+def _auto_pr_enabled_for_session(session_id: str) -> bool:
+    return SessionMetadata.objects.filter(
+        thread_id=session_id, auto_pr_enabled=True
+    ).exists()
 
 
 def _message_intent(request: HttpRequest) -> _MessageIntent:
@@ -2499,9 +2597,18 @@ def new_session(request: HttpRequest) -> HttpResponse:
     resolved_settings = _resolved_settings(request, models_data)
     settings = resolved_settings.values
     cookie_updates = resolved_settings.cookie_updates
+    source_project = target.project
+    default_auto_pr_enabled = _effective_auto_pr_enabled(
+        None if target.project_cleared else source_project,
+        global_enabled=settings.auto_pr_enabled,
+    )
+    auto_pr_enabled, auto_pr_error = _posted_auto_pr_override(
+        request.POST.get("auto_pr"), default=default_auto_pr_enabled
+    )
+    if auto_pr_error is not None:
+        return HttpResponseBadRequest(auto_pr_error)
     if plan_mode and not settings.model:
         return HttpResponseBadRequest("plan mode requires a model")
-    source_project = target.project
 
     session_cwd = cwd
     # PR workflows review the selected repo's current diff; a fresh managed
@@ -2531,6 +2638,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
                 "cwd": session_cwd,
                 "project": source_project,
                 "project_cleared": target.project_cleared,
+                "auto_pr_enabled": False,
             },
         )
         remembered_values = settings._replace(last_selected_repo=cwd)
@@ -2573,6 +2681,8 @@ def new_session(request: HttpRequest) -> HttpResponse:
         spawn_kwargs["enable_memories"] = True
     if plan_mode:
         spawn_kwargs["plan_mode"] = True
+    if auto_pr_enabled:
+        spawn_kwargs["auto_pr_enabled"] = True
     try:
         instance = codex_pool.spawn_new_session(**spawn_kwargs)
     except Exception:
@@ -2590,6 +2700,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
             "cwd": session_cwd,
             "project": session_project,
             "project_cleared": target.project_cleared,
+            "auto_pr_enabled": auto_pr_enabled,
         },
     )
     remembered_values = settings._replace(last_selected_repo=cwd)
