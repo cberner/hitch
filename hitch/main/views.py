@@ -80,6 +80,12 @@ class _MessageIntent(NamedTuple):
     explicit_plan_mode: bool
 
 
+class _NewSessionTarget(NamedTuple):
+    cwd: str
+    project: Project | None
+    project_cleared: bool
+
+
 # Sandbox-policy variants offered in the settings dialog. Stored as the
 # SandboxPolicy ``type`` discriminator string so the cookie value can map
 # 1:1 onto a constructed SandboxPolicy in the worker without any further
@@ -128,6 +134,7 @@ _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
 _SELECTED_PROJECT_COOKIE = "hitch_selected_project_id"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
+_BARE_REPO_PROJECT_VALUE = "__bare_repo__"
 
 # Roughly one year. Long enough that a user's pick survives across
 # sessions without ever needing a manual revisit; short enough that the
@@ -317,8 +324,20 @@ def index(request: HttpRequest) -> HttpResponse:
             }
         )
     repos = [str(p) for p in discover_repos()]
+    repo_set = set(repos)
+    saved_repo = (
+        current_settings.last_selected_repo
+        if current_settings.last_selected_repo in repo_set
+        else ""
+    )
+    new_session_projects = [
+        project for project in projects if project.repo_path in repo_set
+    ]
+    current_new_session_project = _new_session_project_for_dialog(
+        current_project, saved_repo, new_session_projects
+    )
     current_repo = _selected_repo_for_dialog(
-        current_settings.last_selected_repo, repos, current_project
+        saved_repo, repos, current_new_session_project
     )
     settings_dialog_context = _settings_dialog_context(current_settings, models_data)
     response = render(
@@ -327,6 +346,7 @@ def index(request: HttpRequest) -> HttpResponse:
         {
             "sessions": sessions,
             "repos": repos,
+            "new_session_projects": new_session_projects,
             "has_projects": bool(projects),
             "new_session_url": reverse("new_session"),
             "archived_visibility_url": reverse("update_archived_session_visibility"),
@@ -334,7 +354,13 @@ def index(request: HttpRequest) -> HttpResponse:
             "register_url": reverse("register"),
             "current_show_archived_sessions": current_settings.show_archived_sessions,
             "current_repo": current_repo,
+            "current_new_session_project_id": (
+                current_new_session_project.pk
+                if current_new_session_project is not None
+                else ""
+            ),
             "current_project": current_project,
+            "bare_repo_project_value": _BARE_REPO_PROJECT_VALUE,
             "name_max_len": _NAME_MAX_LEN,
             "pr_slash_prompt": _PR_SLASH_PROMPT,
             **settings_dialog_context,
@@ -901,6 +927,18 @@ def _selected_repo_for_dialog(
     if selected_project is not None and selected_project.repo_path in repos:
         return selected_project.repo_path
     return saved_repo if saved_repo in repos else ""
+
+
+def _new_session_project_for_dialog(
+    selected_project: Project | None,
+    saved_repo: str,
+    projects: list[Project],
+) -> Project | None:
+    if selected_project is not None and selected_project in projects:
+        return selected_project
+    if saved_repo:
+        return next((project for project in projects if project.repo_path == saved_repo), None)
+    return projects[0] if projects else None
 
 
 def _selected_project_for_settings(
@@ -1901,6 +1939,27 @@ def _posted_project(raw: str | None) -> tuple[Project | None, str | None]:
     return project, None
 
 
+def _posted_new_session_target(
+    request: HttpRequest, projects: list[Project]
+) -> tuple[_NewSessionTarget | None, str | None]:
+    raw_project = request.POST.get("project")
+    if raw_project is None:
+        cwd = request.POST.get("cwd", "").strip()
+        return _NewSessionTarget(cwd, _project_for_cwd(cwd, projects), False), None
+
+    value = raw_project.strip()
+    if value == _BARE_REPO_PROJECT_VALUE:
+        cwd = request.POST.get("cwd", "").strip()
+        return _NewSessionTarget(cwd, None, True), None
+    if not value:
+        return None, "project is required"
+
+    project, error = _posted_project(value)
+    if error is not None or project is None:
+        return None, error or "invalid project"
+    return _NewSessionTarget(project.repo_path, project, False), None
+
+
 @require_http_methods(["POST"])
 def set_session_name(request: HttpRequest, session_id: str) -> HttpResponse:
     name = request.POST.get("name", "").strip()
@@ -2411,7 +2470,11 @@ def new_session(request: HttpRequest) -> HttpResponse:
     pr_activation = _is_pr_activation(request)
     prompt = intent.prompt
     plan_mode = False if pr_activation else intent.plan_mode
-    cwd = request.POST.get("cwd", "").strip()
+    projects = list(Project.objects.all())
+    target, target_error = _posted_new_session_target(request, projects)
+    if target_error is not None or target is None:
+        return HttpResponseBadRequest(target_error or "invalid project")
+    cwd = target.cwd
     if not prompt:
         return HttpResponseBadRequest("prompt is required")
     if not cwd:
@@ -2438,8 +2501,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
     cookie_updates = resolved_settings.cookie_updates
     if plan_mode and not settings.model:
         return HttpResponseBadRequest("plan mode requires a model")
-    projects = list(Project.objects.all())
-    source_project = _project_for_cwd(cwd, projects)
+    source_project = target.project
 
     session_cwd = cwd
     # PR workflows review the selected repo's current diff; a fresh managed
@@ -2465,7 +2527,11 @@ def new_session(request: HttpRequest) -> HttpResponse:
         )
         SessionMetadata.objects.update_or_create(
             thread_id=thread_id,
-            defaults={"cwd": session_cwd, "project": source_project, "project_cleared": False},
+            defaults={
+                "cwd": session_cwd,
+                "project": source_project,
+                "project_cleared": target.project_cleared,
+            },
         )
         remembered_values = settings._replace(last_selected_repo=cwd)
         user = _authenticated_user(request)
@@ -2485,7 +2551,11 @@ def new_session(request: HttpRequest) -> HttpResponse:
         except WorktreeCreationError as exc:
             return HttpResponseBadRequest(str(exc))
         session_cwd = str(managed_worktree.path)
-    session_project = _project_for_cwd(session_cwd, projects) or source_project
+    session_project = (
+        None
+        if target.project_cleared
+        else _project_for_cwd(session_cwd, projects) or source_project
+    )
 
     # Detach a worker subprocess so the initial turn keeps running past a
     # Django restart. The thread itself is created synchronously to give the
@@ -2516,7 +2586,11 @@ def new_session(request: HttpRequest) -> HttpResponse:
         raise
     SessionMetadata.objects.update_or_create(
         thread_id=instance.thread_id,
-        defaults={"cwd": session_cwd, "project": session_project, "project_cleared": False},
+        defaults={
+            "cwd": session_cwd,
+            "project": session_project,
+            "project_cleared": target.project_cleared,
+        },
     )
     remembered_values = settings._replace(last_selected_repo=cwd)
     user = _authenticated_user(request)
