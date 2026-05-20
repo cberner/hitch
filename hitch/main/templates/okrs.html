@@ -293,6 +293,15 @@
         }
         .key-result-actions {
             flex: 0 0 auto;
+            display: flex;
+            align-items: center;
+            gap: 0.55rem;
+        }
+        .generation-log-link {
+            font-size: 0.84rem;
+            font-weight: 600;
+            color: var(--accent);
+            white-space: nowrap;
         }
         .generation-status {
             margin: 0.45rem 0 0;
@@ -386,6 +395,10 @@
             .key-result-actions .button {
                 width: 100%;
             }
+            .generation-log-link {
+                width: 100%;
+                text-align: center;
+            }
         }
     </style>
 </head>
@@ -465,6 +478,9 @@
                                     <button type="submit" class="button secondary"{% if key_result.task_generation_running %} disabled{% endif %}>
                                         {% if key_result.task_generation_running %}Generating...{% else %}Generate tasks{% endif %}
                                     </button>
+                                    {% if key_result.task_generation_running and key_result.task_generation_log_url %}
+                                    <a class="generation-log-link" href="{{ key_result.task_generation_log_url }}">View log</a>
+                                    {% endif %}
                                 </form>
                             </div>
                             {% if key_result.work_instructions %}

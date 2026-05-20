@@ -1159,6 +1159,55 @@ class OKRViewTests(TestCase):
         self.assertContains(response, "task planning output was not valid JSON")
 
     @patch("hitch.main.views.Codex")
+    def test_okrs_page_links_running_task_generation_log(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex)
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        objective = Objective.objects.create(project=project, title="Improve planning")
+        key_result = KeyResult.objects.create(objective=objective, title="Draft plan")
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.OKR_TASK_AGENT_KIND,
+            main_thread_id=system_agents._okr_task_main_thread_id(key_result.pk),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_OKR_TASKS_RUNNING,
+            state={"key_result_id": key_result.pk},
+        )
+        instance = CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="task-thread",
+            cwd="/repo",
+            prompt="generate tasks",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.OKR_TASK_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.OKR_TASK_AGENT_KIND,
+            thread_id="task-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+        self._select_project(project)
+
+        response = self.client.get(reverse("okrs"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Generating...")
+        self.assertContains(response, "View log")
+        log_url = reverse(
+            "okr_task_generation_log", kwargs={"workflow_id": workflow.pk}
+        )
+        self.assertContains(
+            response,
+            f'href="{log_url}"',
+        )
+
+    @patch("hitch.main.views.Codex")
     def test_okrs_page_without_selected_project_has_no_create_forms(
         self, mock_codex: MagicMock
     ) -> None:
