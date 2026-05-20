@@ -788,9 +788,15 @@
                 Project
                 <select name="project" required data-new-session-project>
                     {% for project in new_session_projects %}
-                    <option value="{{ project.pk }}"{% if project.pk == current_new_session_project_id %} selected{% endif %}>{{ project.name }}</option>
+                    <option
+                        value="{{ project.pk }}"{% if project.pk == current_new_session_project_id %} selected{% endif %}
+                        data-auto-pr-default="{% if project.auto_pr_mode == project_auto_pr_on %}true{% elif project.auto_pr_mode == project_auto_pr_off %}false{% elif current_auto_pr %}true{% else %}false{% endif %}"
+                    >{{ project.name }}</option>
                     {% endfor %}
-                    <option value="{{ bare_repo_project_value }}"{% if not current_new_session_project_id %} selected{% endif %}>&lt;bare repo&gt;</option>
+                    <option
+                        value="{{ bare_repo_project_value }}"{% if not current_new_session_project_id %} selected{% endif %}
+                        data-auto-pr-default="{% if current_auto_pr %}true{% else %}false{% endif %}"
+                    >&lt;bare repo&gt;</option>
                 </select>
             </label>
             <div class="new-session-field" data-new-session-repo-field {% if current_new_session_project_id %}hidden{% endif %}>
@@ -806,6 +812,11 @@
                 <p class="empty-repos">No git repositories found within two levels of your home directory.</p>
                 {% endif %}
             </div>
+            <label class="checkbox-label">
+                <span>Auto-PR</span>
+                <input type="hidden" name="auto_pr" value="false">
+                <input type="checkbox" name="auto_pr" value="true" data-new-session-auto-pr {% if current_new_session_auto_pr %}checked{% endif %}>
+            </label>
             <div class="actions">
                 <button type="button" class="button secondary" data-new-session-cancel>Cancel</button>
                 <button type="submit" class="button" data-new-session-submit {% if not repos %}disabled{% endif %}>Start session</button>
@@ -1209,6 +1220,7 @@
             const newSessionProjectSelect = newSessionForm && newSessionForm.querySelector("[data-new-session-project]");
             const newSessionRepoField = newSessionForm && newSessionForm.querySelector("[data-new-session-repo-field]");
             const newSessionRepoSelect = newSessionForm && newSessionForm.querySelector("[data-new-session-repo]");
+            const newSessionAutoPr = newSessionForm && newSessionForm.querySelector("[data-new-session-auto-pr]");
             const newSessionSlashCommand = newSessionForm && newSessionForm.querySelector("[data-slash-command]");
             const newSessionSlashTrigger = newSessionForm && newSessionForm.querySelector("[data-slash-trigger]");
             const newSessionSlashMenu = newSessionForm && newSessionForm.querySelector("[data-slash-menu]");
@@ -1234,6 +1246,10 @@
                 const bareRepoSelected = newSessionProjectSelect.value === bareRepoProjectValue;
                 if (newSessionRepoField) newSessionRepoField.hidden = !bareRepoSelected;
                 if (newSessionRepoSelect) newSessionRepoSelect.required = bareRepoSelected;
+                if (newSessionAutoPr) {
+                    const option = newSessionProjectSelect.selectedOptions && newSessionProjectSelect.selectedOptions[0];
+                    newSessionAutoPr.checked = option && option.dataset.autoPrDefault === "true";
+                }
             }
             function setNewSessionPlanMode(enabled) {
                 if (!newSessionForm) return;

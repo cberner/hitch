@@ -19,17 +19,35 @@ def _instance(
     events_path: str = "/dev/null",
     status: str = CodexInstance.STATUS_COMPLETED,
     agent_kind: str = "",
+    auto_pr_enabled: bool = False,
+    plan_mode: bool = False,
+    model: str = "",
+    reasoning_effort: str = "",
+    sandbox_policy: str = "",
+    approval_mode: str = "",
+    developer_instructions: str = "",
+    enable_memories: bool = False,
+    user_message_index: int | None = None,
 ) -> CodexInstance:
     return CodexInstance.objects.create(
         pid=1,
         thread_id=thread_id,
         cwd="/repo",
         prompt="prompt",
+        developer_instructions=developer_instructions,
+        enable_memories=enable_memories,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        sandbox_policy=sandbox_policy,
+        approval_mode=approval_mode,
+        plan_mode=plan_mode,
+        auto_pr_enabled=auto_pr_enabled,
         events_path=events_path,
         status=status,
         purpose=purpose,
         workflow_id=workflow_id,
         agent_kind=agent_kind,
+        user_message_index=user_message_index,
     )
 
 
@@ -99,6 +117,83 @@ class PrQaWorkflowTests(TestCase):
         )
 
         self.assertEqual(workflow, existing)
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_pr_starts_workflow_after_completed_user_implementation_turn(
+        self, mock_spawn: MagicMock, _mock_diff: MagicMock
+    ) -> None:
+        mock_spawn.return_value = _instance(
+            thread_id="qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            auto_pr_enabled=True,
+            model="gpt-5.4",
+            reasoning_effort="high",
+            sandbox_policy="workspaceWrite",
+            approval_mode="prompt_user",
+            developer_instructions="Use repo conventions.",
+            enable_memories=True,
+            user_message_index=2,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        instance.refresh_from_db()
+        self.assertIsNotNone(instance.auto_pr_triggered_at)
+        workflow = SystemWorkflow.objects.get(main_thread_id="main-thread")
+        self.assertEqual(workflow.state["sandbox_policy"], "workspaceWrite")
+        self.assertEqual(workflow.state["approval_mode"], "prompt_user")
+        self.assertEqual(workflow.state["model"], "gpt-5.4")
+        self.assertEqual(workflow.state["reasoning_effort"], "high")
+        self.assertEqual(workflow.state["developer_instructions"], "Use repo conventions.")
+        self.assertTrue(workflow.state["enable_memories"])
+        self.assertEqual(workflow.state["next_user_message_index"], 3)
+        mock_spawn.assert_called_once()
+
+    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    def test_auto_pr_does_not_stamp_when_workflow_start_fails(
+        self, mock_start: MagicMock
+    ) -> None:
+        mock_start.side_effect = RuntimeError("database unavailable")
+        instance = _instance(auto_pr_enabled=True)
+
+        with self.assertRaises(RuntimeError):
+            system_agents.on_codex_instance_finished(instance)
+
+        instance.refresh_from_db()
+        self.assertIsNone(instance.auto_pr_triggered_at)
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_pr_skips_completed_plan_mode_turn(self, mock_spawn: MagicMock) -> None:
+        instance = _instance(auto_pr_enabled=True, plan_mode=True)
+
+        system_agents.on_codex_instance_finished(instance)
+
+        self.assertFalse(SystemWorkflow.objects.exists())
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_pr_skips_workflow_owned_user_turn(self, mock_spawn: MagicMock) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_PROMPT_SPAWNED,
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            auto_pr_enabled=True,
+            workflow_id=workflow.pk,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        self.assertEqual(SystemWorkflow.objects.count(), 1)
         mock_spawn.assert_not_called()
 
     def test_only_one_running_workflow_is_allowed_per_thread_and_kind(self) -> None:

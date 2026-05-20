@@ -44,6 +44,7 @@ _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _MODEL_COOKIE = "hitch_model"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
+_AUTO_PR_COOKIE = "hitch_auto_pr"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 _PR_PROMPT = (
@@ -661,7 +662,11 @@ class IndexViewTests(TestCase):
     def test_new_session_dialog_populates_project_and_bare_repo_selectors(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        project_a = Project.objects.create(name="Project A", repo_path="/home/user/proj-a")
+        project_a = Project.objects.create(
+            name="Project A",
+            repo_path="/home/user/proj-a",
+            auto_pr_mode=Project.AUTO_PR_ON,
+        )
         Project.objects.create(name="Project B", repo_path="/home/user/proj-b")
         _setup_codex(mock_codex)
         mock_discover.return_value = [Path("/home/user/proj-a"), Path("/home/user/proj-b")]
@@ -674,6 +679,8 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Project B")
         self.assertContains(response, "&lt;bare repo&gt;")
         self.assertContains(response, f'value="{project_a.pk}" selected')
+        self.assertContains(response, 'data-auto-pr-default="true"')
+        self.assertContains(response, "data-new-session-auto-pr checked")
         self.assertContains(response, "data-new-session-repo-field hidden")
         self.assertContains(response, "/home/user/proj-a")
         self.assertContains(response, "/home/user/proj-b")
@@ -824,6 +831,11 @@ class IndexViewTests(TestCase):
 
 
 class ProjectViewTests(TestCase):
+    def test_projects_default_to_follow_global_auto_pr(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+
+        self.assertEqual(project.auto_pr_mode, Project.AUTO_PR_FOLLOW_GLOBAL)
+
     @patch("hitch.main.views.discover_repos")
     def test_new_project_form_lists_discovered_repos(self, mock_discover: MagicMock) -> None:
         mock_discover.return_value = [Path("/repo")]
@@ -955,6 +967,56 @@ class ProjectViewTests(TestCase):
         self.assertIsNone(SessionMetadata.objects.get(thread_id="cleared").project)
         self.assertTrue(SessionMetadata.objects.get(thread_id="cleared").project_cleared)
         self.assertEqual(SessionMetadata.objects.get(thread_id="ordinary").project, project)
+
+    def test_edit_project_updates_name_and_auto_pr_mode(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+
+        response = self.client.post(
+            reverse("edit_project"),
+            data={
+                "project": str(project.pk),
+                "name": "Renamed",
+                "auto_pr_mode": Project.AUTO_PR_ON,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        project.refresh_from_db()
+        self.assertEqual(project.name, "Renamed")
+        self.assertEqual(project.auto_pr_mode, Project.AUTO_PR_ON)
+
+    def test_edit_project_rejects_invalid_posts(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+
+        for data, message in (
+            (
+                {
+                    "project": "",
+                    "name": "Renamed",
+                    "auto_pr_mode": Project.AUTO_PR_ON,
+                },
+                "project is required",
+            ),
+            (
+                {
+                    "project": str(project.pk),
+                    "name": "",
+                    "auto_pr_mode": Project.AUTO_PR_ON,
+                },
+                "project name is required",
+            ),
+            (
+                {
+                    "project": str(project.pk),
+                    "name": "Renamed",
+                    "auto_pr_mode": "maybe",
+                },
+                "invalid project auto-PR setting",
+            ),
+        ):
+            with self.subTest(message=message):
+                response = self.client.post(reverse("edit_project"), data=data)
+                self.assertContains(response, message, status_code=400)
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.discover_repos")
@@ -1234,6 +1296,184 @@ class NewSessionViewTests(TestCase):
         settings = UserSettings.objects.get(user=user)
         self.assertEqual(settings.last_selected_repo, other_repo)
         self.assertEqual(_cookie_value(response, _LAST_SELECTED_REPO_COOKIE), other_repo)
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_auto_pr_override_marks_new_session_and_spawn(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "do thing", "cwd": self.REPO, "auto_pr": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
+        self.assertTrue(metadata.auto_pr_enabled)
+        mock_spawn.assert_called_once_with(
+            cwd=self.REPO,
+            prompt="do thing",
+            developer_instructions=None,
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            auto_pr_enabled=True,
+        )
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_auto_pr_override_can_disable_global_setting(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+        _seed_cookies(self.client, **{_AUTO_PR_COOKIE: "true"})
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "do thing", "cwd": self.REPO, "auto_pr": "false"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
+        self.assertFalse(metadata.auto_pr_enabled)
+        mock_spawn.assert_called_once_with(
+            cwd=self.REPO,
+            prompt="do thing",
+            developer_instructions=None,
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_project_auto_pr_on_sets_new_session_default(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        project = Project.objects.create(
+            name="Hitch",
+            repo_path=self.REPO,
+            auto_pr_mode=Project.AUTO_PR_ON,
+        )
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "do thing", "project": str(project.pk)},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
+        self.assertTrue(metadata.auto_pr_enabled)
+        mock_spawn.assert_called_once_with(
+            cwd=self.REPO,
+            prompt="do thing",
+            developer_instructions=None,
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            auto_pr_enabled=True,
+        )
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_project_auto_pr_off_overrides_global_new_session_default(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        project = Project.objects.create(
+            name="Hitch",
+            repo_path=self.REPO,
+            auto_pr_mode=Project.AUTO_PR_OFF,
+        )
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+        _seed_cookies(self.client, **{_AUTO_PR_COOKIE: "true"})
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "do thing", "project": str(project.pk)},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
+        self.assertFalse(metadata.auto_pr_enabled)
+        mock_spawn.assert_called_once_with(
+            cwd=self.REPO,
+            prompt="do thing",
+            developer_instructions=None,
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_auto_pr_override_can_disable_project_setting(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        project = Project.objects.create(
+            name="Hitch",
+            repo_path=self.REPO,
+            auto_pr_mode=Project.AUTO_PR_ON,
+        )
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "do thing",
+                "project": str(project.pk),
+                "auto_pr": "false",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
+        self.assertFalse(metadata.auto_pr_enabled)
+        mock_spawn.assert_called_once_with(
+            cwd=self.REPO,
+            prompt="do thing",
+            developer_instructions=None,
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
@@ -1971,6 +2211,7 @@ class SendMessageViewTests(TestCase):
         *,
         cwd: object = "/repo",
         model: str | None = "gpt-5",
+        reasoning_effort: str | None = None,
         models: list[Any] | None = None,
         path: str | None = None,
         turns: list[Any] | None = None,
@@ -1982,6 +2223,8 @@ class SendMessageViewTests(TestCase):
         resumed = SimpleNamespace(thread=thread)
         if model is not None:
             resumed.model = model
+        if reasoning_effort is not None:
+            resumed.reasoning_effort = SimpleNamespace(value=reasoning_effort)
         client._client.thread_resume.return_value = resumed
         client.models.return_value.data = models or []
 
@@ -2580,6 +2823,45 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
+    def test_auto_pr_session_marks_follow_up_turn(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(
+            mock_codex,
+            model="gpt-5.4",
+            reasoning_effort="high",
+        )
+        mock_discover.return_value = [Path("/repo")]
+        SessionMetadata.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            auto_pr_enabled=True,
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="follow-up",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            auto_pr_enabled=True,
+            user_message_index=0,
+            stored_model="gpt-5.4",
+            stored_reasoning_effort="high",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
     def test_forwards_plan_mode_for_one_turn(
         self,
         mock_codex: MagicMock,
@@ -2822,6 +3104,49 @@ class SendMessageViewTests(TestCase):
             prompt="Implement the plan.",
             sandbox_policy=None,
             approval_mode="auto_review",
+            model="gpt-5.4",
+            collaboration_mode="default",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_auto_pr_marks_plan_implementation_turn(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        rollout_path = self._make_pending_plan_rollout()
+        self._patch_codex(mock_codex, model="gpt-5.4", path=str(rollout_path))
+        mock_discover.return_value = [Path("/repo")]
+        SessionMetadata.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            auto_pr_enabled=True,
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={
+                "prompt": "Implement the plan.",
+                "plan_action": "approve",
+                "plan_mode": "true",
+                "default_plan_mode": "true",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="Implement the plan.",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            auto_pr_enabled=True,
+            user_message_index=1,
+            stored_model="gpt-5.4",
+            stored_reasoning_effort=None,
             model="gpt-5.4",
             collaboration_mode="default",
         )

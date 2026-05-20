@@ -50,23 +50,62 @@
             <input type="checkbox" name="use_worktrees" value="true" {% if current_use_worktrees %}checked{% endif %}>
         </label>
         <label class="checkbox-label">
+            <span>Auto-PR</span>
+            <input type="checkbox" name="auto_pr" value="true" {% if current_auto_pr %}checked{% endif %}>
+        </label>
+        <label class="checkbox-label">
             <span>Enable Codex memories</span>
             <input type="checkbox" name="enable_memories" value="true" {% if current_enable_memories %}checked{% endif %}>
         </label>
         <label>
             Project
-            <select name="selected_project">
+            <select name="selected_project" data-settings-project-select>
                 <option value="" {% if not current_project_id %}selected{% endif %}>All projects</option>
                 {% for project in projects %}
-                <option value="{{ project.pk }}" {% if project.pk == current_project_id %}selected{% endif %}>{{ project.name }}</option>
+                <option
+                    value="{{ project.pk }}"{% if project.pk == current_project_id %} selected{% endif %}
+                    data-project-name="{{ project.name }}"
+                    data-project-repo-path="{{ project.repo_path }}"
+                    data-project-auto-pr-mode="{{ project.auto_pr_mode }}"
+                >{{ project.name }}</option>
                 {% endfor %}
             </select>
         </label>
         <div class="settings-link-row">
             <a class="button secondary" href="{{ new_project_url }}">Create project</a>
+            <button type="button" class="button secondary" data-project-edit-open {% if not current_project_id %}disabled{% endif %}>Edit project</button>
         </div>
         <div class="actions">
             <button type="button" class="button secondary" data-settings-cancel>Cancel</button>
+            <button type="submit" class="button">Save</button>
+        </div>
+    </form>
+</dialog>
+
+<dialog class="new-session" data-project-edit-dialog aria-labelledby="project-edit-title">
+    <form method="post" action="{{ edit_project_url }}">
+        {% csrf_token %}
+        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+        <input type="hidden" name="project" value="{{ current_project_id }}" data-project-edit-id>
+        <h2 id="project-edit-title">Edit project</h2>
+        <label>
+            Name
+            <input type="text" name="name" value="{% if current_project %}{{ current_project.name }}{% endif %}" maxlength="{{ project_name_max_len }}" required autocomplete="off" data-project-edit-name>
+        </label>
+        <label>
+            Repository
+            <input type="text" value="{% if current_project %}{{ current_project.repo_path }}{% endif %}" readonly data-project-edit-repo>
+        </label>
+        <label>
+            Auto-PR
+            <select name="auto_pr_mode" required data-project-edit-auto-pr-mode>
+                {% for option in project_auto_pr_options %}
+                <option value="{{ option.id }}" {% if current_project and option.id == current_project.auto_pr_mode %}selected{% endif %}>{{ option.display_name }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <div class="actions">
+            <button type="button" class="button secondary" data-project-edit-cancel>Cancel</button>
             <button type="submit" class="button">Save</button>
         </div>
     </form>

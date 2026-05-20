@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from django.db import IntegrityError, transaction
+from django.utils import timezone
 from openai_codex.generated.v2_all import ThreadSource
 
 from hitch.main import codex_pool
@@ -170,6 +171,39 @@ def on_codex_instance_finished(instance: CodexInstance) -> None:
         return
     if instance.purpose == CodexInstance.PURPOSE_SYSTEM_FEEDBACK:
         _handle_system_feedback_finished(instance)
+        return
+    _maybe_start_auto_pr_workflow(instance)
+
+
+def _maybe_start_auto_pr_workflow(instance: CodexInstance) -> None:
+    if (
+        instance.purpose != CodexInstance.PURPOSE_USER
+        or instance.workflow_id is not None
+        or not instance.auto_pr_enabled
+        or instance.plan_mode
+        or instance.status != CodexInstance.STATUS_COMPLETED
+    ):
+        return
+    if not CodexInstance.objects.filter(
+        pk=instance.pk,
+        auto_pr_triggered_at__isnull=True,
+    ).exists():
+        return
+    start_pr_qa_workflow(
+        main_thread_id=instance.thread_id,
+        cwd=instance.cwd,
+        sandbox_policy=instance.sandbox_policy or None,
+        approval_mode=instance.approval_mode or SYSTEM_AGENT_APPROVAL_MODE,
+        model=instance.model or None,
+        reasoning_effort=instance.reasoning_effort or None,
+        developer_instructions=instance.developer_instructions or None,
+        enable_memories=instance.enable_memories,
+        initial_user_message_index=(instance.user_message_index or 0) + 1,
+    )
+    CodexInstance.objects.filter(
+        pk=instance.pk,
+        auto_pr_triggered_at__isnull=True,
+    ).update(auto_pr_triggered_at=timezone.now())
 
 
 def _handle_system_agent_finished(instance: CodexInstance) -> None:
