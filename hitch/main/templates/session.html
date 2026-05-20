@@ -1837,9 +1837,9 @@
             <span class="live-status"
                   data-live-status
                   data-state="{% if active_worker or active_system_workflow %}working{% else %}idle{% endif %}"
-                  {% if active_system_workflow and not active_worker %}data-working-text="{{ workflow_status_text }}"{% endif %}
+                  {% if live_status_text %}data-working-text="{{ live_status_text }}"{% endif %}
                   role="status"
-                  aria-live="polite">{% if active_system_workflow and not active_worker %}{{ workflow_status_text }}{% elif active_worker %}Codex is working…{% else %}Connected{% endif %}</span>
+                  aria-live="polite">{% if live_status_text %}{{ live_status_text }}{% elif active_worker %}Codex is working…{% else %}Connected{% endif %}</span>
             <span class="live-goal" data-live-goal {% if not active_worker or not goal_objective %}hidden{% endif %}>
                 <span class="live-goal-label">Goal</span>
                 <span class="live-goal-text" data-live-goal-text>{{ goal_objective }}</span>
@@ -2425,7 +2425,7 @@
                 reconnecting: "Reconnecting…",
                 working: "Codex is working…",
             };
-            const workingText = indicator.dataset.workingText || STATE_TEXT.working;
+            let workingText = indicator.dataset.workingText || STATE_TEXT.working;
             // Liveness budget: heartbeats arrive ~3s apart, so two missed
             // intervals plus a margin move the pill into reconnecting.
             // Only show "Connection lost" after a substantially longer
@@ -2442,6 +2442,9 @@
             let retryTimer = 0;
             let source = null;
             let streamEnded = false;
+            function statusTextFor(state) {
+                return state === "working" ? workingText : STATE_TEXT[state];
+            }
             function setState(state) {
                 const retryable = state === "reconnecting" || state === "disconnected";
                 indicator.setAttribute("role", retryable ? "button" : "status");
@@ -2450,11 +2453,13 @@
                 } else {
                     indicator.removeAttribute("tabindex");
                 }
-                if (state === connState) return;
-                connState = state;
-                indicator.dataset.state = state;
-                if (liveWork) liveWork.dataset.state = state;
-                indicator.textContent = state === "working" ? workingText : STATE_TEXT[state];
+                const nextText = statusTextFor(state);
+                if (state !== connState) {
+                    connState = state;
+                    indicator.dataset.state = state;
+                    if (liveWork) liveWork.dataset.state = state;
+                }
+                if (indicator.textContent !== nextText) indicator.textContent = nextText;
             }
             function clearRetryTimer() {
                 if (!retryTimer) return;
@@ -3390,6 +3395,9 @@
                 bump();
                 let payload;
                 try { payload = JSON.parse(event.data); } catch { payload = {}; }
+                if (payload && typeof payload.statusText === "string" && payload.statusText.trim()) {
+                    workingText = payload.statusText.trim();
+                }
                 setState(payload && payload.working ? "working" : "idle");
             }
 

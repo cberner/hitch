@@ -14,7 +14,7 @@ from openai_codex.errors import AppServerError
 
 from hitch.main import codex_events, system_agents
 from hitch.main.diffs import DiffFile, DiffLine, DiffView
-from hitch.main.models import CodexInstance, SystemWorkflow
+from hitch.main.models import CodexInstance, SystemAgentRun, SystemWorkflow
 from hitch.main.views import _pr_url_for_thread, _tool_call_detail, _tool_call_status
 
 # Used for active-worker rendering tests so the session view's
@@ -1711,6 +1711,45 @@ class SessionViewActiveWorkerTests(TestCase):
 
     @patch("hitch.main.views.build_worktree_diff")
     @patch("hitch.main.views.Codex")
+    def test_active_qa_worker_renders_token_progress(
+        self, mock_codex: MagicMock, mock_diff: MagicMock
+    ) -> None:
+        mock_diff.return_value = _diff_view()
+        _patch_thread(self, mock_codex, _thread([]))
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "method": codex_events.GOAL_UPDATED_METHOD,
+                        "payload": {
+                            "threadId": "thread-1",
+                            "goal": {
+                                "objective": "Apply QA feedback",
+                                "tokens_used": 1234,
+                            },
+                        },
+                    }
+                )
+                + "\n"
+            )
+            events_path = fh.name
+        self.addCleanup(Path(events_path).unlink, missing_ok=True)
+        _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+            events_path=events_path,
+            pid=_LIVE_PID,
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertContains(response, "QA agent working...1.2K tokens")
+        self.assertContains(response, 'data-working-text="QA agent working...1.2K tokens"')
+
+    @patch("hitch.main.views.build_worktree_diff")
+    @patch("hitch.main.views.Codex")
     def test_active_worker_renders_latest_goal_near_status_pill(
         self, mock_codex: MagicMock, mock_diff: MagicMock
     ) -> None:
@@ -1993,12 +2032,47 @@ class SessionViewActiveWorkerTests(TestCase):
             status=SystemWorkflow.STATUS_RUNNING,
             step="qa_running",
         )
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "method": codex_events.GOAL_UPDATED_METHOD,
+                        "payload": {
+                            "threadId": "hidden-thread",
+                            "goal": {
+                                "objective": "Review the diff",
+                                "tokensUsed": 4200,
+                            },
+                        },
+                    }
+                )
+                + "\n"
+            )
+            events_path = fh.name
+        self.addCleanup(Path(events_path).unlink, missing_ok=True)
+        instance = _make_codex_instance(
+            thread_id="hidden-thread",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+            events_path=events_path,
+            pid=_LIVE_PID,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="hidden-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
 
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
         stream_path = reverse("session_stream", kwargs={"session_id": "thread-1"})
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "QA agent is reviewing...")
+        self.assertContains(response, "QA agent working...4.2K tokens")
         self.assertContains(response, 'data-workflow-locked="true"')
         self.assertContains(response, "QA workflow is running")
         self.assertContains(response, 'aria-label="Stop the QA workflow"')
