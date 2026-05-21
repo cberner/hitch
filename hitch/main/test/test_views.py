@@ -5121,6 +5121,17 @@ class StandingOrderViewTests(TestCase):
         response = self.client.get(reverse("standing_orders"))
 
         self.assertEqual(response.status_code, 200)
+        body = response.content.decode()
+        nav_start = body.index('<nav class="primary-nav"')
+        nav_end = body.index("</nav>", nav_start)
+        nav_html = body[nav_start:nav_end]
+        self.assertIn(
+            f'href="{reverse("standing_orders")}" aria-current="page"', nav_html
+        )
+        self.assertIn(">standing orders</a>", nav_html)
+        self.assertIn(f'href="{reverse("okrs")}"', nav_html)
+        self.assertContains(response, "--accent-soft")
+        self.assertContains(response, "--shadow-lg")
         self.assertContains(response, "Improve tests")
         self.assertContains(response, "Add parser coverage")
         self.assertContains(response, "This adds focused parser coverage.")

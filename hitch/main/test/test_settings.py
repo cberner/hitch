@@ -242,6 +242,8 @@ class SettingsDialogRenderTests(TestCase):
         self.assertContains(response, f'href="{reverse("usage")}" aria-current="page"')
         self.assertContains(response, ">settings<")
         self.assertContains(response, "GPT-5")
+        self.assertContains(response, 'classList.add("primary-nav-js")')
+        self.assertNotContains(response, "html:not(.js) .primary-nav-toggle")
         self.assertNotContains(response, 'class="back-link"')
 
     @patch("hitch.main.views.discover_repos")
