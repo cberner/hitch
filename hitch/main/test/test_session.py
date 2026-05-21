@@ -323,6 +323,9 @@ class SessionViewTests(TestCase):
         self.assertContains(response, f'href="{reverse("index")}#new-session"')
         self.assertContains(response, ">new session<")
         self.assertContains(response, f'href="{reverse("index")}"')
+        self.assertNotContains(
+            response, f'href="{reverse("index")}" aria-current="page"'
+        )
         self.assertContains(response, f'href="{reverse("usage")}"')
         self.assertContains(response, ">settings<")
         self.assertContains(response, "data-settings-dialog")
