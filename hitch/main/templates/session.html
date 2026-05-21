@@ -1791,6 +1791,13 @@
                     <button type="button" role="menuitem" data-edit-title-open>Rename</button>
                     <button type="button" role="menuitem" data-diff-open {% if not diff_view.has_changes %}disabled{% endif %}>View diff</button>
                     <button type="button" role="menuitem" data-move-project-open>Move to project</button>
+                    <form method="post" action="{{ start_demo_url }}" role="none">
+                        {% csrf_token %}
+                        <button type="submit" role="menuitem" {% if demo_start_disabled %}disabled{% endif %}>Start demo</button>
+                    </form>
+                    {% if session_demo %}
+                        <a href="{{ demo_url }}" role="menuitem" target="_blank" rel="noopener noreferrer">Open demo</a>
+                    {% endif %}
                     {% if pr_url %}
                         <a href="{{ pr_url }}" role="menuitem" target="_blank" rel="noopener noreferrer">Open PR</a>
                     {% endif %}

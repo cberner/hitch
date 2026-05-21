@@ -20,7 +20,7 @@ from django.test import Client, TestCase
 from django.urls import reverse
 from openai_codex.errors import AppServerError, MethodNotFoundError
 
-from hitch.main import system_agents, views
+from hitch.main import demo, system_agents, views
 from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
@@ -29,6 +29,7 @@ from hitch.main.models import (
     Objective,
     Project,
     ProposedTask,
+    SessionDemo,
     SessionMetadata,
     SystemAgentRun,
     SystemWorkflow,
@@ -4190,6 +4191,230 @@ class SetSessionNameViewTests(TestCase):
         mock_codex.assert_not_called()
 
 
+class StartSessionDemoViewTests(TestCase):
+    @patch("hitch.main.views.demo.start_demo_container")
+    @patch("hitch.main.views.system_agents.active_workflow_for_thread")
+    def test_rejects_start_while_system_workflow_is_active(
+        self, mock_active_workflow: MagicMock, mock_start_demo: MagicMock
+    ) -> None:
+        mock_active_workflow.return_value = SimpleNamespace()
+
+        response = self.client.post(
+            reverse("start_session_demo", kwargs={"session_id": "abc"})
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(
+            response,
+            "PR workflow is running for this session",
+            status_code=400,
+        )
+        mock_start_demo.assert_not_called()
+
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.codex_pool.latest_active_for_thread", return_value=None)
+    @patch("hitch.main.views.demo.start_demo_container")
+    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_starts_container_and_sends_agent_setup_prompt(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        _mock_managed: MagicMock,
+        _mock_workflow: MagicMock,
+        mock_start_demo: MagicMock,
+        _mock_active: MagicMock,
+        mock_spawn: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(cwd="/repo", turns=[])
+        )
+        session_demo = SessionDemo(
+            thread_id="abc",
+            host="127.0.0.1",
+            port=45678,
+            container_id="container-1",
+            container_name="hitch-demo-abc",
+            status=SessionDemo.STATUS_ACTIVE,
+        )
+        mock_start_demo.return_value = (session_demo, 3000)
+
+        response = self.client.post(
+            reverse("start_session_demo", kwargs={"session_id": "abc"})
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], reverse("session", kwargs={"session_id": "abc"}))
+        mock_start_demo.assert_called_once_with("abc")
+        mock_spawn.assert_called_once()
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(kwargs["thread_id"], "abc")
+        self.assertEqual(kwargs["cwd"], "/repo")
+        self.assertIn("container id: container-1", kwargs["prompt"])
+        self.assertIn("internal web port: 3000", kwargs["prompt"])
+        self.assertIn("http://testserver/sessions/abc/demo/", kwargs["prompt"])
+
+    @patch("hitch.main.views.demo.cleanup_demo_for_session")
+    @patch("hitch.main.views.codex_pool.spawn_turn", side_effect=RuntimeError("spawn failed"))
+    @patch("hitch.main.views.codex_pool.latest_active_for_thread", return_value=None)
+    @patch("hitch.main.views.demo.start_demo_container")
+    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cleans_up_demo_when_worker_dispatch_fails(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        _mock_managed: MagicMock,
+        _mock_workflow: MagicMock,
+        mock_start_demo: MagicMock,
+        _mock_active: MagicMock,
+        _mock_spawn: MagicMock,
+        mock_cleanup: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(cwd="/repo", turns=[])
+        )
+        mock_start_demo.return_value = (
+            SessionDemo(
+                thread_id="abc",
+                host="127.0.0.1",
+                port=45678,
+                container_id="container-1",
+                status=SessionDemo.STATUS_ACTIVE,
+            ),
+            3000,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "spawn failed"):
+            self.client.post(reverse("start_session_demo", kwargs={"session_id": "abc"}))
+
+        mock_cleanup.assert_called_once_with("abc")
+
+    @patch("hitch.main.views.codex_pool.steer_instance", return_value=True)
+    @patch("hitch.main.views.codex_pool.latest_active_for_thread")
+    @patch("hitch.main.views.demo.start_demo_container")
+    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_steers_active_worker_after_starting_demo(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        _mock_managed: MagicMock,
+        _mock_workflow: MagicMock,
+        mock_start_demo: MagicMock,
+        mock_active: MagicMock,
+        mock_steer: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(cwd="/repo", turns=[])
+        )
+        mock_active.return_value = SimpleNamespace(pk=123)
+        mock_start_demo.return_value = (
+            SessionDemo(
+                thread_id="abc",
+                host="127.0.0.1",
+                port=45678,
+                container_id="container-1",
+                status=SessionDemo.STATUS_ACTIVE,
+            ),
+            3000,
+        )
+
+        response = self.client.post(reverse("start_session_demo", kwargs={"session_id": "abc"}))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], reverse("session", kwargs={"session_id": "abc"}))
+        mock_steer.assert_called_once()
+        self.assertEqual(mock_steer.call_args.kwargs["expected_thread_id"], "abc")
+
+    @patch("hitch.main.views.demo.start_demo_container")
+    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_rejects_missing_cwd_before_starting_container(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        _mock_managed: MagicMock,
+        _mock_workflow: MagicMock,
+        mock_start_demo: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(cwd="", turns=[])
+        )
+
+        response = self.client.post(reverse("start_session_demo", kwargs={"session_id": "abc"}))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, "thread has no cwd", status_code=400)
+        mock_start_demo.assert_not_called()
+
+    @patch("hitch.main.views.demo.start_demo_container", side_effect=demo.DemoError("no podman"))
+    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_reports_demo_start_failure(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        _mock_managed: MagicMock,
+        _mock_workflow: MagicMock,
+        _mock_start_demo: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(cwd="/repo", turns=[])
+        )
+
+        response = self.client.post(reverse("start_session_demo", kwargs={"session_id": "abc"}))
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.content, b"no podman")
+
+    @patch("hitch.main.views.demo.start_demo_container")
+    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_rejects_unallowed_cwd_before_starting_container(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        _mock_managed: MagicMock,
+        _mock_workflow: MagicMock,
+        mock_start_demo: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(cwd="/elsewhere", turns=[])
+        )
+
+        response = self.client.post(
+            reverse("start_session_demo", kwargs={"session_id": "abc"})
+        )
+
+        self.assertEqual(response.status_code, 400)
+        mock_start_demo.assert_not_called()
+
+
 class SetSessionArchivedViewTests(TestCase):
     @patch("hitch.main.views.Codex")
     def test_updates_archive_state_and_response_shape(
@@ -4274,6 +4499,36 @@ class SetSessionArchivedViewTests(TestCase):
                     client.thread_archive.assert_not_called()
                 if seed_cache:
                     self.assertEqual(ArchivedSessionTokenUsage.objects.count(), 0)
+
+    @patch("hitch.main.demo.subprocess.run")
+    @patch("hitch.main.views.Codex")
+    def test_archive_cleans_up_active_demo_container(
+        self, mock_codex: MagicMock, mock_run: MagicMock
+    ) -> None:
+        SessionDemo.objects.create(
+            thread_id="abc",
+            host="127.0.0.1",
+            port=45678,
+            container_id="container-1",
+            runtime="podman",
+            status=SessionDemo.STATUS_ACTIVE,
+        )
+
+        response = self.client.post(
+            reverse("set_session_archived", kwargs={"session_id": "abc"}),
+            data={"archived": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(SessionDemo.objects.get(thread_id="abc").status, SessionDemo.STATUS_STOPPED)
+        mock_run.assert_called_once_with(
+            ["podman", "rm", "-f", "container-1"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        mock_codex.return_value.__enter__.return_value.thread_archive.assert_called_once_with("abc")
 
     @patch("hitch.main.views.Codex")
     def test_rejects_invalid_archive_requests(self, mock_codex: MagicMock) -> None:
