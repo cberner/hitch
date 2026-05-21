@@ -31,14 +31,26 @@ class _DemoHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         self.close_connection = True
+        headers = {key.lower(): value for key, value in self.headers.items()}
         type(self).seen = {
             "method": "GET",
             "path": self.path,
             "host": self.headers.get("Host", ""),
             "forwarded": self.headers.get("X-Forwarded-Host", ""),
+            "headers": headers,
             "cookie": self.headers.get("Cookie", ""),
             "authorization": self.headers.get("Authorization", ""),
         }
+        if self.path.startswith("/connection-header"):
+            body = b"ok"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Connection", "close, X-Debug")
+            self.send_header("X-Debug", "secret")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path.startswith("/redirect"):
             self.send_response(302)
             self.send_header("Location", "/next")
@@ -92,7 +104,13 @@ class _DemoHandler(BaseHTTPRequestHandler):
         self.close_connection = True
         length = int(self.headers.get("Content-Length", "0"))
         body = self.rfile.read(length)
-        type(self).seen = {"method": "POST", "path": self.path, "body": body}
+        headers = {key.lower(): value for key, value in self.headers.items()}
+        type(self).seen = {
+            "method": "POST",
+            "path": self.path,
+            "headers": headers,
+            "body": body,
+        }
         response = b"posted"
         self.send_response(201)
         self.send_header("Content-Type", "text/plain")
@@ -138,6 +156,62 @@ class DemoProxyTests(TestCase):
         self.assertNotIn("Set-Cookie", response.headers)
         self.assertIn(b'href="/sessions/thread-1/demo/asset.css"', response.content)
         self.assertIn(b'src="/sessions/thread-1/demo/logo.png"', response.content)
+
+    def test_proxy_request_headers_filter_browser_and_proxy_control_headers(self) -> None:
+        request = RequestFactory().get(
+            "/sessions/thread-1/demo/app",
+            headers={
+                "Accept-Encoding": "gzip, br",
+                "Accept-Language": "en-US",
+                "Authorization": "Bearer secret",
+                "Connection": "keep-alive, X-Client-Only",
+                "Content-Length": "",
+                "Cookie": "sessionid=secret",
+                "Expect": "100-continue",
+                "Forwarded": "for=198.51.100.1",
+                "Host": "hitch.example.test",
+                "Proxy-Connection": "keep-alive",
+                "Range": "bytes=0-5",
+                "X-Client-Only": "drop me",
+                "X-CSRFToken": "secret",
+                "X-Forwarded-For": "198.51.100.1",
+                "X-Forwarded-Host": "evil.example.test",
+                "X-Forwarded-Prefix": "/evil",
+                "X-Forwarded-Port": "443",
+                "X-Forwarded-Proto": "https",
+            },
+            REMOTE_ADDR="203.0.113.9",
+        )
+        target = SessionDemo(host="127.0.0.1", port=12345)
+
+        headers = demo._proxy_request_headers(
+            request,
+            target,
+            path_prefix="/sessions/thread-1/demo/",
+        )
+        normalized = {key.lower(): value for key, value in headers.items()}
+
+        self.assertEqual(normalized["host"], "127.0.0.1:12345")
+        self.assertEqual(normalized["accept-encoding"], "identity")
+        self.assertEqual(normalized["x-forwarded-host"], "hitch.example.test")
+        self.assertEqual(normalized["x-forwarded-proto"], "http")
+        self.assertEqual(normalized["x-forwarded-for"], "203.0.113.9")
+        self.assertEqual(normalized["x-forwarded-prefix"], "/sessions/thread-1/demo")
+        self.assertEqual(normalized["accept-language"], "en-US")
+        self.assertEqual(normalized["range"], "bytes=0-5")
+        for blocked in (
+            "authorization",
+            "connection",
+            "content-length",
+            "cookie",
+            "expect",
+            "forwarded",
+            "proxy-connection",
+            "x-client-only",
+            "x-csrftoken",
+            "x-forwarded-port",
+        ):
+            self.assertNotIn(blocked, normalized)
 
     def test_proxy_root_forwards_to_upstream_root(self) -> None:
         response = self.client.get(
@@ -209,6 +283,20 @@ class DemoProxyTests(TestCase):
         self.assertEqual(_DemoHandler.seen["method"], "POST")
         self.assertEqual(_DemoHandler.seen["path"], "/api/items")
         self.assertEqual(_DemoHandler.seen["body"], b'{"ok":true}')
+        headers = cast(dict[str, str], _DemoHandler.seen["headers"])
+        self.assertEqual(headers["content-length"], "11")
+
+    def test_proxy_strips_response_connection_token_headers(self) -> None:
+        response = self.client.get(
+            reverse(
+                "session_demo_proxy",
+                kwargs={"session_id": "thread-1", "path": "connection-header"},
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("Connection", response.headers)
+        self.assertNotIn("X-Debug", response.headers)
 
     def test_proxy_rewrites_redirect_location(self) -> None:
         response = self.client.get(
