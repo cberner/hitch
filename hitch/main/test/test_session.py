@@ -12,7 +12,7 @@ from django.test import Client, TestCase
 from django.urls import reverse
 from openai_codex.errors import AppServerError
 
-from hitch.main import codex_events, system_agents
+from hitch.main import codex_events, demo, system_agents
 from hitch.main.diffs import DiffFile, DiffLine, DiffView
 from hitch.main.models import (
     CodexInstance,
@@ -583,6 +583,223 @@ class SessionViewTests(TestCase):
         self.assertContains(response, '<span class="role">User</span>', count=1)
 
     @patch("hitch.main.views.Codex")
+    def test_demo_agent_turn_is_hidden_from_transcript(
+        self, mock_codex: MagicMock
+    ) -> None:
+        prompt = "Start an interactive web demo for this session.\n\nRegistration token: secret"
+        thread = _thread(
+            [
+                _turn([_user_message("Show the feature"), _agent_message("Done")]),
+                _turn(
+                    [
+                        _user_message(prompt),
+                        _agent_message("Registered the demo container."),
+                    ]
+                ),
+            ]
+        )
+        _patch_thread(self, mock_codex, thread)
+        CodexInstance.objects.create(
+            pid=1,
+            thread_id="thread-1",
+            cwd="/tmp/demo",
+            prompt=prompt,
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            display_author=demo.DEMO_DISPLAY_AUTHOR,
+            user_message_index=1,
+        )
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Show the feature")
+        self.assertContains(response, "Done")
+        self.assertNotContains(response, "Start an interactive web demo")
+        self.assertNotContains(response, "Registration token: secret")
+        self.assertNotContains(response, "Registered the demo container")
+
+    @patch("hitch.main.views.Codex")
+    def test_demo_agent_filter_ignores_stale_user_message_index(
+        self, mock_codex: MagicMock
+    ) -> None:
+        prompt = "Start an interactive web demo for this session.\n\nRegistration token: secret"
+        thread = _thread([_turn([_user_message("Show the feature"), _agent_message("Done")])])
+        _patch_thread(self, mock_codex, thread)
+        CodexInstance.objects.create(
+            pid=1,
+            thread_id="thread-1",
+            cwd="/tmp/demo",
+            prompt=prompt,
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            display_author=demo.DEMO_DISPLAY_AUTHOR,
+            user_message_index=0,
+        )
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Show the feature")
+        self.assertContains(response, "Done")
+        self.assertNotContains(response, "Registration token: secret")
+
+    @patch("hitch.main.views.Codex")
+    def test_demo_agent_filter_preserves_inserted_qa_approval(
+        self, mock_codex: MagicMock
+    ) -> None:
+        prompt = "Start an interactive web demo for this session.\n\nRegistration token: secret"
+        thread = _thread(
+            [
+                _turn([_user_message("Show the feature"), _agent_message("Done")]),
+                _turn([_user_message(prompt), _agent_message("Registered container")]),
+                _turn([_user_message("Now explain it"), _agent_message("Explained")]),
+            ]
+        )
+        _patch_thread(self, mock_codex, thread)
+        CodexInstance.objects.create(
+            pid=1,
+            thread_id="thread-1",
+            cwd="/tmp/demo",
+            prompt=prompt,
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            display_author=demo.DEMO_DISPLAY_AUTHOR,
+            user_message_index=1,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-1",
+            cwd="/tmp/demo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_QA_APPROVED,
+            state={
+                "next_user_message_index": 2,
+                "last_feedback": "No qualifying findings.",
+            },
+        )
+        qa_instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="qa-thread",
+            cwd="/tmp/demo",
+            prompt="review",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="qa-thread",
+            instance=qa_instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+            output={"feedback": "No qualifying findings.", "lgtm": True},
+        )
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "QA agent approved the diff.")
+        self.assertContains(response, "Now explain it")
+        self.assertNotContains(response, "Registration token: secret")
+        self.assertNotContains(response, "Registered container")
+
+    @patch("hitch.main.views.Codex")
+    def test_active_demo_worker_renders_live_transcript_without_prompt(
+        self, mock_codex: MagicMock
+    ) -> None:
+        prompt = "Start an interactive web demo for this session.\n\nRegistration token: secret"
+        thread = _thread([])
+        _patch_thread(self, mock_codex, thread)
+        CodexInstance.objects.create(
+            pid=_LIVE_PID,
+            thread_id="thread-1",
+            cwd="/tmp/demo",
+            prompt=prompt,
+            events_path="/tmp/demo-events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            display_author=demo.DEMO_DISPLAY_AUTHOR,
+            user_message_index=0,
+        )
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "Registration token: secret")
+        self.assertContains(response, "data-live-root")
+        self.assertContains(response, 'data-hide-transcript="true"')
+        self.assertContains(response, "data-composer-stop")
+        self.assertContains(response, "Demo agent is working")
+        html = response.content.decode()
+        self.assertIn("Demo setup command approval requested.", html)
+        self.assertIn(
+            "detail.textContent = HIDE_LIVE_TRANSCRIPT\n"
+            "                    ? hiddenTranscriptApprovalDetail(payload.method)",
+            html,
+        )
+        self.assertNotIn(
+            "function handleApprovalRequested(payload) {\n"
+            "                if (HIDE_LIVE_TRANSCRIPT) return;",
+            html,
+        )
+
+    @patch("hitch.main.views.Codex")
+    def test_registered_demo_status_renders_logs(
+        self, mock_codex: MagicMock
+    ) -> None:
+        thread = _thread([])
+        _patch_thread(self, mock_codex, thread)
+        SessionDemo.objects.create(
+            thread_id="thread-1",
+            port=3000,
+            status=SessionDemo.STATUS_PREPARING,
+            generation=1,
+            container_name="hitch-demo-thread-1-abcd",
+            logs="installing dependencies",
+        )
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Demo preparing")
+        self.assertContains(response, "hitch-demo-thread-1-abcd")
+        self.assertContains(response, "installing dependencies")
+
+    @patch("hitch.main.views.Codex")
+    def test_failed_demo_status_renders_error_without_approval_ui(
+        self, mock_codex: MagicMock
+    ) -> None:
+        thread = _thread([])
+        _patch_thread(self, mock_codex, thread)
+        SessionDemo.objects.create(
+            thread_id="thread-1",
+            port=3000,
+            status=SessionDemo.STATUS_FAILED,
+            generation=1,
+            last_error="server crashed",
+            logs="traceback",
+        )
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Demo failed")
+        self.assertContains(response, "server crashed")
+        self.assertContains(response, "traceback")
+        self.assertNotContains(response, "Start demo?")
+
+    @patch("hitch.main.views.Codex")
     def test_next_message_model_comes_only_from_resumed_thread(
         self, mock_codex: MagicMock
     ) -> None:
@@ -707,6 +924,25 @@ class SessionViewTests(TestCase):
             main_thread_id="thread-1",
             cwd="/tmp/demo",
             status=SystemWorkflow.STATUS_RUNNING,
+        )
+        _patch_thread(self, mock_codex, _thread([_turn([_user_message("hi")])]))
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "disabled>Start demo</button>")
+
+    @patch("hitch.main.views.Codex")
+    def test_start_demo_menu_item_disabled_during_active_turn(
+        self, mock_codex: MagicMock
+    ) -> None:
+        CodexInstance.objects.create(
+            pid=_LIVE_PID,
+            thread_id="thread-1",
+            cwd="/tmp/demo",
+            prompt="user turn",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
         )
         _patch_thread(self, mock_codex, _thread([_turn([_user_message("hi")])]))
 
@@ -2005,7 +2241,7 @@ class SessionViewActiveWorkerTests(TestCase):
         body = response.content.decode()
 
         self.assertContains(response, 'data-task-plan')
-        self.assertContains(response, "<main data-session-main data-stream-url=")
+        self.assertContains(response, 'data-stream-url="')
         self.assertContains(response, 'class="has-task-plan"')
         self.assertContains(response, 'data-recorded-at="20"')
         self.assertContains(response, 'data-event-seq="2"')
@@ -2069,7 +2305,7 @@ class SessionViewActiveWorkerTests(TestCase):
         body = response.content.decode()
 
         self.assertContains(response, 'data-task-plan')
-        self.assertContains(response, "<main data-session-main data-stream-url=")
+        self.assertContains(response, 'data-stream-url="')
         self.assertContains(response, 'class="">')
         self.assertContains(response, 'data-recorded-at="20"')
         self.assertContains(response, 'data-event-seq="2"')
@@ -2259,7 +2495,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, 'aria-label="Stop the QA workflow"')
         self.assertContains(
             response,
-            f'data-stream-url="{stream_path}?baseline=&amp;active=&amp;workflow={workflow.pk}"',
+            f'data-stream-url="{stream_path}?baseline=&amp;active=&amp;workflow={workflow.pk}&amp;demo="',
         )
 
     @patch("hitch.main.views.Codex")
@@ -2419,7 +2655,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, 'data-read-only="true"')
         self.assertContains(
             response,
-            f'data-stream-url="{stream_path}?baseline={instance.pk}&amp;active={instance.pk}&amp;workflow="',
+            f'data-stream-url="{stream_path}?baseline={instance.pk}&amp;active={instance.pk}&amp;workflow=&amp;demo="',
         )
         html = response.content.decode()
         self.assertIn(
@@ -2533,7 +2769,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "data-composer")
         self.assertContains(
             response,
-            f'data-stream-url="{stream_path}?baseline=&amp;active=&amp;workflow="',
+            f'data-stream-url="{stream_path}?baseline=&amp;active=&amp;workflow=&amp;demo="',
         )
 
     @patch("hitch.main.views.Codex")
@@ -2664,7 +2900,7 @@ class SessionViewActiveWorkerTests(TestCase):
         stream_path = reverse("session_stream", kwargs={"session_id": "thread-1"})
         self.assertContains(
             response,
-            f'data-stream-url="{stream_path}?baseline={instance.pk}&amp;active={instance.pk}&amp;workflow="',
+            f'data-stream-url="{stream_path}?baseline={instance.pk}&amp;active={instance.pk}&amp;workflow=&amp;demo="',
         )
 
     @patch("hitch.main.views.Codex")

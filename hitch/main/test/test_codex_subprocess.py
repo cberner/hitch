@@ -55,6 +55,7 @@ from hitch.main.management.commands.codex_worker import (
 from hitch.main.models import (
     ApprovalRequest,
     CodexInstance,
+    SessionDemo,
     SystemAgentRun,
     SystemWorkflow,
     UserInputRequest,
@@ -3073,6 +3074,34 @@ class StreamForInstanceTests(TestCase):
             )
         self.assertTrue(frames[-1].startswith(b"event: end"))
         self.assertIn(b'"active"', frames[-1])
+
+    def test_idle_stream_ends_when_demo_status_changes(self) -> None:
+        SessionDemo.objects.create(
+            thread_id="thread-demo",
+            host="127.0.0.1",
+            port=45678,
+            status=SessionDemo.STATUS_REQUESTED,
+        )
+        baseline = streaming.demo_stream_token("thread-demo")
+        SessionDemo.objects.filter(thread_id="thread-demo").update(
+            status=SessionDemo.STATUS_ACTIVE
+        )
+        with (
+            patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001),
+            patch(
+                "hitch.main.streaming.codex_pool.latest_id_for_thread",
+                return_value=None,
+            ),
+        ):
+            frames = list(
+                streaming.idle_stream(
+                    "thread-demo",
+                    baseline_id=None,
+                    demo_baseline=baseline,
+                )
+            )
+        self.assertTrue(frames[-1].startswith(b"event: end"))
+        self.assertIn(b'"demo"', frames[-1])
 
     @patch("hitch.main.streaming._HEARTBEAT_INTERVAL", 0.0)
     @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)

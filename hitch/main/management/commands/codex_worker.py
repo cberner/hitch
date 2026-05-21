@@ -279,6 +279,12 @@ def _notify_system_agents(instance: CodexInstance) -> None:
         system_agents.on_codex_instance_finished(instance)
     except Exception:
         logger.exception("failed to route completed worker %s to system agents", instance.pk)
+    try:
+        from hitch.main import demo
+
+        demo.on_codex_instance_finished(instance)
+    except Exception:
+        logger.exception("failed to route completed worker %s to demo workflow", instance.pk)
 
 
 def _run_turn(

@@ -80,6 +80,11 @@ urlpatterns = [
         name="start_session_demo",
     ),
     path(
+        "sessions/<str:session_id>/demo/register/",
+        hitch.main.views.register_session_demo,
+        name="session_demo_register",
+    ),
+    path(
         "sessions/<str:session_id>/demo/",
         hitch.main.views.session_demo_proxy_root,
         name="session_demo_proxy_root",

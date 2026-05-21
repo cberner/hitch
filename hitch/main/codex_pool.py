@@ -599,18 +599,26 @@ def reconcile_dead() -> int:
 
 
 def _notify_system_agents_if_needed(instance: CodexInstance) -> None:
-    if instance.purpose not in (
+    if instance.purpose in (
         CodexInstance.PURPOSE_SYSTEM_AGENT,
         CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
     ):
-        return
-    try:
-        from hitch.main import system_agents
+        try:
+            from hitch.main import system_agents
 
-        system_agents.on_codex_instance_finished(instance)
+            system_agents.on_codex_instance_finished(instance)
+        except Exception:
+            logger.exception(
+                "failed to notify system workflow for reconciled instance %s",
+                instance.pk,
+            )
+    try:
+        from hitch.main import demo
+
+        demo.on_codex_instance_finished(instance)
     except Exception:
         logger.exception(
-            "failed to notify system workflow for reconciled instance %s",
+            "failed to notify demo workflow for reconciled instance %s",
             instance.pk,
         )
 

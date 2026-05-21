@@ -380,6 +380,47 @@
             max-height: min(28rem, 60vh);
             overflow: auto;
         }
+        .demo-status {
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--surface);
+            color: var(--text-muted);
+            overflow: hidden;
+        }
+        .demo-status summary {
+            cursor: pointer;
+            list-style: none;
+            padding: 0.65rem 0.95rem;
+            background: var(--surface-2);
+            font-size: 0.88rem;
+            font-weight: 600;
+        }
+        .demo-status summary::-webkit-details-marker { display: none; }
+        .demo-status-body {
+            display: grid;
+            gap: 0.7rem;
+            padding: 0.75rem 0.9rem;
+        }
+        .demo-attempt {
+            display: grid;
+            gap: 0.35rem;
+        }
+        .demo-attempt-meta {
+            font-size: 0.82rem;
+        }
+        .demo-attempt pre {
+            max-height: 18rem;
+            overflow: auto;
+            margin: 0;
+            padding: 0.65rem;
+            border-radius: var(--radius-sm);
+            background: var(--surface-2);
+            color: var(--text);
+            font-size: 0.78rem;
+            line-height: 1.45;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+        }
         .entry { margin: 0; }
         .entry-header {
             display: flex;
@@ -1795,7 +1836,7 @@
                         {% csrf_token %}
                         <button type="submit" role="menuitem" {% if demo_start_disabled %}disabled{% endif %}>Start demo</button>
                     </form>
-                    {% if session_demo %}
+                    {% if active_session_demo %}
                         <a href="{{ demo_url }}" role="menuitem" target="_blank" rel="noopener noreferrer">Open demo</a>
                     {% endif %}
                     {% if pr_url %}
@@ -1811,7 +1852,9 @@
             {% endif %}
         </div>
     </header>
-    <main data-session-main data-stream-url="{{ stream_url }}" class="{% if task_plan.visible %}has-task-plan{% endif %}">
+    <main data-session-main
+          data-stream-url="{{ stream_url }}"
+          class="{% if task_plan.visible %}has-task-plan{% endif %}">
         <aside class="task-plan"
                data-task-plan
                data-recorded-at="{% if task_plan %}{{ task_plan.recorded_at }}{% else %}0{% endif %}"
@@ -1881,8 +1924,20 @@
         </div>
 
         <div class="session-body">
-        {% if system_prompt or entries or pending_user_prompt or active_worker %}
+        {% if system_prompt or entries or pending_user_prompt or active_worker or session_demo %}
         <section class="thread" data-thread>
+            {% if session_demo %}
+            <details class="demo-status" {% if session_demo.status != "active" %}open{% endif %}>
+                <summary>Demo {{ session_demo.status }}</summary>
+                <div class="demo-status-body">
+                    <div class="demo-attempt">
+                        {% if session_demo.container_name %}<div class="demo-attempt-meta">{{ session_demo.container_name }}</div>{% endif %}
+                        {% if session_demo.last_error %}<div class="demo-attempt-meta">{{ session_demo.last_error }}</div>{% endif %}
+                        {% if session_demo.logs %}<pre>{{ session_demo.logs }}</pre>{% endif %}
+                    </div>
+                </div>
+            </details>
+            {% endif %}
             {% if system_prompt %}
             <details class="system-prompt">
                 <summary>System prompt</summary>
@@ -1911,6 +1966,7 @@
             <div class="entry"
                  data-live-root
                  data-active-author="{{ pending_user_author }}"
+                 data-hide-transcript="{{ show_active_worker_transcript|yesno:'false,true' }}"
                  data-read-only="{{ read_only|yesno:'true,false' }}"
                  data-approval-url-template="{{ approval_url_template }}"
                  data-input-url-template="{{ input_url_template }}"></div>
@@ -2683,8 +2739,10 @@
                 if (!streamEnded && Date.now() - lastFrame > STALE_MS) markConnectionProblem();
             }, 1000);
 
+            const sessionMain = document.querySelector("[data-session-main]");
             const liveRoot = document.querySelector("[data-live-root]");
             const READ_ONLY = liveRoot && liveRoot.dataset.readOnly === "true";
+            const HIDE_LIVE_TRANSCRIPT = liveRoot && liveRoot.dataset.hideTranscript === "true";
             // The Django ``resolve_approval`` URL is templated with a
             // placeholder pk of ``0`` server-side; the JS swaps in the
             // real ApprovalRequest id when a decision is posted.
@@ -2764,7 +2822,6 @@
             // node so deltas append directly.
             const items = new Map();
             const planViews = new Map();
-            const sessionMain = document.querySelector("[data-session-main]");
             const taskPlan = document.querySelector("[data-task-plan]");
             const taskPlanToggle = taskPlan && taskPlan.querySelector("[data-task-plan-toggle]");
             const taskPlanCurrent = taskPlan && taskPlan.querySelector("[data-task-plan-current]");
@@ -2825,6 +2882,16 @@
                     if (paths.length) return paths.join("\n");
                 }
                 return JSON.stringify(item, null, 2);
+            }
+
+            function hiddenTranscriptApprovalDetail(method) {
+                if (method === "item/commandExecution/requestApproval") {
+                    return "Demo setup command approval requested.";
+                }
+                if (method === "item/fileChange/requestApproval") {
+                    return "Demo setup file change approval requested.";
+                }
+                return "Demo setup approval requested.";
             }
 
             function ensureNoEmpty() {
@@ -3172,6 +3239,7 @@
                 ensureNoEmpty();
                 const item = payload.item || {};
                 if (!item.id || items.has(item.id)) return;
+                if (HIDE_LIVE_TRANSCRIPT) return;
                 switch (item.type) {
                     case "userMessage": renderUserItem(item); break;
                     case "agentMessage": renderAgentItem(item); break;
@@ -3188,6 +3256,7 @@
             }
 
             function handlePlanDelta(payload) {
+                if (HIDE_LIVE_TRANSCRIPT) return;
                 const itemId = payload.itemId;
                 if (!itemId) return;
                 const entry = items.get(itemId);
@@ -3202,6 +3271,7 @@
 
             function handleItemCompleted(payload) {
                 const item = payload.item || {};
+                if (HIDE_LIVE_TRANSCRIPT) return;
                 const entry = items.get(item.id);
                 if (!entry) {
                     // Item that completed without a prior started event —
@@ -3325,7 +3395,9 @@
                 box.appendChild(header);
                 const detail = document.createElement("div");
                 detail.className = "approval-detail";
-                detail.textContent = approvalDetail(payload.method, payload.params);
+                detail.textContent = HIDE_LIVE_TRANSCRIPT
+                    ? hiddenTranscriptApprovalDetail(payload.method)
+                    : approvalDetail(payload.method, payload.params);
                 box.appendChild(detail);
                 if (READ_ONLY) {
                     wrap.appendChild(box);
@@ -3352,7 +3424,7 @@
                 box.appendChild(actions);
                 wrap.appendChild(box);
                 insertBeforeLive(wrap);
-                approvals.set(id, { node: wrap, box, actions, resolved: false });
+                approvals.set(id, { node: wrap, box, actions, resolved: false, reloadOnResolve: false });
                 followRenderedContent();
             }
 
@@ -3490,7 +3562,7 @@
 
             function submitApproval(id, decision) {
                 const entry = approvals.get(id);
-                if (!entry) return;
+                if (!entry || !entry.actions) return;
                 const reenable = () => {
                     for (const btn of entry.actions.querySelectorAll("button")) {
                         btn.disabled = false;
@@ -3505,7 +3577,7 @@
                 // for the real ApprovalRequest id. The regex anchors on the
                 // trailing ``/0/`` so a future URL prefix that happens to
                 // contain a ``0`` doesn't accidentally substitute there.
-                const url = APPROVAL_URL_TEMPLATE.replace(/\/0\/?$/, "/" + id + "/");
+                const url = entry.url || APPROVAL_URL_TEMPLATE.replace(/\/0\/?$/, "/" + id + "/");
                 fetch(url, {
                     method: "POST",
                     headers: {
@@ -3523,6 +3595,10 @@
                     // ``approval/resolved`` SSE frame will fold the UI;
                     // for everything else, re-enable so the user can try
                     // again.
+                    if (response.ok && entry.reloadOnResolve) {
+                        window.location.reload();
+                        return;
+                    }
                     if (!response.ok && response.status !== 409) reenable();
                 }).catch(() => {
                     // Network failure (no response). The approval/resolved
