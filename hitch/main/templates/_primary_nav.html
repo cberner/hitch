@@ -10,6 +10,7 @@
         <a href="{% url 'index' %}"{% if current_route == "index" %} aria-current="page"{% endif %}>sessions</a>
         <a href="{% url 'system_sessions' %}"{% if current_route == "system_sessions" or current_route == "system_session" %} aria-current="page"{% endif %}>system sessions</a>
         {% if current_project %}
+        <a href="{% url 'standing_orders' %}"{% if current_route == "standing_orders" %} aria-current="page"{% endif %}>standing orders</a>
         <a href="{% url 'okrs' %}"{% if current_route == "okrs" %} aria-current="page"{% endif %}>OKRs</a>
         {% endif %}
         <a href="{% url 'usage' %}"{% if current_route == "usage" %} aria-current="page"{% endif %}>usage</a>

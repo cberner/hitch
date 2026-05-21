@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.core import signing
+from django.http import HttpResponse
 from django.test import Client, TestCase
 from django.urls import reverse
 from openai_codex.errors import AppServerError, MethodNotFoundError
@@ -28,9 +29,11 @@ from hitch.main.models import (
     KeyResult,
     Objective,
     Project,
+    ProposedSession,
     ProposedTask,
     SessionDemo,
     SessionMetadata,
+    StandingOrder,
     SystemAgentRun,
     SystemWorkflow,
     UserInputRequest,
@@ -5081,3 +5084,300 @@ class SessionViewApprovalContextTests(TestCase):
                 "resolve_input_request", kwargs={"input_id": 0}
             ),
         )
+
+
+class StandingOrderViewTests(TestCase):
+    @patch("hitch.main.views.Codex")
+    def test_page_lists_inbox_and_orders_for_selected_project(
+        self, mock_codex: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other_project = Project.objects.create(name="Other", repo_path="/other")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        StandingOrder.objects.create(
+            project=other_project,
+            title="Other order",
+            goal="Should not render.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            standing_order=order,
+            title="Add parser coverage",
+            summary="This adds focused parser coverage.",
+            confidence=StandingOrder.CONFIDENCE_HIGH,
+            relevant_files=["hitch/main/rollout.py"],
+            candidate_session=candidate,
+        )
+
+        response = self.client.get(reverse("standing_orders"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Improve tests")
+        self.assertContains(response, "Add parser coverage")
+        self.assertContains(response, "This adds focused parser coverage.")
+        self.assertContains(response, "hitch/main/rollout.py")
+        self.assertNotContains(response, "Other order")
+
+    def test_create_standing_order_for_selected_project(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+
+        response = self.client.post(
+            reverse("create_standing_order"),
+            {
+                "title": "Improve tests",
+                "goal": "Find useful test coverage increments.",
+                "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        order = StandingOrder.objects.get()
+        self.assertEqual(order.project, project)
+        self.assertEqual(order.title, "Improve tests")
+        self.assertEqual(
+            order.confidence_threshold,
+            StandingOrder.CONFIDENCE_VERY_HIGH,
+        )
+
+    def test_create_standing_order_validates_inputs(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+
+        response = self.client.post(
+            reverse("create_standing_order"),
+            {
+                "title": "Improve tests",
+                "goal": "Find useful test coverage increments.",
+                "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"active project is required")
+
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        cases = [
+            ({"title": "", "goal": "Goal", "confidence_threshold": "high"}, b"title is required"),
+            ({"title": "Title", "goal": "", "confidence_threshold": "high"}, b"goal is required"),
+            (
+                {"title": "Title", "goal": "Goal", "confidence_threshold": "low"},
+                b"confidence threshold is invalid",
+            ),
+        ]
+        for post_data, message in cases:
+            with self.subTest(message=message):
+                response = self.client.post(reverse("create_standing_order"), post_data)
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.content, message)
+
+    @patch("hitch.main.views.system_agents.start_standing_order_workflow")
+    def test_run_all_starts_each_selected_project_order(
+        self, mock_start: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other_project = Project.objects.create(name="Other", repo_path="/other")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        first = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        second = StandingOrder.objects.create(
+            project=project,
+            title="Improve docs",
+            goal="Find useful docs increments.",
+        )
+        StandingOrder.objects.create(
+            project=other_project,
+            title="Other order",
+            goal="Should not run.",
+        )
+
+        response = self.client.post(reverse("run_standing_orders"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            [call.kwargs["standing_order"] for call in mock_start.call_args_list],
+            [first, second],
+        )
+
+    def test_run_all_requires_selected_project(self) -> None:
+        response = self.client.post(reverse("run_standing_orders"))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"active project is required")
+
+    def test_reject_proposed_session_requires_reason(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        proposal = ProposedSession.objects.create(
+            standing_order=order,
+            title="Add parser coverage",
+        )
+
+        response = self.client.post(
+            reverse("update_proposed_session_outcome", args=[proposal.pk]),
+            {"outcome_status": ProposedSession.OUTCOME_REJECTED},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"reason is required")
+
+    def test_update_proposed_session_outcome_validates_inputs(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other_project = Project.objects.create(name="Other", repo_path="/other")
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        other_order = StandingOrder.objects.create(
+            project=other_project,
+            title="Other order",
+            goal="Should not update.",
+        )
+        other_proposal = ProposedSession.objects.create(
+            standing_order=other_order,
+            title="Other proposal",
+        )
+
+        response = self.client.post(
+            reverse("update_proposed_session_outcome", args=[other_proposal.pk]),
+            {"outcome_status": ProposedSession.OUTCOME_ACCEPTED},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"active project is required")
+
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        response = self.client.post(
+            reverse("update_proposed_session_outcome", args=[0]),
+            {"outcome_status": ProposedSession.OUTCOME_ACCEPTED},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"proposed session is required")
+
+        response = self.client.post(
+            reverse("update_proposed_session_outcome", args=[other_proposal.pk]),
+            {"outcome_status": ProposedSession.OUTCOME_ACCEPTED},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"proposed session is required")
+
+        proposal = ProposedSession.objects.create(
+            standing_order=order,
+            title="Add parser coverage",
+        )
+        response = self.client.post(
+            reverse("update_proposed_session_outcome", args=[proposal.pk]),
+            {"outcome_status": "wat"},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"outcome status is invalid")
+
+    def test_accept_proposed_session_links_candidate_session(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo",
+            project=project,
+        )
+        proposal = ProposedSession.objects.create(
+            standing_order=order,
+            candidate_session=candidate,
+            title="Add parser coverage",
+        )
+
+        response = self.client.post(
+            reverse("update_proposed_session_outcome", args=[proposal.pk]),
+            {"outcome_status": ProposedSession.OUTCOME_ACCEPTED},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
+        self.assertEqual(proposal.accepted_session, candidate)
+
+    @patch("hitch.main.views._render_session_detail")
+    def test_standing_order_run_log_renders_latest_run(
+        self, mock_render: MagicMock
+    ) -> None:
+        mock_render.return_value = HttpResponse("ok")
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(order.pk),
+            cwd="/repo",
+            state={"standing_order_id": order.pk},
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="candidate-thread",
+            cwd="/repo",
+            prompt="prompt",
+            events_path="/dev/null",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            thread_id="candidate-thread",
+            instance=instance,
+        )
+
+        response = self.client.get(reverse("standing_order_run_log", args=[workflow.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        mock_render.assert_called_once()
+        self.assertEqual(mock_render.call_args.args[1], "candidate-thread")
+
+    def test_standing_order_run_log_404s_for_invalid_workflows(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other_project = Project.objects.create(name="Other", repo_path="/other")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        other_order = StandingOrder.objects.create(
+            project=other_project,
+            title="Other order",
+            goal="Should not show.",
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                other_order.pk
+            ),
+            cwd="/other",
+            state={"standing_order_id": other_order.pk},
+        )
+
+        response = self.client.get(reverse("standing_order_run_log", args=[0]))
+        self.assertEqual(response.status_code, 404)
+
+        response = self.client.get(reverse("standing_order_run_log", args=[workflow.pk]))
+        self.assertEqual(response.status_code, 404)
