@@ -525,12 +525,36 @@ def _validated_okr_title(raw_title: str) -> tuple[str, str | None]:
     return title, None
 
 
-def _proposed_task_session_prompt(task: ProposedTask) -> str:
+def _proposed_task_session_prompt(
+    task: ProposedTask, key_result: KeyResult, objective: Objective
+) -> str:
     parts = [
         "Do this ProposedTask.",
         "",
-        f"Title: {task.title}",
+        "This task is part of the following Key Result (KR), which is part of "
+        "the following Objective.",
+        "",
+        f"Objective: {objective.title}",
     ]
+    if objective.description:
+        parts.extend(["", f"Objective description:\n{objective.description}"])
+    parts.extend(["", f"Key Result: {key_result.title}"])
+    if key_result.description:
+        parts.extend(["", f"Key Result description:\n{key_result.description}"])
+    if key_result.work_instructions:
+        parts.extend(
+            ["", f"Key Result work instructions:\n{key_result.work_instructions}"]
+        )
+    parts.extend(
+        [
+            "",
+            "There will be other tasks to complete the rest of this Key Result. "
+            "Only do this part, even if the result seems incomplete without the "
+            "other tasks.",
+            "",
+            f"Title: {task.title}",
+        ]
+    )
     if task.description:
         parts.extend(["", f"Description:\n{task.description}"])
     if task.success_criteria:
@@ -547,7 +571,9 @@ def _attach_proposed_task_display_state(
         for key_result in objective.key_results.all():
             tasks = list(key_result.proposed_tasks.all())
             for task in tasks:
-                task.session_prompt = _proposed_task_session_prompt(task)  # type: ignore[attr-defined]
+                task.session_prompt = _proposed_task_session_prompt(  # type: ignore[attr-defined]
+                    task, key_result, objective
+                )
             visible_tasks = (
                 tasks
                 if show_hidden_tasks

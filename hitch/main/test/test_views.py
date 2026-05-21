@@ -1173,6 +1173,55 @@ class OKRViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
+    def test_okrs_do_it_prompt_includes_okr_context(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex)
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        objective = Objective.objects.create(
+            project=project,
+            title="Improve planning",
+            description="Make plans concrete.",
+        )
+        key_result = KeyResult.objects.create(
+            objective=objective,
+            title="Draft plan",
+            description="Capture the work needed to ship planning.",
+            work_instructions="Use concise task prompts.",
+        )
+        ProposedTask.objects.create(
+            key_result=key_result,
+            title="Add task model",
+            description="Store generated tasks.",
+        )
+        self._select_project(project)
+
+        response = self.client.get(reverse("okrs"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Do this ProposedTask.")
+        self.assertContains(
+            response,
+            "This task is part of the following Key Result (KR), which is part of "
+            "the following Objective.",
+        )
+        self.assertContains(response, "Objective: Improve planning")
+        self.assertContains(response, "Objective description:")
+        self.assertContains(response, "Make plans concrete.")
+        self.assertContains(response, "Key Result: Draft plan")
+        self.assertContains(response, "Key Result description:")
+        self.assertContains(response, "Capture the work needed to ship planning.")
+        self.assertContains(response, "Key Result work instructions:")
+        self.assertContains(response, "Use concise task prompts.")
+        self.assertContains(
+            response,
+            "There will be other tasks to complete the rest of this Key Result. "
+            "Only do this part, even if the result seems incomplete without the "
+            "other tasks.",
+        )
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
     def test_okrs_page_hides_completed_proposed_tasks_by_default(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
