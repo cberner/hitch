@@ -329,6 +329,8 @@ class SessionViewTests(TestCase):
         self.assertContains(response, f'href="{reverse("usage")}"')
         self.assertContains(response, ">settings<")
         self.assertContains(response, "data-settings-dialog")
+        self.assertContains(response, 'classList.add("primary-nav-js")')
+        self.assertNotContains(response, "html:not(.js) .primary-nav-toggle")
         self.assertNotContains(response, 'class="back-link"')
 
     @patch("hitch.main.views.Codex")
@@ -343,10 +345,14 @@ class SessionViewTests(TestCase):
         response = _get_session(self.client)
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, f'href="{reverse("standing_orders")}"')
-        self.assertContains(response, ">standing orders<")
-        self.assertContains(response, f'href="{reverse("okrs")}"')
-        self.assertContains(response, ">OKRs<")
+        body = response.content.decode()
+        nav_start = body.index('<nav class="primary-nav"')
+        nav_end = body.index("</nav>", nav_start)
+        nav_html = body[nav_start:nav_end]
+        self.assertIn(f'href="{reverse("standing_orders")}"', nav_html)
+        self.assertIn(">standing orders</a>", nav_html)
+        self.assertIn(f'href="{reverse("okrs")}"', nav_html)
+        self.assertIn(">OKRs</a>", nav_html)
         self.assertContains(response, "@media (max-width: 900px)")
 
     @patch("hitch.main.views.Codex")

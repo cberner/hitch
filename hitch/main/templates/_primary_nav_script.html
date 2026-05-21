@@ -49,6 +49,7 @@
                     closeNavMenu();
                     navMenuButton.focus();
                 });
+                if (navMenu) navMenu.classList.add("primary-nav-js");
             }
             settingsOpenButtons.forEach((btn) => btn.addEventListener("click", () => {
                 closeNavMenu();
