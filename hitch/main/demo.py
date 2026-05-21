@@ -31,12 +31,20 @@ LOCAL_DEMO_SUFFIX: Final = ".demo.localhost"
 HOP_BY_HOP_HEADERS: Final = {
     "connection",
     "keep-alive",
+    "proxy-connection",
     "proxy-authenticate",
     "proxy-authorization",
     "te",
     "trailer",
     "transfer-encoding",
     "upgrade",
+}
+CONTROLLED_REQUEST_HEADERS: Final = {
+    "accept-encoding",
+    "content-length",
+    "expect",
+    "forwarded",
+    "host",
 }
 SENSITIVE_REQUEST_HEADERS: Final = {
     "authorization",
@@ -212,7 +220,7 @@ def proxy_demo_request(
             method,
             upstream_path,
             body=body,
-            headers=_proxy_request_headers(request, demo),
+            headers=_proxy_request_headers(request, demo, path_prefix=path_prefix),
         )
         upstream = connection.getresponse()
     except OSError as exc:
@@ -224,7 +232,8 @@ def proxy_demo_request(
         upstream_netloc=f"{demo.host}:{demo.port}",
     )
     content_type = upstream.getheader("Content-Type", "")
-    if _should_rewrite_body(content_type, path_prefix):
+    content_encoding = upstream.getheader("Content-Encoding", "").lower()
+    if _should_rewrite_body(content_type, path_prefix) and content_encoding in {"", "identity"}:
         body_bytes = upstream.read()
         connection.close()
         response = HttpResponse(
@@ -332,17 +341,26 @@ def _upstream_path(path: str, query_string: str) -> str:
     return normalized
 
 
-def _proxy_request_headers(request: HttpRequest, demo: SessionDemo) -> dict[str, str]:
+def _proxy_request_headers(
+    request: HttpRequest, demo: SessionDemo, *, path_prefix: str
+) -> dict[str, str]:
+    blocked_headers = (
+        HOP_BY_HOP_HEADERS
+        | CONTROLLED_REQUEST_HEADERS
+        | SENSITIVE_REQUEST_HEADERS
+        | _connection_header_tokens(request.headers.get("Connection", ""))
+    )
     headers = {
         key: value
         for key, value in request.headers.items()
-        if key.lower()
-        not in HOP_BY_HOP_HEADERS | SENSITIVE_REQUEST_HEADERS | {"host"}
+        if not _blocked_request_header(key, blocked_headers)
     }
     headers["Host"] = f"{demo.host}:{demo.port}"
-    headers["X-Forwarded-Host"] = request.get_host()
+    headers["Accept-Encoding"] = "identity"
+    headers["X-Forwarded-Host"] = request.headers.get("Host", "")
     headers["X-Forwarded-Proto"] = request.scheme or "http"
     headers["X-Forwarded-For"] = request.META.get("REMOTE_ADDR", "")
+    headers["X-Forwarded-Prefix"] = path_prefix.rstrip("/") or "/"
     return headers
 
 
@@ -352,15 +370,36 @@ def _proxy_response_headers(
     *,
     upstream_netloc: str,
 ) -> dict[str, str]:
+    upstream_headers = upstream.getheaders()
+    blocked_headers = (
+        HOP_BY_HOP_HEADERS
+        | SENSITIVE_RESPONSE_HEADERS
+        | {"content-length"}
+        | {
+            token
+            for key, value in upstream_headers
+            if key.lower() == "connection"
+            for token in _connection_header_tokens(value)
+        }
+    )
     headers: dict[str, str] = {}
-    for key, value in upstream.getheaders():
+    for key, value in upstream_headers:
         lower = key.lower()
-        if lower in HOP_BY_HOP_HEADERS | SENSITIVE_RESPONSE_HEADERS or lower == "content-length":
+        if lower in blocked_headers:
             continue
         if lower == "location":
             value = _rewrite_location(value, path_prefix, upstream_netloc=upstream_netloc)
         headers[key] = value
     return headers
+
+
+def _connection_header_tokens(value: str) -> set[str]:
+    return {token.strip().lower() for token in value.split(",") if token.strip()}
+
+
+def _blocked_request_header(key: str, blocked_headers: set[str]) -> bool:
+    lower = key.lower()
+    return lower in blocked_headers or lower.startswith("x-forwarded-")
 
 
 def _rewrite_location(value: str, path_prefix: str, *, upstream_netloc: str) -> str:
