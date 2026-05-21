@@ -194,6 +194,47 @@ class SessionMetadata(models.Model):
         return f"SessionMetadata(thread_id={self.thread_id}, project={self.project_id})"
 
 
+class SessionDemo(models.Model):
+    """Active web demo target for a Codex session."""
+
+    STATUS_ACTIVE = "active"
+    STATUS_STOPPED = "stopped"
+    STATUS_FAILED = "failed"
+
+    STATUS_CHOICES = (
+        (STATUS_ACTIVE, "active"),
+        (STATUS_STOPPED, "stopped"),
+        (STATUS_FAILED, "failed"),
+    )
+
+    thread_id = models.CharField(max_length=128, unique=True)
+    host = models.CharField(max_length=255, default="127.0.0.1")
+    port = models.PositiveIntegerField()
+    container_id = models.CharField(max_length=128, blank=True, default="")
+    container_name = models.CharField(max_length=128, blank=True, default="")
+    runtime = models.CharField(max_length=32, default="podman")
+    status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
+    last_error = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(
+                fields=["thread_id", "status"],
+                name="sessiondemo_thread_status_idx",
+            ),
+            models.Index(fields=["status"], name="sessiondemo_status_idx"),
+        ]
+
+    @override
+    def __str__(self) -> str:
+        return (
+            f"SessionDemo(thread_id={self.thread_id}, "
+            f"target={self.host}:{self.port}, status={self.status})"
+        )
+
+
 class CodexInstance(models.Model):
     """One row per spawned Codex worker subprocess.
 

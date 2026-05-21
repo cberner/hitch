@@ -48,6 +48,21 @@ urlpatterns = [
         name="system_session",
     ),
     path("sessions/new/", hitch.main.views.new_session, name="new_session"),
+    path(
+        "sessions/<str:session_id>/demo/start/",
+        hitch.main.views.start_session_demo,
+        name="start_session_demo",
+    ),
+    path(
+        "sessions/<str:session_id>/demo/",
+        hitch.main.views.session_demo_proxy_root,
+        name="session_demo_proxy_root",
+    ),
+    path(
+        "sessions/<str:session_id>/demo/<path:path>",
+        hitch.main.views.session_demo_proxy,
+        name="session_demo_proxy",
+    ),
     path("sessions/<str:session_id>/", hitch.main.views.session, name="session"),
     path(
         "sessions/<str:session_id>/name/",

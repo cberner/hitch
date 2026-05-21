@@ -19,6 +19,7 @@ from hitch.main.models import (
     KeyResult,
     Objective,
     Project,
+    SessionDemo,
     SessionMetadata,
     SystemAgentRun,
     SystemWorkflow,
@@ -647,6 +648,45 @@ class SessionViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'role="menuitem">Archive</button>')
         client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    def test_session_menu_offers_demo_actions(self, mock_codex: MagicMock) -> None:
+        SessionDemo.objects.create(
+            thread_id="thread-1",
+            host="127.0.0.1",
+            port=45678,
+            status=SessionDemo.STATUS_ACTIVE,
+        )
+        _patch_thread(self, mock_codex, _thread([_turn([_user_message("hi")])]))
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            f'action="{reverse("start_session_demo", kwargs={"session_id": "thread-1"})}"',
+        )
+        self.assertContains(response, "Start demo</button>")
+        self.assertNotContains(response, "disabled>Start demo</button>")
+        self.assertContains(response, 'href="http://testserver/sessions/thread-1/demo/"')
+        self.assertContains(response, 'role="menuitem" target="_blank" rel="noopener noreferrer">Open demo</a>')
+
+    @patch("hitch.main.views.Codex")
+    def test_start_demo_menu_item_disabled_during_system_workflow(
+        self, mock_codex: MagicMock
+    ) -> None:
+        SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-1",
+            cwd="/tmp/demo",
+            status=SystemWorkflow.STATUS_RUNNING,
+        )
+        _patch_thread(self, mock_codex, _thread([_turn([_user_message("hi")])]))
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "disabled>Start demo</button>")
 
     @patch("hitch.main.views.Codex")
     def test_topbar_title_truncates_long_preview(self, mock_codex: MagicMock) -> None:

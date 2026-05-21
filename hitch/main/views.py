@@ -23,6 +23,7 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
+from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from openai_codex import AppServerError, Codex
 from openai_codex.generated.v2_all import (
@@ -31,7 +32,7 @@ from openai_codex.generated.v2_all import (
     ReasoningEffort,
 )
 
-from hitch.main import codex_events, codex_pool, rollout, streaming, system_agents
+from hitch.main import codex_events, codex_pool, demo, rollout, streaming, system_agents
 from hitch.main.diffs import build_worktree_diff
 from hitch.main.formatting import looks_like_markdown, render_markdown
 from hitch.main.models import (
@@ -983,6 +984,8 @@ def _render_session_detail(
         codex_events.latest_task_plan_for_instance(active_instance)
     )
     diff_view = build_worktree_diff(_thread_cwd(thread))
+    session_demo = demo.active_demo_for(session_id)
+    demo_url = demo.demo_url_for_request(request, session_id) if session_demo is not None else ""
     settings_dialog_context = _settings_dialog_context(settings, models_data)
     active_worker_status_text = _active_worker_status_text(active_instance)
     workflow_status_text = _workflow_status_text(active_system_workflow)
@@ -1005,6 +1008,9 @@ def _render_session_detail(
             "set_name_url": reverse("set_session_name", kwargs={"session_id": session_id}),
             "set_archived_url": reverse(
                 "set_session_archived", kwargs={"session_id": session_id}
+            ),
+            "start_demo_url": reverse(
+                "start_session_demo", kwargs={"session_id": session_id}
             ),
             "set_project_url": reverse(
                 "set_session_project", kwargs={"session_id": session_id}
@@ -1031,6 +1037,7 @@ def _render_session_detail(
             ),
             "active_worker": active_instance is not None,
             "active_system_workflow": active_system_workflow,
+            "demo_start_disabled": active_system_workflow is not None,
             "workflow_status_text": workflow_status_text,
             "active_worker_status_text": active_worker_status_text,
             "live_status_text": live_status_text,
@@ -1055,6 +1062,8 @@ def _render_session_detail(
             "goal_objective": goal_objective,
             "task_plan": task_plan,
             "diff_view": diff_view,
+            "session_demo": session_demo,
+            "demo_url": demo_url,
             "projects": projects,
             "session_project": session_project,
             "session_project_id": session_project.pk if session_project is not None else "",
@@ -2672,6 +2681,8 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
     archived = request.POST.get("archived", "").strip()
     if archived not in {"true", "false"}:
         return HttpResponseBadRequest("archived must be true or false")
+    if archived == "true":
+        demo.cleanup_demo_for_session(session_id)
     settings = _stored_settings(request)
     config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
     with Codex(config=config) as codex:
@@ -2687,6 +2698,69 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
     if archived == "true":
         return redirect("index")
     return redirect("session", session_id=session_id)
+
+
+@require_http_methods(["POST"])
+def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
+    if system_agents.active_workflow_for_thread(session_id) is not None:
+        return HttpResponseBadRequest("PR workflow is running for this session")
+    settings = _stored_settings(request)
+    config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
+    with Codex(config=config) as codex:
+        resumed = codex._client.thread_resume(session_id)
+        thread = resumed.thread
+    cwd = _thread_cwd(thread)
+    if not cwd:
+        return HttpResponseBadRequest("thread has no cwd")
+    if cwd not in _allowed_session_cwds():
+        return HttpResponseBadRequest("thread cwd is not an allowed repository")
+    try:
+        session_demo, container_port = demo.start_demo_container(session_id)
+    except demo.DemoError as exc:
+        return HttpResponse(str(exc), status=500, content_type="text/plain")
+
+    prompt = demo.demo_prompt_for(
+        request=request,
+        session_id=session_id,
+        demo=session_demo,
+        container_port=container_port,
+    )
+    try:
+        active_instance = codex_pool.latest_active_for_thread(session_id)
+        if active_instance is not None:
+            steered = codex_pool.steer_instance(
+                active_instance.pk,
+                expected_thread_id=session_id,
+                prompt=prompt,
+            )
+            if steered is not None:
+                return redirect("session", session_id=session_id)
+
+        codex_pool.spawn_turn(
+            thread_id=session_id,
+            cwd=cwd,
+            prompt=prompt,
+            sandbox_policy=_effective_sandbox_policy(settings) or None,
+            approval_mode=_effective_approval_mode(settings),
+            enable_memories=settings.enable_memories,
+        )
+    except Exception:
+        demo.cleanup_demo_for_session(session_id)
+        raise
+    return redirect("session", session_id=session_id)
+
+
+@csrf_exempt
+def session_demo_proxy_root(request: HttpRequest, session_id: str) -> HttpResponse:
+    return session_demo_proxy(request, session_id, "")
+
+
+@csrf_exempt
+def session_demo_proxy(
+    request: HttpRequest, session_id: str, path: str
+) -> HttpResponse:
+    prefix = reverse("session_demo_proxy_root", kwargs={"session_id": session_id})
+    return demo.proxy_demo_request(request, session_id, path, path_prefix=prefix)
 
 
 @require_http_methods(["POST"])
