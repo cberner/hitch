@@ -849,6 +849,56 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(workflow.state["next_user_message_index"], 5)
 
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_qa_lgtm_can_complete_without_pr_prompt(self, mock_spawn: MagicMock) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step="qa_running",
+            state={"open_pr_on_lgtm": False, "next_user_message_index": 4},
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False) as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "method": "item/completed",
+                        "payload": {
+                            "item": {
+                                "id": "a1",
+                                "type": "agentMessage",
+                                "text": '{"feedback": "Looks good", "lgtm": true}',
+                            }
+                        },
+                    }
+                )
+                + "\n"
+            )
+            events_path = fh.name
+        self.addCleanup(Path(events_path).unlink, missing_ok=True)
+        instance = _instance(
+            thread_id="qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=events_path,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="qa-thread",
+            instance=instance,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        mock_spawn.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_QA_APPROVED)
+        self.assertEqual(workflow.state["next_user_message_index"], 4)
+        self.assertEqual(workflow.state["last_feedback"], "Looks good")
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
     def test_qa_completion_recovers_when_run_row_does_not_exist_yet(
         self, mock_spawn: MagicMock
     ) -> None:

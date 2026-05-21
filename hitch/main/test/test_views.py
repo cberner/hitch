@@ -52,6 +52,7 @@ _PR_PROMPT = (
     "Do a thorough review of the diff. Rebase on master, clean it up, "
     "and then open a PR"
 )
+_QA_PROMPT = "Run the QA agent on the current diff and fix anything it finds"
 
 
 def _rollout_line(
@@ -794,9 +795,12 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Plan mode")
         self.assertNotContains(response, "data-slash-pr")
         self.assertContains(response, _PR_PROMPT)
+        self.assertContains(response, _QA_PROMPT)
         self.assertContains(response, "parseNewSessionPlanCommand")
         self.assertContains(response, "parseNewSessionPrCommand")
+        self.assertContains(response, "parseNewSessionQaCommand")
         self.assertContains(response, 'toLowerCase() !== "/plan"')
+        self.assertContains(response, 'toLowerCase() !== "/qa"')
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -2288,6 +2292,47 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.create_session_thread")
+    @patch("hitch.main.views.discover_repos")
+    def test_qa_slash_command_starts_new_session_without_pr_prompt(
+        self,
+        mock_discover: MagicMock,
+        mock_create_thread: MagicMock,
+        mock_codex: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_create_thread.return_value = "thread-xyz"
+        _setup_codex(mock_codex, models=[_make_model("gpt-5.4", is_default=True)])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "/QA", "cwd": self.REPO, "plan_mode": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_create_thread.assert_called_once_with(
+            cwd=self.REPO,
+            name=_QA_PROMPT,
+            developer_instructions=None,
+            model="gpt-5.4",
+            enable_memories=False,
+        )
+        mock_start_workflow.assert_called_once_with(
+            main_thread_id="thread-xyz",
+            cwd=self.REPO,
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model="gpt-5.4",
+            reasoning_effort="medium",
+            developer_instructions=None,
+            enable_memories=False,
+            initial_user_message_index=0,
+            open_pr_on_lgtm=False,
+        )
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.create_session_thread")
     @patch("hitch.main.views.create_worktree_for_session")
     @patch("hitch.main.views.discover_repos")
     def test_pr_slash_command_uses_selected_repo_when_worktrees_are_enabled(
@@ -3691,6 +3736,68 @@ class SendMessageViewTests(TestCase):
             developer_instructions=None,
             enable_memories=False,
             initial_user_message_index=0,
+        )
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_qa_slash_command_starts_qa_workflow_without_pr_prompt(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex, model="gpt-5.4", reasoning_effort="high")
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "/qa", "plan_mode": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_start_workflow.assert_called_once_with(
+            main_thread_id="abc",
+            cwd="/repo",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model="gpt-5.4",
+            reasoning_effort="high",
+            developer_instructions=None,
+            enable_memories=False,
+            initial_user_message_index=0,
+            open_pr_on_lgtm=False,
+        )
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_qa_menu_prompt_starts_qa_workflow_without_pr_prompt(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex, model="gpt-5.4")
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": _QA_PROMPT},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_start_workflow.assert_called_once_with(
+            main_thread_id="abc",
+            cwd="/repo",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model="gpt-5.4",
+            reasoning_effort=None,
+            developer_instructions=None,
+            enable_memories=False,
+            initial_user_message_index=0,
+            open_pr_on_lgtm=False,
         )
 
     @patch("hitch.main.views.codex_pool.spawn_turn")

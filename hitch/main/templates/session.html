@@ -1990,6 +1990,9 @@
                     <button type="button" role="menuitem" data-slash-pr>
                         <span class="slash-menu-title">PR</span>
                     </button>
+                    <button type="button" role="menuitem" data-slash-qa>
+                        <span class="slash-menu-title">QA</span>
+                    </button>
                 </div>
             </div>
             {% if active_worker %}
@@ -2275,6 +2278,7 @@
                 const slashMenu = composer.querySelector("[data-slash-menu]");
                 const slashPlan = composer.querySelector("[data-slash-plan]");
                 const slashPr = composer.querySelector("[data-slash-pr]");
+                const slashQa = composer.querySelector("[data-slash-qa]");
                 const liveWork = document.querySelector("[data-live-work]");
                 const nextMessageConfig = document.querySelector("[data-next-message-config]");
                 const nextMessageItems = nextMessageConfig
@@ -2283,6 +2287,7 @@
                 const composerKeyboardOffsetProperty = "--composer-keyboard-offset";
                 const mobileComposerQuery = window.matchMedia("(max-width: 640px)");
                 const prPrompt = "{{ pr_slash_prompt|escapejs }}";
+                const qaPrompt = "{{ qa_slash_prompt|escapejs }}";
                 const workflowLocked = composer.dataset.workflowLocked === "true";
                 let composerKeyboardFrame = 0;
                 const sync = () => {
@@ -2335,9 +2340,19 @@
                     if ((parts[0] || "").toLowerCase() !== "/pr") return null;
                     return prPrompt;
                 };
+                const parseQaCommand = () => {
+                    const text = input.value.trim();
+                    const parts = text.split(/\s+/, 2);
+                    if ((parts[0] || "").toLowerCase() !== "/qa") return null;
+                    return qaPrompt;
+                };
                 const syncNextMessageConfig = () => {
-                    const planMode = composer.dataset.planMode === "true"
-                        || parsePlanCommand() !== null;
+                    const workflowCommand = parsePrCommand() !== null
+                        || parseQaCommand() !== null;
+                    const planMode = !workflowCommand && (
+                        composer.dataset.planMode === "true"
+                        || parsePlanCommand() !== null
+                    );
                     if (nextMessageConfig) {
                         nextMessageConfig.dataset.planMode = planMode ? "true" : "false";
                     }
@@ -2411,6 +2426,15 @@
                         requestSubmit(composer, submit);
                     });
                 }
+                if (slashQa) {
+                    slashQa.addEventListener("click", () => {
+                        setPlanMode(false, true);
+                        input.value = qaPrompt;
+                        sync();
+                        closeSlashMenu();
+                        requestSubmit(composer, submit);
+                    });
+                }
                 document.addEventListener("click", (event) => {
                     if (!slashCommand || !slashMenu || slashMenu.hidden) return;
                     if (!slashCommand.contains(event.target)) closeSlashMenu();
@@ -2451,10 +2475,12 @@
                         return;
                     }
                     const prCommandPrompt = parsePrCommand();
-                    const commandPrompt = prCommandPrompt === null ? parsePlanCommand() : null;
-                    if (prCommandPrompt !== null) {
+                    const qaCommandPrompt = prCommandPrompt === null ? parseQaCommand() : null;
+                    const workflowCommandPrompt = prCommandPrompt || qaCommandPrompt;
+                    const commandPrompt = workflowCommandPrompt === null ? parsePlanCommand() : null;
+                    if (workflowCommandPrompt !== null) {
                         setPlanMode(false, true);
-                        input.value = prCommandPrompt;
+                        input.value = workflowCommandPrompt;
                         sync();
                     } else if (commandPrompt !== null) {
                         setPlanMode(true, true);

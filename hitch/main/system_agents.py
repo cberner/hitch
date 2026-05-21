@@ -25,6 +25,9 @@ PR_SLASH_DISPLAY_PROMPT = (
     "Do a thorough review of the diff. Rebase on master, clean it up, "
     "and then open a PR"
 )
+QA_SLASH_DISPLAY_PROMPT = (
+    "Run the QA agent on the current diff and fix anything it finds"
+)
 PR_SLASH_PROMPT = (
     f"{PR_SLASH_DISPLAY_PROMPT}. After opening it, poll the PR every 2 minutes "
     "until you have CI status and at least one review signal: code review "
@@ -40,6 +43,7 @@ STEP_QA_RUNNING = "qa_running"
 STEP_FEEDBACK_RUNNING = "feedback_running"
 STEP_BLOCKED = "blocked"
 STEP_MAX_ITERATIONS_REACHED = "max_iterations_reached"
+STEP_QA_APPROVED = "qa_approved"
 STEP_PR_PROMPT_SPAWNED = "pr_prompt_spawned"
 STEP_OKR_TASKS_RUNNING = "okr_tasks_running"
 STEP_OKR_TASKS_SAVED = "okr_tasks_saved"
@@ -116,8 +120,9 @@ def start_pr_qa_workflow(
     developer_instructions: str | None = None,
     enable_memories: bool = False,
     initial_user_message_index: int = 0,
+    open_pr_on_lgtm: bool = True,
 ) -> SystemWorkflow:
-    """Start a PR workflow by running QA before the work-agent PR prompt."""
+    """Start a QA workflow before optionally running the work-agent PR prompt."""
     try:
         with transaction.atomic():
             workflow = SystemWorkflow.objects.create(
@@ -135,6 +140,7 @@ def start_pr_qa_workflow(
                     "developer_instructions": developer_instructions or "",
                     "enable_memories": enable_memories,
                     "next_user_message_index": max(initial_user_message_index, 0),
+                    "open_pr_on_lgtm": open_pr_on_lgtm,
                 },
             )
     except IntegrityError:
@@ -315,6 +321,11 @@ def _handle_system_agent_finished(instance: CodexInstance) -> None:
     lgtm = parsed["lgtm"]
     workflow.state = {**workflow.state, "last_feedback": feedback}
     if lgtm:
+        if workflow.state.get("open_pr_on_lgtm", True) is not True:
+            workflow.status = SystemWorkflow.STATUS_COMPLETED
+            workflow.step = STEP_QA_APPROVED
+            workflow.save(update_fields=["status", "step", "state", "updated_at"])
+            return
         try:
             _spawn_pr_prompt(workflow)
         except Exception as exc:

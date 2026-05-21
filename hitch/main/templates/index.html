@@ -1227,6 +1227,7 @@
             const newSessionSlashPlan = newSessionForm && newSessionForm.querySelector("[data-slash-plan]");
             const bareRepoProjectValue = "{{ bare_repo_project_value|escapejs }}";
             const prPrompt = "{{ pr_slash_prompt|escapejs }}";
+            const qaPrompt = "{{ qa_slash_prompt|escapejs }}";
             function isSuperEnter(event) {
                 const hasSuper = event.metaKey
                     || (event.getModifierState && event.getModifierState("Meta"))
@@ -1281,6 +1282,13 @@
                 const parts = text.split(/\s+/, 2);
                 if ((parts[0] || "").toLowerCase() !== "/pr") return null;
                 return prPrompt;
+            }
+            function parseNewSessionQaCommand() {
+                if (!newSessionInput) return null;
+                const text = newSessionInput.value.trim();
+                const parts = text.split(/\s+/, 2);
+                if ((parts[0] || "").toLowerCase() !== "/qa") return null;
+                return qaPrompt;
             }
             function openNewSessionDialog() {
                 syncNewSessionProjectFields();
@@ -1348,10 +1356,12 @@
                 });
                 newSessionForm.addEventListener("submit", (event) => {
                     const prCommandPrompt = parseNewSessionPrCommand();
-                    const commandPrompt = prCommandPrompt === null ? parseNewSessionPlanCommand() : null;
-                    if (prCommandPrompt !== null && newSessionInput) {
+                    const qaCommandPrompt = prCommandPrompt === null ? parseNewSessionQaCommand() : null;
+                    const workflowCommandPrompt = prCommandPrompt || qaCommandPrompt;
+                    const commandPrompt = workflowCommandPrompt === null ? parseNewSessionPlanCommand() : null;
+                    if (workflowCommandPrompt !== null && newSessionInput) {
                         setNewSessionPlanMode(false);
-                        newSessionInput.value = prCommandPrompt;
+                        newSessionInput.value = workflowCommandPrompt;
                     } else if (commandPrompt !== null && newSessionInput) {
                         setNewSessionPlanMode(true);
                         newSessionInput.value = commandPrompt;
