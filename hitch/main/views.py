@@ -3,7 +3,7 @@ import binascii
 import json
 import logging
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 from urllib.parse import urlencode
@@ -1067,7 +1067,7 @@ def _token_usage_for(thread: Any) -> dict[str, str] | None:
     if usage is None:
         return None
     formatted = {
-        "input": _format_token_count(usage["input_tokens"]),
+        "input": _format_token_count(_non_cached_input_tokens(usage)),
         "cached": _format_token_count(usage["cached_input_tokens"]),
         "output": _format_token_count(usage["output_tokens"]),
     }
@@ -1179,6 +1179,16 @@ def _format_token_count(value: int) -> str:
     return f"{value:,}"
 
 
+# Codex reports cached input as part of input_tokens and total_tokens; keep
+# cache as a breakdown rather than adding it back into displayed totals.
+def _non_cached_input_tokens(usage: Mapping[str, int]) -> int:
+    return max(usage.get("input_tokens", 0) - usage.get("cached_input_tokens", 0), 0)
+
+
+def _display_total_tokens(usage: Mapping[str, int]) -> int:
+    return max(usage.get("total_tokens", 0) - usage.get("cached_input_tokens", 0), 0)
+
+
 def _threads_for_usage(codex: Codex) -> list[Any] | None:
     threads: list[Any] = []
     failed = False
@@ -1213,15 +1223,19 @@ def _dedupe_usage_threads(threads: list[Any]) -> list[Any]:
 
 def _lifetime_token_usage_for(threads: list[Any]) -> dict[str, str]:
     totals = {key: 0 for key in _TOKEN_USAGE_KEYS}
+    display_total = 0
+    display_input = 0
     for thread in threads:
         usage = _token_usage_numbers_for(thread)
         if usage is None:
             continue
         for key in _TOKEN_USAGE_KEYS:
             totals[key] += usage.get(key, 0)
+        display_total += _display_total_tokens(usage)
+        display_input += _non_cached_input_tokens(usage)
     return {
-        "total": _format_token_count(totals["total_tokens"]),
-        "input": _format_token_count(totals["input_tokens"]),
+        "total": _format_token_count(display_total),
+        "input": _format_token_count(display_input),
         "output": _format_token_count(totals["output_tokens"]),
         "cached": _format_token_count(totals["cached_input_tokens"]),
     }

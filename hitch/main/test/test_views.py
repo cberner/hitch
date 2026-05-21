@@ -70,6 +70,7 @@ def _token_count_line(
     cached_input_tokens: int,
     output_tokens: int,
     total_tokens: int,
+    reasoning_output_tokens: int = 0,
     context_tokens: int = 0,
     model_context_window: int = 0,
 ) -> str:
@@ -82,6 +83,7 @@ def _token_count_line(
                     "input_tokens": input_tokens,
                     "cached_input_tokens": cached_input_tokens,
                     "output_tokens": output_tokens,
+                    "reasoning_output_tokens": reasoning_output_tokens,
                     "total_tokens": total_tokens,
                 },
                 "last_token_usage": {
@@ -520,7 +522,8 @@ class IndexViewTests(TestCase):
         response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "123,456")
+        self.assertContains(response, "113,456")
+        self.assertNotContains(response, "123,456")
         cache = ArchivedSessionTokenUsage.objects.get(thread_id="archived")
         self.assertEqual(cache.total_tokens, 123_456)
         self.assertEqual(cache.rollout_mtime_ns, 1_000_000_000)
@@ -538,7 +541,8 @@ class IndexViewTests(TestCase):
 
         response = self.client.get(reverse("usage"))
 
-        self.assertContains(response, "999,999")
+        self.assertContains(response, "909,999")
+        self.assertNotContains(response, "999,999")
         self.assertNotContains(response, "123,456")
         cache.refresh_from_db()
         self.assertEqual(cache.total_tokens, 999_999)
@@ -596,7 +600,7 @@ class IndexViewTests(TestCase):
         client.thread_list.assert_any_call(archived=True)
 
     @patch("hitch.main.views.Codex")
-    def test_usage_page_sums_lifetime_token_usage(
+    def test_usage_page_sums_lifetime_token_usage_without_cached_double_count(
         self, mock_codex: MagicMock
     ) -> None:
         active_path = _make_rollout(
@@ -606,7 +610,8 @@ class IndexViewTests(TestCase):
                     input_tokens=400,
                     cached_input_tokens=50,
                     output_tokens=600,
-                    total_tokens=1_000,
+                    reasoning_output_tokens=40,
+                    total_tokens=1_040,
                 )
             ],
         )
@@ -617,7 +622,8 @@ class IndexViewTests(TestCase):
                     input_tokens=1_000,
                     cached_input_tokens=200,
                     output_tokens=1_500,
-                    total_tokens=2_500,
+                    reasoning_output_tokens=300,
+                    total_tokens=3_000,
                 )
             ],
             archived=True,
@@ -635,12 +641,15 @@ class IndexViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Lifetime")
         self.assertContains(response, "All sessions")
-        self.assertContains(response, "3,500")
-        self.assertContains(response, "1,400")
+        self.assertContains(response, "3,790")
+        self.assertContains(response, "1,150")
         self.assertContains(response, "2,100")
         self.assertContains(response, "250")
+        self.assertNotContains(response, "4,040")
+        self.assertNotContains(response, "3,250")
+        self.assertNotContains(response, "1,400")
         cache = ArchivedSessionTokenUsage.objects.get(thread_id="archived")
-        self.assertEqual(cache.total_tokens, 2_500)
+        self.assertEqual(cache.total_tokens, 3_000)
         client = mock_codex.return_value.__enter__.return_value
         client.thread_list.assert_any_call()
         client.thread_list.assert_any_call(archived=True)
