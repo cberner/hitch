@@ -400,12 +400,94 @@ def index(request: HttpRequest) -> HttpResponse:
             "current_show_archived_sessions": current_settings.show_archived_sessions,
             "current_project": current_project,
             "name_max_len": _NAME_MAX_LEN,
+            "show_new_session_controls": True,
             **settings_dialog_context,
             **new_session_dialog_context,
         },
     )
     _apply_cookie_updates(response, cookie_updates)
     return response
+
+
+@require_http_methods(["GET"])
+def system_sessions(request: HttpRequest) -> HttpResponse:
+    codex_pool.reconcile_dead()
+    initial_settings = _stored_settings(request)
+    config = codex_pool.app_server_config(
+        enable_memories=initial_settings.enable_memories
+    )
+    with Codex(config=config) as codex:
+        models_data = list(codex.models().data)
+        resolved_settings = _resolved_settings(request, models_data)
+        current_settings = resolved_settings.values
+        cookie_updates = resolved_settings.cookie_updates
+        threads = _all_threads(codex)
+        if current_settings.show_archived_sessions:
+            threads.extend(_all_threads(codex, archived=True))
+    hidden_thread_ids = system_agents.hidden_thread_ids()
+    runs_by_thread_id = _system_agent_runs_by_thread_id(hidden_thread_ids)
+    threads = sorted(threads, key=lambda s: s.updated_at, reverse=True)
+    projects = list(Project.objects.all())
+    current_project = _selected_project_for_settings(current_settings, projects)
+    metadata_by_thread = _metadata_by_thread_id(threads)
+    sessions = []
+    for thread in threads:
+        thread_id = getattr(thread, "id", None)
+        if not isinstance(thread_id, str) or thread_id not in hidden_thread_ids:
+            continue
+        run = runs_by_thread_id.get(thread_id)
+        session_project = _project_for_thread(thread, metadata_by_thread, projects)
+        if current_project is not None and session_project != current_project:
+            continue
+        sessions.append(
+            {
+                "id": thread.id,
+                "cwd": thread.cwd,
+                "updated_at": thread.updated_at,
+                "display_title": _display_title(thread),
+                "name_value": getattr(thread, "name", None) or "",
+                "is_archived": _thread_is_archived(thread),
+                "project": session_project,
+                "detail_url": reverse(
+                    "system_session", kwargs={"session_id": thread_id}
+                ),
+                "system_kind": _system_agent_run_label(run),
+                "system_status": run.status if run is not None else "",
+            }
+        )
+    settings_dialog_context = _settings_dialog_context(current_settings, models_data)
+    response = render(
+        request,
+        "index.html",
+        {
+            "sessions": sessions,
+            "has_projects": bool(projects),
+            "archived_visibility_url": reverse("update_archived_session_visibility"),
+            "login_url": reverse("login"),
+            "register_url": reverse("register"),
+            "current_show_archived_sessions": current_settings.show_archived_sessions,
+            "name_max_len": _NAME_MAX_LEN,
+            "system_session_list": True,
+            "show_new_session_controls": False,
+            **settings_dialog_context,
+        },
+    )
+    _apply_cookie_updates(response, cookie_updates)
+    return response
+
+
+@require_http_methods(["GET"])
+def system_session(request: HttpRequest, session_id: str) -> HttpResponse:
+    run = _system_agent_run_for_thread(session_id)
+    if run is None:
+        raise Http404("system session not found")
+    return _render_session_detail(
+        request,
+        session_id,
+        read_only=True,
+        display_title=_system_agent_run_detail_title(run),
+        system_prompt=run.instance.prompt,
+    )
 
 
 @require_http_methods(["GET"])
@@ -852,6 +934,7 @@ def _render_session_detail(
     *,
     read_only: bool = False,
     display_title: str | None = None,
+    system_prompt: str = "",
 ) -> HttpResponse:
     # Sweep stuck workers before reading status: a worker that died without
     # writing a terminal status would otherwise leave the page in "streaming"
@@ -916,6 +999,7 @@ def _render_session_detail(
             "entries": entries,
             "display_title": display_title or _display_title(thread),
             "read_only": read_only,
+            "system_prompt": system_prompt,
             "name_value": name_value,
             "name_max_len": _NAME_MAX_LEN,
             "set_name_url": reverse("set_session_name", kwargs={"session_id": session_id}),
@@ -1209,6 +1293,49 @@ def _dedupe_usage_threads(threads: list[Any]) -> list[Any]:
             seen.add(thread_id)
         deduped.append(thread)
     return deduped
+
+
+def _system_agent_runs_by_thread_id(
+    thread_ids: Iterable[str],
+) -> dict[str, SystemAgentRun]:
+    ids = [thread_id for thread_id in thread_ids if thread_id]
+    if not ids:
+        return {}
+    runs = (
+        SystemAgentRun.objects.filter(thread_id__in=ids)
+        .exclude(thread_id="")
+        .select_related("instance", "workflow")
+        .order_by("thread_id", "-created_at", "-pk")
+    )
+    by_thread_id: dict[str, SystemAgentRun] = {}
+    for run in runs:
+        by_thread_id.setdefault(run.thread_id, run)
+    return by_thread_id
+
+
+def _system_agent_run_for_thread(thread_id: str) -> SystemAgentRun | None:
+    if not thread_id:
+        return None
+    return (
+        SystemAgentRun.objects.filter(thread_id=thread_id)
+        .select_related("instance", "workflow")
+        .order_by("-created_at", "-pk")
+        .first()
+    )
+
+
+def _system_agent_run_label(run: SystemAgentRun | None) -> str:
+    if run is None:
+        return ""
+    display_author = run.instance.display_author.strip()
+    if display_author:
+        return display_author
+    return run.agent_kind.replace("_", " ")
+
+
+def _system_agent_run_detail_title(run: SystemAgentRun) -> str:
+    label = _system_agent_run_label(run)
+    return f"{label} log" if label else "System session"
 
 
 def _lifetime_token_usage_for(threads: list[Any]) -> dict[str, str]:

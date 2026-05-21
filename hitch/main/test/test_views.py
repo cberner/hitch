@@ -348,6 +348,55 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Visible next page")
         self.assertNotContains(response, "Hidden QA")
 
+    @patch("hitch.main.views.Codex")
+    def test_system_sessions_lists_hidden_threads_as_read_only_links(
+        self, mock_codex: MagicMock
+    ) -> None:
+        visible = _session("visible", preview="Visible")
+        hidden = _session("qa-thread", preview="Hidden QA")
+        _setup_codex(mock_codex, threads=[visible, hidden])
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="visible",
+            cwd="/repo",
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="qa-thread",
+            cwd="/repo",
+            prompt="qa",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="qa-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+        )
+
+        response = self.client.get(reverse("system_sessions"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "System sessions")
+        self.assertContains(response, "Hidden QA")
+        self.assertContains(
+            response, reverse("system_session", kwargs={"session_id": "qa-thread"})
+        )
+        self.assertContains(response, "QA agent")
+        self.assertContains(response, "completed")
+        self.assertNotContains(response, "Visible")
+        self.assertNotContains(response, 'aria-label="Session actions"')
+        self.assertNotContains(response, "data-session-archive-url")
+        self.assertNotContains(
+            response, '<dialog class="new-session" data-new-session-dialog', html=False
+        )
+
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_new_session_dialog_adjusts_for_mobile_keyboard(

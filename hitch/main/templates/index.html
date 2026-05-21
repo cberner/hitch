@@ -683,21 +683,24 @@
                 <a class="button secondary account-action" href="{{ login_url }}">Log in</a>
                 <a class="button account-action" href="{{ register_url }}">Register</a>
                 {% endif %}
+                {% if show_new_session_controls %}
                 <button type="button" class="button topbar-action" data-new-session-open>
                     <span class="plus">+</span>New session
                 </button>
+                {% endif %}
             </div>
         </div>
     </header>
     <main>
-        {% if not has_projects %}
+        {% if not system_session_list and not has_projects %}
         <div class="project-banner">
             <p>Create a project to group sessions by repository.</p>
             <a class="button" href="{{ new_project_url }}">Create project</a>
         </div>
         {% endif %}
         <div class="session-list-header">
-            <p class="section-label">{% if current_project %}{{ current_project.name }} sessions{% else %}Codex sessions{% endif %}</p>
+            <p class="section-label">{% if system_session_list %}System sessions{% elif current_project %}{{ current_project.name }} sessions{% else %}Codex sessions{% endif %}</p>
+            {% if not system_session_list %}
             <form class="archived-visibility-form" method="post" action="{{ archived_visibility_url }}" data-archived-visibility-form>
                 {% csrf_token %}
                 <label class="archived-visibility-toggle">
@@ -706,22 +709,28 @@
                 </label>
                 <button type="submit" class="archived-visibility-submit" data-archived-visibility-submit>Apply</button>
             </form>
+            {% endif %}
         </div>
         {% if sessions %}
         <ul class="session-list">
             {% for session in sessions %}
-            <li class="session" data-session-row data-session-archived="{{ session.is_archived|yesno:'true,false' }}" data-session-archive-url="{% url 'set_session_archived' session_id=session.id %}" data-session-name-url="{% url 'set_session_name' session_id=session.id %}">
+            <li class="session"{% if not system_session_list %} data-session-row data-session-archived="{{ session.is_archived|yesno:'true,false' }}" data-session-archive-url="{% url 'set_session_archived' session_id=session.id %}" data-session-name-url="{% url 'set_session_name' session_id=session.id %}"{% endif %}>
+                {% if not system_session_list %}
                 <div class="session-swipe-action" aria-hidden="true">Archive</div>
+                {% endif %}
                 <div class="session-content">
-                    <a class="session-link" href="{% url 'session' session_id=session.id %}">
+                    <a class="session-link" href="{% if session.detail_url %}{{ session.detail_url }}{% else %}{% url 'session' session_id=session.id %}{% endif %}">
                         <div class="session-title" data-session-title>{{ session.display_title }}</div>
                         <div class="session-meta">
                             <span class="meta-item"><span class="meta-label">cwd</span><code>{{ session.cwd }}</code></span>
                             {% if session.project %}<span class="meta-item"><span class="meta-label">project</span>{{ session.project.name }}</span>{% endif %}
+                            {% if session.system_kind %}<span class="meta-item"><span class="meta-label">agent</span>{{ session.system_kind }}</span>{% endif %}
+                            {% if session.system_status %}<span class="meta-item"><span class="meta-label">status</span>{{ session.system_status }}</span>{% endif %}
                             <span class="meta-item"><time data-updated-at="{{ session.updated_at }}">{{ session.updated_at }}</time></span>
                             {% if session.is_archived %}<span class="archive-badge">Archived</span>{% endif %}
                         </div>
                     </a>
+                    {% if not system_session_list %}
                     <div class="session-row-menu" data-session-menu>
                         <button type="button" class="session-action" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false" data-session-menu-open>...</button>
                         <div class="session-menu" role="menu" data-session-menu-panel hidden>
@@ -734,7 +743,9 @@
                             </form>
                         </div>
                     </div>
+                    {% endif %}
                 </div>
+                {% if not system_session_list %}
                 <div class="session-rename" data-session-rename hidden>
                     <form method="post" action="{% url 'set_session_name' session_id=session.id %}" data-session-rename-form>
                         {% csrf_token %}
@@ -743,28 +754,34 @@
                         <button type="submit">Save</button>
                     </form>
                 </div>
+                {% endif %}
             </li>
             {% endfor %}
         </ul>
         {% else %}
         <div class="empty">
-            <p>No sessions found.</p>
-            <p class="hint">Tap “New session” to start your first one.</p>
+            <p>{% if system_session_list %}No system sessions found.{% else %}No sessions found.{% endif %}</p>
+            {% if not system_session_list %}<p class="hint">Tap “New session” to start your first one.</p>{% endif %}
         </div>
         {% endif %}
     </main>
 
+    {% if not system_session_list %}
     <div class="archive-toast" data-archive-toast hidden aria-live="polite">
         <span data-archive-toast-text>Session archived</span>
         <button type="button" class="button secondary" data-archive-undo>Undo</button>
     </div>
+    {% endif %}
 
+    {% if show_new_session_controls %}
     <button type="button" class="fab" data-new-session-open aria-label="New session">
         <span class="plus" aria-hidden="true">+</span>New
     </button>
+    {% endif %}
 
     {% include "_settings_dialog.html" %}
 
+    {% if show_new_session_controls %}
     <dialog class="new-session" data-new-session-dialog aria-labelledby="new-session-title">
         <form method="post" action="{{ new_session_url }}">
             {% csrf_token %}
@@ -823,6 +840,7 @@
             </div>
         </form>
     </dialog>
+    {% endif %}
 
     <script>
         (function () {
@@ -1388,14 +1406,16 @@
                     window.history.pushState(null, "", url.hash);
                 }
             }
-            newSessionOpenButtons.forEach((btn) => btn.addEventListener("click", (event) => {
-                if (!isPlainPrimaryClick(event)) return;
-                event.preventDefault();
-                closeNavMenu();
-                preserveHashForLink(event.currentTarget);
-                openNewSessionDialog();
-            }));
-            if (window.location.hash === "#new-session") {
+            if (newSessionDialog) {
+                newSessionOpenButtons.forEach((btn) => btn.addEventListener("click", (event) => {
+                    if (!isPlainPrimaryClick(event)) return;
+                    event.preventDefault();
+                    closeNavMenu();
+                    preserveHashForLink(event.currentTarget);
+                    openNewSessionDialog();
+                }));
+            }
+            if (newSessionDialog && window.location.hash === "#new-session") {
                 openNewSessionDialog();
             }
 

@@ -337,6 +337,49 @@
         .edit-title button:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 
         section.thread { display: flex; flex-direction: column; gap: 0.85rem; }
+        .system-prompt {
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--border-strong);
+            border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+            background: var(--surface);
+            box-shadow: var(--shadow);
+            overflow: hidden;
+        }
+        .system-prompt summary {
+            cursor: pointer;
+            list-style: none;
+            padding: 0.55rem 0.8rem;
+            color: var(--text-muted);
+            font-size: 0.78rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .system-prompt summary::-webkit-details-marker { display: none; }
+        .system-prompt summary::after {
+            content: "›";
+            float: right;
+            color: var(--text-faint);
+            font-size: 1.1rem;
+            line-height: 1;
+            transform: rotate(90deg);
+            transition: transform 0.15s ease;
+        }
+        .system-prompt[open] summary::after {
+            transform: rotate(-90deg);
+        }
+        .system-prompt-body {
+            border-top: 1px solid var(--border);
+            padding: 0.7rem 0.8rem;
+            color: var(--text);
+            font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+            font-size: 0.82rem;
+            line-height: 1.5;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            max-height: min(28rem, 60vh);
+            overflow: auto;
+        }
         .entry { margin: 0; }
         .entry-header {
             display: flex;
@@ -1831,8 +1874,14 @@
         </div>
 
         <div class="session-body">
-        {% if entries or pending_user_prompt or active_worker %}
+        {% if system_prompt or entries or pending_user_prompt or active_worker %}
         <section class="thread" data-thread>
+            {% if system_prompt %}
+            <details class="system-prompt">
+                <summary>System prompt</summary>
+                <div class="system-prompt-body">{{ system_prompt }}</div>
+            </details>
+            {% endif %}
             {% for entry in entries %}
                 {% if entry.kind == "intermediate" %}
                 <details class="intermediate">
