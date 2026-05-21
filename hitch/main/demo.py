@@ -1,33 +1,58 @@
-"""Per-session web demo containers and proxying."""
+"""Per-session web demo registration, cleanup, and proxying."""
 
 from __future__ import annotations
 
 import html
 import http.client
+import json
 import logging
 import re
-import socket
+import secrets
 import subprocess
-import uuid
 from collections.abc import Iterator
-from typing import Final, cast
+from typing import Any, Final, cast
 from urllib.parse import urlsplit
 
 from django.conf import settings
 from django.db import transaction
-from django.http import Http404, HttpRequest, HttpResponse, StreamingHttpResponse
+from django.http import Http404, HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.urls import reverse
 from django.utils.text import slugify
 
-from hitch.main.models import SessionDemo
+from hitch.main.models import CodexInstance, SessionDemo
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_RUNTIME: Final = "podman"
-DEFAULT_IMAGE: Final = "node:22-bookworm"
 DEFAULT_CONTAINER_PORT: Final = 3000
 DEFAULT_HOST: Final = "127.0.0.1"
+DEMO_AGENT_KIND: Final = "demo"
+DEMO_DISPLAY_AUTHOR: Final = "Demo agent"
 LOCAL_DEMO_SUFFIX: Final = ".demo.localhost"
+MAX_LOG_CHARS: Final = 20_000
+TOKEN_BYTES: Final = 24
+HITCH_DEMO_LABEL: Final = "io.hitch.managed"
+HITCH_DEMO_LABEL_VALUE: Final = "demo"
+HITCH_SESSION_LABEL: Final = "io.hitch.session"
+HITCH_TOKEN_LABEL: Final = "io.hitch.demo_token"
+HITCH_NAME_LABEL: Final = "io.hitch.container_name"
+LOCAL_BIND_HOSTS: Final = frozenset({DEFAULT_HOST, "::1", "localhost"})
+DEMO_REGISTRATION_TRANSITIONS: Final[dict[str, frozenset[str]]] = {
+    SessionDemo.STATUS_REQUESTED: frozenset(
+        {
+            SessionDemo.STATUS_PREPARING,
+            SessionDemo.STATUS_ACTIVE,
+            SessionDemo.STATUS_FAILED,
+        }
+    ),
+    SessionDemo.STATUS_PREPARING: frozenset(
+        {
+            SessionDemo.STATUS_PREPARING,
+            SessionDemo.STATUS_ACTIVE,
+            SessionDemo.STATUS_FAILED,
+        }
+    ),
+}
 HOP_BY_HOP_HEADERS: Final = {
     "connection",
     "keep-alive",
@@ -59,10 +84,20 @@ SENSITIVE_RESPONSE_HEADERS: Final = {
 }
 TEXT_REWRITE_TYPES: Final = ("text/html", "text/css", "application/javascript", "text/javascript")
 DNS_LABEL_RE: Final = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+CONTAINER_NAME_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+PROMPT_REGISTRATION_TOKEN_RE: Final = re.compile(r"^Registration token: (\S+)$", re.MULTILINE)
 
 
 class DemoError(Exception):
-    """Raised when a demo container cannot be started or stopped."""
+    """Raised when a demo registration or cleanup operation fails."""
+
+
+class DemoAlreadyRunningError(DemoError):
+    """Raised when a demo setup request is already in progress."""
+
+
+class DemoContainerLabelMismatchError(DemoError):
+    """Raised when a registered container target is not verified for its demo."""
 
 
 def active_demo_for(session_id: str) -> SessionDemo | None:
@@ -70,6 +105,10 @@ def active_demo_for(session_id: str) -> SessionDemo | None:
         thread_id=session_id,
         status=SessionDemo.STATUS_ACTIVE,
     ).first()
+
+
+def latest_demo_for(session_id: str) -> SessionDemo | None:
+    return SessionDemo.objects.filter(thread_id=session_id).order_by("-updated_at").first()
 
 
 def demo_url_for_request(request: HttpRequest, session_id: str) -> str:
@@ -84,113 +123,214 @@ def demo_url_for_request(request: HttpRequest, session_id: str) -> str:
     )
 
 
-def demo_prompt_for(
-    *,
-    request: HttpRequest,
-    session_id: str,
-    demo: SessionDemo,
-    container_port: int,
-) -> str:
-    demo_url = demo_url_for_request(request, session_id)
-    target = f"{demo.host}:{demo.port}"
-    return (
-        "Start an interactive web demo for this session.\n\n"
-        f"Hitch has started a Podman container for you:\n"
-        f"- container id: {demo.container_id}\n"
-        f"- container name: {demo.container_name}\n"
-        f"- internal web port: {container_port}\n"
-        f"- host target: {target}\n"
-        f"- browser demo URL: {demo_url}\n\n"
-        "Copy or prepare the feature code inside the container, install what the "
-        f"frontend needs, and run the web server on 0.0.0.0:{container_port}. "
-        "When it is ready, tell the user to open the browser demo URL."
+def register_url_for_request(request: HttpRequest, session_id: str) -> str:
+    return request.build_absolute_uri(
+        reverse("session_demo_register", kwargs={"session_id": session_id})
     )
 
 
-def start_demo_container(session_id: str) -> tuple[SessionDemo, int]:
+def start_demo_prompt_for(
+    *,
+    request: HttpRequest,
+    session_id: str,
+    cwd: str,
+    demo: SessionDemo,
+) -> str:
+    demo_url = demo_url_for_request(request, session_id)
+    register_url = register_url_for_request(request, session_id)
+    container_prefix = _container_name_prefix(session_id)
+    return (
+        "Start an interactive web demo for this session.\n\n"
+        "You own the container startup. Use normal shell commands and the user's "
+        "configured command approvals. Do not return JSON for Hitch to execute.\n\n"
+        f"Repository cwd: {cwd}\n"
+        f"Demo URL for the user: {demo_url}\n"
+        f"Registration URL: {register_url}\n"
+        f"Registration token: {demo.registration_token}\n\n"
+        "Process:\n"
+        f"1. Choose a unique container name beginning with {container_prefix}.\n"
+        "2. Before creating or running the container, register it as preparing:\n"
+        f"   curl -sS -X POST {register_url} "
+        "-H 'Content-Type: application/json' "
+        f"--data '{{\"token\":\"{demo.registration_token}\","
+        "\"status\":\"preparing\",\"container_name\":\"CONTAINER_NAME\","
+        "\"logs\":\"starting demo container\"}}'\n"
+        "3. Run Podman yourself. Label the container with:\n"
+        f"   --label {HITCH_DEMO_LABEL}={HITCH_DEMO_LABEL_VALUE}\n"
+        f"   --label {HITCH_SESSION_LABEL}={session_id}\n"
+        f"   --label {HITCH_TOKEN_LABEL}={demo.registration_token}\n"
+        f"   --label {HITCH_NAME_LABEL}=CONTAINER_NAME\n"
+        "4. Bind the web server to 0.0.0.0 inside the container and publish it "
+        "on 127.0.0.1 on the host.\n"
+        "5. Inspect logs and retry in this same turn until the demo responds.\n"
+        "6. When it works, register it as active with host, host port, container "
+        "name, container id, and concise logs. If you cannot make it work, "
+        "register failed with the relevant error and logs."
+    )
+
+
+def demo_runtime() -> str:
     runtime = _setting("HITCH_DEMO_RUNTIME", DEFAULT_RUNTIME)
     if runtime != DEFAULT_RUNTIME:
         raise DemoError("only podman demo runtime is supported")
-    image = _setting("HITCH_DEMO_IMAGE", DEFAULT_IMAGE)
-    container_port = _int_setting("HITCH_DEMO_CONTAINER_PORT", DEFAULT_CONTAINER_PORT)
-    host_port = _reserve_port()
-    container_name = _container_name_for(session_id)
-    failure: tuple[str, BaseException] | None = None
+    return runtime
 
+
+def request_demo_start(session_id: str) -> SessionDemo:
+    runtime = demo_runtime()
+    protected_targets: set[tuple[str, str]] = set()
     with transaction.atomic():
-        existing = SessionDemo.objects.select_for_update().filter(thread_id=session_id).first()
-        if existing is not None:
-            _remove_container(existing, ignore_missing=True)
-            existing.status = SessionDemo.STATUS_STOPPED
-            existing.container_id = ""
-            existing.container_name = ""
-            existing.save(
+        demo, created = SessionDemo.objects.select_for_update().get_or_create(
+            thread_id=session_id,
+            defaults={
+                "host": DEFAULT_HOST,
+                "port": DEFAULT_CONTAINER_PORT,
+                "runtime": runtime,
+                "status": SessionDemo.STATUS_REQUESTED,
+                "generation": 1,
+                "registration_token": _new_registration_token(),
+            },
+        )
+        if not created:
+            if demo.status in {
+                SessionDemo.STATUS_REQUESTED,
+                SessionDemo.STATUS_PREPARING,
+            }:
+                raise DemoAlreadyRunningError("demo setup is already running")
+            try:
+                _remove_container(demo, ignore_missing=True)
+            except DemoContainerLabelMismatchError:
+                logger.warning(
+                    "resetting demo %s despite unverified prior container %s",
+                    demo.thread_id,
+                    demo.container_name or demo.container_id,
+                )
+                if demo.container_id:
+                    protected_targets.add(("id", demo.container_id))
+                if demo.container_name:
+                    protected_targets.add(("name", demo.container_name))
+            demo.generation += 1
+            demo.host = DEFAULT_HOST
+            demo.port = DEFAULT_CONTAINER_PORT
+            demo.container_id = ""
+            demo.container_name = ""
+            demo.runtime = runtime
+            demo.status = SessionDemo.STATUS_REQUESTED
+            demo.last_error = ""
+            demo.logs = ""
+            demo.registration_token = _new_registration_token()
+            demo.save(
                 update_fields=[
-                    "status",
+                    "generation",
+                    "host",
+                    "port",
                     "container_id",
                     "container_name",
+                    "runtime",
+                    "status",
+                    "last_error",
+                    "logs",
+                    "registration_token",
                     "updated_at",
                 ]
             )
+    cleanup_unregistered_demo_containers(protected_targets=protected_targets)
+    return demo
 
-        cmd = [
-            runtime,
-            "run",
-            "-d",
-            "--name",
-            container_name,
-            "-p",
-            f"{DEFAULT_HOST}:{host_port}:{container_port}",
-            image,
-            "sleep",
-            "infinity",
-        ]
-        try:
-            result = subprocess.run(
-                cmd,
-                check=True,
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            message = _subprocess_error_message(exc)
-            SessionDemo.objects.update_or_create(
-                thread_id=session_id,
-                defaults={
-                    "host": DEFAULT_HOST,
-                    "port": host_port,
-                    "container_id": "",
-                    "container_name": container_name,
-                    "runtime": runtime,
-                    "status": SessionDemo.STATUS_FAILED,
-                    "last_error": message,
-                },
-            )
-            failure = (message, exc)
+
+def register_demo_container(session_id: str, payload: dict[str, Any]) -> SessionDemo:
+    status = str(payload.get("status") or "").strip()
+    if status not in {
+        SessionDemo.STATUS_PREPARING,
+        SessionDemo.STATUS_ACTIVE,
+        SessionDemo.STATUS_FAILED,
+    }:
+        raise DemoError("invalid demo status")
+    token = str(payload.get("token") or "")
+    with transaction.atomic():
+        demo = SessionDemo.objects.select_for_update().filter(thread_id=session_id).first()
+        if demo is None or not demo.registration_token or not secrets.compare_digest(
+            token, demo.registration_token
+        ):
+            raise DemoError("invalid demo registration token")
+        if demo.status == SessionDemo.STATUS_STOPPED:
+            raise DemoError("demo has been stopped")
+        allowed_statuses = DEMO_REGISTRATION_TRANSITIONS.get(demo.status)
+        if allowed_statuses is None or status not in allowed_statuses:
+            raise DemoError("demo registration is already complete")
+        if status == SessionDemo.STATUS_PREPARING:
+            _apply_preparing_registration(demo, payload)
+        elif status == SessionDemo.STATUS_ACTIVE:
+            _apply_active_registration(demo, payload)
         else:
-            demo, _created = SessionDemo.objects.update_or_create(
-                thread_id=session_id,
-                defaults={
-                    "host": DEFAULT_HOST,
-                    "port": host_port,
-                    "container_id": result.stdout.strip(),
-                    "container_name": container_name,
-                    "runtime": runtime,
-                    "status": SessionDemo.STATUS_ACTIVE,
-                    "last_error": "",
-                },
-            )
+            _apply_failed_registration(demo, payload)
+        demo.save()
+    if status == SessionDemo.STATUS_ACTIVE or (
+        status == SessionDemo.STATUS_FAILED
+        and not (demo.container_id or demo.container_name)
+    ):
+        cleanup_unregistered_demo_containers()
+    return demo
 
-    if failure is not None:
-        message, cause = failure
-        raise DemoError(message) from cause
-    return demo, container_port
+
+def _apply_preparing_registration(demo: SessionDemo, payload: dict[str, Any]) -> None:
+    container_name = _clean_container_name(payload.get("container_name"), demo.thread_id)
+    container_id = _clean_container_id(payload.get("container_id"))
+    if not container_name:
+        raise DemoError("preparing demo registration requires container_name")
+    demo.status = SessionDemo.STATUS_PREPARING
+    demo.host = DEFAULT_HOST
+    demo.port = _optional_port(payload.get("port")) or demo.port or DEFAULT_CONTAINER_PORT
+    demo.container_name = container_name
+    demo.container_id = container_id
+    demo.runtime = _clean_runtime(payload.get("runtime"))
+    demo.logs = _bounded_text(payload.get("logs"))
+    demo.last_error = ""
+
+
+def _apply_active_registration(demo: SessionDemo, payload: dict[str, Any]) -> None:
+    container_name = _clean_container_name(payload.get("container_name"), demo.thread_id)
+    container_id = _clean_container_id(payload.get("container_id"))
+    host = _clean_host(payload.get("host"))
+    port = _required_port(payload.get("port"))
+    if not container_name:
+        raise DemoError("active demo registration requires container_name")
+    _verify_registered_container_labels(
+        target=container_id or container_name,
+        thread_id=demo.thread_id,
+        token=demo.registration_token,
+        container_name=container_name,
+        port=port,
+    )
+    demo.status = SessionDemo.STATUS_ACTIVE
+    demo.host = host
+    demo.port = port
+    demo.container_name = container_name
+    demo.container_id = container_id
+    demo.runtime = _clean_runtime(payload.get("runtime"))
+    demo.logs = _bounded_text(payload.get("logs"))
+    demo.last_error = ""
+
+
+def _apply_failed_registration(demo: SessionDemo, payload: dict[str, Any]) -> None:
+    error = _bounded_text(payload.get("error")) or "demo setup failed"
+    demo.status = SessionDemo.STATUS_FAILED
+    demo.last_error = error
+    demo.logs = _bounded_text(payload.get("logs")) or error
+    demo.runtime = _clean_runtime(payload.get("runtime"))
+    try:
+        _remove_container(demo, ignore_missing=True)
+    except DemoError as exc:
+        demo.last_error = f"{error}; cleanup failed: {exc}"
+        logger.exception("failed to remove failed demo container for %s", demo.thread_id)
+    else:
+        demo.container_id = ""
+        demo.container_name = ""
 
 
 def cleanup_demo_for_session(session_id: str) -> None:
     demo = SessionDemo.objects.filter(thread_id=session_id).first()
-    if demo is None or demo.status != SessionDemo.STATUS_ACTIVE:
+    if demo is None:
         return
     try:
         _remove_container(demo, ignore_missing=True)
@@ -201,7 +341,82 @@ def cleanup_demo_for_session(session_id: str) -> None:
         logger.exception("failed to clean up demo container for session %s", session_id)
         return
     demo.status = SessionDemo.STATUS_STOPPED
-    demo.save(update_fields=["status", "updated_at"])
+    demo.container_id = ""
+    demo.container_name = ""
+    demo.save(update_fields=["status", "container_id", "container_name", "updated_at"])
+    cleanup_unregistered_demo_containers()
+
+
+def cleanup_unregistered_demo_containers(
+    *, protected_targets: set[tuple[str, str]] | None = None
+) -> int:
+    registered = _registered_demo_targets()
+    if protected_targets:
+        for kind, target in protected_targets:
+            if target:
+                registered.add((kind, "", target))
+    containers = _hitch_demo_containers()
+    removed = 0
+    for container in containers:
+        if _container_registered(container, registered):
+            continue
+        target = container.get("id", "") or container.get("name", "")
+        if not target:
+            continue
+        try:
+            subprocess.run(
+                [DEFAULT_RUNTIME, "rm", "-f", target],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            removed += 1
+        except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            logger.exception("failed to remove unregistered demo container %s", target)
+    return removed
+
+
+def on_codex_instance_finished(instance: CodexInstance) -> None:
+    if instance.agent_kind != DEMO_AGENT_KIND:
+        return
+    instance_token = _registration_token_from_instance(instance)
+    with transaction.atomic():
+        demo = SessionDemo.objects.select_for_update().filter(
+            thread_id=instance.thread_id
+        ).first()
+        if (
+            demo is not None
+            and demo.status in {
+                SessionDemo.STATUS_REQUESTED,
+                SessionDemo.STATUS_PREPARING,
+            }
+            and instance_token
+            and secrets.compare_digest(instance_token, demo.registration_token)
+        ):
+            if instance.status == CodexInstance.STATUS_COMPLETED:
+                demo.status = SessionDemo.STATUS_FAILED
+                demo.last_error = "demo agent finished without registering a container"
+            else:
+                demo.status = SessionDemo.STATUS_FAILED
+                demo.last_error = instance.error or "demo agent did not complete"
+            update_fields = ["status", "last_error", "updated_at"]
+            try:
+                _remove_container(demo, ignore_missing=True)
+            except DemoError as exc:
+                demo.last_error = f"{demo.last_error}; cleanup failed: {exc}"
+                logger.exception("failed to remove demo container after agent exit")
+            else:
+                demo.container_id = ""
+                demo.container_name = ""
+                update_fields.extend(["container_id", "container_name"])
+            demo.save(update_fields=update_fields)
+    cleanup_unregistered_demo_containers()
+
+
+def _registration_token_from_instance(instance: CodexInstance) -> str:
+    match = PROMPT_REGISTRATION_TOKEN_RE.search(instance.prompt or "")
+    return match.group(1) if match is not None else ""
 
 
 def proxy_demo_request(
@@ -253,6 +468,18 @@ def proxy_demo_request(
     return cast(HttpResponse, stream_response)
 
 
+def registration_response(demo: SessionDemo) -> JsonResponse:
+    return JsonResponse(
+        {
+            "status": demo.status,
+            "demo_url": reverse(
+                "session_demo_proxy_root",
+                kwargs={"session_id": demo.thread_id},
+            ),
+        }
+    )
+
+
 def session_id_from_demo_host(host: str) -> str | None:
     host_name = host.split(":", 1)[0].lower()
     if not host_name.endswith(LOCAL_DEMO_SUFFIX):
@@ -272,26 +499,331 @@ def _setting(name: str, default: str) -> str:
     return value if isinstance(value, str) and value else default
 
 
-def _int_setting(name: str, default: int) -> int:
-    value = getattr(settings, name, default)
-    return value if isinstance(value, int) and value > 0 else default
+def _new_registration_token() -> str:
+    return secrets.token_urlsafe(TOKEN_BYTES)
 
 
-def _reserve_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind((DEFAULT_HOST, 0))
-        return int(sock.getsockname()[1])
-
-
-def _container_name_for(session_id: str) -> str:
+def _container_name_prefix(session_id: str) -> str:
     slug = slugify(session_id)[:48] or "session"
-    return f"hitch-demo-{slug}-{uuid.uuid4().hex[:8]}"
+    return f"hitch-demo-{slug}-"
+
+
+def _clean_container_name(value: object, session_id: str | None = None) -> str:
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    if not value:
+        return ""
+    if not CONTAINER_NAME_RE.fullmatch(value):
+        raise DemoError("invalid container name")
+    if session_id is not None:
+        prefix = _container_name_prefix(session_id)
+        if not value.startswith(prefix):
+            raise DemoError(f"container name must start with {prefix}")
+    return value
+
+
+def _clean_container_id(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    if not value:
+        return ""
+    if (
+        value.startswith("-")
+        or len(value) > 128
+        or not re.fullmatch(r"[A-Za-z0-9_.:-]+", value)
+    ):
+        raise DemoError("invalid container id")
+    return value
+
+
+def _clean_runtime(value: object) -> str:
+    runtime = str(value or DEFAULT_RUNTIME).strip() or DEFAULT_RUNTIME
+    if runtime != DEFAULT_RUNTIME:
+        raise DemoError("only podman demo runtime is supported")
+    return runtime
+
+
+def _clean_host(value: object) -> str:
+    host = str(value or DEFAULT_HOST).strip()
+    if host not in {DEFAULT_HOST, "localhost"}:
+        raise DemoError("demo host must be localhost")
+    return DEFAULT_HOST if host == "localhost" else host
+
+
+def _optional_port(value: object) -> int | None:
+    if value in {None, ""}:
+        return None
+    return _required_port(value)
+
+
+def _required_port(value: object) -> int:
+    if isinstance(value, bool):
+        raise DemoError("invalid demo port")
+    if not isinstance(value, str | int):
+        raise DemoError("invalid demo port")
+    try:
+        port = int(value)
+    except (TypeError, ValueError) as exc:
+        raise DemoError("invalid demo port") from exc
+    if not 1 <= port <= 65535:
+        raise DemoError("invalid demo port")
+    return port
+
+
+def _bounded_text(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value[-MAX_LOG_CHARS:]
+
+
+def _registered_demo_targets() -> set[tuple[str, str, str]]:
+    registered: set[tuple[str, str, str]] = set()
+    demos = SessionDemo.objects.filter(
+        status__in=(
+            SessionDemo.STATUS_PREPARING,
+            SessionDemo.STATUS_ACTIVE,
+            SessionDemo.STATUS_FAILED,
+        )
+    ).exclude(registration_token="")
+    for demo in demos:
+        # Failed demos can retain targets after label verification failed.
+        # Keep those targets out of the raw sweep without trusting their labels.
+        token = "" if demo.status == SessionDemo.STATUS_FAILED else demo.registration_token
+        if demo.container_id:
+            registered.add(("id", token, demo.container_id))
+        if demo.container_name:
+            registered.add(("name", token, demo.container_name))
+    return registered
+
+
+def _hitch_demo_containers() -> list[dict[str, str]]:
+    try:
+        result = subprocess.run(
+            [
+                DEFAULT_RUNTIME,
+                "ps",
+                "-a",
+                "--filter",
+                f"label={HITCH_DEMO_LABEL}={HITCH_DEMO_LABEL_VALUE}",
+                "--format",
+                "json",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        logger.exception("failed to list demo containers")
+        return []
+    return _parse_podman_ps_json(result.stdout)
+
+
+def _parse_podman_ps_json(output: str) -> list[dict[str, str]]:
+    if not isinstance(output, str):
+        return []
+    if not output.strip():
+        return []
+    try:
+        raw = json.loads(output)
+    except json.JSONDecodeError:
+        raw = []
+        for line in output.splitlines():
+            if not line.strip():
+                continue
+            try:
+                raw.append(json.loads(line))
+            except json.JSONDecodeError:
+                return []
+    if not isinstance(raw, list):
+        raw = [raw]
+    containers: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        labels = item.get("Labels") or item.get("labels") or {}
+        if isinstance(labels, str):
+            labels = _parse_label_string(labels)
+        if not isinstance(labels, dict):
+            labels = {}
+        names = item.get("Names") or item.get("names") or item.get("Name") or item.get("name") or ""
+        name = names[0] if isinstance(names, list) and names else str(names or "")
+        containers.append(
+            {
+                "id": str(item.get("ID") or item.get("Id") or item.get("id") or ""),
+                "name": name,
+                "token": str(labels.get(HITCH_TOKEN_LABEL) or ""),
+            }
+        )
+    return containers
+
+
+def _parse_label_string(value: str) -> dict[str, str]:
+    labels: dict[str, str] = {}
+    for part in value.split(","):
+        key, sep, raw = part.partition("=")
+        if sep:
+            labels[key.strip()] = raw.strip()
+    return labels
+
+
+def _container_registered(
+    container: dict[str, str],
+    registered: set[tuple[str, str, str]],
+) -> bool:
+    token = container.get("token", "")
+    container_id = container.get("id", "")
+    name = container.get("name", "")
+    return (
+        (bool(token) and ("id", token, container_id) in registered)
+        or ("id", "", container_id) in registered
+        or (bool(token) and ("name", token, name) in registered)
+        or ("name", "", name) in registered
+    )
+
+
+def _verify_registered_container_labels(
+    *,
+    target: str,
+    thread_id: str,
+    token: str,
+    container_name: str,
+    port: int | None = None,
+) -> None:
+    inspected = _container_inspect(target)
+    if inspected is None:
+        raise DemoError("registered demo container was not found")
+    labels = _container_labels_from_inspect(inspected)
+    expected = {
+        HITCH_DEMO_LABEL: HITCH_DEMO_LABEL_VALUE,
+        HITCH_SESSION_LABEL: thread_id,
+        HITCH_TOKEN_LABEL: token,
+        HITCH_NAME_LABEL: container_name,
+    }
+    for key, value in expected.items():
+        if labels.get(key) != value:
+            raise DemoError(f"registered demo container is missing label {key}")
+    if port is not None and port not in _published_local_host_ports(inspected):
+        raise DemoError("registered demo port is not published on localhost by container")
+
+
+def _container_labels(target: str) -> dict[str, str] | None:
+    inspected = _container_inspect(target)
+    if inspected is None:
+        return None
+    return _container_labels_from_inspect(inspected)
+
+
+def _container_inspect(target: str) -> dict[str, Any] | None:
+    try:
+        result = subprocess.run(
+            [DEFAULT_RUNTIME, "inspect", target],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.CalledProcessError as exc:
+        if _container_missing_error(exc):
+            return None
+        raise DemoError(
+            f"failed to inspect demo container {target}: {_subprocess_error_message(exc)}"
+        ) from exc
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise DemoError(
+            f"failed to inspect demo container {target}: {_subprocess_error_message(exc)}"
+        ) from exc
+    try:
+        raw = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {}
+    if isinstance(raw, list):
+        item = raw[0] if raw else {}
+    else:
+        item = raw
+    if not isinstance(item, dict):
+        return {}
+    return item
+
+
+def _container_labels_from_inspect(item: dict[str, Any]) -> dict[str, str]:
+    config = item.get("Config")
+    labels: object = {}
+    if isinstance(config, dict):
+        labels = config.get("Labels") or {}
+    if not isinstance(labels, dict):
+        labels = item.get("Labels") or {}
+    if not isinstance(labels, dict):
+        return {}
+    return {str(key): str(value) for key, value in labels.items()}
+
+
+def _published_local_host_ports(item: dict[str, Any]) -> set[int]:
+    ports: set[int] = set()
+    for bindings in _container_port_binding_sources(item):
+        for entries in bindings.values():
+            if isinstance(entries, dict):
+                entries = [entries]
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                host_ip = str(entry.get("HostIp") or entry.get("HostIP") or "")
+                if host_ip not in LOCAL_BIND_HOSTS:
+                    continue
+                try:
+                    host_port = int(str(entry.get("HostPort") or ""))
+                except ValueError:
+                    continue
+                ports.add(host_port)
+    return ports
+
+
+def _container_port_binding_sources(item: dict[str, Any]) -> Iterator[dict[Any, Any]]:
+    network_settings = item.get("NetworkSettings")
+    if isinstance(network_settings, dict):
+        ports = network_settings.get("Ports")
+        if isinstance(ports, dict):
+            yield ports
+    host_config = item.get("HostConfig")
+    if isinstance(host_config, dict):
+        bindings = host_config.get("PortBindings")
+        if isinstance(bindings, dict):
+            yield bindings
+
+
+def _demo_labels_match(
+    demo: SessionDemo, labels: dict[str, str], *, require_name: bool
+) -> bool:
+    if labels.get(HITCH_DEMO_LABEL) != HITCH_DEMO_LABEL_VALUE:
+        return False
+    if labels.get(HITCH_SESSION_LABEL) != demo.thread_id:
+        return False
+    if demo.registration_token and labels.get(HITCH_TOKEN_LABEL) != demo.registration_token:
+        return False
+    if require_name and demo.container_name:
+        return labels.get(HITCH_NAME_LABEL) == demo.container_name
+    return True
 
 
 def _remove_container(demo: SessionDemo, *, ignore_missing: bool = False) -> None:
     if not demo.container_id and not demo.container_name:
         return
     target = demo.container_id or demo.container_name
+    if demo.registration_token:
+        labels = _container_labels(target)
+        if labels is None:
+            if ignore_missing:
+                return
+            raise DemoError(f"demo container {target} could not be inspected")
+        if not _demo_labels_match(demo, labels, require_name=not demo.container_id):
+            logger.warning("refusing to remove unverified demo container %s", target)
+            raise DemoContainerLabelMismatchError(
+                "demo container labels did not match registration"
+            )
     try:
         subprocess.run(
             [demo.runtime or DEFAULT_RUNTIME, "rm", "-f", target],

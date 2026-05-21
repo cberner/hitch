@@ -12,15 +12,15 @@ import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from django.contrib.auth import get_user_model
 from django.core import signing
-from django.test import Client, TestCase
+from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 from openai_codex.errors import AppServerError, MethodNotFoundError
 
-from hitch.main import demo, system_agents, views
+from hitch.main import demo, streaming, system_agents, views
 from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
@@ -4310,10 +4310,10 @@ class SetSessionNameViewTests(TestCase):
 
 
 class StartSessionDemoViewTests(TestCase):
-    @patch("hitch.main.views.demo.start_demo_container")
+    @patch("hitch.main.views.demo.request_demo_start")
     @patch("hitch.main.views.system_agents.active_workflow_for_thread")
     def test_rejects_start_while_system_workflow_is_active(
-        self, mock_active_workflow: MagicMock, mock_start_demo: MagicMock
+        self, mock_active_workflow: MagicMock, mock_request_demo: MagicMock
     ) -> None:
         mock_active_workflow.return_value = SimpleNamespace()
 
@@ -4327,39 +4327,89 @@ class StartSessionDemoViewTests(TestCase):
             "PR workflow is running for this session",
             status_code=400,
         )
-        mock_start_demo.assert_not_called()
+        mock_request_demo.assert_not_called()
 
+    @patch("hitch.main.views.demo.request_demo_start")
+    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    def test_rejects_start_while_user_turn_is_active(
+        self, _mock_active_workflow: MagicMock, mock_request_demo: MagicMock
+    ) -> None:
+        CodexInstance.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="user turn",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+            pid=123,
+        )
+
+        response = self.client.post(
+            reverse("start_session_demo", kwargs={"session_id": "abc"})
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(
+            response,
+            "Codex is already working for this session",
+            status_code=400,
+        )
+        mock_request_demo.assert_not_called()
+
+    @override_settings(HITCH_DEMO_RUNTIME="docker")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.demo.request_demo_start")
+    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    def test_rejects_unsupported_runtime_before_spawning_agent(
+        self,
+        _mock_active_workflow: MagicMock,
+        mock_request_demo: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        response = self.client.post(
+            reverse("start_session_demo", kwargs={"session_id": "abc"})
+        )
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.content, b"only podman demo runtime is supported")
+        mock_request_demo.assert_not_called()
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views.demo.cleanup_unregistered_demo_containers")
     @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.codex_pool.latest_active_for_thread", return_value=None)
-    @patch("hitch.main.views.demo.start_demo_container")
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_starts_container_and_sends_agent_setup_prompt(
+    def test_requests_demo_agent_turn(
         self,
         mock_codex: MagicMock,
         mock_discover: MagicMock,
         _mock_managed: MagicMock,
         _mock_workflow: MagicMock,
-        mock_start_demo: MagicMock,
-        _mock_active: MagicMock,
         mock_spawn: MagicMock,
+        _mock_cleanup: MagicMock,
     ) -> None:
         mock_discover.return_value = [Path("/repo")]
         client = mock_codex.return_value.__enter__.return_value
         client._client.thread_resume.return_value = SimpleNamespace(
             thread=SimpleNamespace(cwd="/repo", turns=[])
         )
-        session_demo = SessionDemo(
-            thread_id="abc",
-            host="127.0.0.1",
-            port=45678,
-            container_id="container-1",
-            container_name="hitch-demo-abc",
-            status=SessionDemo.STATUS_ACTIVE,
-        )
-        mock_start_demo.return_value = (session_demo, 3000)
+        spawned_instances: list[CodexInstance] = []
+
+        def spawn_side_effect(**_kwargs: object) -> CodexInstance:
+            instance = CodexInstance.objects.create(
+                thread_id="abc",
+                cwd="/repo",
+                prompt="demo",
+                events_path="/tmp/events.jsonl",
+                status=CodexInstance.STATUS_RUNNING,
+                pid=123,
+                agent_kind=demo.DEMO_AGENT_KIND,
+            )
+            spawned_instances.append(instance)
+            return instance
+
+        mock_spawn.side_effect = spawn_side_effect
 
         response = self.client.post(
             reverse("start_session_demo", kwargs={"session_id": "abc"})
@@ -4367,19 +4417,24 @@ class StartSessionDemoViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response.headers["Location"], reverse("session", kwargs={"session_id": "abc"}))
-        mock_start_demo.assert_called_once_with("abc")
         mock_spawn.assert_called_once()
         kwargs = mock_spawn.call_args.kwargs
         self.assertEqual(kwargs["thread_id"], "abc")
         self.assertEqual(kwargs["cwd"], "/repo")
-        self.assertIn("container id: container-1", kwargs["prompt"])
-        self.assertIn("internal web port: 3000", kwargs["prompt"])
+        self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_SYSTEM_AGENT)
+        self.assertEqual(kwargs["agent_kind"], demo.DEMO_AGENT_KIND)
+        self.assertNotIn("output_schema", kwargs)
+        self.assertIsNone(kwargs["user_message_index"])
+        self.assertIn("Start an interactive web demo", kwargs["prompt"])
+        self.assertIn("Registration token:", kwargs["prompt"])
+        self.assertIn("io.hitch.managed=demo", kwargs["prompt"])
         self.assertIn("http://testserver/sessions/abc/demo/", kwargs["prompt"])
+        session_demo = SessionDemo.objects.get(thread_id="abc")
+        self.assertTrue(session_demo.registration_token)
+        self.assertEqual(spawned_instances[0].agent_kind, demo.DEMO_AGENT_KIND)
 
     @patch("hitch.main.views.demo.cleanup_demo_for_session")
     @patch("hitch.main.views.codex_pool.spawn_turn", side_effect=RuntimeError("spawn failed"))
-    @patch("hitch.main.views.codex_pool.latest_active_for_thread", return_value=None)
-    @patch("hitch.main.views.demo.start_demo_container")
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.views.discover_repos")
@@ -4390,8 +4445,6 @@ class StartSessionDemoViewTests(TestCase):
         mock_discover: MagicMock,
         _mock_managed: MagicMock,
         _mock_workflow: MagicMock,
-        mock_start_demo: MagicMock,
-        _mock_active: MagicMock,
         _mock_spawn: MagicMock,
         mock_cleanup: MagicMock,
     ) -> None:
@@ -4400,64 +4453,12 @@ class StartSessionDemoViewTests(TestCase):
         client._client.thread_resume.return_value = SimpleNamespace(
             thread=SimpleNamespace(cwd="/repo", turns=[])
         )
-        mock_start_demo.return_value = (
-            SessionDemo(
-                thread_id="abc",
-                host="127.0.0.1",
-                port=45678,
-                container_id="container-1",
-                status=SessionDemo.STATUS_ACTIVE,
-            ),
-            3000,
-        )
-
         with self.assertRaisesRegex(RuntimeError, "spawn failed"):
             self.client.post(reverse("start_session_demo", kwargs={"session_id": "abc"}))
 
         mock_cleanup.assert_called_once_with("abc")
 
-    @patch("hitch.main.views.codex_pool.steer_instance", return_value=True)
-    @patch("hitch.main.views.codex_pool.latest_active_for_thread")
-    @patch("hitch.main.views.demo.start_demo_container")
-    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
-    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.Codex")
-    def test_steers_active_worker_after_starting_demo(
-        self,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        _mock_managed: MagicMock,
-        _mock_workflow: MagicMock,
-        mock_start_demo: MagicMock,
-        mock_active: MagicMock,
-        mock_steer: MagicMock,
-    ) -> None:
-        mock_discover.return_value = [Path("/repo")]
-        client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_resume.return_value = SimpleNamespace(
-            thread=SimpleNamespace(cwd="/repo", turns=[])
-        )
-        mock_active.return_value = SimpleNamespace(pk=123)
-        mock_start_demo.return_value = (
-            SessionDemo(
-                thread_id="abc",
-                host="127.0.0.1",
-                port=45678,
-                container_id="container-1",
-                status=SessionDemo.STATUS_ACTIVE,
-            ),
-            3000,
-        )
-
-        response = self.client.post(reverse("start_session_demo", kwargs={"session_id": "abc"}))
-
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(response.headers["Location"], reverse("session", kwargs={"session_id": "abc"}))
-        mock_steer.assert_called_once()
-        self.assertEqual(mock_steer.call_args.kwargs["expected_thread_id"], "abc")
-
-    @patch("hitch.main.views.demo.start_demo_container")
+    @patch("hitch.main.views.demo.request_demo_start")
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.views.discover_repos")
@@ -4468,7 +4469,7 @@ class StartSessionDemoViewTests(TestCase):
         mock_discover: MagicMock,
         _mock_managed: MagicMock,
         _mock_workflow: MagicMock,
-        mock_start_demo: MagicMock,
+        mock_request_demo: MagicMock,
     ) -> None:
         mock_discover.return_value = [Path("/repo")]
         client = mock_codex.return_value.__enter__.return_value
@@ -4480,9 +4481,9 @@ class StartSessionDemoViewTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertContains(response, "thread has no cwd", status_code=400)
-        mock_start_demo.assert_not_called()
+        mock_request_demo.assert_not_called()
 
-    @patch("hitch.main.views.demo.start_demo_container", side_effect=demo.DemoError("no podman"))
+    @patch("hitch.main.views.demo.request_demo_start", side_effect=demo.DemoError("no podman"))
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.views.discover_repos")
@@ -4493,7 +4494,7 @@ class StartSessionDemoViewTests(TestCase):
         mock_discover: MagicMock,
         _mock_managed: MagicMock,
         _mock_workflow: MagicMock,
-        _mock_start_demo: MagicMock,
+        _mock_request_demo: MagicMock,
     ) -> None:
         mock_discover.return_value = [Path("/repo")]
         client = mock_codex.return_value.__enter__.return_value
@@ -4506,7 +4507,39 @@ class StartSessionDemoViewTests(TestCase):
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.content, b"no podman")
 
-    @patch("hitch.main.views.demo.start_demo_container")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_rejects_pending_demo_before_spawning_agent(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        _mock_managed: MagicMock,
+        _mock_workflow: MagicMock,
+        mock_spawn: MagicMock,
+    ) -> None:
+        SessionDemo.objects.create(
+            thread_id="abc",
+            host="127.0.0.1",
+            port=3000,
+            status=SessionDemo.STATUS_REQUESTED,
+            registration_token="token",
+        )
+        mock_discover.return_value = [Path("/repo")]
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(cwd="/repo", turns=[])
+        )
+
+        response = self.client.post(reverse("start_session_demo", kwargs={"session_id": "abc"}))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, "demo setup is already running", status_code=400)
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.views.demo.request_demo_start")
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.views.discover_repos")
@@ -4517,7 +4550,7 @@ class StartSessionDemoViewTests(TestCase):
         mock_discover: MagicMock,
         _mock_managed: MagicMock,
         _mock_workflow: MagicMock,
-        mock_start_demo: MagicMock,
+        mock_request_demo: MagicMock,
     ) -> None:
         mock_discover.return_value = [Path("/repo")]
         client = mock_codex.return_value.__enter__.return_value
@@ -4530,7 +4563,67 @@ class StartSessionDemoViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        mock_start_demo.assert_not_called()
+        mock_request_demo.assert_not_called()
+
+
+class RegisterSessionDemoViewTests(TestCase):
+    @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
+    @patch("hitch.main.demo._verify_registered_container_labels")
+    def test_registers_active_demo_from_json(
+        self, _mock_verify: MagicMock, _cleanup: MagicMock
+    ) -> None:
+        session_demo = demo.request_demo_start("abc")
+
+        response = self.client.post(
+            reverse("session_demo_register", kwargs={"session_id": "abc"}),
+            data=json.dumps(
+                {
+                    "token": session_demo.registration_token,
+                    "status": "active",
+                    "container_name": "hitch-demo-abc-1234",
+                    "container_id": "container123",
+                    "host": "127.0.0.1",
+                    "port": 45678,
+                }
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.content)
+        self.assertEqual(payload["status"], SessionDemo.STATUS_ACTIVE)
+        session_demo.refresh_from_db()
+        self.assertEqual(session_demo.container_name, "hitch-demo-abc-1234")
+        self.assertEqual(session_demo.port, 45678)
+
+    @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
+    def test_rejects_invalid_registration_token(self, _cleanup: MagicMock) -> None:
+        demo.request_demo_start("abc")
+
+        response = self.client.post(
+            reverse("session_demo_register", kwargs={"session_id": "abc"}),
+            data=json.dumps(
+                {
+                    "token": "bad",
+                    "status": "preparing",
+                    "container_name": "hitch-demo-abc-1234",
+                }
+            ),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"invalid demo registration token")
+
+    def test_rejects_invalid_json(self) -> None:
+        response = self.client.post(
+            reverse("session_demo_register", kwargs={"session_id": "abc"}),
+            data=b"{",
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"invalid JSON")
 
 
 class SetSessionArchivedViewTests(TestCase):
@@ -4623,13 +4716,31 @@ class SetSessionArchivedViewTests(TestCase):
     def test_archive_cleans_up_active_demo_container(
         self, mock_codex: MagicMock, mock_run: MagicMock
     ) -> None:
+        mock_run.side_effect = [
+            SimpleNamespace(
+                stdout=(
+                    '[{"Config":{"Labels":{'
+                    '"io.hitch.managed":"demo",'
+                    '"io.hitch.session":"abc",'
+                    '"io.hitch.demo_token":"token",'
+                    '"io.hitch.container_name":"hitch-demo-abc-abcd"'
+                    "}}}]"
+                ),
+                stderr="",
+                returncode=0,
+            ),
+            SimpleNamespace(stdout="", stderr="", returncode=0),
+            SimpleNamespace(stdout="[]", stderr="", returncode=0),
+        ]
         SessionDemo.objects.create(
             thread_id="abc",
             host="127.0.0.1",
             port=45678,
             container_id="container-1",
+            container_name="hitch-demo-abc-abcd",
             runtime="podman",
             status=SessionDemo.STATUS_ACTIVE,
+            registration_token="token",
         )
 
         response = self.client.post(
@@ -4639,13 +4750,13 @@ class SetSessionArchivedViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(SessionDemo.objects.get(thread_id="abc").status, SessionDemo.STATUS_STOPPED)
-        mock_run.assert_called_once_with(
+        self.assertEqual(mock_run.call_args_list[1], call(
             ["podman", "rm", "-f", "container-1"],
             check=True,
             capture_output=True,
             text=True,
             timeout=30,
-        )
+        ))
         mock_codex.return_value.__enter__.return_value.thread_archive.assert_called_once_with("abc")
 
     @patch("hitch.main.views.Codex")
@@ -4781,13 +4892,14 @@ class SessionStreamViewTests(TestCase):
         baseline: str = "",
         active: str = "",
         workflow: str = "",
+        demo: str = "",
     ) -> str:
         # Helper that builds the SSE URL with the page-render-time state
         # the view expects on every legitimate request. Tests that want
         # to exercise the stale-reload path pass an empty/wrong value.
         return (
             reverse("session_stream", kwargs={"session_id": session_id})
-            + f"?baseline={baseline}&active={active}&workflow={workflow}"
+            + f"?baseline={baseline}&active={active}&workflow={workflow}&demo={demo}"
         )
 
     @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
@@ -4875,6 +4987,19 @@ class SessionStreamViewTests(TestCase):
         body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
         self.assertIn(b'"status": "stale"', body)
 
+        # Demo status changes are also render-state changes. A page that
+        # rendered while a demo was still requested must reload when the
+        # background notifier later marks it active.
+        SessionDemo.objects.create(
+            thread_id="thread-demo",
+            host="127.0.0.1",
+            port=45678,
+            status=SessionDemo.STATUS_ACTIVE,
+        )
+        response = self.client.get(self._stream_url("thread-demo"))
+        body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
+        self.assertIn(b'"status": "stale"', body)
+
     @patch("hitch.main.streaming._POLL_INTERVAL", 0.01)
     def test_forwards_worker_events_through_view(self) -> None:
         # End-to-end through the URL routing: a RUNNING instance with
@@ -4905,6 +5030,38 @@ class SessionStreamViewTests(TestCase):
 
         self.assertIn(b"item/started", body)
         self.assertIn(b'"status": "completed"', body)
+
+    @patch("hitch.main.streaming._POLL_INTERVAL", 0.001)
+    def test_active_worker_stream_reloads_when_demo_status_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            Path(events_path).touch()
+            instance = self._make(
+                thread_id="thread-demo-active",
+                agent_kind=demo.DEMO_AGENT_KIND,
+                events_path=events_path,
+            )
+            session_demo = SessionDemo.objects.create(
+                thread_id="thread-demo-active",
+                host="127.0.0.1",
+                port=3000,
+                status=SessionDemo.STATUS_REQUESTED,
+            )
+            demo_token = streaming.demo_stream_token("thread-demo-active")
+            response = self.client.get(
+                self._stream_url(
+                    "thread-demo-active",
+                    baseline=str(instance.pk),
+                    active=str(instance.pk),
+                    demo=demo_token,
+                )
+            )
+            session_demo.status = SessionDemo.STATUS_ACTIVE
+            session_demo.save(update_fields=["status", "updated_at"])
+
+            body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
+
+        self.assertIn(b'"status": "demo"', body)
 
 
 class ResolveApprovalViewTests(TestCase):

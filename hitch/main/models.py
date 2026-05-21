@@ -327,11 +327,15 @@ class SessionMetadata(models.Model):
 class SessionDemo(models.Model):
     """Active web demo target for a Codex session."""
 
+    STATUS_REQUESTED = "requested"
+    STATUS_PREPARING = "preparing"
     STATUS_ACTIVE = "active"
     STATUS_STOPPED = "stopped"
     STATUS_FAILED = "failed"
 
     STATUS_CHOICES = (
+        (STATUS_REQUESTED, "requested"),
+        (STATUS_PREPARING, "preparing"),
         (STATUS_ACTIVE, "active"),
         (STATUS_STOPPED, "stopped"),
         (STATUS_FAILED, "failed"),
@@ -345,6 +349,9 @@ class SessionDemo(models.Model):
     runtime = models.CharField(max_length=32, default="podman")
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_ACTIVE)
     last_error = models.TextField(blank=True, default="")
+    generation = models.PositiveIntegerField(default=0)
+    registration_token = models.CharField(max_length=128, blank=True, default="")
+    logs = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

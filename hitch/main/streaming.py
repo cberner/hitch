@@ -25,7 +25,7 @@ from collections.abc import Generator, Iterator
 from pathlib import Path
 
 from hitch.main import codex_events, codex_pool
-from hitch.main.models import CodexInstance, SystemAgentRun, SystemWorkflow
+from hitch.main.models import CodexInstance, SessionDemo, SystemAgentRun, SystemWorkflow
 
 # Cadence at which we re-poll the events file when it has no new bytes. Short
 # enough that streamed deltas surface in near-real-time; long enough not to
@@ -69,7 +69,9 @@ _COMPACT_TOKEN_UNITS = (
 )
 
 
-def stream_for_instance(instance: CodexInstance) -> Iterator[bytes]:
+def stream_for_instance(
+    instance: CodexInstance, *, demo_baseline: str | None = None
+) -> Iterator[bytes]:
     """Yield SSE frames (as bytes) for a single CodexInstance.
 
     Always ends with a named ``end`` event so the client can stop its
@@ -85,6 +87,9 @@ def stream_for_instance(instance: CodexInstance) -> Iterator[bytes]:
     started = time.monotonic()
     last_heartbeat = time.monotonic()
     while not path.exists():
+        if _demo_changed(instance.thread_id, demo_baseline):
+            yield _end_frame("demo")
+            return
         if _is_done(instance.pk):
             yield _end_frame(_current_status(instance.pk))
             return
@@ -107,7 +112,14 @@ def stream_for_instance(instance: CodexInstance) -> Iterator[bytes]:
             if chunk:
                 buffer += chunk
                 buffer = yield from _emit_complete_lines(buffer)
+                if _demo_changed(instance.thread_id, demo_baseline):
+                    yield _end_frame("demo")
+                    return
                 continue
+
+            if _demo_changed(instance.thread_id, demo_baseline):
+                yield _end_frame("demo")
+                return
 
             done = _is_done(instance.pk)
             if done:
@@ -134,7 +146,11 @@ def stream_for_instance(instance: CodexInstance) -> Iterator[bytes]:
             time.sleep(_POLL_INTERVAL)
 
 
-def idle_stream(session_id: str, baseline_id: int | None) -> Iterator[bytes]:
+def idle_stream(
+    session_id: str,
+    baseline_id: int | None,
+    demo_baseline: str = "",
+) -> Iterator[bytes]:
     """Long-running stream for a session with no active worker.
 
     Keeps the SSE channel open so the page's connection indicator can show
@@ -164,6 +180,9 @@ def idle_stream(session_id: str, baseline_id: int | None) -> Iterator[bytes]:
             # or already terminal from a fast turn). End the stream so the
             # client reloads and re-renders with the live UI.
             yield _end_frame("active")
+            return
+        if demo_stream_token(session_id) != demo_baseline:
+            yield _end_frame("demo")
             return
         if time.monotonic() > deadline:
             return
@@ -216,6 +235,23 @@ def reload_stream() -> Iterator[bytes]:
     """
     yield b"retry: 2000\n\n"
     yield _end_frame("stale")
+
+
+def demo_stream_token(session_id: str) -> str:
+    row = (
+        SessionDemo.objects.filter(thread_id=session_id)
+        .values_list("status", "updated_at")
+        .first()
+    )
+    if row is None:
+        return ""
+    status, updated_at = row
+    timestamp = updated_at.timestamp() if updated_at is not None else 0
+    return f"{status}:{timestamp}"
+
+
+def _demo_changed(session_id: str, demo_baseline: str | None) -> bool:
+    return demo_baseline is not None and demo_stream_token(session_id) != demo_baseline
 
 
 def _emit_complete_lines(buffer: str) -> Generator[bytes, None, str]:

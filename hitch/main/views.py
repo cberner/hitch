@@ -1306,6 +1306,7 @@ def _render_session_detail(
     is_archived = _thread_is_archived(thread)
     entries = _apply_system_authors(list(_entries_for(thread)), session_id)
     entries = _apply_qa_approval_messages(entries, session_id)
+    entries = _filter_demo_agent_entries(entries, session_id)
     name_value = getattr(thread, "name", None) or ""
     projects = list(Project.objects.all())
     metadata_by_thread = _metadata_by_thread_id([thread])
@@ -1313,6 +1314,7 @@ def _render_session_detail(
     pr_url = _pr_url_for_thread(thread)
     _mark_proposed_tasks_pr_opened(session_id, pr_url)
     active_instance = _active_instance_for(session_id)
+    show_active_worker_transcript = _show_active_worker_transcript(active_instance)
     active_system_workflow = system_agents.active_workflow_for_thread(session_id)
     # While a worker is running, drop the entries that belong to its
     # in-progress turn — the SSE stream replays them from byte 0 of the
@@ -1328,8 +1330,13 @@ def _render_session_detail(
         codex_events.latest_task_plan_for_instance(active_instance)
     )
     diff_view = build_worktree_diff(_thread_cwd(thread))
-    session_demo = demo.active_demo_for(session_id)
-    demo_url = demo.demo_url_for_request(request, session_id) if session_demo is not None else ""
+    active_session_demo = demo.active_demo_for(session_id)
+    session_demo = demo.latest_demo_for(session_id)
+    demo_url = (
+        demo.demo_url_for_request(request, session_id)
+        if active_session_demo is not None
+        else ""
+    )
     settings_dialog_context = _settings_dialog_context(settings, models_data)
     active_worker_status_text = _active_worker_status_text(active_instance)
     workflow_status_text = _workflow_status_text(active_system_workflow)
@@ -1380,8 +1387,11 @@ def _render_session_detail(
                 "resolve_input_request", kwargs={"input_id": 0}
             ),
             "active_worker": active_instance is not None,
+            "show_active_worker_transcript": show_active_worker_transcript,
             "active_system_workflow": active_system_workflow,
-            "demo_start_disabled": active_system_workflow is not None,
+            "demo_start_disabled": (
+                active_system_workflow is not None or active_instance is not None
+            ),
             "workflow_status_text": workflow_status_text,
             "active_worker_status_text": active_worker_status_text,
             "live_status_text": live_status_text,
@@ -1407,6 +1417,7 @@ def _render_session_detail(
             "task_plan": task_plan,
             "diff_view": diff_view,
             "session_demo": session_demo,
+            "active_session_demo": active_session_demo,
             "demo_url": demo_url,
             "projects": projects,
             "session_project": session_project,
@@ -1959,6 +1970,10 @@ def _trim_in_progress_turn(
     return entries
 
 
+def _show_active_worker_transcript(active: CodexInstance | None) -> bool:
+    return active is not None and active.agent_kind != demo.DEMO_AGENT_KIND
+
+
 def _pending_user_prompt(active: CodexInstance | None) -> str:
     """Surface the active worker's prompt as a pending user bubble.
 
@@ -1969,7 +1984,7 @@ def _pending_user_prompt(active: CodexInstance | None) -> str:
     placeholder. The streaming JS removes the bubble as soon as the
     real ``userMessage`` event lands.
     """
-    if active is None or not active.prompt:
+    if active is None or not active.prompt or active.agent_kind == demo.DEMO_AGENT_KIND:
         return ""
     return active.prompt
 
@@ -2005,6 +2020,8 @@ def _current_task_text(steps: tuple[codex_events.TaskPlanStep, ...]) -> str:
 def _pending_user_author(active: CodexInstance | None) -> str:
     if active is None:
         return ""
+    if active.agent_kind == demo.DEMO_AGENT_KIND:
+        return active.display_author
     return active.display_author if active.purpose == CodexInstance.PURPOSE_SYSTEM_FEEDBACK else ""
 
 
@@ -2013,6 +2030,8 @@ def _workflow_status_text(workflow: Any | None) -> str:
 
 
 def _active_worker_status_text(active: CodexInstance | None) -> str:
+    if active is not None and active.agent_kind == demo.DEMO_AGENT_KIND:
+        return "Demo agent is working"
     return streaming.qa_agent_status_text_for_instance(active)
 
 
@@ -2051,6 +2070,37 @@ def _apply_system_author(
                 item, system_authors, user_message_index
             )
     return user_message_index
+
+
+def _filter_demo_agent_entries(
+    entries: list[dict[str, Any]], session_id: str
+) -> list[dict[str, Any]]:
+    hidden_prompts: set[str] = set()
+    for prompt in CodexInstance.objects.filter(
+        thread_id=session_id,
+        agent_kind=demo.DEMO_AGENT_KIND,
+    ).values_list("prompt", flat=True):
+        if isinstance(prompt, str) and prompt:
+            hidden_prompts.add(prompt)
+    if not hidden_prompts:
+        return entries
+
+    filtered: list[dict[str, Any]] = []
+    suppress_turn = False
+    for entry in entries:
+        if entry.get("kind") == "user":
+            text = entry.get("text")
+            suppress_turn = isinstance(text, str) and text in hidden_prompts
+        if suppress_turn and _preserve_during_hidden_demo_turn(entry):
+            filtered.append(entry)
+            continue
+        if not suppress_turn:
+            filtered.append(entry)
+    return filtered
+
+
+def _preserve_during_hidden_demo_turn(entry: dict[str, Any]) -> bool:
+    return entry.get("kind") == "agent" and bool(entry.get("display_author"))
 
 
 def _apply_qa_approval_messages(
@@ -2152,24 +2202,28 @@ def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpRespon
     baseline_param = request.GET.get("baseline", "")
     active_param = request.GET.get("active", "")
     workflow_param = request.GET.get("workflow", "")
+    demo_param = request.GET.get("demo", "")
     current_latest = codex_pool.latest_id_for_thread(session_id)
     current_latest_str = str(current_latest) if current_latest is not None else ""
     active = _active_instance_for(session_id)
     current_active_str = str(active.pk) if active is not None else ""
     active_workflow = system_agents.active_workflow_for_thread(session_id)
     current_workflow_str = str(active_workflow.pk) if active_workflow is not None else ""
+    current_demo_str = streaming.demo_stream_token(session_id)
 
     if (
         baseline_param != current_latest_str
         or active_param != current_active_str
         or workflow_param != current_workflow_str
+        or demo_param != current_demo_str
     ):
         response = StreamingHttpResponse(
             streaming.reload_stream(), content_type="text/event-stream"
         )
     elif active is not None:
         response = StreamingHttpResponse(
-            streaming.stream_for_instance(active), content_type="text/event-stream"
+            streaming.stream_for_instance(active, demo_baseline=current_demo_str),
+            content_type="text/event-stream",
         )
     elif active_workflow is not None:
         response = StreamingHttpResponse(
@@ -2180,7 +2234,7 @@ def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpRespon
         )
     else:
         response = StreamingHttpResponse(
-            streaming.idle_stream(session_id, current_latest),
+            streaming.idle_stream(session_id, current_latest, current_demo_str),
             content_type="text/event-stream",
         )
     # Discourage proxies from buffering: SSE depends on every frame reaching
@@ -2208,11 +2262,13 @@ def _stream_url_for(
     baseline_id = codex_pool.latest_id_for_thread(session_id)
     active_id = active_instance.pk if active_instance is not None else None
     workflow_id = active_workflow.pk if active_workflow is not None else None
+    demo_token = streaming.demo_stream_token(session_id)
     qs = urlencode(
         {
             "baseline": str(baseline_id) if baseline_id is not None else "",
             "active": str(active_id) if active_id is not None else "",
             "workflow": str(workflow_id) if workflow_id is not None else "",
+            "demo": demo_token,
         }
     )
     return f"{reverse('session_stream', kwargs={'session_id': session_id})}?{qs}"
@@ -3087,6 +3143,15 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
 def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
     if system_agents.active_workflow_for_thread(session_id) is not None:
         return HttpResponseBadRequest("PR workflow is running for this session")
+    active_instance = codex_pool.latest_active_for_thread(session_id)
+    if active_instance is not None:
+        if active_instance.agent_kind == demo.DEMO_AGENT_KIND:
+            return HttpResponseBadRequest("demo setup is already running")
+        return HttpResponseBadRequest("Codex is already working for this session")
+    try:
+        demo.demo_runtime()
+    except demo.DemoError as exc:
+        return HttpResponse(str(exc), status=500, content_type="text/plain")
     settings = _stored_settings(request)
     config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
     with Codex(config=config) as codex:
@@ -3098,27 +3163,18 @@ def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
     if cwd not in _allowed_session_cwds():
         return HttpResponseBadRequest("thread cwd is not an allowed repository")
     try:
-        session_demo, container_port = demo.start_demo_container(session_id)
+        session_demo = demo.request_demo_start(session_id)
+    except demo.DemoAlreadyRunningError as exc:
+        return HttpResponseBadRequest(str(exc))
     except demo.DemoError as exc:
         return HttpResponse(str(exc), status=500, content_type="text/plain")
-
-    prompt = demo.demo_prompt_for(
+    prompt = demo.start_demo_prompt_for(
         request=request,
         session_id=session_id,
+        cwd=cwd,
         demo=session_demo,
-        container_port=container_port,
     )
     try:
-        active_instance = codex_pool.latest_active_for_thread(session_id)
-        if active_instance is not None:
-            steered = codex_pool.steer_instance(
-                active_instance.pk,
-                expected_thread_id=session_id,
-                prompt=prompt,
-            )
-            if steered is not None:
-                return redirect("session", session_id=session_id)
-
         codex_pool.spawn_turn(
             thread_id=session_id,
             cwd=cwd,
@@ -3126,11 +3182,31 @@ def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
             sandbox_policy=_effective_sandbox_policy(settings) or None,
             approval_mode=_effective_approval_mode(settings),
             enable_memories=settings.enable_memories,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            display_author=demo.DEMO_DISPLAY_AUTHOR,
+            user_message_index=None,
         )
     except Exception:
         demo.cleanup_demo_for_session(session_id)
         raise
     return redirect("session", session_id=session_id)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+def register_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
+    try:
+        payload = json.loads(request.body.decode("utf-8") or "{}")
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return HttpResponseBadRequest("invalid JSON")
+    if not isinstance(payload, dict):
+        return HttpResponseBadRequest("invalid JSON")
+    try:
+        session_demo = demo.register_demo_container(session_id, payload)
+    except demo.DemoError as exc:
+        return HttpResponse(str(exc), status=400, content_type="text/plain")
+    return demo.registration_response(session_demo)
 
 
 @csrf_exempt
