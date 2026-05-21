@@ -2394,6 +2394,58 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     @patch("hitch.main.views.Codex")
+    def test_system_session_detail_is_read_only_and_shows_system_prompt(
+        self, mock_codex: MagicMock
+    ) -> None:
+        prompt = "You are Hitch's QA agent.\nReview <diff>."
+        _patch_thread(
+            self,
+            mock_codex,
+            _thread([], id="qa-thread", name="QA thread", cwd="/repo"),
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-1",
+            cwd="/repo",
+        )
+        instance = _make_codex_instance(
+            thread_id="qa-thread",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+            prompt=prompt,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="qa-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+        )
+
+        response = self.client.get(
+            reverse("system_session", kwargs={"session_id": "qa-thread"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '<body class="read-only">')
+        self.assertContains(response, "QA agent log")
+        self.assertContains(response, '<details class="system-prompt">', html=False)
+        self.assertContains(response, "<summary>System prompt</summary>", html=False)
+        self.assertContains(response, "Review &lt;diff&gt;.")
+        self.assertNotContains(response, "No messages in this session yet.")
+        self.assertNotContains(response, 'class="composer"')
+
+    def test_system_session_detail_requires_system_run(self) -> None:
+        response = self.client.get(
+            reverse("system_session", kwargs={"session_id": "thread-1"})
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    @patch("hitch.main.views.Codex")
     def test_indicator_stream_url_lives_on_composer_form(
         self, mock_codex: MagicMock
     ) -> None:

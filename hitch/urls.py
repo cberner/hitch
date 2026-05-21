@@ -41,6 +41,12 @@ urlpatterns = [
     ),
     path("projects/new/", hitch.main.views.new_project, name="new_project"),
     path("projects/edit/", hitch.main.views.edit_project, name="edit_project"),
+    path("system-sessions/", hitch.main.views.system_sessions, name="system_sessions"),
+    path(
+        "system-sessions/<str:session_id>/",
+        hitch.main.views.system_session,
+        name="system_session",
+    ),
     path("sessions/new/", hitch.main.views.new_session, name="new_session"),
     path("sessions/<str:session_id>/", hitch.main.views.session, name="session"),
     path(
