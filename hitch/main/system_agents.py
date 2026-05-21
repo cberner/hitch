@@ -39,6 +39,8 @@ PR_SLASH_PROMPT = (
     "30 minutes."
 )
 SYSTEM_AGENT_APPROVAL_MODE = "auto_review"
+QA_WORKFLOW_MAX_ITERATIONS = 3
+PR_QA_WORKFLOW_MAX_ITERATIONS = QA_WORKFLOW_MAX_ITERATIONS + 3
 STEP_QA_RUNNING = "qa_running"
 STEP_FEEDBACK_RUNNING = "feedback_running"
 STEP_BLOCKED = "blocked"
@@ -131,6 +133,11 @@ def start_pr_qa_workflow(
                 cwd=cwd,
                 status=SystemWorkflow.STATUS_RUNNING,
                 step=STEP_QA_RUNNING,
+                max_iterations=(
+                    PR_QA_WORKFLOW_MAX_ITERATIONS
+                    if open_pr_on_lgtm
+                    else QA_WORKFLOW_MAX_ITERATIONS
+                ),
                 state={
                     "pr_prompt": PR_SLASH_PROMPT,
                     "sandbox_policy": sandbox_policy or "",

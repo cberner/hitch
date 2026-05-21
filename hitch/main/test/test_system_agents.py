@@ -556,6 +556,9 @@ class PrQaWorkflowTests(TestCase):
         )
 
         self.assertEqual(workflow.step, "qa_running")
+        self.assertEqual(
+            workflow.max_iterations, system_agents.PR_QA_WORKFLOW_MAX_ITERATIONS
+        )
         mock_spawn.assert_called_once()
         kwargs = mock_spawn.call_args.kwargs
         self.assertEqual(kwargs["thread_source"], ThreadSource.subagent)
@@ -579,6 +582,28 @@ class PrQaWorkflowTests(TestCase):
 
         run = SystemAgentRun.objects.get(workflow=workflow)
         self.assertEqual(run.thread_id, "qa-thread")
+
+    @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_qa_only_workflow_keeps_default_iteration_limit(
+        self, mock_spawn: MagicMock, _mock_diff: MagicMock
+    ) -> None:
+        mock_spawn.return_value = _instance(
+            thread_id="qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        )
+
+        workflow = system_agents.start_pr_qa_workflow(
+            main_thread_id="main-thread",
+            cwd="/repo",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            open_pr_on_lgtm=False,
+        )
+
+        self.assertEqual(
+            workflow.max_iterations, system_agents.QA_WORKFLOW_MAX_ITERATIONS
+        )
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_start_returns_existing_running_workflow(self, mock_spawn: MagicMock) -> None:
