@@ -167,6 +167,120 @@ class ProposedTask(models.Model):
         return self.title
 
 
+class StandingOrder(models.Model):
+    """A project-scoped recurring goal that can propose Codex sessions."""
+
+    CONFIDENCE_MEDIUM = "medium"
+    CONFIDENCE_HIGH = "high"
+    CONFIDENCE_VERY_HIGH = "very_high"
+    CONFIDENCE_CHOICES: ClassVar[tuple[tuple[str, str], ...]] = (
+        (CONFIDENCE_MEDIUM, "Medium"),
+        (CONFIDENCE_HIGH, "High"),
+        (CONFIDENCE_VERY_HIGH, "Very high"),
+    )
+
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name="standing_orders",
+    )
+    title = models.CharField(max_length=200)
+    goal = models.TextField()
+    confidence_threshold = models.CharField(
+        max_length=32,
+        choices=CONFIDENCE_CHOICES,
+        default=CONFIDENCE_HIGH,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        indexes = [
+            models.Index(fields=["project", "created_at"]),
+        ]
+
+    @override
+    def __str__(self) -> str:
+        return self.title
+
+
+class ProposedSession(models.Model):
+    """A standing-order session proposal awaiting user acceptance."""
+
+    OUTCOME_UNSET = ""
+    OUTCOME_ACCEPTED = "accepted"
+    OUTCOME_REJECTED = "rejected"
+
+    OUTCOME_CHOICES: ClassVar[tuple[tuple[str, str], ...]] = (
+        (OUTCOME_UNSET, "Not set"),
+        (OUTCOME_ACCEPTED, "Accepted"),
+        (OUTCOME_REJECTED, "Rejected"),
+    )
+
+    standing_order = models.ForeignKey(
+        StandingOrder,
+        on_delete=models.CASCADE,
+        related_name="proposed_sessions",
+    )
+    source_workflow = models.ForeignKey(
+        "SystemWorkflow",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="proposed_sessions",
+    )
+    title = models.CharField(max_length=200)
+    summary = models.TextField(blank=True, default="")
+    confidence = models.CharField(
+        max_length=32,
+        choices=StandingOrder.CONFIDENCE_CHOICES,
+        default=StandingOrder.CONFIDENCE_MEDIUM,
+    )
+    relevant_files = models.JSONField(default=list, blank=True)
+    candidate_session = models.ForeignKey(
+        "SessionMetadata",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="standing_order_candidate_proposals",
+    )
+    judge_session = models.ForeignKey(
+        "SessionMetadata",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="standing_order_judge_proposals",
+    )
+    accepted_session = models.ForeignKey(
+        "SessionMetadata",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="accepted_standing_order_proposals",
+    )
+    outcome_status = models.CharField(
+        max_length=32,
+        choices=OUTCOME_CHOICES,
+        blank=True,
+        default=OUTCOME_UNSET,
+    )
+    outcome_notes = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        indexes = [
+            models.Index(fields=["standing_order", "created_at"]),
+            models.Index(fields=["outcome_status", "created_at"]),
+        ]
+
+    @override
+    def __str__(self) -> str:
+        return self.title
+
+
 class SessionMetadata(models.Model):
     """Local metadata for a Codex thread that Hitch does not own on disk."""
 
@@ -320,6 +434,7 @@ class SystemWorkflow(models.Model):
 
     KIND_PR_QA = "pr_qa"
     KIND_OKR_TASK_GENERATION = "okr_task_generation"
+    KIND_STANDING_ORDER_RUN = "standing_order_run"
 
     STATUS_RUNNING = "running"
     STATUS_BLOCKED = "blocked"

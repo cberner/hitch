@@ -13,7 +13,10 @@ from hitch.main.models import (
     KeyResult,
     Objective,
     Project,
+    ProposedSession,
     ProposedTask,
+    SessionMetadata,
+    StandingOrder,
     SystemAgentRun,
     SystemWorkflow,
 )
@@ -59,6 +62,28 @@ def _instance(
         user_message_index=user_message_index,
         error=error,
     )
+
+
+def _events_file(test: TestCase, payload: dict[str, object]) -> str:
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "method": "item/completed",
+                    "payload": {
+                        "item": {
+                            "id": "a1",
+                            "type": "agentMessage",
+                            "text": json.dumps(payload),
+                        }
+                    },
+                }
+            )
+            + "\n"
+        )
+        events_path = fh.name
+    test.addCleanup(Path(events_path).unlink, missing_ok=True)
+    return events_path
 
 
 class OkrTaskGenerationWorkflowTests(TestCase):
@@ -1139,3 +1164,266 @@ class PrQaWorkflowTests(TestCase):
             system_agents._final_agent_text(events_path),
             '{"feedback": "Done", "lgtm": true}',
         )
+
+
+class StandingOrderWorkflowTests(TestCase):
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_workflow_starts_hidden_candidate_thread(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+
+        workflow = system_agents.start_standing_order_workflow(
+            standing_order=standing_order
+        )
+
+        self.assertEqual(workflow.step, system_agents.STEP_STANDING_ORDER_CANDIDATE_RUNNING)
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(kwargs["cwd"], "/repo")
+        self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
+        self.assertEqual(kwargs["agent_kind"], system_agents.STANDING_ORDER_AGENT_KIND)
+        self.assertEqual(kwargs["display_author"], system_agents.STANDING_ORDER_DISPLAY_AUTHOR)
+        self.assertIn("Keep docs current", kwargs["prompt"])
+        self.assertTrue(
+            SessionMetadata.objects.filter(thread_id="candidate-thread").exists()
+        )
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_candidate_completion_starts_judge_thread(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_STANDING_ORDER_CANDIDATE_RUNNING,
+            state={"standing_order_id": standing_order.pk},
+        )
+        candidate_metadata = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo",
+            project=project,
+        )
+        workflow.state = {
+            **workflow.state,
+            "candidate_session_id": candidate_metadata.pk,
+        }
+        workflow.save(update_fields=["state", "updated_at"])
+        instance = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {
+                    "title": "Add parser coverage",
+                    "summary": "Cover parser edge cases.",
+                    "impact": "Fewer regressions.",
+                    "implementation_direction": "Add focused tests.",
+                    "relevant_files": ["hitch/main/rollout.py"],
+                },
+            ),
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            thread_id="candidate-thread",
+            instance=instance,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="judge-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING)
+        self.assertEqual(workflow.state["candidate"]["title"], "Add parser coverage")
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(kwargs["agent_kind"], system_agents.STANDING_ORDER_JUDGE_AGENT_KIND)
+        self.assertIn("Add parser coverage", kwargs["prompt"])
+        self.assertTrue(SessionMetadata.objects.filter(thread_id="judge-thread").exists())
+
+    def test_judge_creates_proposal_when_confidence_meets_threshold(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+        )
+        candidate_metadata = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo",
+            project=project,
+        )
+        judge_metadata = SessionMetadata.objects.create(
+            thread_id="judge-thread",
+            cwd="/repo",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            state={
+                "standing_order_id": standing_order.pk,
+                "candidate_session_id": candidate_metadata.pk,
+                "judge_session_id": judge_metadata.pk,
+                "candidate": {
+                    "title": "Add parser coverage",
+                    "relevant_files": ["hitch/main/rollout.py"],
+                },
+            },
+        )
+        instance = _instance(
+            thread_id="judge-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {
+                    "confidence": "high",
+                    "summary": "This adds focused parser coverage.",
+                    "rationale": "The files are well-scoped.",
+                },
+            ),
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            thread_id="judge-thread",
+            instance=instance,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_STANDING_ORDER_PROPOSED)
+        proposal = ProposedSession.objects.get()
+        self.assertEqual(proposal.title, "Add parser coverage")
+        self.assertEqual(proposal.confidence, StandingOrder.CONFIDENCE_HIGH)
+        self.assertEqual(proposal.candidate_session, candidate_metadata)
+        self.assertEqual(proposal.judge_session, judge_metadata)
+
+    def test_judge_skips_proposal_below_threshold(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=StandingOrder.CONFIDENCE_VERY_HIGH,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            state={
+                "standing_order_id": standing_order.pk,
+                "candidate": {"title": "Maybe add tests", "relevant_files": []},
+            },
+        )
+        instance = _instance(
+            thread_id="judge-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {
+                    "confidence": "high",
+                    "summary": "Useful but not certain.",
+                    "rationale": "There is some ambiguity.",
+                },
+            ),
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            thread_id="judge-thread",
+            instance=instance,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_STANDING_ORDER_SKIPPED)
+        self.assertFalse(ProposedSession.objects.exists())
+
+    def test_accepted_proposed_session_unhides_candidate_thread(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        metadata = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+        )
+        instance = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            thread_id="candidate-thread",
+            instance=instance,
+        )
+
+        self.assertIn("candidate-thread", system_agents.hidden_thread_ids())
+
+        ProposedSession.objects.create(
+            standing_order=standing_order,
+            candidate_session=metadata,
+            accepted_session=metadata,
+            title="Add parser coverage",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        )
+
+        self.assertNotIn("candidate-thread", system_agents.hidden_thread_ids())
