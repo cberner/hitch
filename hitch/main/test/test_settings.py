@@ -1,14 +1,17 @@
 import base64
+import subprocess
 from types import SimpleNamespace
+from typing import override
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
 from django.core import signing
-from django.test import Client, TestCase
+from django.test import Client, SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 from openai_codex.errors import MethodNotFoundError
 from openai_codex.generated.v2_all import ReasoningEffort
 
+from hitch.main import context_processors
 from hitch.main.models import Project, UserSettings
 
 _MODEL_COOKIE = "hitch_model"
@@ -141,11 +144,53 @@ def _extra_system_prompt_value(response: object) -> str:
     return base64.urlsafe_b64decode(raw.encode("ascii")).decode()
 
 
+class ServerRevisionContextTests(SimpleTestCase):
+    @override
+    def setUp(self) -> None:
+        context_processors.server_git_hash.cache_clear()
+        super().setUp()
+
+    @override
+    def tearDown(self) -> None:
+        context_processors.server_git_hash.cache_clear()
+        super().tearDown()
+
+    @override_settings(BASE_DIR="/srv/hitch")
+    @patch("hitch.main.context_processors.subprocess.run")
+    def test_server_revision_exposes_short_git_hash(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout="abc123\n",
+        )
+
+        context = context_processors.server_revision(MagicMock())
+
+        self.assertEqual(context, {"server_git_hash": "abc123"})
+        mock_run.assert_called_once_with(
+            ["git", "-C", "/srv/hitch", "rev-parse", "--short=6", "HEAD"],
+            capture_output=True,
+            check=True,
+            text=True,
+        )
+
+    @patch("hitch.main.context_processors.subprocess.run")
+    def test_server_revision_is_blank_when_git_lookup_fails(
+        self, mock_run: MagicMock
+    ) -> None:
+        mock_run.side_effect = subprocess.CalledProcessError(128, "git")
+
+        context = context_processors.server_revision(MagicMock())
+
+        self.assertEqual(context, {"server_git_hash": ""})
+
+
 class SettingsDialogRenderTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    @patch("hitch.main.context_processors.server_git_hash", return_value="abc123")
     def test_dialog_lists_models_and_efforts(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
+        self, _mock_hash: MagicMock, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _configure_codex(
             mock_codex,
@@ -166,6 +211,8 @@ class SettingsDialogRenderTests(TestCase):
         self.assertContains(response, f'href="{reverse("index")}"')
         self.assertContains(response, ">sessions<")
         self.assertContains(response, ">settings<")
+        self.assertContains(response, "Server git revision")
+        self.assertContains(response, ">abc123<")
         self.assertContains(response, f'href="{reverse("usage")}"')
         self.assertContains(response, ">usage<")
         self.assertContains(response, "GPT-5")
