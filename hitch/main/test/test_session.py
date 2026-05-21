@@ -2254,6 +2254,52 @@ class SessionViewActiveWorkerTests(TestCase):
         )
 
     @patch("hitch.main.views.Codex")
+    def test_completed_qa_only_approval_is_appended_to_transcript(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _patch_thread(
+            self,
+            mock_codex,
+            _thread([_turn([_user_message("Change it"), _agent_message("Done")])]),
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-1",
+            cwd="/tmp/demo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_QA_APPROVED,
+            state={
+                "next_user_message_index": 1,
+                "last_feedback": "No qualifying findings.",
+            },
+        )
+        instance = _make_codex_instance(
+            thread_id="hidden-thread",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="hidden-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+            output={"feedback": "No qualifying findings.", "lgtm": True},
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '<span class="role">QA agent</span>')
+        self.assertContains(response, "QA agent approved the diff.")
+        self.assertContains(response, "No qualifying findings.")
+        self.assertLess(body.index("Done"), body.index("QA agent approved the diff."))
+
+    @patch("hitch.main.views.Codex")
     def test_okr_task_generation_log_is_read_only_session_view(
         self, mock_codex: MagicMock
     ) -> None:
@@ -2404,14 +2450,21 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, 'name="plan_mode"')
         self.assertContains(response, "Plan mode")
         self.assertContains(response, "PR")
+        self.assertContains(response, "QA")
         self.assertContains(response, "data-slash-pr")
+        self.assertContains(response, "data-slash-qa")
         self.assertContains(
             response,
             "Do a thorough review of the diff. Rebase on master, clean it up, and then open a PR",
         )
+        self.assertContains(
+            response,
+            "Run the QA agent on the current diff and fix anything it finds",
+        )
         self.assertContains(response, "syncNextMessageConfig")
         self.assertContains(response, 'parsePlanCommand() !== null')
         self.assertContains(response, "parsePrCommand")
+        self.assertContains(response, "parseQaCommand")
         self.assertContains(response, 'case "turn/plan/updated"')
         self.assertContains(response, 'case "item/plan/delta"')
         self.assertContains(response, "activateFinalPlanText")

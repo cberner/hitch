@@ -191,6 +191,8 @@ _VALID_PLAN_ACTIONS = frozenset({"", _PLAN_ACTION_APPROVE, _PLAN_ACTION_REVISE})
 _PR_SLASH_COMMAND = "/pr"
 _PR_SLASH_PROMPT = system_agents.PR_SLASH_DISPLAY_PROMPT
 _PR_SLASH_FINAL_PROMPT = system_agents.PR_SLASH_PROMPT
+_QA_SLASH_COMMAND = "/qa"
+_QA_SLASH_PROMPT = system_agents.QA_SLASH_DISPLAY_PROMPT
 _PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium.value
 _DEFAULT_COLLABORATION_MODE = "default"
 _GITHUB_PR_TOOL_RE = re.compile(
@@ -311,6 +313,7 @@ def _new_session_dialog_context(
         "current_new_session_auto_pr": current_new_session_auto_pr,
         "bare_repo_project_value": _BARE_REPO_PROJECT_VALUE,
         "pr_slash_prompt": _PR_SLASH_PROMPT,
+        "qa_slash_prompt": _QA_SLASH_PROMPT,
     }
 
 
@@ -934,6 +937,7 @@ def _render_session_detail(
             "token_usage": token_usage,
             "next_message_config": _next_message_config(settings, resumed, plan_model),
             "pr_slash_prompt": _PR_SLASH_PROMPT,
+            "qa_slash_prompt": _QA_SLASH_PROMPT,
             "default_plan_mode": default_plan_mode,
             "plan_approval_prompt": _PLAN_APPROVAL_PROMPT,
             "plan_revision_prompt": _PLAN_REVISION_PROMPT,
@@ -1555,7 +1559,10 @@ def _qa_approval_entries(session_id: str) -> Iterator[tuple[int, dict[str, Any]]
             kind=SystemWorkflow.KIND_PR_QA,
             main_thread_id=session_id,
             status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_PROMPT_SPAWNED,
+            step__in=[
+                system_agents.STEP_PR_PROMPT_SPAWNED,
+                system_agents.STEP_QA_APPROVED,
+            ],
         )
         .order_by("created_at")
         .prefetch_related("agent_runs")
@@ -1571,7 +1578,11 @@ def _qa_approval_entries(session_id: str) -> Iterator[tuple[int, dict[str, Any]]
         text = "QA agent approved the diff."
         if feedback:
             text = f"{text}\n\n{feedback}"
-        yield max(next_user_message_index - 1, 0), {
+        if workflow.step == system_agents.STEP_QA_APPROVED:
+            insert_index = next_user_message_index
+        else:
+            insert_index = max(next_user_message_index - 1, 0)
+        yield insert_index, {
             "kind": "agent",
             "display_author": system_agents.QA_DISPLAY_AUTHOR,
             "text": text,
@@ -2515,6 +2526,8 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
 def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     intent = _message_intent(request)
     pr_activation = _is_pr_activation(request)
+    qa_activation = _is_qa_activation(request)
+    qa_workflow_activation = pr_activation or qa_activation
     prompt = intent.prompt
     plan_mode = intent.plan_mode
     if not prompt:
@@ -2533,21 +2546,21 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         return HttpResponseBadRequest("invalid collaboration mode")
     if collaboration_mode and plan_mode and intent.explicit_plan_mode:
         return HttpResponseBadRequest("collaboration mode conflicts with plan mode")
-    if pr_activation and collaboration_mode:
+    if qa_workflow_activation and collaboration_mode:
         return HttpResponseBadRequest("PR workflow conflicts with collaboration mode")
     if collaboration_mode:
         plan_mode = False
-    if pr_activation:
+    if qa_workflow_activation:
         plan_mode = False
     active_system_workflow = system_agents.active_workflow_for_thread(session_id)
     if active_system_workflow is not None:
-        if pr_activation:
+        if qa_workflow_activation:
             return redirect("session", session_id=session_id)
         return HttpResponseBadRequest("PR workflow is running for this session")
     settings = _stored_settings(request)
     raw_active = request.POST.get("active_instance", "").strip()
     if raw_active:
-        if pr_activation:
+        if qa_workflow_activation:
             return HttpResponseBadRequest("PR workflow requires an idle session")
         instance_id, error = _parse_instance_id(raw_active)
         if error is not None or instance_id is None:
@@ -2562,7 +2575,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     else:
         active_instance = codex_pool.latest_active_for_thread(session_id)
         if active_instance is not None:
-            if pr_activation:
+            if qa_workflow_activation:
                 return HttpResponseBadRequest("PR workflow requires an idle session")
             steered = codex_pool.steer_instance(
                 active_instance.pk,
@@ -2622,7 +2635,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     sandbox_policy = _effective_sandbox_policy(settings)
     approval_mode = _effective_approval_mode(settings)
     auto_pr_enabled = _auto_pr_enabled_for_session(session_id)
-    if pr_activation:
+    if qa_workflow_activation:
         previous_instance = codex_pool.latest_for_thread(session_id)
         developer_instructions = (
             previous_instance.developer_instructions
@@ -2634,17 +2647,20 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             _string_value(getattr(resumed, "reasoning_effort", None))
             or settings.reasoning_effort
         )
-        system_agents.start_pr_qa_workflow(
-            main_thread_id=session_id,
-            cwd=cwd,
-            sandbox_policy=sandbox_policy or None,
-            approval_mode=approval_mode,
-            model=workflow_model or None,
-            reasoning_effort=workflow_reasoning_effort or None,
-            developer_instructions=developer_instructions or None,
-            enable_memories=settings.enable_memories,
-            initial_user_message_index=_count_user_entries(thread_entries),
-        )
+        workflow_kwargs: dict[str, Any] = {
+            "main_thread_id": session_id,
+            "cwd": cwd,
+            "sandbox_policy": sandbox_policy or None,
+            "approval_mode": approval_mode,
+            "model": workflow_model or None,
+            "reasoning_effort": workflow_reasoning_effort or None,
+            "developer_instructions": developer_instructions or None,
+            "enable_memories": settings.enable_memories,
+            "initial_user_message_index": _count_user_entries(thread_entries),
+        }
+        if qa_activation:
+            workflow_kwargs["open_pr_on_lgtm"] = False
+        system_agents.start_pr_qa_workflow(**workflow_kwargs)
         return redirect("session", session_id=session_id)
     spawn_kwargs: dict[str, Any] = {
         "thread_id": session_id,
@@ -2819,7 +2835,11 @@ def _message_intent(request: HttpRequest) -> _MessageIntent:
         )
     if command == _PR_SLASH_COMMAND:
         return _MessageIntent(_PR_SLASH_PROMPT, False, False, False)
+    if command == _QA_SLASH_COMMAND:
+        return _MessageIntent(_QA_SLASH_PROMPT, False, False, False)
     if not plan_mode and prompt in {_PR_SLASH_PROMPT, _PR_SLASH_FINAL_PROMPT}:
+        return _MessageIntent(prompt, False, False, False)
+    if not plan_mode and prompt == _QA_SLASH_PROMPT:
         return _MessageIntent(prompt, False, False, False)
     return _MessageIntent(prompt, plan_mode, True, explicit_plan_mode)
 
@@ -2831,6 +2851,15 @@ def _is_pr_activation(request: HttpRequest) -> bool:
         _PR_SLASH_PROMPT,
         _PR_SLASH_FINAL_PROMPT,
     }
+
+
+def _is_qa_activation(request: HttpRequest) -> bool:
+    prompt = request.POST.get("prompt", "").strip()
+    parts = prompt.split(maxsplit=1)
+    return (
+        bool(parts and parts[0].lower() == _QA_SLASH_COMMAND)
+        or prompt == _QA_SLASH_PROMPT
+    )
 
 
 def _plan_mode_model(codex: Codex, resumed: Any, settings: SettingsValues) -> str | None:
@@ -2996,8 +3025,10 @@ def stop_session(request: HttpRequest, session_id: str) -> HttpResponse:
 def new_session(request: HttpRequest) -> HttpResponse:
     intent = _message_intent(request)
     pr_activation = _is_pr_activation(request)
+    qa_activation = _is_qa_activation(request)
+    qa_workflow_activation = pr_activation or qa_activation
     prompt = intent.prompt
-    plan_mode = False if pr_activation else intent.plan_mode
+    plan_mode = False if qa_workflow_activation else intent.plan_mode
     projects = list(Project.objects.all())
     target, target_error = _posted_new_session_target(request, projects)
     if target_error is not None or target is None:
@@ -3046,27 +3077,31 @@ def new_session(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest("plan mode requires a model")
 
     session_cwd = cwd
-    # PR workflows review the selected repo's current diff; a fresh managed
+    # QA workflows review the selected repo's current diff; a fresh managed
     # worktree would be clean and miss uncommitted changes.
-    if pr_activation:
+    if qa_workflow_activation:
+        thread_name = _PR_SLASH_PROMPT if pr_activation else _QA_SLASH_PROMPT
         thread_id = codex_pool.create_session_thread(
             cwd=session_cwd,
-            name=_PR_SLASH_PROMPT,
+            name=thread_name,
             developer_instructions=settings.extra_system_prompt or None,
             model=settings.model or None,
             enable_memories=settings.enable_memories,
         )
-        system_agents.start_pr_qa_workflow(
-            main_thread_id=thread_id,
-            cwd=session_cwd,
-            sandbox_policy=settings.sandbox_policy or None,
-            approval_mode=settings.approval_mode,
-            model=settings.model or None,
-            reasoning_effort=settings.reasoning_effort or None,
-            developer_instructions=settings.extra_system_prompt or None,
-            enable_memories=settings.enable_memories,
-            initial_user_message_index=0,
-        )
+        workflow_kwargs: dict[str, Any] = {
+            "main_thread_id": thread_id,
+            "cwd": session_cwd,
+            "sandbox_policy": settings.sandbox_policy or None,
+            "approval_mode": settings.approval_mode,
+            "model": settings.model or None,
+            "reasoning_effort": settings.reasoning_effort or None,
+            "developer_instructions": settings.extra_system_prompt or None,
+            "enable_memories": settings.enable_memories,
+            "initial_user_message_index": 0,
+        }
+        if qa_activation:
+            workflow_kwargs["open_pr_on_lgtm"] = False
+        system_agents.start_pr_qa_workflow(**workflow_kwargs)
         session_metadata, _created = SessionMetadata.objects.update_or_create(
             thread_id=thread_id,
             defaults={
