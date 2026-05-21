@@ -22,5 +22,8 @@
             <button type="submit">Log out</button>
         </form>
         {% endif %}
+        {% if server_git_hash %}
+        <span class="primary-nav-version">server {{ server_git_hash }}</span>
+        {% endif %}
     </div>
 </nav>

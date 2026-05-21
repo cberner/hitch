@@ -83,9 +83,27 @@
             margin: 0;
             display: inline-flex;
         }
+        .primary-nav-version {
+            display: inline-flex;
+            align-items: center;
+            min-height: 34px;
+            padding: 0.35rem 0.65rem;
+            color: var(--text-faint);
+            font-size: 0.78rem;
+            line-height: 1.25;
+            white-space: nowrap;
+        }
         .primary-nav.primary-nav-js .primary-nav-panel .logout-form {
             display: block;
             width: 100%;
+        }
+        .primary-nav.primary-nav-js .primary-nav-version {
+            display: flex;
+            width: 100%;
+            min-height: 30px;
+            margin-top: 0.2rem;
+            padding: 0.55rem 0.65rem 0.35rem;
+            border-top: 1px solid var(--border);
         }
         .primary-nav-panel a,
         .primary-nav-panel button {

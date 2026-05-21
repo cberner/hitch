@@ -209,8 +209,12 @@ class AuthViewTests(TestCase):
 class AuthenticatedSettingsTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    @patch("hitch.main.context_processors._server_git_hash", return_value="abc123")
     def test_index_places_logout_in_primary_nav(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
+        self,
+        mock_hash: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
     ) -> None:
         user = _make_user()
         self.client.force_login(user)
@@ -226,6 +230,8 @@ class AuthenticatedSettingsTests(TestCase):
         logout_pos = nav_html.index(f'action="{reverse("logout")}"')
         self.assertLess(nav_html.index(">settings</button>"), logout_pos)
         self.assertIn(">Log out</button>", nav_html)
+        self.assertLess(logout_pos, nav_html.index(">server abc123</span>"))
+        mock_hash.assert_called()
 
     def test_update_settings_writes_database_and_cookie_mirror(self) -> None:
         user = _make_user()
