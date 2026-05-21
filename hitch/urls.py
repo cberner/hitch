@@ -11,6 +11,27 @@ urlpatterns = [
     path("login/", hitch.main.views.login, name="login"),
     path("logout/", hitch.main.views.logout, name="logout"),
     path("usage/", hitch.main.views.usage, name="usage"),
+    path("standing-orders/", hitch.main.views.standing_orders, name="standing_orders"),
+    path(
+        "standing-orders/create/",
+        hitch.main.views.create_standing_order,
+        name="create_standing_order",
+    ),
+    path(
+        "standing-orders/run-all/",
+        hitch.main.views.run_standing_orders,
+        name="run_standing_orders",
+    ),
+    path(
+        "standing-orders/runs/<int:workflow_id>/log/",
+        hitch.main.views.standing_order_run_log,
+        name="standing_order_run_log",
+    ),
+    path(
+        "standing-orders/proposed-sessions/<int:proposed_session_id>/outcome/",
+        hitch.main.views.update_proposed_session_outcome,
+        name="update_proposed_session_outcome",
+    ),
     path("okrs/", hitch.main.views.okrs, name="okrs"),
     path("okrs/objectives/", hitch.main.views.create_objective, name="create_objective"),
     path(

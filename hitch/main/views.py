@@ -42,8 +42,10 @@ from hitch.main.models import (
     KeyResult,
     Objective,
     Project,
+    ProposedSession,
     ProposedTask,
     SessionMetadata,
+    StandingOrder,
     SystemAgentRun,
     SystemWorkflow,
     UserInputRequest,
@@ -174,6 +176,7 @@ _MINUTES_PER_DAY = 24 * _MINUTES_PER_HOUR
 _NAME_MAX_LEN = 200
 _PROJECT_NAME_MAX_LEN = 200
 _OKR_TITLE_MAX_LEN = 200
+_STANDING_ORDER_TITLE_MAX_LEN = 200
 _LAST_SELECTED_REPO_MAX_LEN = 4096
 _VALID_PROJECT_AUTO_PR_MODES = {value for value, _label in Project.AUTO_PR_CHOICES}
 
@@ -736,6 +739,162 @@ def _redirect_to_okrs_from_post(request: HttpRequest) -> HttpResponse:
     return redirect("okrs")
 
 
+@require_http_methods(["GET"])
+def standing_orders(request: HttpRequest) -> HttpResponse:
+    codex_pool.reconcile_dead()
+    initial_settings = _stored_settings(request)
+    config = codex_pool.app_server_config(
+        enable_memories=initial_settings.enable_memories
+    )
+    with Codex(config=config) as codex:
+        models_data = list(codex.models().data)
+        resolved_settings = _resolved_settings(request, models_data)
+        current_settings = resolved_settings.values
+        cookie_updates = resolved_settings.cookie_updates
+    projects = list(Project.objects.all())
+    current_project = _selected_project_for_settings(current_settings, projects)
+    orders = (
+        list(StandingOrder.objects.filter(project=current_project))
+        if current_project is not None
+        else []
+    )
+    inbox = (
+        list(
+            ProposedSession.objects.filter(
+                standing_order__project=current_project,
+                outcome_status=ProposedSession.OUTCOME_UNSET,
+            )
+            .select_related(
+                "standing_order",
+                "candidate_session",
+                "judge_session",
+                "source_workflow",
+            )
+            .order_by("created_at", "id")
+        )
+        if current_project is not None
+        else []
+    )
+    _attach_standing_order_run_state(orders)
+    _attach_proposed_session_display_state(inbox)
+    settings_dialog_context = _settings_dialog_context(current_settings, models_data)
+    response = render(
+        request,
+        "standing_orders.html",
+        {
+            "login_url": reverse("login"),
+            "register_url": reverse("register"),
+            "current_project": current_project,
+            "standing_orders": orders,
+            "proposed_sessions": inbox,
+            "standing_order_create_url": reverse("create_standing_order"),
+            "standing_order_run_all_url": reverse("run_standing_orders"),
+            "confidence_choices": StandingOrder.CONFIDENCE_CHOICES,
+            "default_confidence": StandingOrder.CONFIDENCE_HIGH,
+            "proposed_session_rejected_status": ProposedSession.OUTCOME_REJECTED,
+            "title_max_len": _STANDING_ORDER_TITLE_MAX_LEN,
+            **settings_dialog_context,
+        },
+    )
+    _apply_cookie_updates(response, cookie_updates)
+    return response
+
+
+@require_http_methods(["POST"])
+def create_standing_order(request: HttpRequest) -> HttpResponse:
+    project = _active_project_from_request(request)
+    if project is None:
+        return HttpResponseBadRequest("active project is required")
+    title, error = _validated_standing_order_title(request.POST.get("title", ""))
+    if error is not None:
+        return HttpResponseBadRequest(error)
+    goal = request.POST.get("goal", "").strip()
+    if not goal:
+        return HttpResponseBadRequest("goal is required")
+    threshold = request.POST.get("confidence_threshold", "").strip()
+    valid_thresholds = {value for value, _label in StandingOrder.CONFIDENCE_CHOICES}
+    if threshold not in valid_thresholds:
+        return HttpResponseBadRequest("confidence threshold is invalid")
+    StandingOrder.objects.create(
+        project=project,
+        title=title,
+        goal=goal,
+        confidence_threshold=threshold,
+    )
+    return redirect("standing_orders")
+
+
+@require_http_methods(["POST"])
+def run_standing_orders(request: HttpRequest) -> HttpResponse:
+    project = _active_project_from_request(request)
+    if project is None:
+        return HttpResponseBadRequest("active project is required")
+    for standing_order in StandingOrder.objects.filter(project=project):
+        system_agents.start_standing_order_workflow(standing_order=standing_order)
+    return redirect("standing_orders")
+
+
+@require_http_methods(["GET"])
+def standing_order_run_log(request: HttpRequest, workflow_id: int) -> HttpResponse:
+    workflow = _standing_order_workflow_for_log(request, workflow_id)
+    run = workflow.agent_runs.exclude(thread_id="").order_by("-created_at").first()
+    if run is None:
+        raise Http404("standing order run log not found")
+    return _render_session_detail(
+        request,
+        run.thread_id,
+        read_only=True,
+        display_title="Standing order run log",
+    )
+
+
+@require_http_methods(["POST"])
+def update_proposed_session_outcome(
+    request: HttpRequest, proposed_session_id: int
+) -> HttpResponse:
+    project = _active_project_from_request(request)
+    if project is None:
+        return HttpResponseBadRequest("active project is required")
+    if proposed_session_id < 1 or proposed_session_id > _MAX_BIGAUTOFIELD:
+        return HttpResponseBadRequest("proposed session is required")
+    proposed_session = (
+        ProposedSession.objects.select_related(
+            "standing_order__project",
+            "candidate_session",
+        )
+        .filter(pk=proposed_session_id, standing_order__project=project)
+        .first()
+    )
+    if proposed_session is None:
+        return HttpResponseBadRequest("proposed session is required")
+    outcome_status = request.POST.get("outcome_status", "")
+    valid_statuses = {choice[0] for choice in ProposedSession.OUTCOME_CHOICES}
+    if outcome_status not in valid_statuses:
+        return HttpResponseBadRequest("outcome status is invalid")
+    outcome_notes = request.POST.get(
+        "reason", request.POST.get("outcome_notes", "")
+    ).strip()
+    if outcome_status == ProposedSession.OUTCOME_REJECTED and not outcome_notes:
+        return HttpResponseBadRequest("reason is required")
+    proposed_session.outcome_status = outcome_status
+    proposed_session.outcome_notes = outcome_notes
+    update_fields = ["outcome_status", "outcome_notes", "updated_at"]
+    if outcome_status == ProposedSession.OUTCOME_ACCEPTED:
+        proposed_session.accepted_session = proposed_session.candidate_session
+        update_fields.append("accepted_session")
+    proposed_session.save(update_fields=update_fields)
+    return redirect("standing_orders")
+
+
+def _validated_standing_order_title(raw_title: str) -> tuple[str, str | None]:
+    title = raw_title.strip()
+    if not title:
+        return "", "title is required"
+    if len(title) > _STANDING_ORDER_TITLE_MAX_LEN:
+        return "", "title is too long"
+    return title, None
+
+
 @require_http_methods(["POST"])
 def create_objective(request: HttpRequest) -> HttpResponse:
     project = _active_project_from_request(request)
@@ -910,6 +1069,111 @@ def _okr_task_generation_workflow_for_log(
     )
     if key_result is None:
         raise Http404("task generation log not found")
+    return workflow
+
+
+def _attach_standing_order_run_state(orders: list[StandingOrder]) -> None:
+    order_ids = [order.pk for order in orders]
+    if not order_ids:
+        return
+    workflows = (
+        SystemWorkflow.objects.filter(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id__in=[
+                system_agents._standing_order_main_thread_id(order_id)
+                for order_id in order_ids
+            ],
+        )
+        .order_by("main_thread_id", "-created_at")
+    )
+    workflows_by_thread: dict[str, SystemWorkflow] = {}
+    for workflow in workflows:
+        workflows_by_thread.setdefault(workflow.main_thread_id, workflow)
+    log_urls_by_workflow_id = _standing_order_log_urls(workflows_by_thread.values())
+    for order in orders:
+        latest_workflow = workflows_by_thread.get(
+            system_agents._standing_order_main_thread_id(order.pk)
+        )
+        order.latest_workflow = latest_workflow  # type: ignore[attr-defined]
+        order.run_running = (  # type: ignore[attr-defined]
+            latest_workflow is not None
+            and latest_workflow.status == SystemWorkflow.STATUS_RUNNING
+        )
+        order.run_log_url = (  # type: ignore[attr-defined]
+            log_urls_by_workflow_id.get(latest_workflow.pk)
+            if latest_workflow is not None
+            else ""
+        )
+
+
+def _attach_proposed_session_display_state(
+    proposed_sessions: list[ProposedSession],
+) -> None:
+    for proposed_session in proposed_sessions:
+        files = proposed_session.relevant_files
+        proposed_session.display_files = (  # type: ignore[attr-defined]
+            [item for item in files if isinstance(item, str) and item.strip()]
+            if isinstance(files, list)
+            else []
+        )
+        if proposed_session.candidate_session is not None:
+            proposed_session.candidate_log_url = reverse(  # type: ignore[attr-defined]
+                "system_session",
+                kwargs={"session_id": proposed_session.candidate_session.thread_id},
+            )
+        else:
+            proposed_session.candidate_log_url = ""  # type: ignore[attr-defined]
+        if proposed_session.judge_session is not None:
+            proposed_session.judge_log_url = reverse(  # type: ignore[attr-defined]
+                "system_session",
+                kwargs={"session_id": proposed_session.judge_session.thread_id},
+            )
+        else:
+            proposed_session.judge_log_url = ""  # type: ignore[attr-defined]
+
+
+def _standing_order_log_urls(workflows: Iterable[SystemWorkflow]) -> dict[int, str]:
+    workflow_ids = [workflow.pk for workflow in workflows]
+    if not workflow_ids:
+        return {}
+    runs = (
+        SystemAgentRun.objects.filter(workflow_id__in=workflow_ids)
+        .exclude(thread_id="")
+        .order_by("workflow_id", "-created_at")
+    )
+    urls: dict[int, str] = {}
+    for run in runs:
+        urls.setdefault(
+            run.workflow_id,
+            reverse("standing_order_run_log", kwargs={"workflow_id": run.workflow_id}),
+        )
+    return urls
+
+
+def _standing_order_workflow_for_log(
+    request: HttpRequest, workflow_id: int
+) -> SystemWorkflow:
+    if workflow_id < 1 or workflow_id > _MAX_BIGAUTOFIELD:
+        raise Http404("standing order run log not found")
+    project = _active_project_from_request(request)
+    if project is None:
+        raise Http404("standing order run log not found")
+    workflow = (
+        SystemWorkflow.objects.filter(
+            pk=workflow_id,
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+        .first()
+    )
+    if workflow is None:
+        raise Http404("standing order run log not found")
+    standing_order_id = _workflow_state_int(workflow, "standing_order_id")
+    standing_order = StandingOrder.objects.filter(
+        pk=standing_order_id,
+        project=project,
+    ).first()
+    if standing_order is None:
+        raise Http404("standing order run log not found")
     return workflow
 
 

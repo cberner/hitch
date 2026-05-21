@@ -13,14 +13,27 @@ from openai_codex.generated.v2_all import ThreadSource
 
 from hitch.main import codex_pool
 from hitch.main.diffs import build_worktree_diff_text
-from hitch.main.models import CodexInstance, KeyResult, ProposedTask, SystemAgentRun, SystemWorkflow
+from hitch.main.models import (
+    CodexInstance,
+    KeyResult,
+    ProposedSession,
+    ProposedTask,
+    SessionMetadata,
+    StandingOrder,
+    SystemAgentRun,
+    SystemWorkflow,
+)
 
 logger = logging.getLogger(__name__)
 
 PR_QA_AGENT_KIND = "pr_qa"
 OKR_TASK_AGENT_KIND = SystemWorkflow.KIND_OKR_TASK_GENERATION
+STANDING_ORDER_AGENT_KIND = SystemWorkflow.KIND_STANDING_ORDER_RUN
+STANDING_ORDER_JUDGE_AGENT_KIND = "standing_order_judge"
 QA_DISPLAY_AUTHOR = "QA agent"
 OKR_TASK_DISPLAY_AUTHOR = "Task planning agent"
+STANDING_ORDER_DISPLAY_AUTHOR = "Standing order agent"
+STANDING_ORDER_JUDGE_DISPLAY_AUTHOR = "Standing order judge"
 PR_SLASH_DISPLAY_PROMPT = (
     "Do a thorough review of the diff. Rebase on master, clean it up, "
     "and then open a PR"
@@ -49,9 +62,20 @@ STEP_QA_APPROVED = "qa_approved"
 STEP_PR_PROMPT_SPAWNED = "pr_prompt_spawned"
 STEP_OKR_TASKS_RUNNING = "okr_tasks_running"
 STEP_OKR_TASKS_SAVED = "okr_tasks_saved"
+STEP_STANDING_ORDER_CANDIDATE_RUNNING = "standing_order_candidate_running"
+STEP_STANDING_ORDER_JUDGE_RUNNING = "standing_order_judge_running"
+STEP_STANDING_ORDER_PROPOSED = "standing_order_proposed"
+STEP_STANDING_ORDER_SKIPPED = "standing_order_skipped"
 
 _OKR_TASK_INLINE_CONTEXT_CHARS = 14_000
 _OKR_TASK_TITLE_MAX_LEN = 200
+_STANDING_ORDER_INLINE_HISTORY_CHARS = 10_000
+_STANDING_ORDER_TITLE_MAX_LEN = 200
+_CONFIDENCE_RANK = {
+    StandingOrder.CONFIDENCE_MEDIUM: 1,
+    StandingOrder.CONFIDENCE_HIGH: 2,
+    StandingOrder.CONFIDENCE_VERY_HIGH: 3,
+}
 
 _QA_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -87,6 +111,37 @@ _OKR_TASK_OUTPUT_SCHEMA: dict[str, Any] = {
                 },
             },
         }
+    },
+}
+
+_STANDING_ORDER_CANDIDATE_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["title", "summary", "impact", "implementation_direction", "relevant_files"],
+    "properties": {
+        "title": {"type": "string"},
+        "summary": {"type": "string"},
+        "impact": {"type": "string"},
+        "implementation_direction": {"type": "string"},
+        "relevant_files": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+_STANDING_ORDER_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["confidence", "summary", "rationale"],
+    "properties": {
+        "confidence": {
+            "type": "string",
+            "enum": [
+                StandingOrder.CONFIDENCE_MEDIUM,
+                StandingOrder.CONFIDENCE_HIGH,
+                StandingOrder.CONFIDENCE_VERY_HIGH,
+            ],
+        },
+        "summary": {"type": "string"},
+        "rationale": {"type": "string"},
     },
 }
 
@@ -205,12 +260,57 @@ def start_okr_task_generation_workflow(*, key_result: KeyResult) -> SystemWorkfl
     return workflow
 
 
+def start_standing_order_workflow(*, standing_order: StandingOrder) -> SystemWorkflow:
+    standing_order = (
+        StandingOrder.objects.select_related("project")
+        .filter(pk=standing_order.pk)
+        .get()
+    )
+    main_thread_id = _standing_order_main_thread_id(standing_order.pk)
+    try:
+        with transaction.atomic():
+            workflow = SystemWorkflow.objects.create(
+                kind=STANDING_ORDER_AGENT_KIND,
+                main_thread_id=main_thread_id,
+                cwd=standing_order.project.repo_path,
+                status=SystemWorkflow.STATUS_RUNNING,
+                step=STEP_STANDING_ORDER_CANDIDATE_RUNNING,
+                state={"standing_order_id": standing_order.pk},
+            )
+    except IntegrityError:
+        existing_workflow = SystemWorkflow.objects.filter(
+            kind=STANDING_ORDER_AGENT_KIND,
+            main_thread_id=main_thread_id,
+            status=SystemWorkflow.STATUS_RUNNING,
+        ).first()
+        if existing_workflow is None:
+            raise
+        return existing_workflow
+
+    try:
+        _spawn_standing_order_candidate_run(workflow, standing_order)
+    except Exception as exc:
+        _block_workflow(
+            workflow,
+            f"failed to start standing order agent: {exc!r}",
+            surface_to_thread=False,
+        )
+    return workflow
+
+
 def hidden_thread_ids() -> set[str]:
-    return set(
+    hidden_ids = set(
         SystemAgentRun.objects.exclude(thread_id="")
         .values_list("thread_id", flat=True)
         .distinct()
     )
+    visible_ids = set(
+        ProposedSession.objects.filter(
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            candidate_session__isnull=False,
+        ).values_list("candidate_session__thread_id", flat=True)
+    )
+    return hidden_ids - visible_ids
 
 
 def active_workflow_for_thread(main_thread_id: str) -> SystemWorkflow | None:
@@ -301,6 +401,9 @@ def _handle_system_agent_finished(instance: CodexInstance) -> None:
     workflow = run.workflow
     if workflow.kind == OKR_TASK_AGENT_KIND:
         _handle_okr_task_agent_finished(instance, run, workflow)
+        return
+    if workflow.kind == STANDING_ORDER_AGENT_KIND:
+        _handle_standing_order_agent_finished(instance, run, workflow)
         return
     if workflow.kind != SystemWorkflow.KIND_PR_QA:
         return
@@ -446,6 +549,104 @@ def _handle_okr_task_agent_finished(
         workflow.save(update_fields=["status", "step", "state", "updated_at"])
 
 
+def _handle_standing_order_agent_finished(
+    instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
+) -> None:
+    if workflow.status != SystemWorkflow.STATUS_RUNNING:
+        return
+    if instance.status != CodexInstance.STATUS_COMPLETED:
+        _fail_run_and_block_workflow(
+            run,
+            f"standing order worker failed: {instance.error}",
+            surface_to_thread=False,
+        )
+        return
+
+    standing_order = (
+        StandingOrder.objects.select_related("project")
+        .filter(pk=_state_int(workflow, "standing_order_id"))
+        .first()
+    )
+    if standing_order is None:
+        _fail_run_and_block_workflow(
+            run,
+            "standing order no longer exists",
+            surface_to_thread=False,
+        )
+        return
+
+    raw_output = _final_agent_text(instance.events_path)
+    if workflow.step == STEP_STANDING_ORDER_CANDIDATE_RUNNING:
+        candidate = _parse_standing_order_candidate_output(raw_output)
+        if candidate is None:
+            _fail_run_and_block_workflow(
+                run,
+                "standing order candidate output was not valid JSON",
+                raw_output,
+                surface_to_thread=False,
+            )
+            return
+        run.status = SystemAgentRun.STATUS_COMPLETED
+        run.output = candidate
+        run.raw_output = raw_output
+        run.save(update_fields=["status", "output", "raw_output", "updated_at"])
+        workflow.step = STEP_STANDING_ORDER_JUDGE_RUNNING
+        workflow.state = {**workflow.state, "candidate": candidate}
+        workflow.save(update_fields=["step", "state", "updated_at"])
+        try:
+            _spawn_standing_order_judge_run(workflow, standing_order, candidate)
+        except Exception as exc:
+            _block_workflow(
+                workflow,
+                f"failed to start standing order judge: {exc!r}",
+                surface_to_thread=False,
+            )
+        return
+
+    if workflow.step != STEP_STANDING_ORDER_JUDGE_RUNNING:
+        return
+    judgment = _parse_standing_order_judge_output(raw_output)
+    if judgment is None:
+        _fail_run_and_block_workflow(
+            run,
+            "standing order judge output was not valid JSON",
+            raw_output,
+            surface_to_thread=False,
+        )
+        return
+    run.status = SystemAgentRun.STATUS_COMPLETED
+    run.output = judgment
+    run.raw_output = raw_output
+    run.save(update_fields=["status", "output", "raw_output", "updated_at"])
+
+    candidate = workflow.state.get("candidate")
+    if not isinstance(candidate, dict):
+        candidate = {}
+    if _confidence_meets_threshold(
+        judgment["confidence"], standing_order.confidence_threshold
+    ):
+        ProposedSession.objects.create(
+            standing_order=standing_order,
+            source_workflow=workflow,
+            title=str(candidate.get("title", standing_order.title))[
+                :_STANDING_ORDER_TITLE_MAX_LEN
+            ],
+            summary=judgment["summary"],
+            confidence=judgment["confidence"],
+            relevant_files=_string_list(candidate.get("relevant_files")),
+            candidate_session=_session_metadata_from_state(
+                workflow, "candidate_session_id"
+            ),
+            judge_session=_session_metadata_from_state(workflow, "judge_session_id"),
+        )
+        workflow.step = STEP_STANDING_ORDER_PROPOSED
+    else:
+        workflow.step = STEP_STANDING_ORDER_SKIPPED
+    workflow.status = SystemWorkflow.STATUS_COMPLETED
+    workflow.state = {**workflow.state, "judgment": judgment}
+    workflow.save(update_fields=["status", "step", "state", "updated_at"])
+
+
 def _spawn_pr_qa_run(workflow: SystemWorkflow) -> SystemAgentRun:
     diff_text = build_worktree_diff_text(workflow.cwd)
     prompt = _qa_prompt(workflow.cwd, diff_text)
@@ -507,6 +708,97 @@ def _spawn_okr_task_generation_run(
                 "cwd": workflow.cwd,
                 "key_result_id": key_result.pk,
                 "context_files": context_files,
+            },
+        },
+    )
+    return run
+
+
+def _spawn_standing_order_candidate_run(
+    workflow: SystemWorkflow, standing_order: StandingOrder
+) -> SystemAgentRun:
+    prompt = _standing_order_candidate_prompt(workflow, standing_order)
+    instance = codex_pool.spawn_new_session(
+        cwd=workflow.cwd,
+        prompt=prompt,
+        approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
+        thread_source=ThreadSource.subagent,
+        purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        workflow_id=workflow.pk,
+        agent_kind=STANDING_ORDER_AGENT_KIND,
+        display_author=STANDING_ORDER_DISPLAY_AUTHOR,
+        output_schema=_STANDING_ORDER_CANDIDATE_OUTPUT_SCHEMA,
+    )
+    metadata, _created = SessionMetadata.objects.update_or_create(
+        thread_id=instance.thread_id,
+        defaults={
+            "cwd": workflow.cwd,
+            "project": standing_order.project,
+            "project_cleared": False,
+            "auto_pr_enabled": False,
+        },
+    )
+    workflow.state = {**workflow.state, "candidate_session_id": metadata.pk}
+    workflow.save(update_fields=["state", "updated_at"])
+    run, _created = SystemAgentRun.objects.get_or_create(
+        instance=instance,
+        defaults={
+            "workflow": workflow,
+            "agent_kind": STANDING_ORDER_AGENT_KIND,
+            "thread_id": instance.thread_id,
+            "status": SystemAgentRun.STATUS_RUNNING,
+            "input": {
+                "cwd": workflow.cwd,
+                "standing_order_id": standing_order.pk,
+            },
+        },
+    )
+    return run
+
+
+def _spawn_standing_order_judge_run(
+    workflow: SystemWorkflow, standing_order: StandingOrder, candidate: dict[str, Any]
+) -> SystemAgentRun:
+    prompt, history_files = _standing_order_judge_prompt(
+        workflow, standing_order, candidate
+    )
+    if history_files:
+        workflow.state = {**workflow.state, "history_files": history_files}
+        workflow.save(update_fields=["state", "updated_at"])
+    instance = codex_pool.spawn_new_session(
+        cwd=workflow.cwd,
+        prompt=prompt,
+        approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
+        thread_source=ThreadSource.subagent,
+        purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        workflow_id=workflow.pk,
+        agent_kind=STANDING_ORDER_JUDGE_AGENT_KIND,
+        display_author=STANDING_ORDER_JUDGE_DISPLAY_AUTHOR,
+        output_schema=_STANDING_ORDER_JUDGE_OUTPUT_SCHEMA,
+    )
+    metadata, _created = SessionMetadata.objects.update_or_create(
+        thread_id=instance.thread_id,
+        defaults={
+            "cwd": workflow.cwd,
+            "project": standing_order.project,
+            "project_cleared": False,
+            "auto_pr_enabled": False,
+        },
+    )
+    workflow.state = {**workflow.state, "judge_session_id": metadata.pk}
+    workflow.save(update_fields=["state", "updated_at"])
+    run, _created = SystemAgentRun.objects.get_or_create(
+        instance=instance,
+        defaults={
+            "workflow": workflow,
+            "agent_kind": STANDING_ORDER_JUDGE_AGENT_KIND,
+            "thread_id": instance.thread_id,
+            "status": SystemAgentRun.STATUS_RUNNING,
+            "input": {
+                "cwd": workflow.cwd,
+                "standing_order_id": standing_order.pk,
+                "candidate": candidate,
+                "history_files": history_files,
             },
         },
     )
@@ -658,6 +950,68 @@ def _okr_task_generation_prompt(
     ), context_files
 
 
+def _standing_order_candidate_prompt(
+    workflow: SystemWorkflow, standing_order: StandingOrder
+) -> str:
+    return (
+        "You are Hitch's standing order agent.\n\n"
+        "Thoroughly analyze the codebase and find one incremental way to make "
+        "progress toward the standing order goal. Do not make code changes. "
+        "Focus on a concrete session that a user could accept and continue from.\n\n"
+        f"Repository cwd: {workflow.cwd}\n"
+        f"Standing order title: {standing_order.title}\n\n"
+        "Standing order goal:\n"
+        f"{standing_order.goal}\n\n"
+        "Return only JSON matching this shape: "
+        '{"title": string, "summary": string, "impact": string, '
+        '"implementation_direction": string, "relevant_files": [string]}. '
+        "The title should be concise. The summary should explain the proposed "
+        "session. Impact should describe the likely user-visible or engineering "
+        "benefit. Implementation direction should be specific enough for the "
+        "user to continue the work in this session."
+    )
+
+
+def _standing_order_judge_prompt(
+    workflow: SystemWorkflow, standing_order: StandingOrder, candidate: dict[str, Any]
+) -> tuple[str, list[str]]:
+    history_sections = _standing_order_history_sections(standing_order)
+    inline_history, overflow_history = _split_standing_order_history(history_sections)
+    history_files = _write_standing_order_history_files(workflow, overflow_history)
+    history_file_text = (
+        "\n".join(f"- {path}" for path in history_files) if history_files else "(none)"
+    )
+    candidate_text = json.dumps(candidate, indent=2, sort_keys=True)
+    candidate_session = _session_metadata_from_state(workflow, "candidate_session_id")
+    candidate_thread_id = (
+        candidate_session.thread_id if candidate_session is not None else "(unknown)"
+    )
+    return (
+        "You are Hitch's standing order confidence judge.\n\n"
+        "Judge whether the candidate session is likely to make meaningful "
+        "progress toward the standing order goal. Use the standing order's "
+        "accepted and rejected proposal history to calibrate your judgment. "
+        "Do not reward broad or vague ideas; confidence should reflect whether "
+        "this specific session is likely to advance the goal incrementally.\n\n"
+        f"Repository cwd: {workflow.cwd}\n"
+        f"Standing order title: {standing_order.title}\n"
+        f"Confidence threshold: {standing_order.confidence_threshold}\n\n"
+        "Standing order goal:\n"
+        f"{standing_order.goal}\n\n"
+        "Candidate session JSON:\n"
+        f"Candidate session ID: {candidate_thread_id}\n"
+        f"{candidate_text}\n\n"
+        "Accepted/rejected proposal history included inline:\n"
+        f"{inline_history or '(none)'}\n\n"
+        "Additional history files:\n"
+        f"{history_file_text}\n\n"
+        "Return only JSON matching this shape: "
+        '{"confidence": "medium" | "high" | "very_high", '
+        '"summary": string, "rationale": string}. Summary is shown to the user '
+        "in the inbox and should explain the expected impact."
+    ), history_files
+
+
 def _format_key_result_context(key_result: KeyResult, *, is_target: bool) -> str:
     label = "Target KR" if is_target else "Sibling KR"
     return (
@@ -700,6 +1054,37 @@ def _format_proposed_task_context(key_result: KeyResult, task: ProposedTask) -> 
     )
 
 
+def _standing_order_history_sections(standing_order: StandingOrder) -> list[str]:
+    proposals = (
+        standing_order.proposed_sessions.exclude(outcome_status=ProposedSession.OUTCOME_UNSET)
+        .select_related("candidate_session")
+        .order_by("-updated_at", "-id")[:50]
+    )
+    return [_format_proposed_session_context(proposal) for proposal in proposals]
+
+
+def _format_proposed_session_context(proposal: ProposedSession) -> str:
+    files = _string_list(proposal.relevant_files)
+    candidate_id = (
+        proposal.candidate_session.thread_id if proposal.candidate_session else "(none)"
+    )
+    notes_label = (
+        "Reject reason"
+        if proposal.outcome_status == ProposedSession.OUTCOME_REJECTED
+        else "Outcome notes"
+    )
+    return (
+        f"ProposedSession ID: {proposal.pk}\n"
+        f"Candidate session ID: {candidate_id}\n"
+        f"Title: {proposal.title}\n"
+        f"Confidence: {proposal.confidence}\n"
+        f"Summary: {proposal.summary or '(none)'}\n"
+        f"Relevant files: {', '.join(files) if files else '(none)'}\n"
+        f"Outcome status: {proposal.outcome_status}\n"
+        f"{notes_label}: {proposal.outcome_notes or '(none)'}"
+    )
+
+
 def _split_task_context(sections: list[tuple[bool, str]]) -> tuple[str, list[str]]:
     inline_parts: list[str] = []
     overflow: list[str] = []
@@ -707,6 +1092,20 @@ def _split_task_context(sections: list[tuple[bool, str]]) -> tuple[str, list[str
     for _important, section in sections:
         section_chars = len(section) + 2
         if used_chars + section_chars <= _OKR_TASK_INLINE_CONTEXT_CHARS:
+            inline_parts.append(section)
+            used_chars += section_chars
+        else:
+            overflow.append(section)
+    return "\n\n".join(inline_parts), overflow
+
+
+def _split_standing_order_history(sections: list[str]) -> tuple[str, list[str]]:
+    inline_parts: list[str] = []
+    overflow: list[str] = []
+    used_chars = 0
+    for section in sections:
+        section_chars = len(section) + 2
+        if used_chars + section_chars <= _STANDING_ORDER_INLINE_HISTORY_CHARS:
             inline_parts.append(section)
             used_chars += section_chars
         else:
@@ -722,6 +1121,18 @@ def _write_okr_task_context_files(
     directory = codex_pool.events_dir() / "okr_task_context" / str(workflow.pk)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "prior_tasks.txt"
+    path.write_text("\n\n---\n\n".join(sections), encoding="utf-8")
+    return [str(path)]
+
+
+def _write_standing_order_history_files(
+    workflow: SystemWorkflow, sections: list[str]
+) -> list[str]:
+    if not sections:
+        return []
+    directory = codex_pool.events_dir() / "standing_order_history" / str(workflow.pk)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "proposal_history.txt"
     path.write_text("\n\n---\n\n".join(sections), encoding="utf-8")
     return [str(path)]
 
@@ -786,6 +1197,60 @@ def _parse_okr_task_output(raw_output: str) -> dict[str, Any] | None:
             }
         )
     return {"tasks": normalized_tasks}
+
+
+def _parse_standing_order_candidate_output(raw_output: str) -> dict[str, Any] | None:
+    text = _strip_json_markdown_fence(raw_output)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    title = parsed.get("title")
+    summary = parsed.get("summary")
+    impact = parsed.get("impact")
+    implementation_direction = parsed.get("implementation_direction")
+    if not isinstance(title, str):
+        return None
+    if not isinstance(summary, str):
+        return None
+    if not isinstance(impact, str):
+        return None
+    if not isinstance(implementation_direction, str):
+        return None
+    title = title.strip()
+    if not title:
+        return None
+    return {
+        "title": title,
+        "summary": summary.strip(),
+        "impact": impact.strip(),
+        "implementation_direction": implementation_direction.strip(),
+        "relevant_files": _string_list(parsed.get("relevant_files")),
+    }
+
+
+def _parse_standing_order_judge_output(raw_output: str) -> dict[str, str] | None:
+    text = _strip_json_markdown_fence(raw_output)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    confidence = parsed.get("confidence")
+    summary = parsed.get("summary")
+    rationale = parsed.get("rationale")
+    if confidence not in _CONFIDENCE_RANK:
+        return None
+    if not isinstance(summary, str) or not isinstance(rationale, str):
+        return None
+    return {
+        "confidence": confidence,
+        "summary": summary.strip(),
+        "rationale": rationale.strip(),
+    }
 
 
 def _strip_json_markdown_fence(raw_output: str) -> str:
@@ -885,8 +1350,38 @@ def _state_bool(workflow: SystemWorkflow, key: str) -> bool:
     return workflow.state.get(key) is True
 
 
+def _confidence_meets_threshold(confidence: str, threshold: str) -> bool:
+    return _CONFIDENCE_RANK.get(confidence, 0) >= _CONFIDENCE_RANK.get(threshold, 0)
+
+
+def _string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        item = item.strip()
+        if item and item not in normalized:
+            normalized.append(item)
+    return normalized
+
+
+def _session_metadata_from_state(
+    workflow: SystemWorkflow, key: str
+) -> SessionMetadata | None:
+    session_id = _state_int(workflow, key)
+    if session_id < 1:
+        return None
+    return SessionMetadata.objects.filter(pk=session_id).first()
+
+
 def _okr_task_main_thread_id(key_result_id: int) -> str:
     return f"okr-key-result:{key_result_id}"
+
+
+def _standing_order_main_thread_id(standing_order_id: int) -> str:
+    return f"standing-order:{standing_order_id}"
 
 
 def _workflow_for_instance(instance: CodexInstance) -> SystemWorkflow | None:
