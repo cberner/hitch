@@ -332,6 +332,24 @@ class SessionViewTests(TestCase):
         self.assertNotContains(response, 'class="back-link"')
 
     @patch("hitch.main.views.Codex")
+    def test_selected_project_session_nav_includes_project_links(
+        self, mock_codex: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        thread = _thread([_turn([_user_message("hi")])], cwd="/repo")
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, f'href="{reverse("standing_orders")}"')
+        self.assertContains(response, ">standing orders<")
+        self.assertContains(response, f'href="{reverse("okrs")}"')
+        self.assertContains(response, ">OKRs<")
+        self.assertContains(response, "@media (max-width: 900px)")
+
+    @patch("hitch.main.views.Codex")
     def test_settings_dialog_uses_resolved_settings(
         self, mock_codex: MagicMock
     ) -> None:
