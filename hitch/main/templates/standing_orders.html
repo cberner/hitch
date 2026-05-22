@@ -81,6 +81,8 @@
         .page-header,
         .page-header-actions,
         .proposal-actions,
+        .order-header,
+        .order-actions,
         .order-meta {
             display: flex;
             align-items: center;
@@ -211,8 +213,17 @@
         }
         .proposal h3,
         .order h3 {
-            margin: 0 0 0.35rem;
+            margin: 0;
             font-size: 1.05rem;
+        }
+        .order-header {
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 0.35rem;
+        }
+        .order-actions {
+            flex: 0 0 auto;
+            flex-wrap: wrap;
         }
         .proposal p,
         .order p,
@@ -269,7 +280,9 @@
         @media (max-width: 640px) {
             .page-header,
             .page-header-actions,
-            .proposal-actions {
+            .proposal-actions,
+            .order-header,
+            .order-actions {
                 align-items: stretch;
                 flex-direction: column;
             }
@@ -424,7 +437,21 @@
             <ul class="order-list">
                 {% for order in standing_orders %}
                 <li class="order">
-                    <h3>{{ order.title }}</h3>
+                    <div class="order-header">
+                        <h3>{{ order.title }}</h3>
+                        <div class="order-actions">
+                            <button
+                                type="button"
+                                class="button secondary"
+                                data-standing-order-edit
+                                data-edit-url="{% url 'edit_standing_order' order.pk %}"
+                                data-title="{{ order.title }}"
+                                data-goal="{{ order.goal }}"
+                                data-ambition="{{ order.ambition }}"
+                                data-confidence-threshold="{{ order.confidence_threshold }}"
+                            >Edit</button>
+                        </div>
+                    </div>
                     <p>{{ order.goal }}</p>
                     <div class="order-meta">
                         <span class="meta">Ambition: {{ order.get_ambition_display }}</span>
@@ -500,6 +527,40 @@
             </div>
         </form>
     </dialog>
+    <dialog class="new-session" data-edit-standing-order-dialog aria-labelledby="edit-standing-order-title">
+        <form method="post" data-edit-standing-order-form>
+            {% csrf_token %}
+            <h2 id="edit-standing-order-title">Edit standing order</h2>
+            <label>
+                Title
+                <input type="text" name="title" maxlength="{{ title_max_len }}" required autocomplete="off" data-edit-standing-order-title>
+            </label>
+            <label>
+                Goal
+                <textarea name="goal" required data-edit-standing-order-goal></textarea>
+            </label>
+            <label>
+                Ambition
+                <select name="ambition" required data-edit-standing-order-ambition>
+                    {% for value, label in ambition_choices %}
+                    <option value="{{ value }}">{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>
+                Confidence threshold
+                <select name="confidence_threshold" required data-edit-standing-order-confidence-threshold>
+                    {% for value, label in confidence_choices %}
+                    <option value="{{ value }}">{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <div class="actions">
+                <button type="button" class="button secondary" data-edit-standing-order-cancel>Cancel</button>
+                <button type="submit" class="button">Save</button>
+            </div>
+        </form>
+    </dialog>
     <dialog class="new-session" data-reject-session-dialog aria-labelledby="reject-session-title">
         <form method="post" data-reject-session-form>
             {% csrf_token %}
@@ -550,6 +611,13 @@
             const rejectTitle = rejectDialog && rejectDialog.querySelector("[data-reject-session-title]");
             const rejectReason = rejectDialog && rejectDialog.querySelector("textarea[name='reason']");
             const rejectCancel = rejectDialog && rejectDialog.querySelector("[data-reject-session-cancel]");
+            const editOrderDialog = document.querySelector("[data-edit-standing-order-dialog]");
+            const editOrderForm = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-form]");
+            const editOrderTitle = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-title]");
+            const editOrderGoal = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-goal]");
+            const editOrderAmbition = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-ambition]");
+            const editOrderConfidence = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-confidence-threshold]");
+            const editOrderCancel = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-cancel]");
             const newSessionDialog = document.querySelector("[data-new-session-dialog]");
             const newSessionForm = newSessionDialog && newSessionDialog.querySelector("form");
             const newSessionInput = newSessionForm && newSessionForm.querySelector("textarea[name='prompt']");
@@ -590,6 +658,19 @@
                 newSessionProjectSelect.addEventListener("change", syncNewSessionProjectFields);
             }
             if (newSessionCancel) newSessionCancel.addEventListener("click", () => hideDialog(newSessionDialog));
+            for (const button of document.querySelectorAll("[data-standing-order-edit]")) {
+                button.addEventListener("click", () => {
+                    if (!editOrderForm) return;
+                    editOrderForm.action = button.dataset.editUrl || "";
+                    if (editOrderTitle) editOrderTitle.value = button.dataset.title || "";
+                    if (editOrderGoal) editOrderGoal.value = button.dataset.goal || "";
+                    if (editOrderAmbition) editOrderAmbition.value = button.dataset.ambition || "";
+                    if (editOrderConfidence) editOrderConfidence.value = button.dataset.confidenceThreshold || "";
+                    showDialog(editOrderDialog);
+                    if (editOrderTitle) editOrderTitle.focus();
+                });
+            }
+            if (editOrderCancel) editOrderCancel.addEventListener("click", () => hideDialog(editOrderDialog));
             for (const button of document.querySelectorAll("[data-proposed-session-do]")) {
                 button.addEventListener("click", () => {
                     openNewSessionDialog(

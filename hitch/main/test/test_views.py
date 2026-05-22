@@ -5353,6 +5353,11 @@ class StandingOrderViewTests(TestCase):
         self.assertContains(response, "Standing order goal:")
         self.assertContains(response, "Find useful test coverage increments.")
         self.assertContains(response, 'name="proposed_session"')
+        self.assertContains(
+            response,
+            f'data-edit-url="{reverse("edit_standing_order", args=[order.pk])}"',
+        )
+        self.assertContains(response, 'data-standing-order-edit')
         self.assertNotContains(response, "Other order")
 
     def test_create_standing_order_for_selected_project(self) -> None:
@@ -5378,6 +5383,121 @@ class StandingOrderViewTests(TestCase):
             order.confidence_threshold,
             StandingOrder.CONFIDENCE_VERY_HIGH,
         )
+
+    def test_edit_standing_order_updates_selected_project_order(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            ambition=StandingOrder.AMBITION_INCREMENTAL,
+            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+        )
+
+        response = self.client.post(
+            reverse("edit_standing_order", args=[order.pk]),
+            {
+                "title": "Improve docs",
+                "goal": "Find useful docs increments.",
+                "ambition": StandingOrder.AMBITION_HIGH,
+                "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.title, "Improve docs")
+        self.assertEqual(order.goal, "Find useful docs increments.")
+        self.assertEqual(order.ambition, StandingOrder.AMBITION_HIGH)
+        self.assertEqual(
+            order.confidence_threshold,
+            StandingOrder.CONFIDENCE_VERY_HIGH,
+        )
+
+    def test_edit_standing_order_is_scoped_to_selected_project(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other_project = Project.objects.create(name="Other", repo_path="/other")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        order = StandingOrder.objects.create(
+            project=other_project,
+            title="Other order",
+            goal="Should not change.",
+        )
+
+        response = self.client.post(
+            reverse("edit_standing_order", args=[order.pk]),
+            {
+                "title": "Changed",
+                "goal": "Changed.",
+                "ambition": StandingOrder.AMBITION_HIGH,
+                "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
+            },
+        )
+
+        self.assertEqual(response.status_code, 404)
+        order.refresh_from_db()
+        self.assertEqual(order.title, "Other order")
+        self.assertEqual(order.goal, "Should not change.")
+
+    def test_edit_standing_order_rejects_invalid_posts(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+
+        for data, message in (
+            (
+                {
+                    "title": "",
+                    "goal": "Find useful docs increments.",
+                    "ambition": StandingOrder.AMBITION_HIGH,
+                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                },
+                "title is required",
+            ),
+            (
+                {
+                    "title": "Improve docs",
+                    "goal": "",
+                    "ambition": StandingOrder.AMBITION_HIGH,
+                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                },
+                "goal is required",
+            ),
+            (
+                {
+                    "title": "Improve docs",
+                    "goal": "Find useful docs increments.",
+                    "ambition": "huge",
+                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                },
+                "ambition is invalid",
+            ),
+            (
+                {
+                    "title": "Improve docs",
+                    "goal": "Find useful docs increments.",
+                    "ambition": StandingOrder.AMBITION_HIGH,
+                    "confidence_threshold": "absolute",
+                },
+                "confidence threshold is invalid",
+            ),
+        ):
+            with self.subTest(message=message):
+                response = self.client.post(
+                    reverse("edit_standing_order", args=[order.pk]),
+                    data,
+                )
+
+                self.assertContains(response, message, status_code=400)
+
+        order.refresh_from_db()
+        self.assertEqual(order.title, "Improve tests")
+        self.assertEqual(order.goal, "Find useful test coverage increments.")
 
     @patch("hitch.main.views.system_agents.start_standing_order_workflow")
     def test_run_all_starts_each_selected_project_order(
