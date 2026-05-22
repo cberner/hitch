@@ -1770,6 +1770,213 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
+    def test_new_session_accepts_and_associates_proposed_session(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        proposal = ProposedSession.objects.create(
+            standing_order=order,
+            title="Add parser coverage",
+        )
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Go ahead and implement this proposed session.",
+                "cwd": self.REPO,
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        proposal.refresh_from_db()
+        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
+        self.assertEqual(proposal.accepted_session, metadata)
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos", return_value=[Path(REPO)])
+    def test_new_session_rejects_invalid_proposed_session(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        _setup_codex(mock_codex, models=[])
+
+        for value in ("not-a-number", "0", "999"):
+            with self.subTest(value=value):
+                response = self.client.post(
+                    reverse("new_session"),
+                    data={
+                        "prompt": "Go ahead and implement this proposed session.",
+                        "cwd": self.REPO,
+                        "proposed_session": value,
+                    },
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.content, b"proposed session is required")
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_rejects_proposed_session_from_different_project(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        other_project = Project.objects.create(name="Other", repo_path="/home/user/other")
+        order = StandingOrder.objects.create(
+            project=other_project,
+            title="Improve docs",
+            goal="Find useful docs increments.",
+        )
+        proposal = ProposedSession.objects.create(
+            standing_order=order,
+            title="Add docs coverage",
+        )
+        mock_discover.return_value = [Path(self.REPO), Path(other_project.repo_path)]
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Go ahead and implement this proposed session.",
+                "project": str(project.pk),
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"proposed session does not match project")
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_rejects_implicit_target_proposed_session_from_different_project(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        other_project = Project.objects.create(name="Other", repo_path="/home/user/other")
+        order = StandingOrder.objects.create(
+            project=other_project,
+            title="Improve docs",
+            goal="Find useful docs increments.",
+        )
+        proposal = ProposedSession.objects.create(
+            standing_order=order,
+            title="Add docs coverage",
+        )
+        mock_discover.return_value = [Path(self.REPO), Path(other_project.repo_path)]
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Go ahead and implement this proposed session.",
+                "cwd": self.REPO,
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"proposed session does not match project")
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_rejects_bare_repo_proposed_session_from_different_project(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        other_project = Project.objects.create(name="Other", repo_path="/home/user/other")
+        order = StandingOrder.objects.create(
+            project=other_project,
+            title="Improve docs",
+            goal="Find useful docs increments.",
+        )
+        proposal = ProposedSession.objects.create(
+            standing_order=order,
+            title="Add docs coverage",
+        )
+        mock_discover.return_value = [Path(self.REPO), Path(other_project.repo_path)]
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Go ahead and implement this proposed session.",
+                "project": views._BARE_REPO_PROJECT_VALUE,
+                "cwd": self.REPO,
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"proposed session does not match project")
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_rejects_resolved_proposed_session(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        proposal = ProposedSession.objects.create(
+            standing_order=order,
+            title="Add parser coverage",
+            outcome_status=ProposedSession.OUTCOME_REJECTED,
+        )
+        mock_discover.return_value = [Path(self.REPO)]
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Go ahead and implement this proposed session.",
+                "project": str(project.pk),
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"proposed session is required")
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
     def test_remembers_selected_repo_in_cookie(
         self,
         mock_discover: MagicMock,
@@ -5086,9 +5293,10 @@ class SessionViewApprovalContextTests(TestCase):
 
 
 class StandingOrderViewTests(TestCase):
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_page_lists_inbox_and_orders_for_selected_project(
-        self, mock_codex: MagicMock
+        self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         other_project = Project.objects.create(name="Other", repo_path="/other")
@@ -5138,6 +5346,13 @@ class StandingOrderViewTests(TestCase):
         self.assertContains(response, "Add parser coverage")
         self.assertContains(response, "This adds focused parser coverage.")
         self.assertContains(response, "hitch/main/rollout.py")
+        self.assertContains(response, 'data-proposed-session-do')
+        self.assertContains(response, 'data-proposed-session-id="')
+        self.assertContains(response, f'data-proposed-session-project="{project.pk}"')
+        self.assertContains(response, "Go ahead and implement this proposed session.")
+        self.assertContains(response, "Standing order goal:")
+        self.assertContains(response, "Find useful test coverage increments.")
+        self.assertContains(response, 'name="proposed_session"')
         self.assertNotContains(response, "Other order")
 
     def test_create_standing_order_for_selected_project(self) -> None:
