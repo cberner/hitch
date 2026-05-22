@@ -5286,7 +5286,7 @@ class StandingOrderViewTests(TestCase):
         self.assertNotContains(response, "No standing orders yet.")
         self.assertNotContains(
             response,
-            '<button type="button" class="button secondary" data-create-standing-order-open>',
+            '<button type="button" role="menuitem" data-create-standing-order-open>',
         )
         self.assertNotContains(
             response,
@@ -5310,10 +5310,12 @@ class StandingOrderViewTests(TestCase):
         response = self.client.get(reverse("standing_orders"))
 
         self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'class="page-menu" data-page-menu')
         self.assertContains(
             response,
-            '<button type="button" class="button secondary" data-create-standing-order-open>',
+            '<button type="button" role="menuitem" data-create-standing-order-open>',
         )
+        self.assertContains(response, 'role="menuitem">Run all</button>')
         self.assertContains(
             response,
             '<dialog class="new-session" data-create-standing-order-dialog',
