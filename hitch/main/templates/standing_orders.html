@@ -79,7 +79,6 @@
         .topbar-leading,
         .topbar-actions,
         .page-header,
-        .page-header-actions,
         .proposal-actions,
         .order-header,
         .order-actions,
@@ -90,6 +89,76 @@
         }
         .topbar-leading { min-width: 0; }
         .topbar-actions { flex: 0 0 auto; }
+        .page-menu {
+            position: relative;
+            flex: 0 0 auto;
+        }
+        .page-menu-toggle {
+            font: inherit;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 2.25rem;
+            height: 2.25rem;
+            font-size: 1.2rem;
+            line-height: 1;
+            background: transparent;
+            color: var(--text-muted);
+            border: none;
+            border-radius: 8px;
+            padding: 0;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        .page-menu-toggle:hover { background: var(--surface-2); }
+        .page-menu-toggle[aria-expanded="true"] {
+            background: var(--surface-2);
+            color: var(--text);
+        }
+        .page-menu-panel {
+            position: absolute;
+            right: 0;
+            top: calc(100% + 0.35rem);
+            z-index: 60;
+            min-width: 12rem;
+            padding: 0.35rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--surface);
+            box-shadow: var(--shadow-lg);
+        }
+        .page-menu-panel[hidden] { display: none; }
+        .page-menu-panel form { margin: 0; }
+        .page-menu-panel button {
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            min-height: 34px;
+            font: inherit;
+            font-size: 0.9rem;
+            text-align: left;
+            border: 0;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text);
+            padding: 0.5rem 0.65rem;
+            cursor: pointer;
+        }
+        .page-menu-panel button:hover,
+        .page-menu-panel button:focus {
+            outline: none;
+            background: var(--surface-2);
+        }
+        .page-menu-panel button:disabled {
+            color: var(--text-faint);
+            cursor: not-allowed;
+            opacity: 0.65;
+        }
+        .page-menu-panel button:disabled:hover,
+        .page-menu-panel button:disabled:focus {
+            background: transparent;
+        }
         .brand {
             font-size: 1rem;
             font-weight: 700;
@@ -279,15 +348,13 @@
         }
         @media (max-width: 640px) {
             .page-header,
-            .page-header-actions,
             .proposal-actions,
             .order-header,
             .order-actions {
                 align-items: stretch;
                 flex-direction: column;
             }
-            .button,
-            .page-header-actions form {
+            .button {
                 width: 100%;
             }
         }
@@ -308,6 +375,20 @@
                 <a class="button secondary account-action" href="{{ login_url }}">Log in</a>
                 <a class="button account-action" href="{{ register_url }}">Register</a>
                 {% endif %}
+                {% if current_project %}
+                <div class="page-menu" data-page-menu>
+                    <button type="button" class="page-menu-toggle" aria-label="Standing order actions" aria-haspopup="menu" aria-expanded="false" data-page-menu-open>...</button>
+                    <div class="page-menu-panel" role="menu" data-page-menu-panel hidden>
+                        {% if standing_orders %}
+                        <button type="button" role="menuitem" data-create-standing-order-open>New order</button>
+                        {% endif %}
+                        <form method="post" action="{{ standing_order_run_all_url }}" role="none">
+                            {% csrf_token %}
+                            <button type="submit" role="menuitem"{% if not standing_orders %} disabled{% endif %}>Run all</button>
+                        </form>
+                    </div>
+                </div>
+                {% endif %}
             </div>
         </div>
     </header>
@@ -321,17 +402,6 @@
                     <p class="project-name">{{ current_project.name }}</p>
                     {% endif %}
                 </div>
-                {% if current_project %}
-                <div class="page-header-actions">
-                    {% if standing_orders %}
-                    <button type="button" class="button secondary" data-create-standing-order-open>New order</button>
-                    {% endif %}
-                    <form method="post" action="{{ standing_order_run_all_url }}">
-                        {% csrf_token %}
-                        <button type="submit" class="button"{% if not standing_orders %} disabled{% endif %}>Run all</button>
-                    </form>
-                </div>
-                {% endif %}
             </div>
             {% if not current_project %}
             <div class="empty">
@@ -607,6 +677,9 @@
             const createOrderOpen = document.querySelector("[data-create-standing-order-open]");
             const createOrderTitle = createOrderDialog && createOrderDialog.querySelector("[data-create-standing-order-title]");
             const createOrderCancel = createOrderDialog && createOrderDialog.querySelector("[data-create-standing-order-cancel]");
+            const pageMenu = document.querySelector("[data-page-menu]");
+            const pageMenuButton = pageMenu && pageMenu.querySelector("[data-page-menu-open]");
+            const pageMenuPanel = pageMenu && pageMenu.querySelector("[data-page-menu-panel]");
             const newSessionDialog = document.querySelector("[data-new-session-dialog]");
             const newSessionForm = newSessionDialog && newSessionDialog.querySelector("form");
             const newSessionInput = newSessionForm && newSessionForm.querySelector("textarea[name='prompt']");
@@ -647,8 +720,29 @@
                 newSessionProjectSelect.addEventListener("change", syncNewSessionProjectFields);
             }
             if (newSessionCancel) newSessionCancel.addEventListener("click", () => hideDialog(newSessionDialog));
+            function closePageMenu() {
+                if (!pageMenuButton || !pageMenuPanel) return;
+                pageMenuPanel.hidden = true;
+                pageMenuButton.setAttribute("aria-expanded", "false");
+            }
+            if (pageMenu && pageMenuButton && pageMenuPanel) {
+                pageMenuButton.addEventListener("click", () => {
+                    const willOpen = pageMenuPanel.hidden;
+                    pageMenuPanel.hidden = !willOpen;
+                    pageMenuButton.setAttribute("aria-expanded", willOpen ? "true" : "false");
+                });
+                document.addEventListener("click", (event) => {
+                    if (!pageMenu.contains(event.target)) closePageMenu();
+                });
+                document.addEventListener("keydown", (event) => {
+                    if (event.key !== "Escape" || pageMenuPanel.hidden) return;
+                    closePageMenu();
+                    pageMenuButton.focus();
+                });
+            }
             if (createOrderOpen) {
                 createOrderOpen.addEventListener("click", () => {
+                    closePageMenu();
                     showDialog(createOrderDialog);
                     if (createOrderTitle) createOrderTitle.focus();
                 });
