@@ -82,6 +82,13 @@ class ResolvedSettings(NamedTuple):
     cookie_updates: dict[str, str]
 
 
+class StandingOrderValues(NamedTuple):
+    title: str
+    goal: str
+    ambition: str
+    confidence_threshold: str
+
+
 class _MessageIntent(NamedTuple):
     prompt: str
     plan_mode: bool
@@ -811,27 +818,44 @@ def create_standing_order(request: HttpRequest) -> HttpResponse:
     project = _active_project_from_request(request)
     if project is None:
         return HttpResponseBadRequest("active project is required")
-    title, error = _validated_standing_order_title(request.POST.get("title", ""))
+    values, error = _validated_standing_order_values(request)
     if error is not None:
         return HttpResponseBadRequest(error)
-    goal = request.POST.get("goal", "").strip()
-    if not goal:
-        return HttpResponseBadRequest("goal is required")
-    ambition = request.POST.get("ambition", "").strip()
-    valid_ambitions = {value for value, _label in StandingOrder.AMBITION_CHOICES}
-    if ambition not in valid_ambitions:
-        return HttpResponseBadRequest("ambition is invalid")
-    threshold = request.POST.get("confidence_threshold", "").strip()
-    valid_thresholds = {value for value, _label in StandingOrder.CONFIDENCE_CHOICES}
-    if threshold not in valid_thresholds:
-        return HttpResponseBadRequest("confidence threshold is invalid")
+    assert values is not None
     StandingOrder.objects.create(
         project=project,
-        title=title,
-        goal=goal,
-        ambition=ambition,
-        confidence_threshold=threshold,
+        title=values.title,
+        goal=values.goal,
+        ambition=values.ambition,
+        confidence_threshold=values.confidence_threshold,
     )
+    return redirect("standing_orders")
+
+
+@require_http_methods(["POST"])
+def edit_standing_order(request: HttpRequest, standing_order_id: int) -> HttpResponse:
+    project = _active_project_from_request(request)
+    if project is None:
+        return HttpResponseBadRequest("active project is required")
+    standing_order = StandingOrder.objects.filter(
+        pk=standing_order_id,
+        project=project,
+    ).first()
+    if standing_order is None:
+        raise Http404("standing order not found")
+    values, error = _validated_standing_order_values(request)
+    if error is not None:
+        return HttpResponseBadRequest(error)
+    assert values is not None
+
+    updates: list[str] = []
+    for field in ("title", "goal", "ambition", "confidence_threshold"):
+        value = getattr(values, field)
+        if getattr(standing_order, field) != value:
+            setattr(standing_order, field, value)
+            updates.append(field)
+    if updates:
+        standing_order.save(update_fields=[*updates, "updated_at"])
     return redirect("standing_orders")
 
 
@@ -904,6 +928,31 @@ def _validated_standing_order_title(raw_title: str) -> tuple[str, str | None]:
     if len(title) > _STANDING_ORDER_TITLE_MAX_LEN:
         return "", "title is too long"
     return title, None
+
+
+def _validated_standing_order_values(
+    request: HttpRequest,
+) -> tuple[StandingOrderValues | None, str | None]:
+    title, error = _validated_standing_order_title(request.POST.get("title", ""))
+    if error is not None:
+        return None, error
+    goal = request.POST.get("goal", "").strip()
+    if not goal:
+        return None, "goal is required"
+    ambition = request.POST.get("ambition", "").strip()
+    valid_ambitions = {value for value, _label in StandingOrder.AMBITION_CHOICES}
+    if ambition not in valid_ambitions:
+        return None, "ambition is invalid"
+    threshold = request.POST.get("confidence_threshold", "").strip()
+    valid_thresholds = {value for value, _label in StandingOrder.CONFIDENCE_CHOICES}
+    if threshold not in valid_thresholds:
+        return None, "confidence threshold is invalid"
+    return StandingOrderValues(
+        title=title,
+        goal=goal,
+        ambition=ambition,
+        confidence_threshold=threshold,
+    ), None
 
 
 @require_http_methods(["POST"])
