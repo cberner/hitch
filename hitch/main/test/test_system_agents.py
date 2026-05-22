@@ -1227,6 +1227,30 @@ class StandingOrderWorkflowTests(TestCase):
         )
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_yolo_workflow_starts_candidate_thread_with_yolo_guidance(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find substantial documentation improvements.",
+            ambition=StandingOrder.AMBITION_YOLO,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+
+        system_agents.start_standing_order_workflow(standing_order=standing_order)
+
+        prompt = mock_spawn.call_args.kwargs["prompt"]
+        self.assertIn("bold, high-leverage progress", prompt)
+        self.assertIn("substantial session", prompt)
+        self.assertNotIn("incremental", prompt.lower())
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_candidate_completion_starts_judge_thread(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -1293,6 +1317,72 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertEqual(kwargs["agent_kind"], system_agents.STANDING_ORDER_JUDGE_AGENT_KIND)
         self.assertIn("Add parser coverage", kwargs["prompt"])
         self.assertTrue(SessionMetadata.objects.filter(thread_id="judge-thread").exists())
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_yolo_candidate_completion_starts_judge_thread_with_yolo_guidance(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            ambition=StandingOrder.AMBITION_YOLO,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_STANDING_ORDER_CANDIDATE_RUNNING,
+            state={"standing_order_id": standing_order.pk},
+        )
+        candidate_metadata = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo",
+            project=project,
+        )
+        workflow.state = {
+            **workflow.state,
+            "candidate_session_id": candidate_metadata.pk,
+        }
+        workflow.save(update_fields=["state", "updated_at"])
+        instance = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {
+                    "title": "Consolidate command tests",
+                    "summary": "Merge duplicated command-routing tests.",
+                    "impact": "Less duplicated test maintenance.",
+                    "implementation_direction": "Refactor adjacent tests.",
+                    "relevant_files": ["hitch/main/test/test_views.py"],
+                },
+            ),
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            thread_id="candidate-thread",
+            instance=instance,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="judge-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        prompt = mock_spawn.call_args.kwargs["prompt"]
+        self.assertIn("bold, high-leverage progress", prompt)
+        self.assertIn("substantial and high-upside", prompt)
+        self.assertNotIn("incremental", prompt.lower())
 
     def test_judge_creates_proposal_when_confidence_meets_threshold(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
