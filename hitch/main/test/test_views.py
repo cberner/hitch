@@ -680,9 +680,46 @@ class IndexViewTests(TestCase):
             ],
             archived=True,
         )
+        system_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=300,
+                    cached_input_tokens=100,
+                    output_tokens=700,
+                    reasoning_output_tokens=80,
+                    total_tokens=1_100,
+                )
+            ],
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="active",
+            cwd="/repo",
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="system",
+            cwd="/repo",
+            prompt="qa",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="system",
+            instance=instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+        )
         _setup_codex(
             mock_codex,
-            threads=[_session("active", name="Active session", path=str(active_path))],
+            threads=[
+                _session("active", name="Active session", path=str(active_path)),
+                _session("system", name="System session", path=str(system_path)),
+            ],
             archived_threads=[
                 _session("archived", name="Archived session", path=str(archived_path))
             ],
@@ -693,10 +730,14 @@ class IndexViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Lifetime")
         self.assertContains(response, "All sessions")
+        self.assertContains(response, "Sessions")
+        self.assertContains(response, "HITCH system")
+        self.assertContains(response, "4,790")
         self.assertContains(response, "3,790")
-        self.assertContains(response, "1,150")
-        self.assertContains(response, "2,100")
-        self.assertContains(response, "250")
+        self.assertContains(response, "1,000")
+        self.assertContains(response, "1,350")
+        self.assertContains(response, "2,800")
+        self.assertContains(response, "350")
         self.assertNotContains(response, "4,040")
         self.assertNotContains(response, "3,250")
         self.assertNotContains(response, "1,400")

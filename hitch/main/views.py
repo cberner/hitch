@@ -1730,13 +1730,12 @@ def _threads_for_usage(codex: Codex) -> list[Any] | None:
 
 
 def _dedupe_usage_threads(threads: list[Any]) -> list[Any]:
-    hidden_thread_ids = system_agents.hidden_thread_ids()
     seen: set[str] = set()
     deduped: list[Any] = []
     for thread in threads:
         thread_id = getattr(thread, "id", None)
         if isinstance(thread_id, str):
-            if thread_id in hidden_thread_ids or thread_id in seen:
+            if thread_id in seen:
                 continue
             seen.add(thread_id)
         deduped.append(thread)
@@ -1821,19 +1820,30 @@ def _system_agent_run_detail_title(run: SystemAgentRun) -> str:
 
 
 def _lifetime_token_usage_for(threads: list[Any]) -> dict[str, str]:
+    hidden_thread_ids = system_agents.hidden_thread_ids()
     totals = {key: 0 for key in _TOKEN_USAGE_KEYS}
     display_total = 0
+    session_display_total = 0
+    system_display_total = 0
     display_input = 0
     for thread in threads:
         usage = _token_usage_numbers_for(thread)
         if usage is None:
             continue
+        thread_id = getattr(thread, "id", None)
+        thread_display_total = _display_total_tokens(usage)
         for key in _TOKEN_USAGE_KEYS:
             totals[key] += usage.get(key, 0)
-        display_total += _display_total_tokens(usage)
+        display_total += thread_display_total
+        if isinstance(thread_id, str) and thread_id in hidden_thread_ids:
+            system_display_total += thread_display_total
+        else:
+            session_display_total += thread_display_total
         display_input += _non_cached_input_tokens(usage)
     return {
         "total": _format_token_count(display_total),
+        "sessions_total": _format_token_count(session_display_total),
+        "system_total": _format_token_count(system_display_total),
         "input": _format_token_count(display_input),
         "output": _format_token_count(totals["output_tokens"]),
         "cached": _format_token_count(totals["cached_input_tokens"]),
