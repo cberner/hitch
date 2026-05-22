@@ -737,14 +737,18 @@ class SessionViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, "Registration token: secret")
+        self.assertContains(response, "Demo agent</label>")
+        self.assertContains(response, 'id="session-tab-demo-agent" checked')
         self.assertContains(response, "data-live-root")
-        self.assertContains(response, 'data-hide-transcript="true"')
+        self.assertContains(response, 'data-hide-transcript="false"')
+        self.assertContains(response, 'data-hide-user-message="true"')
+        self.assertContains(response, 'data-sanitize-live-details="true"')
         self.assertContains(response, "data-composer-stop")
         self.assertContains(response, "Demo agent is working")
         html = response.content.decode()
         self.assertIn("Demo setup command approval requested.", html)
         self.assertIn(
-            "detail.textContent = HIDE_LIVE_TRANSCRIPT\n"
+            "detail.textContent = HIDE_LIVE_TRANSCRIPT || SANITIZE_LIVE_DETAILS\n"
             "                    ? hiddenTranscriptApprovalDetail(payload.method)",
             html,
         )
@@ -753,6 +757,101 @@ class SessionViewTests(TestCase):
             "                if (HIDE_LIVE_TRANSCRIPT) return;",
             html,
         )
+
+    @patch("hitch.main.views.Codex")
+    def test_active_demo_worker_sanitizes_sensitive_live_details(
+        self, mock_codex: MagicMock
+    ) -> None:
+        prompt = "Start an interactive web demo for this session.\n\nRegistration token: token-secret"
+        thread = _thread([])
+        _patch_thread(self, mock_codex, thread)
+        CodexInstance.objects.create(
+            pid=_LIVE_PID,
+            thread_id="thread-1",
+            cwd="/tmp/demo",
+            prompt=prompt,
+            events_path="/tmp/demo-events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            display_author=demo.DEMO_DISPLAY_AUTHOR,
+            user_message_index=0,
+        )
+
+        response = _get_session(self.client)
+        html = response.content.decode()
+
+        try:
+            from playwright.sync_api import Error as PlaywrightError
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            self.skipTest(f"playwright unavailable: {exc}")
+
+        with sync_playwright() as playwright:
+            try:
+                browser = playwright.chromium.launch(headless=True)
+            except PlaywrightError as exc:
+                self.skipTest(f"playwright browser unavailable: {exc}")
+            try:
+                page = browser.new_page()
+                page.evaluate(
+                    """
+                    () => {
+                    class MockEventSource {
+                        constructor(url) {
+                            this.url = url;
+                            this.listeners = {};
+                            window.__eventSource = this;
+                        }
+                        addEventListener(type, callback) {
+                            this.listeners[type] = callback;
+                        }
+                        close() {}
+                        emit(type, data) {
+                            this.listeners[type]({ data: JSON.stringify(data) });
+                        }
+                    }
+                    window.EventSource = MockEventSource;
+                    }
+                    """
+                )
+                page.set_content(html, wait_until="load")
+                page.wait_for_function("window.__eventSource !== undefined")
+                page.evaluate(
+                    """
+                    () => {
+                        const tokenCommand = [
+                            "curl -H 'Registration token: token-secret'",
+                            "podman run --label io.hitch.demo_token=token-secret",
+                        ].join(" && ");
+                        window.__eventSource.emit("message", {
+                            method: "approval/requested",
+                            payload: {
+                                id: 77,
+                                method: "item/commandExecution/requestApproval",
+                                params: { item: { command: tokenCommand } },
+                            },
+                        });
+                        window.__eventSource.emit("message", {
+                            method: "item/started",
+                            payload: {
+                                item: {
+                                    id: "cmd-1",
+                                    type: "commandExecution",
+                                    command: tokenCommand,
+                                },
+                            },
+                        });
+                    }
+                    """
+                )
+                body = page.locator("body").inner_text()
+            finally:
+                browser.close()
+
+        self.assertNotIn("token-secret", body)
+        self.assertIn("Demo setup command approval requested.", body)
+        self.assertIn("Demo setup command", body)
 
     @patch("hitch.main.views.Codex")
     def test_registered_demo_status_renders_logs(
