@@ -1701,6 +1701,26 @@ class OKRViewTests(TestCase):
 class NewSessionViewTests(TestCase):
     REPO = "/home/user/proj"
 
+    def _assert_new_session_spawn(
+        self,
+        mock_spawn: MagicMock,
+        *,
+        cwd: str = REPO,
+        prompt: str = "do thing",
+        **overrides: Any,
+    ) -> None:
+        expected = {
+            "cwd": cwd,
+            "prompt": prompt,
+            "developer_instructions": None,
+            "model": None,
+            "reasoning_effort": None,
+            "sandbox_policy": None,
+            "approval_mode": "auto_review",
+        }
+        expected.update(overrides)
+        mock_spawn.assert_called_once_with(**expected)
+
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
@@ -2113,346 +2133,181 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
-    def test_assigns_new_session_to_selected_project(
+    def test_new_session_project_routing_matrix(
         self,
         mock_discover: MagicMock,
         mock_spawn: MagicMock,
         mock_codex: MagicMock,
     ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
         _setup_codex(mock_codex, models=[])
-        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        cases: list[tuple[str, str, str, str | None, bool]] = [
+            ("selected project", "selected", f"{self.REPO}/selected", "selected", False),
+            ("posted repository", "cwd", "/home/user/other", "posted", False),
+            ("posted project", "project", "/home/user/posted", "posted", False),
+            ("bare repo override", "bare", "/home/user/bare", None, True),
+            ("unprojected repo", "unprojected", "/home/user/unprojected", None, False),
+        ]
 
-        response = self.client.post(
-            reverse("new_session"),
-            data={"prompt": "do thing", "cwd": self.REPO},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
-        self.assertEqual(metadata.cwd, self.REPO)
-        self.assertEqual(metadata.project, project)
-
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
-    def test_new_session_project_comes_from_posted_repository(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        repo_a = self.REPO
-        repo_b = "/home/user/other"
-        project_a = Project.objects.create(name="Project A", repo_path=repo_a)
-        project_b = Project.objects.create(name="Project B", repo_path=repo_b)
-        mock_discover.return_value = [Path(repo_a), Path(repo_b)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
-        _setup_codex(mock_codex, models=[])
-        _seed_cookies(self.client, hitch_selected_project_id=str(project_a.pk))
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={"prompt": "do thing", "cwd": repo_b},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
-        self.assertEqual(metadata.cwd, repo_b)
-        self.assertEqual(metadata.project, project_b)
-
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
-    def test_new_session_project_comes_from_posted_project(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        repo_b = "/home/user/other"
-        project = Project.objects.create(name="Project B", repo_path=repo_b)
-        mock_discover.return_value = [Path(self.REPO), Path(repo_b)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
-        _setup_codex(mock_codex, models=[])
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={"prompt": "do thing", "project": str(project.pk)},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_called_once_with(
-            cwd=repo_b,
-            prompt="do thing",
-            developer_instructions=None,
-            model=None,
-            reasoning_effort=None,
-            sandbox_policy=None,
-            approval_mode="auto_review",
-        )
-        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
-        self.assertEqual(metadata.cwd, repo_b)
-        self.assertEqual(metadata.project, project)
-        self.assertFalse(metadata.project_cleared)
-
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
-    def test_new_session_bare_repo_does_not_set_matching_project(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        Project.objects.create(name="Hitch", repo_path=self.REPO)
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
-        _setup_codex(mock_codex, models=[])
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={
-                "prompt": "do thing",
-                "project": views._BARE_REPO_PROJECT_VALUE,
-                "cwd": self.REPO,
-            },
-        )
-
-        self.assertEqual(response.status_code, 302)
-        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
-        self.assertEqual(metadata.cwd, self.REPO)
-        self.assertIsNone(metadata.project)
-        self.assertTrue(metadata.project_cleared)
-
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
-    def test_new_session_in_unprojected_repo_ignores_selected_project(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        repo_b = "/home/user/other"
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
-        mock_discover.return_value = [Path(self.REPO), Path(repo_b)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
-        _setup_codex(mock_codex, models=[])
-        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={"prompt": "do thing", "cwd": repo_b},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertIsNone(SessionMetadata.objects.get(thread_id="thread-xyz").project)
-
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
-    def test_forwards_extra_system_prompt_cookie_to_spawn(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
-        _setup_codex(mock_codex, models=[])
-        _seed_cookies(
-            self.client,
-            **{
-                _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt(
-                    "  Always run focused tests.  "
+        for index, (label, selector, repo, expected_project, cleared) in enumerate(cases):
+            with self.subTest(label=label):
+                client = Client()
+                selected_repo = (
+                    repo
+                    if selector == "selected"
+                    else f"{self.REPO}/selected-{index}"
                 )
-            },
-        )
-
-        self.client.post(
-            reverse("new_session"),
-            data={"prompt": "do thing", "cwd": self.REPO},
-        )
-
-        mock_spawn.assert_called_once_with(
-            cwd=self.REPO,
-            prompt="do thing",
-            developer_instructions="Always run focused tests.",
-            model=None,
-            reasoning_effort=None,
-            sandbox_policy=None,
-            approval_mode="auto_review",
-        )
-
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
-    def test_forwards_cookie_settings_to_spawn(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        """Cookie-driven model/effort/sandbox flow into ``spawn_new_session``."""
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
-        _setup_codex(mock_codex, models=[_make_model("gpt-5", is_default=True)])
-        _seed_cookies(
-            self.client,
-            hitch_model="gpt-5",
-            hitch_reasoning_effort="high",
-            hitch_sandbox_policy="workspaceWrite",
-        )
-
-        self.client.post(
-            reverse("new_session"),
-            data={"prompt": "do thing", "cwd": self.REPO},
-        )
-
-        mock_spawn.assert_called_once_with(
-            cwd=self.REPO,
-            prompt="do thing",
-            developer_instructions=None,
-            model="gpt-5",
-            reasoning_effort="high",
-            sandbox_policy="workspaceWrite",
-            approval_mode="auto_review",
-        )
-
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
-    def test_forwards_memories_cookie_to_new_session_spawn(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
-        _setup_codex(mock_codex, models=[])
-        _seed_cookies(self.client, **{_ENABLE_MEMORIES_COOKIE: "true"})
-
-        self.client.post(
-            reverse("new_session"),
-            data={"prompt": "do thing", "cwd": self.REPO},
-        )
-
-        mock_spawn.assert_called_once_with(
-            cwd=self.REPO,
-            prompt="do thing",
-            developer_instructions=None,
-            model=None,
-            reasoning_effort=None,
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            enable_memories=True,
-        )
-
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
-    def test_forwards_approval_mode_cookie_to_spawn(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        """An explicit approval-mode cookie must reach the spawn call; the
-        SDK default is the safe fallback otherwise, but a user who picked a
-        stricter/user-prompting mode expects it to take effect on session
-        start."""
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
-        _setup_codex(mock_codex, models=[])
-
-        for mode in ("deny_all", "prompt_user"):
-            with self.subTest(mode=mode):
+                selected_project = Project.objects.create(
+                    name=f"Selected {index}", repo_path=selected_repo
+                )
+                posted_project = None
+                if selector in {"cwd", "project", "bare"}:
+                    posted_project = Project.objects.create(
+                        name=f"Posted {index}", repo_path=repo
+                    )
+                data = {"prompt": "do thing"}
+                if selector == "project":
+                    assert posted_project is not None
+                    data["project"] = str(posted_project.pk)
+                else:
+                    data["cwd"] = repo
+                    if selector == "bare":
+                        data["project"] = views._BARE_REPO_PROJECT_VALUE
+                    _seed_cookies(
+                        client, hitch_selected_project_id=str(selected_project.pk)
+                    )
+                discovered = [Path(selected_project.repo_path), Path(repo)]
+                if posted_project is not None:
+                    discovered.append(Path(posted_project.repo_path))
+                mock_discover.return_value = discovered
+                thread_id = f"thread-project-{index}"
+                mock_spawn.return_value = SimpleNamespace(thread_id=thread_id)
                 mock_spawn.reset_mock()
-                _seed_cookies(self.client, hitch_approval_mode=mode)
 
-                self.client.post(
+                response = client.post(reverse("new_session"), data=data)
+
+                self.assertEqual(response.status_code, 302)
+                self._assert_new_session_spawn(mock_spawn, cwd=repo)
+                metadata = SessionMetadata.objects.get(thread_id=thread_id)
+                self.assertEqual(metadata.cwd, repo)
+                if expected_project == "selected":
+                    self.assertEqual(metadata.project, selected_project)
+                elif expected_project == "posted":
+                    self.assertIsNotNone(posted_project)
+                    self.assertEqual(metadata.project, posted_project)
+                else:
+                    self.assertIsNone(metadata.project)
+                self.assertEqual(metadata.project_cleared, cleared)
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_forwards_cookie_settings_to_spawn_matrix(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        codex = _setup_codex(mock_codex, models=[])
+        cases: list[tuple[str, dict[str, str], dict[str, Any]]] = [
+            (
+                "extra prompt",
+                {
+                    _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt(
+                        "  Always run focused tests.  "
+                    )
+                },
+                {"developer_instructions": "Always run focused tests."},
+            ),
+            (
+                "model effort sandbox",
+                {
+                    "hitch_model": "gpt-5",
+                    "hitch_reasoning_effort": "high",
+                    "hitch_sandbox_policy": "workspaceWrite",
+                },
+                {
+                    "model": "gpt-5",
+                    "reasoning_effort": "high",
+                    "sandbox_policy": "workspaceWrite",
+                },
+            ),
+            ("memories", {_ENABLE_MEMORIES_COOKIE: "true"}, {"enable_memories": True}),
+            (
+                "deny all approval",
+                {"hitch_approval_mode": "deny_all"},
+                {"approval_mode": "deny_all"},
+            ),
+            (
+                "prompt user approval",
+                {"hitch_approval_mode": "prompt_user"},
+                {"approval_mode": "prompt_user"},
+            ),
+        ]
+
+        for index, (label, cookies, expected) in enumerate(cases):
+            with self.subTest(label=label):
+                client = Client()
+                codex.models.return_value.data = (
+                    [_make_model("gpt-5", is_default=True)]
+                    if "hitch_model" in cookies
+                    else []
+                )
+                mock_spawn.return_value = SimpleNamespace(thread_id=f"thread-{index}")
+                mock_spawn.reset_mock()
+                _seed_cookies(client, **cookies)
+
+                response = client.post(
                     reverse("new_session"),
                     data={"prompt": "do thing", "cwd": self.REPO},
                 )
 
-                mock_spawn.assert_called_once_with(
-                    cwd=self.REPO,
-                    prompt="do thing",
-                    developer_instructions=None,
-                    model=None,
-                    reasoning_effort=None,
-                    sandbox_policy=None,
-                    approval_mode=mode,
-                )
+                self.assertEqual(response.status_code, 302)
+                self._assert_new_session_spawn(mock_spawn, **expected)
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
-    def test_forwards_plan_mode_for_new_session(
+    def test_new_session_plan_mode_matrix(
         self,
         mock_discover: MagicMock,
         mock_spawn: MagicMock,
         mock_codex: MagicMock,
     ) -> None:
         mock_discover.return_value = [Path(self.REPO)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
         _setup_codex(mock_codex, models=[_make_model("gpt-default", is_default=True)])
+        cases: list[tuple[str, dict[str, str], dict[str, str], dict[str, Any]]] = [
+            (
+                "checkbox",
+                {"prompt": "make a migration plan", "cwd": self.REPO, "plan_mode": "true"},
+                {},
+                {"model": "gpt-default", "reasoning_effort": "medium"},
+            ),
+            (
+                "slash command",
+                {"prompt": "/plan make a migration plan", "cwd": self.REPO},
+                {_MODEL_COOKIE: "gpt-default"},
+                {"model": "gpt-default"},
+            ),
+        ]
 
-        response = self.client.post(
-            reverse("new_session"),
-            data={
-                "prompt": "make a migration plan",
-                "cwd": self.REPO,
-                "plan_mode": "true",
-            },
-        )
+        for index, (label, data, cookies, expected) in enumerate(cases):
+            with self.subTest(label=label):
+                client = Client()
+                mock_spawn.return_value = SimpleNamespace(thread_id=f"thread-plan-{index}")
+                mock_spawn.reset_mock()
+                if cookies:
+                    _seed_cookies(client, **cookies)
 
-        self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_called_once_with(
-            cwd=self.REPO,
-            prompt="make a migration plan",
-            developer_instructions=None,
-            model="gpt-default",
-            reasoning_effort="medium",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            plan_mode=True,
-        )
+                response = client.post(reverse("new_session"), data=data)
 
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
-    def test_plan_slash_command_starts_new_session_in_plan_mode(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
-        _setup_codex(mock_codex, models=[_make_model("gpt-5", is_default=True)])
-        _seed_cookies(self.client, **{_MODEL_COOKIE: "gpt-5"})
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={"prompt": "/plan make a migration plan", "cwd": self.REPO},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_called_once_with(
-            cwd=self.REPO,
-            prompt="make a migration plan",
-            developer_instructions=None,
-            model="gpt-5",
-            reasoning_effort=None,
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            plan_mode=True,
-        )
+                self.assertEqual(response.status_code, 302)
+                self._assert_new_session_spawn(
+                    mock_spawn,
+                    prompt="make a migration plan",
+                    plan_mode=True,
+                    **expected,
+                )
 
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     def test_plan_slash_command_without_prompt_is_rejected(
@@ -2861,7 +2716,7 @@ class NewSessionViewTests(TestCase):
     ) -> None:
         mock_discover.return_value = [Path(self.REPO)]
 
-        cases = [
+        cases: list[tuple[dict[str, str], str]] = [
             ({"prompt": "", "cwd": self.REPO}, "empty prompt"),
             ({"prompt": "hello", "cwd": ""}, "missing cwd"),
             ({"prompt": "hello", "cwd": "/etc"}, "cwd outside allowed list"),
@@ -2981,6 +2836,24 @@ class SendMessageViewTests(TestCase):
             ]
         )
 
+    def _assert_follow_up_spawn(
+        self,
+        mock_spawn: MagicMock,
+        *,
+        prompt: str = "follow-up",
+        cwd: str = "/repo",
+        **overrides: Any,
+    ) -> None:
+        expected = {
+            "thread_id": "abc",
+            "cwd": cwd,
+            "prompt": prompt,
+            "sandbox_policy": None,
+            "approval_mode": "auto_review",
+        }
+        expected.update(overrides)
+        mock_spawn.assert_called_once_with(**expected)
+
     @patch("hitch.main.views.codex_pool.steer_instance")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
@@ -3063,114 +2936,102 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.codex_pool.steer_instance", return_value=None)
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
-    def test_stale_finished_active_instance_falls_back_to_spawn(
+    def test_failed_steer_falls_back_to_spawn_matrix(
         self,
         mock_codex: MagicMock,
         mock_spawn: MagicMock,
         mock_steer: MagicMock,
         mock_discover: MagicMock,
     ) -> None:
-        self._patch_codex(mock_codex)
         mock_discover.return_value = [Path("/repo")]
+        resolved_plan_path = str(self._make_resolved_plan_rollout())
+        cases: list[
+            tuple[str, dict[str, str], str | None, int | str, str, dict[str, Any]]
+        ] = [
+            (
+                "posted stale instance",
+                {"prompt": "follow up", "active_instance": "42"},
+                None,
+                42,
+                "follow up",
+                {},
+            ),
+            (
+                "posted stale recomputes default plan mode",
+                {
+                    "prompt": "follow up",
+                    "active_instance": "42",
+                    "plan_mode": "true",
+                    "default_plan_mode": "true",
+                },
+                resolved_plan_path,
+                42,
+                "follow up",
+                {},
+            ),
+            (
+                "posted stale keeps explicit plan mode",
+                {
+                    "prompt": "make another plan",
+                    "active_instance": "42",
+                    "plan_mode": "true",
+                    "plan_mode_explicit": "true",
+                },
+                resolved_plan_path,
+                42,
+                "make another plan",
+                {"model": "gpt-5", "plan_mode": True},
+            ),
+            (
+                "latest active instance",
+                {"prompt": "also lint"},
+                None,
+                "latest",
+                "also lint",
+                {},
+            ),
+        ]
 
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "follow up", "active_instance": "42"},
-        )
+        for label, data, rollout_path, steered_instance, prompt, expected in cases:
+            with self.subTest(label=label):
+                CodexInstance.objects.all().delete()
+                if steered_instance == "latest":
+                    instance = CodexInstance.objects.create(
+                        pid=0,
+                        thread_id="abc",
+                        cwd="/repo",
+                        prompt="launching",
+                        events_path="/tmp/events.jsonl",
+                        status=CodexInstance.STATUS_STARTING,
+                    )
+                    expected_instance = instance.pk
+                else:
+                    assert isinstance(steered_instance, int)
+                    CodexInstance.objects.create(
+                        pid=123,
+                        thread_id="abc",
+                        cwd="/repo",
+                        prompt="newer work",
+                        events_path="/tmp/events.jsonl",
+                        status=CodexInstance.STATUS_RUNNING,
+                    )
+                    expected_instance = steered_instance
+                self._patch_codex(mock_codex, path=rollout_path)
+                mock_steer.reset_mock()
+                mock_spawn.reset_mock()
 
-        self.assertEqual(response.status_code, 302)
-        mock_steer.assert_called_once_with(
-            42,
-            expected_thread_id="abc",
-            prompt="follow up",
-        )
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt="follow up",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-        )
+                response = self.client.post(
+                    reverse("send_message", kwargs={"session_id": "abc"}),
+                    data=data,
+                )
 
-    @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.codex_pool.steer_instance", return_value=None)
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
-    def test_stale_active_instance_recomputes_plan_mode_before_spawn(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_steer: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        rollout_path = self._make_resolved_plan_rollout()
-        self._patch_codex(mock_codex, path=str(rollout_path))
-        mock_discover.return_value = [Path("/repo")]
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={
-                "prompt": "follow up",
-                "active_instance": "42",
-                "plan_mode": "true",
-                "default_plan_mode": "true",
-            },
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_steer.assert_called_once_with(
-            42,
-            expected_thread_id="abc",
-            prompt="follow up",
-        )
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt="follow up",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-        )
-
-    @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.codex_pool.steer_instance", return_value=None)
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
-    def test_explicit_plan_toggle_survives_stale_active_fallback(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_steer: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        rollout_path = self._make_resolved_plan_rollout()
-        self._patch_codex(mock_codex, path=str(rollout_path))
-        mock_discover.return_value = [Path("/repo")]
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={
-                "prompt": "make another plan",
-                "active_instance": "42",
-                "plan_mode": "true",
-                "plan_mode_explicit": "true",
-            },
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_steer.assert_called_once_with(
-            42,
-            expected_thread_id="abc",
-            prompt="make another plan",
-        )
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt="make another plan",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            model="gpt-5",
-            plan_mode=True,
-        )
+                self.assertEqual(response.status_code, 302)
+                mock_steer.assert_called_once_with(
+                    expected_instance,
+                    expected_thread_id="abc",
+                    prompt=prompt,
+                )
+                self._assert_follow_up_spawn(mock_spawn, prompt=prompt, **expected)
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
@@ -3195,95 +3056,7 @@ class SendMessageViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt="follow up",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-        )
-
-    @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.codex_pool.steer_instance", return_value=None)
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
-    def test_stale_active_instance_failed_steer_falls_back_to_spawn(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_steer: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        self._patch_codex(mock_codex)
-        mock_discover.return_value = [Path("/repo")]
-        CodexInstance.objects.create(
-            pid=123,
-            thread_id="abc",
-            cwd="/repo",
-            prompt="newer work",
-            events_path="/tmp/events.jsonl",
-            status=CodexInstance.STATUS_RUNNING,
-        )
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "follow up", "active_instance": "42"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_steer.assert_called_once_with(
-            42,
-            expected_thread_id="abc",
-            prompt="follow up",
-        )
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt="follow up",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-        )
-
-    @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.codex_pool.steer_instance", return_value=None)
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
-    def test_latest_active_failed_steer_falls_back_to_spawn(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_steer: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        self._patch_codex(mock_codex)
-        mock_discover.return_value = [Path("/repo")]
-        instance = CodexInstance.objects.create(
-            pid=0,
-            thread_id="abc",
-            cwd="/repo",
-            prompt="launching",
-            events_path="/tmp/events.jsonl",
-            status=CodexInstance.STATUS_STARTING,
-        )
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "also lint"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_steer.assert_called_once_with(
-            instance.pk,
-            expected_thread_id="abc",
-            prompt="also lint",
-        )
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt="also lint",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-        )
+        self._assert_follow_up_spawn(mock_spawn, prompt="follow up")
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
@@ -3882,94 +3655,52 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_pr_slash_command_starts_qa_workflow(
+    def test_pr_qa_activation_routes_to_workflow_matrix(
         self,
         mock_codex: MagicMock,
         mock_discover: MagicMock,
         mock_start_workflow: MagicMock,
     ) -> None:
-        self._patch_codex(mock_codex, model="gpt-5.4")
         mock_discover.return_value = [Path("/repo")]
+        cases: list[tuple[str, dict[str, str], str | None, dict[str, Any]]] = [
+            ("pr slash", {"prompt": "/pr"}, None, {}),
+            (
+                "qa slash",
+                {"prompt": "/qa", "plan_mode": "true"},
+                "high",
+                {"reasoning_effort": "high", "open_pr_on_lgtm": False},
+            ),
+            ("qa menu", {"prompt": _QA_PROMPT}, None, {"open_pr_on_lgtm": False}),
+        ]
 
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "/pr"},
-        )
+        for label, data, reasoning_effort, expected in cases:
+            with self.subTest(label=label):
+                self._patch_codex(
+                    mock_codex,
+                    model="gpt-5.4",
+                    reasoning_effort=reasoning_effort,
+                )
+                mock_start_workflow.reset_mock()
 
-        self.assertEqual(response.status_code, 302)
-        mock_start_workflow.assert_called_once_with(
-            main_thread_id="abc",
-            cwd="/repo",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            model="gpt-5.4",
-            reasoning_effort=None,
-            developer_instructions=None,
-            enable_memories=False,
-            initial_user_message_index=0,
-        )
+                response = self.client.post(
+                    reverse("send_message", kwargs={"session_id": "abc"}),
+                    data=data,
+                )
 
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
-    @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.Codex")
-    def test_qa_slash_command_starts_qa_workflow_without_pr_prompt(
-        self,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_start_workflow: MagicMock,
-    ) -> None:
-        self._patch_codex(mock_codex, model="gpt-5.4", reasoning_effort="high")
-        mock_discover.return_value = [Path("/repo")]
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "/qa", "plan_mode": "true"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_start_workflow.assert_called_once_with(
-            main_thread_id="abc",
-            cwd="/repo",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            model="gpt-5.4",
-            reasoning_effort="high",
-            developer_instructions=None,
-            enable_memories=False,
-            initial_user_message_index=0,
-            open_pr_on_lgtm=False,
-        )
-
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
-    @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.Codex")
-    def test_qa_menu_prompt_starts_qa_workflow_without_pr_prompt(
-        self,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_start_workflow: MagicMock,
-    ) -> None:
-        self._patch_codex(mock_codex, model="gpt-5.4")
-        mock_discover.return_value = [Path("/repo")]
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": _QA_PROMPT},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_start_workflow.assert_called_once_with(
-            main_thread_id="abc",
-            cwd="/repo",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            model="gpt-5.4",
-            reasoning_effort=None,
-            developer_instructions=None,
-            enable_memories=False,
-            initial_user_message_index=0,
-            open_pr_on_lgtm=False,
-        )
+                self.assertEqual(response.status_code, 302)
+                workflow_kwargs: dict[str, Any] = {
+                    "main_thread_id": "abc",
+                    "cwd": "/repo",
+                    "sandbox_policy": None,
+                    "approval_mode": "auto_review",
+                    "model": "gpt-5.4",
+                    "reasoning_effort": reasoning_effort,
+                    "developer_instructions": None,
+                    "enable_memories": False,
+                    "initial_user_message_index": 0,
+                }
+                workflow_kwargs.update(expected)
+                mock_start_workflow.assert_called_once_with(**workflow_kwargs)
 
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
@@ -4025,84 +3756,51 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
-    def test_plan_mode_uses_saved_model_when_resume_omits_model(
+    def test_plan_mode_model_resolution_matrix(
         self,
         mock_codex: MagicMock,
         mock_spawn: MagicMock,
         mock_discover: MagicMock,
     ) -> None:
-        self._patch_codex(mock_codex, model=None)
         mock_discover.return_value = [Path("/repo")]
-        _seed_cookies(self.client, **{_MODEL_COOKIE: "gpt-saved"})
+        cases = [
+            ("saved cookie", {_MODEL_COOKIE: "gpt-saved"}, [], "gpt-saved", 302),
+            (
+                "default model",
+                {},
+                [_make_model("gpt-default", is_default=True)],
+                "gpt-default",
+                302,
+            ),
+            ("unresolved", {}, [], None, 400),
+        ]
 
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "make a migration plan", "plan_mode": "true"},
-        )
+        for label, cookies, models, expected_model, expected_status in cases:
+            with self.subTest(label=label):
+                client = Client()
+                self._patch_codex(mock_codex, model=None, models=models)
+                mock_spawn.reset_mock()
+                if cookies:
+                    _seed_cookies(client, **cookies)
 
-        self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt="make a migration plan",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            model="gpt-saved",
-            plan_mode=True,
-        )
+                response = client.post(
+                    reverse("send_message", kwargs={"session_id": "abc"}),
+                    data={"prompt": "make a migration plan", "plan_mode": "true"},
+                )
 
-    @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
-    def test_plan_mode_uses_default_model_when_resume_omits_model(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        self._patch_codex(
-            mock_codex,
-            model=None,
-            models=[_make_model("gpt-default", is_default=True)],
-        )
-        mock_discover.return_value = [Path("/repo")]
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "make a migration plan", "plan_mode": "true"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt="make a migration plan",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            model="gpt-default",
-            plan_mode=True,
-        )
-
-    @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
-    def test_plan_mode_returns_bad_request_when_model_cannot_be_resolved(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        self._patch_codex(mock_codex, model=None, models=[])
-        mock_discover.return_value = [Path("/repo")]
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "make a migration plan", "plan_mode": "true"},
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertContains(response, "plan mode requires a model", status_code=400)
-        mock_spawn.assert_not_called()
+                self.assertEqual(response.status_code, expected_status)
+                if expected_model is None:
+                    self.assertContains(
+                        response, "plan mode requires a model", status_code=400
+                    )
+                    mock_spawn.assert_not_called()
+                else:
+                    self._assert_follow_up_spawn(
+                        mock_spawn,
+                        prompt="make a migration plan",
+                        model=expected_model,
+                        plan_mode=True,
+                    )
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
