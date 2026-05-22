@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 from openai_codex.generated.v2_all import ThreadSource
 
@@ -309,6 +309,7 @@ def hidden_thread_ids() -> set[str]:
         ProposedSession.objects.filter(
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             candidate_session__isnull=False,
+            accepted_session=models.F("candidate_session"),
         ).values_list("candidate_session__thread_id", flat=True)
     )
     return hidden_ids - visible_ids
