@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, call, patch
 
 from django.contrib.auth import get_user_model
 from django.core import signing
+from django.db import IntegrityError
 from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 from openai_codex.errors import AppServerError, MethodNotFoundError
@@ -4157,6 +4158,85 @@ class StartSessionDemoViewTests(TestCase):
 
         mock_cleanup.assert_called_once_with("abc")
 
+    @patch("hitch.main.views.demo.cleanup_demo_for_session")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cleans_up_demo_when_workflow_state_save_fails(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        _mock_managed: MagicMock,
+        _mock_workflow: MagicMock,
+        mock_spawn: MagicMock,
+        mock_cleanup: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(cwd="/repo", turns=[])
+        )
+        original_save = SystemWorkflow.save
+
+        def save_side_effect(
+            workflow: SystemWorkflow, *args: Any, **kwargs: Any
+        ) -> None:
+            if kwargs.get("update_fields") == ["state", "updated_at"]:
+                raise RuntimeError("state save failed")
+            original_save(workflow, *args, **kwargs)
+
+        with patch.object(SystemWorkflow, "save", autospec=True) as mock_save:
+            mock_save.side_effect = save_side_effect
+            with self.assertRaisesRegex(RuntimeError, "state save failed"):
+                self.client.post(reverse("start_session_demo", kwargs={"session_id": "abc"}))
+
+        workflow = SystemWorkflow.objects.get(
+            kind=demo.DEMO_WORKFLOW_KIND,
+            main_thread_id="abc",
+        )
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_FAILED)
+        mock_spawn.assert_not_called()
+        mock_cleanup.assert_called_once_with("abc")
+
+    @patch("hitch.main.views.demo.cleanup_demo_for_session")
+    @patch(
+        "hitch.main.views.demo.start_demo_prompt_for",
+        side_effect=RuntimeError("prompt failed"),
+    )
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cleans_up_demo_when_prompt_construction_fails(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        _mock_managed: MagicMock,
+        _mock_workflow: MagicMock,
+        mock_spawn: MagicMock,
+        _mock_prompt: MagicMock,
+        mock_cleanup: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(cwd="/repo", turns=[])
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "prompt failed"):
+            self.client.post(reverse("start_session_demo", kwargs={"session_id": "abc"}))
+
+        workflow = SystemWorkflow.objects.get(
+            kind=demo.DEMO_WORKFLOW_KIND,
+            main_thread_id="abc",
+        )
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_FAILED)
+        mock_spawn.assert_not_called()
+        mock_cleanup.assert_called_once_with("abc")
+
     @patch("hitch.main.views.demo.cleanup_unregistered_demo_containers")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
@@ -4260,6 +4340,46 @@ class StartSessionDemoViewTests(TestCase):
         stale_workflow.refresh_from_db()
         self.assertEqual(stale_workflow.status, SystemWorkflow.STATUS_RUNNING)
 
+    @patch("hitch.main.views.demo.request_demo_start")
+    @patch("hitch.main.views.SystemWorkflow.objects.create")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_demo_workflow_integrity_error_rejects_before_mutating_demo_state(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        _mock_managed: MagicMock,
+        _mock_workflow: MagicMock,
+        mock_spawn: MagicMock,
+        mock_create_workflow: MagicMock,
+        mock_request_demo: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(cwd="/repo", turns=[])
+        )
+        mock_create_workflow.side_effect = IntegrityError(
+            "uniq_running_system_workflow"
+        )
+
+        response = self.client.post(
+            reverse("start_session_demo", kwargs={"session_id": "abc"})
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(
+            response,
+            "demo setup workflow is already running",
+            status_code=400,
+        )
+        mock_request_demo.assert_not_called()
+        mock_spawn.assert_not_called()
+        self.assertFalse(SessionDemo.objects.filter(thread_id="abc").exists())
+
     @patch("hitch.main.views.Codex")
     def test_system_sessions_lists_demo_run_without_hiding_user_session(
         self, mock_codex: MagicMock
@@ -4346,11 +4466,59 @@ class StartSessionDemoViewTests(TestCase):
         client._client.thread_resume.return_value = SimpleNamespace(
             thread=SimpleNamespace(cwd="/repo", turns=[])
         )
+        original_save = SystemWorkflow.save
 
-        response = self.client.post(reverse("start_session_demo", kwargs={"session_id": "abc"}))
+        def save_side_effect(
+            workflow: SystemWorkflow, *args: Any, **kwargs: Any
+        ) -> None:
+            if kwargs.get("update_fields") == ["status", "updated_at"]:
+                raise AssertionError("status failure should use queryset update")
+            original_save(workflow, *args, **kwargs)
+
+        with patch.object(SystemWorkflow, "save", autospec=True) as mock_save:
+            mock_save.side_effect = save_side_effect
+            response = self.client.post(
+                reverse("start_session_demo", kwargs={"session_id": "abc"})
+            )
 
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.content, b"no podman")
+        workflow = SystemWorkflow.objects.get(
+            kind=demo.DEMO_WORKFLOW_KIND,
+            main_thread_id="abc",
+        )
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_FAILED)
+
+    @patch("hitch.main.views.demo.request_demo_start", side_effect=RuntimeError("boom"))
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_fails_workflow_when_demo_start_raises_unexpected_error(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        _mock_managed: MagicMock,
+        _mock_workflow: MagicMock,
+        mock_spawn: MagicMock,
+        _mock_request_demo: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(cwd="/repo", turns=[])
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "boom"):
+            self.client.post(reverse("start_session_demo", kwargs={"session_id": "abc"}))
+
+        workflow = SystemWorkflow.objects.get(
+            kind=demo.DEMO_WORKFLOW_KIND,
+            main_thread_id="abc",
+        )
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_FAILED)
+        mock_spawn.assert_not_called()
 
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
