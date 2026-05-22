@@ -76,6 +76,7 @@ def _token_count_line(
     reasoning_output_tokens: int = 0,
     context_tokens: int = 0,
     model_context_window: int = 0,
+    timestamp: str = "2025-01-05T12:00:00Z",
 ) -> str:
     return _rollout_line(
         "event_msg",
@@ -95,6 +96,7 @@ def _token_count_line(
                 "model_context_window": model_context_window,
             },
         },
+        timestamp=timestamp,
     )
 
 
@@ -574,7 +576,10 @@ class IndexViewTests(TestCase):
         response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "113,456")
+        self.assertContains(response, "90K")
+        self.assertContains(response, "23K")
+        self.assertContains(response, "10K")
+        self.assertNotContains(response, "113,456")
         self.assertNotContains(response, "123,456")
         cache = ArchivedSessionTokenUsage.objects.get(thread_id="archived")
         self.assertEqual(cache.total_tokens, 123_456)
@@ -593,7 +598,10 @@ class IndexViewTests(TestCase):
 
         response = self.client.get(reverse("usage"))
 
-        self.assertContains(response, "909,999")
+        self.assertContains(response, "810K")
+        self.assertContains(response, "100K")
+        self.assertContains(response, "90K")
+        self.assertNotContains(response, "909,999")
         self.assertNotContains(response, "999,999")
         self.assertNotContains(response, "123,456")
         cache.refresh_from_db()
@@ -729,15 +737,27 @@ class IndexViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Lifetime")
-        self.assertContains(response, "All sessions")
         self.assertContains(response, "Sessions")
         self.assertContains(response, "HITCH system")
-        self.assertContains(response, "4,790")
-        self.assertContains(response, "3,790")
-        self.assertContains(response, "1,000")
-        self.assertContains(response, "1,350")
-        self.assertContains(response, "2,800")
-        self.assertContains(response, "350")
+        self.assertContains(
+            response,
+            '<div class="lifetime-stat" role="button" tabindex="0" aria-expanded="false">',
+            count=2,
+        )
+        self.assertContains(response, "Sessions token usage by date")
+        self.assertContains(response, "HITCH system token usage by date")
+        self.assertContains(
+            response,
+            '<span class="lifetime-chart-label">01-05</span>',
+            count=2,
+        )
+        self.assertContains(response, "1.2K")
+        self.assertContains(response, "2.1K")
+        self.assertContains(response, "250")
+        self.assertContains(response, "200")
+        self.assertContains(response, "700")
+        self.assertContains(response, "100")
+        self.assertNotContains(response, "All sessions")
         self.assertNotContains(response, "4,040")
         self.assertNotContains(response, "3,250")
         self.assertNotContains(response, "1,400")
@@ -746,6 +766,49 @@ class IndexViewTests(TestCase):
         client = mock_codex.return_value.__enter__.return_value
         client.thread_list.assert_any_call()
         client.thread_list.assert_any_call(archived=True)
+
+    def test_lifetime_human_token_formatter(self) -> None:
+        self.assertEqual(views._format_human_token_count(-1), "0")
+        self.assertEqual(views._format_human_token_count(999), "999")
+        self.assertEqual(views._format_human_token_count(1_500_000), "1.5M")
+        self.assertEqual(views._format_human_token_count(10_500_000), "11M")
+        self.assertEqual(views._format_human_token_count(1_000_000_000), "1B")
+
+    def test_lifetime_token_chart_formats_segments(self) -> None:
+        self.assertEqual(views._format_lifetime_token_chart({}), [])
+        self.assertEqual(views._chart_segment_percent(0, 100), 0)
+        self.assertEqual(views._chart_segment_percent(5, 0), 0)
+        self.assertEqual(views._chart_segment_percent(1, 1_000), 0)
+        self.assertEqual(
+            views._format_lifetime_token_chart(
+                {
+                    "2025-01-06": {"input": 50, "output": 50, "cached": 0},
+                    "2025-01-05": {"input": 100, "output": 50, "cached": 50},
+                }
+            ),
+            [
+                {
+                    "date": "2025-01-05",
+                    "input": "100",
+                    "output": "50",
+                    "cached": "50",
+                    "total": "200",
+                    "input_percent": 50,
+                    "output_percent": 25,
+                    "cached_percent": 25,
+                },
+                {
+                    "date": "2025-01-06",
+                    "input": "50",
+                    "output": "50",
+                    "cached": "0",
+                    "total": "100",
+                    "input_percent": 25,
+                    "output_percent": 25,
+                    "cached_percent": 0,
+                },
+            ],
+        )
 
     @patch("hitch.main.views.Codex")
     def test_usage_page_marks_lifetime_unavailable_when_session_list_fails(

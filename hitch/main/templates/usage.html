@@ -182,19 +182,31 @@
         }
         .lifetime-stats {
             display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
+            grid-template-columns: repeat(2, minmax(0, 1fr));
             gap: 0.65rem;
         }
         .lifetime-stat {
             display: flex;
             flex-direction: column;
-            gap: 0.1rem;
+            gap: 0.7rem;
+            width: 100%;
+            color: inherit;
+            font: inherit;
+            text-align: left;
             border: 1px solid var(--border);
             border-radius: var(--radius);
             background: var(--surface);
             box-shadow: var(--shadow);
             padding: 0.85rem 0.95rem;
             min-width: 0;
+            cursor: pointer;
+        }
+        .lifetime-stat:hover {
+            border-color: var(--border-strong);
+        }
+        .lifetime-stat:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
         }
         .lifetime-label {
             color: var(--text-faint);
@@ -203,7 +215,22 @@
             font-size: 0.66rem;
             font-weight: 600;
         }
+        .lifetime-breakdown {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.6rem;
+        }
+        .lifetime-metric {
+            min-width: 0;
+        }
+        .lifetime-metric-label {
+            display: block;
+            color: var(--text-muted);
+            font-size: 0.72rem;
+            line-height: 1.2;
+        }
         .lifetime-value {
+            display: block;
             color: var(--text);
             font-size: 1.15rem;
             font-weight: 650;
@@ -215,6 +242,73 @@
             color: var(--text-muted);
             font-size: 0.78rem;
         }
+        .lifetime-chart {
+            display: none;
+            border-top: 1px solid var(--border);
+            padding-top: 0.8rem;
+        }
+        .lifetime-stat.is-expanded .lifetime-chart {
+            display: block;
+        }
+        .lifetime-chart-bars {
+            display: flex;
+            align-items: end;
+            gap: 0.45rem;
+            height: 9rem;
+            overflow-x: auto;
+            padding-bottom: 0.2rem;
+        }
+        .lifetime-chart-day {
+            display: grid;
+            grid-template-rows: 1fr auto;
+            gap: 0.35rem;
+            min-width: 2.6rem;
+            height: 100%;
+        }
+        .lifetime-chart-stack {
+            display: flex;
+            flex-direction: column-reverse;
+            justify-content: end;
+            height: 100%;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: 6px 6px 3px 3px;
+            overflow: hidden;
+        }
+        .lifetime-chart-segment {
+            min-height: 0;
+        }
+        .lifetime-chart-segment.input { background: #4f8f66; }
+        .lifetime-chart-segment.output { background: #5278bd; }
+        .lifetime-chart-segment.cached { background: #b37a34; }
+        .lifetime-chart-label {
+            color: var(--text-faint);
+            font-size: 0.64rem;
+            line-height: 1.1;
+            text-align: center;
+            white-space: nowrap;
+        }
+        .lifetime-chart-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.45rem 0.7rem;
+            margin-top: 0.65rem;
+            color: var(--text-muted);
+            font-size: 0.72rem;
+        }
+        .lifetime-chart-legend-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
+        }
+        .lifetime-chart-swatch {
+            width: 0.55rem;
+            height: 0.55rem;
+            border-radius: 2px;
+        }
+        .lifetime-chart-swatch.input { background: #4f8f66; }
+        .lifetime-chart-swatch.output { background: #5278bd; }
+        .lifetime-chart-swatch.cached { background: #b37a34; }
         .rate-limit-list {
             display: flex;
             flex-direction: column;
@@ -293,6 +387,9 @@
             .lifetime-stats {
                 grid-template-columns: 1fr;
             }
+            .lifetime-breakdown {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
             .rate-limit-row-head {
                 align-items: flex-start;
                 flex-direction: column;
@@ -326,35 +423,81 @@
             </div>
             {% if lifetime_usage %}
             <div class="lifetime-stats" aria-label="Lifetime token usage">
-                <div class="lifetime-stat">
-                    <span class="lifetime-label">All sessions</span>
-                    <span class="lifetime-value">{{ lifetime_usage.total }}</span>
-                    <span class="lifetime-unit">tokens</span>
-                </div>
-                <div class="lifetime-stat">
+                <div class="lifetime-stat" role="button" tabindex="0" aria-expanded="false">
                     <span class="lifetime-label">Sessions</span>
-                    <span class="lifetime-value">{{ lifetime_usage.sessions_total }}</span>
-                    <span class="lifetime-unit">tokens</span>
+                    <div class="lifetime-breakdown">
+                        <span class="lifetime-metric">
+                            <span class="lifetime-metric-label">Input</span>
+                            <span class="lifetime-value">{{ lifetime_usage.sessions.input }}</span>
+                        </span>
+                        <span class="lifetime-metric">
+                            <span class="lifetime-metric-label">Output</span>
+                            <span class="lifetime-value">{{ lifetime_usage.sessions.output }}</span>
+                        </span>
+                        <span class="lifetime-metric">
+                            <span class="lifetime-metric-label">Cached</span>
+                            <span class="lifetime-value">{{ lifetime_usage.sessions.cached }}</span>
+                        </span>
+                    </div>
+                    {% if lifetime_usage.sessions.chart %}
+                    <div class="lifetime-chart" aria-label="Sessions token usage by date">
+                        <div class="lifetime-chart-bars">
+                            {% for day in lifetime_usage.sessions.chart %}
+                            <div class="lifetime-chart-day" title="{{ day.date }}: {{ day.total }} tokens">
+                                <div class="lifetime-chart-stack">
+                                    <span class="lifetime-chart-segment input" style="height: {{ day.input_percent }}%" title="Input {{ day.input }}"></span>
+                                    <span class="lifetime-chart-segment output" style="height: {{ day.output_percent }}%" title="Output {{ day.output }}"></span>
+                                    <span class="lifetime-chart-segment cached" style="height: {{ day.cached_percent }}%" title="Cached {{ day.cached }}"></span>
+                                </div>
+                                <span class="lifetime-chart-label">{{ day.date|slice:"5:" }}</span>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <div class="lifetime-chart-legend" aria-hidden="true">
+                            <span class="lifetime-chart-legend-item"><span class="lifetime-chart-swatch input"></span>Input</span>
+                            <span class="lifetime-chart-legend-item"><span class="lifetime-chart-swatch output"></span>Output</span>
+                            <span class="lifetime-chart-legend-item"><span class="lifetime-chart-swatch cached"></span>Cached</span>
+                        </div>
+                    </div>
+                    {% endif %}
                 </div>
-                <div class="lifetime-stat">
+                <div class="lifetime-stat" role="button" tabindex="0" aria-expanded="false">
                     <span class="lifetime-label">HITCH system</span>
-                    <span class="lifetime-value">{{ lifetime_usage.system_total }}</span>
-                    <span class="lifetime-unit">tokens</span>
-                </div>
-                <div class="lifetime-stat">
-                    <span class="lifetime-label">Input</span>
-                    <span class="lifetime-value">{{ lifetime_usage.input }}</span>
-                    <span class="lifetime-unit">tokens</span>
-                </div>
-                <div class="lifetime-stat">
-                    <span class="lifetime-label">Output</span>
-                    <span class="lifetime-value">{{ lifetime_usage.output }}</span>
-                    <span class="lifetime-unit">tokens</span>
-                </div>
-                <div class="lifetime-stat">
-                    <span class="lifetime-label">Cached</span>
-                    <span class="lifetime-value">{{ lifetime_usage.cached }}</span>
-                    <span class="lifetime-unit">tokens</span>
+                    <div class="lifetime-breakdown">
+                        <span class="lifetime-metric">
+                            <span class="lifetime-metric-label">Input</span>
+                            <span class="lifetime-value">{{ lifetime_usage.system.input }}</span>
+                        </span>
+                        <span class="lifetime-metric">
+                            <span class="lifetime-metric-label">Output</span>
+                            <span class="lifetime-value">{{ lifetime_usage.system.output }}</span>
+                        </span>
+                        <span class="lifetime-metric">
+                            <span class="lifetime-metric-label">Cached</span>
+                            <span class="lifetime-value">{{ lifetime_usage.system.cached }}</span>
+                        </span>
+                    </div>
+                    {% if lifetime_usage.system.chart %}
+                    <div class="lifetime-chart" aria-label="HITCH system token usage by date">
+                        <div class="lifetime-chart-bars">
+                            {% for day in lifetime_usage.system.chart %}
+                            <div class="lifetime-chart-day" title="{{ day.date }}: {{ day.total }} tokens">
+                                <div class="lifetime-chart-stack">
+                                    <span class="lifetime-chart-segment input" style="height: {{ day.input_percent }}%" title="Input {{ day.input }}"></span>
+                                    <span class="lifetime-chart-segment output" style="height: {{ day.output_percent }}%" title="Output {{ day.output }}"></span>
+                                    <span class="lifetime-chart-segment cached" style="height: {{ day.cached_percent }}%" title="Cached {{ day.cached }}"></span>
+                                </div>
+                                <span class="lifetime-chart-label">{{ day.date|slice:"5:" }}</span>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        <div class="lifetime-chart-legend" aria-hidden="true">
+                            <span class="lifetime-chart-legend-item"><span class="lifetime-chart-swatch input"></span>Input</span>
+                            <span class="lifetime-chart-legend-item"><span class="lifetime-chart-swatch output"></span>Output</span>
+                            <span class="lifetime-chart-legend-item"><span class="lifetime-chart-swatch cached"></span>Cached</span>
+                        </div>
+                    </div>
+                    {% endif %}
                 </div>
             </div>
             {% else %}
@@ -405,6 +548,19 @@
     {% include "_settings_dialog.html" %}
     <script>
         (function () {
+            document.querySelectorAll(".lifetime-stat").forEach((tile) => {
+                function toggleTile() {
+                    const expanded = tile.classList.toggle("is-expanded");
+                    tile.setAttribute("aria-expanded", expanded ? "true" : "false");
+                }
+                tile.addEventListener("click", toggleTile);
+                tile.addEventListener("keydown", (event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return;
+                    event.preventDefault();
+                    toggleTile();
+                });
+            });
+
             const relative = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
             const units = [
                 ["year", 31536000],

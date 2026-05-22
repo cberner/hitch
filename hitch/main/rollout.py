@@ -106,6 +106,46 @@ def latest_token_usage(rollout_path: Path) -> dict[str, int] | None:
     }
 
 
+def token_usage_history(rollout_path: Path) -> list[dict[str, int]]:
+    """Return cumulative token counts for every timestamped token_count event."""
+    try:
+        text = rollout_path.read_text()
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning("failed to read rollout %s: %s", rollout_path, exc)
+        return []
+    history: list[dict[str, int]] = []
+    for raw in text.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        timestamp = _iso_to_unix_seconds(entry.get("timestamp"))
+        if timestamp is None or entry.get("type") != "event_msg":
+            continue
+        payload = entry.get("payload") or {}
+        if payload.get("type") != "token_count":
+            continue
+        info = payload.get("info")
+        if not isinstance(info, dict):
+            continue
+        total = info.get("total_token_usage")
+        if not isinstance(total, dict):
+            continue
+        history.append(
+            {
+                "timestamp": timestamp,
+                "input_tokens": _coerce_int(total.get("input_tokens")),
+                "cached_input_tokens": _coerce_int(total.get("cached_input_tokens")),
+                "output_tokens": _coerce_int(total.get("output_tokens")),
+                "total_tokens": _coerce_int(total.get("total_tokens")),
+            }
+        )
+    return history
+
+
 def _coerce_int(value: Any) -> int:
     if isinstance(value, bool):
         return 0
