@@ -2026,180 +2026,89 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
-    def test_auto_pr_override_marks_new_session_and_spawn(
+    def test_new_session_auto_pr_precedence_matrix(
         self,
         mock_discover: MagicMock,
         mock_spawn: MagicMock,
         mock_codex: MagicMock,
     ) -> None:
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
         _setup_codex(mock_codex, models=[])
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={"prompt": "do thing", "cwd": self.REPO, "auto_pr": "true"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
-        self.assertTrue(metadata.auto_pr_enabled)
-        mock_spawn.assert_called_once_with(
-            cwd=self.REPO,
-            prompt="do thing",
-            developer_instructions=None,
-            model=None,
-            reasoning_effort=None,
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            auto_pr_enabled=True,
-        )
-
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
-    def test_new_session_auto_pr_override_can_disable_global_setting(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
-        _setup_codex(mock_codex, models=[])
-        _seed_cookies(self.client, **{_AUTO_PR_COOKIE: "true"})
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={"prompt": "do thing", "cwd": self.REPO, "auto_pr": "false"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
-        self.assertFalse(metadata.auto_pr_enabled)
-        mock_spawn.assert_called_once_with(
-            cwd=self.REPO,
-            prompt="do thing",
-            developer_instructions=None,
-            model=None,
-            reasoning_effort=None,
-            sandbox_policy=None,
-            approval_mode="auto_review",
-        )
-
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
-    def test_project_auto_pr_on_sets_new_session_default(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        project = Project.objects.create(
-            name="Hitch",
-            repo_path=self.REPO,
-            auto_pr_mode=Project.AUTO_PR_ON,
-        )
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
-        _setup_codex(mock_codex, models=[])
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={"prompt": "do thing", "project": str(project.pk)},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
-        self.assertTrue(metadata.auto_pr_enabled)
-        mock_spawn.assert_called_once_with(
-            cwd=self.REPO,
-            prompt="do thing",
-            developer_instructions=None,
-            model=None,
-            reasoning_effort=None,
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            auto_pr_enabled=True,
-        )
-
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
-    def test_project_auto_pr_off_overrides_global_new_session_default(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        project = Project.objects.create(
-            name="Hitch",
-            repo_path=self.REPO,
-            auto_pr_mode=Project.AUTO_PR_OFF,
-        )
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
-        _setup_codex(mock_codex, models=[])
-        _seed_cookies(self.client, **{_AUTO_PR_COOKIE: "true"})
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={"prompt": "do thing", "project": str(project.pk)},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
-        self.assertFalse(metadata.auto_pr_enabled)
-        mock_spawn.assert_called_once_with(
-            cwd=self.REPO,
-            prompt="do thing",
-            developer_instructions=None,
-            model=None,
-            reasoning_effort=None,
-            sandbox_policy=None,
-            approval_mode="auto_review",
-        )
-
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
-    def test_new_session_auto_pr_override_can_disable_project_setting(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        project = Project.objects.create(
-            name="Hitch",
-            repo_path=self.REPO,
-            auto_pr_mode=Project.AUTO_PR_ON,
-        )
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
-        _setup_codex(mock_codex, models=[])
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={
-                "prompt": "do thing",
-                "project": str(project.pk),
-                "auto_pr": "false",
+        cases: list[dict[str, Any]] = [
+            {
+                "name": "posted override enables bare repo",
+                "post_auto_pr": "true",
+                "expected": True,
             },
-        )
+            {
+                "name": "posted override disables global setting",
+                "global_auto_pr": "true",
+                "post_auto_pr": "false",
+                "expected": False,
+            },
+            {
+                "name": "project on sets default",
+                "project_auto_pr_mode": Project.AUTO_PR_ON,
+                "expected": True,
+            },
+            {
+                "name": "project off overrides global setting",
+                "global_auto_pr": "true",
+                "project_auto_pr_mode": Project.AUTO_PR_OFF,
+                "expected": False,
+            },
+            {
+                "name": "posted override disables project setting",
+                "project_auto_pr_mode": Project.AUTO_PR_ON,
+                "post_auto_pr": "false",
+                "expected": False,
+            },
+        ]
 
-        self.assertEqual(response.status_code, 302)
-        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
-        self.assertFalse(metadata.auto_pr_enabled)
-        mock_spawn.assert_called_once_with(
-            cwd=self.REPO,
-            prompt="do thing",
-            developer_instructions=None,
-            model=None,
-            reasoning_effort=None,
-            sandbox_policy=None,
-            approval_mode="auto_review",
-        )
+        for index, case in enumerate(cases):
+            with self.subTest(case["name"]):
+                client = Client()
+                thread_id = f"thread-{index}"
+                repo = (
+                    f"{self.REPO}-{index}"
+                    if "project_auto_pr_mode" in case
+                    else self.REPO
+                )
+                data = {"prompt": "do thing"}
+                project_auto_pr_mode = case.get("project_auto_pr_mode")
+                if project_auto_pr_mode is None:
+                    data["cwd"] = repo
+                else:
+                    project = Project.objects.create(
+                        name=f"Hitch {index}",
+                        repo_path=repo,
+                        auto_pr_mode=project_auto_pr_mode,
+                    )
+                    data["project"] = str(project.pk)
+                if "post_auto_pr" in case:
+                    data["auto_pr"] = case["post_auto_pr"]
+                if "global_auto_pr" in case:
+                    _seed_cookies(client, **{_AUTO_PR_COOKIE: case["global_auto_pr"]})
+                mock_discover.return_value = [Path(repo)]
+                mock_spawn.return_value = SimpleNamespace(thread_id=thread_id)
+                mock_spawn.reset_mock()
+
+                response = client.post(reverse("new_session"), data=data)
+
+                self.assertEqual(response.status_code, 302)
+                metadata = SessionMetadata.objects.get(thread_id=thread_id)
+                self.assertEqual(metadata.auto_pr_enabled, case["expected"])
+                expected_spawn: dict[str, Any] = {
+                    "cwd": repo,
+                    "prompt": "do thing",
+                    "developer_instructions": None,
+                    "model": None,
+                    "reasoning_effort": None,
+                    "sandbox_policy": None,
+                    "approval_mode": "auto_review",
+                }
+                if case["expected"]:
+                    expected_spawn["auto_pr_enabled"] = True
+                mock_spawn.assert_called_once_with(**expected_spawn)
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
