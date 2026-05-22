@@ -323,6 +323,9 @@
                 </div>
                 {% if current_project %}
                 <div class="page-header-actions">
+                    {% if standing_orders %}
+                    <button type="button" class="button secondary" data-create-standing-order-open>New order</button>
+                    {% endif %}
                     <form method="post" action="{{ standing_order_run_all_url }}">
                         {% csrf_token %}
                         <button type="submit" class="button"{% if not standing_orders %} disabled{% endif %}>Run all</button>
@@ -395,41 +398,6 @@
             {% endif %}
         </section>
 
-        <section class="section" aria-labelledby="create-standing-order-title">
-            <p class="section-label">Create</p>
-            <h2 id="create-standing-order-title" hidden>Create standing order</h2>
-            <form class="form" method="post" action="{{ standing_order_create_url }}">
-                {% csrf_token %}
-                <label>
-                    Title
-                    <input type="text" name="title" maxlength="{{ title_max_len }}" required autocomplete="off">
-                </label>
-                <label>
-                    Goal
-                    <textarea name="goal" required></textarea>
-                </label>
-                <label>
-                    Ambition
-                    <select name="ambition" required>
-                        {% for value, label in ambition_choices %}
-                        <option value="{{ value }}"{% if value == default_ambition %} selected{% endif %}>{{ label }}</option>
-                        {% endfor %}
-                    </select>
-                </label>
-                <label>
-                    Confidence threshold
-                    <select name="confidence_threshold" required>
-                        {% for value, label in confidence_choices %}
-                        <option value="{{ value }}"{% if value == default_confidence %} selected{% endif %}>{{ label }}</option>
-                        {% endfor %}
-                    </select>
-                </label>
-                <div class="actions">
-                    <button type="submit" class="button">Create standing order</button>
-                </div>
-            </form>
-        </section>
-
         <section class="section" aria-labelledby="standing-order-list-title">
             <p class="section-label">Orders</p>
             <h2 id="standing-order-list-title" hidden>Orders</h2>
@@ -470,14 +438,31 @@
                 {% endfor %}
             </ul>
             {% else %}
-            <div class="empty">
-                <p>No standing orders yet.</p>
-            </div>
+            <form class="form" method="post" action="{{ standing_order_create_url }}" data-standing-order-create-form>
+                {% csrf_token %}
+                {% include "_standing_order_form_fields.html" %}
+                <div class="actions">
+                    <button type="submit" class="button">Create standing order</button>
+                </div>
+            </form>
             {% endif %}
         </section>
         {% endif %}
     </main>
     {% include "_settings_dialog.html" %}
+    {% if current_project and standing_orders %}
+    <dialog class="new-session" data-create-standing-order-dialog aria-labelledby="create-standing-order-dialog-title">
+        <form method="post" action="{{ standing_order_create_url }}" data-standing-order-create-form>
+            {% csrf_token %}
+            <h2 id="create-standing-order-dialog-title">Create standing order</h2>
+            {% include "_standing_order_form_fields.html" with title_input_attrs="data-create-standing-order-title" %}
+            <div class="actions">
+                <button type="button" class="button secondary" data-create-standing-order-cancel>Cancel</button>
+                <button type="submit" class="button">Create standing order</button>
+            </div>
+        </form>
+    </dialog>
+    {% endif %}
     <dialog class="new-session" data-new-session-dialog aria-labelledby="new-session-title">
         <form method="post" action="{{ new_session_url }}">
             {% csrf_token %}
@@ -618,6 +603,10 @@
             const editOrderAmbition = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-ambition]");
             const editOrderConfidence = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-confidence-threshold]");
             const editOrderCancel = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-cancel]");
+            const createOrderDialog = document.querySelector("[data-create-standing-order-dialog]");
+            const createOrderOpen = document.querySelector("[data-create-standing-order-open]");
+            const createOrderTitle = createOrderDialog && createOrderDialog.querySelector("[data-create-standing-order-title]");
+            const createOrderCancel = createOrderDialog && createOrderDialog.querySelector("[data-create-standing-order-cancel]");
             const newSessionDialog = document.querySelector("[data-new-session-dialog]");
             const newSessionForm = newSessionDialog && newSessionDialog.querySelector("form");
             const newSessionInput = newSessionForm && newSessionForm.querySelector("textarea[name='prompt']");
@@ -658,6 +647,13 @@
                 newSessionProjectSelect.addEventListener("change", syncNewSessionProjectFields);
             }
             if (newSessionCancel) newSessionCancel.addEventListener("click", () => hideDialog(newSessionDialog));
+            if (createOrderOpen) {
+                createOrderOpen.addEventListener("click", () => {
+                    showDialog(createOrderDialog);
+                    if (createOrderTitle) createOrderTitle.focus();
+                });
+            }
+            if (createOrderCancel) createOrderCancel.addEventListener("click", () => hideDialog(createOrderDialog));
             for (const button of document.querySelectorAll("[data-standing-order-edit]")) {
                 button.addEventListener("click", () => {
                     if (!editOrderForm) return;
