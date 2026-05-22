@@ -3377,67 +3377,7 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
-    def test_forwards_sandbox_policy_cookie_to_spawn_turn(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        """Sandbox policy is applied per-turn, not persisted on the thread,
-        so follow-up messages must re-forward the cookie or every turn
-        after the first silently reverts to Codex defaults — which breaks
-        multi-turn workflows that depend on elevated permissions."""
-        self._patch_codex(mock_codex)
-        mock_discover.return_value = [Path("/repo")]
-        _seed_cookies(self.client, hitch_sandbox_policy="workspaceWrite")
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "follow-up"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt="follow-up",
-            sandbox_policy="workspaceWrite",
-            approval_mode="auto_review",
-        )
-
-    @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
-    def test_invalid_sandbox_cookie_is_treated_as_empty(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        """A tampered or post-SDK-upgrade cookie value must fall through to
-        ``None`` rather than ride a bogus string into the worker."""
-        self._patch_codex(mock_codex)
-        mock_discover.return_value = [Path("/repo")]
-        _seed_cookies(self.client, hitch_sandbox_policy="phantomPolicy")
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "follow-up"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt="follow-up",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-        )
-
-    @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
-    def test_forwards_memories_cookie_to_spawn_turn(
+    def test_forwards_follow_up_cookie_options_to_spawn_turn(
         self,
         mock_codex: MagicMock,
         mock_spawn: MagicMock,
@@ -3445,42 +3385,48 @@ class SendMessageViewTests(TestCase):
     ) -> None:
         self._patch_codex(mock_codex)
         mock_discover.return_value = [Path("/repo")]
-        _seed_cookies(self.client, **{_ENABLE_MEMORIES_COOKIE: "true"})
+        cases: list[tuple[str, dict[str, str], dict[str, object]]] = [
+            (
+                "sandbox policy",
+                {"hitch_sandbox_policy": "workspaceWrite"},
+                {"sandbox_policy": "workspaceWrite", "approval_mode": "auto_review"},
+            ),
+            (
+                "invalid sandbox policy",
+                {"hitch_sandbox_policy": "phantomPolicy"},
+                {"sandbox_policy": None, "approval_mode": "auto_review"},
+            ),
+            (
+                "memories",
+                {_ENABLE_MEMORIES_COOKIE: "true"},
+                {
+                    "sandbox_policy": None,
+                    "approval_mode": "auto_review",
+                    "enable_memories": True,
+                },
+            ),
+            (
+                "deny all approval mode",
+                {"hitch_approval_mode": "deny_all"},
+                {"sandbox_policy": None, "approval_mode": "deny_all"},
+            ),
+            (
+                "prompt user approval mode",
+                {"hitch_approval_mode": "prompt_user"},
+                {"sandbox_policy": None, "approval_mode": "prompt_user"},
+            ),
+            (
+                "invalid approval mode",
+                {"hitch_approval_mode": "phantomMode"},
+                {"sandbox_policy": None, "approval_mode": "auto_review"},
+            ),
+        ]
 
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "follow-up"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt="follow-up",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            enable_memories=True,
-        )
-
-    @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
-    def test_forwards_approval_mode_cookie_to_spawn_turn(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        """Approval mode is applied per-turn just like sandbox policy, so
-        the cookie has to ride into every follow-up turn or an explicit
-        stricter/user-prompting choice silently reverts to the SDK default."""
-        self._patch_codex(mock_codex)
-        mock_discover.return_value = [Path("/repo")]
-
-        for mode in ("deny_all", "prompt_user"):
-            with self.subTest(mode=mode):
+        for label, cookies, expected_options in cases:
+            with self.subTest(label=label):
+                self.client.cookies.clear()
                 mock_spawn.reset_mock()
-                _seed_cookies(self.client, hitch_approval_mode=mode)
+                _seed_cookies(self.client, **cookies)
 
                 response = self.client.post(
                     reverse("send_message", kwargs={"session_id": "abc"}),
@@ -3492,8 +3438,7 @@ class SendMessageViewTests(TestCase):
                     thread_id="abc",
                     cwd="/repo",
                     prompt="follow-up",
-                    sandbox_policy=None,
-                    approval_mode=mode,
+                    **expected_options,
                 )
 
     @patch("hitch.main.views.discover_repos")
@@ -4158,36 +4103,6 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertContains(response, "plan mode requires a model", status_code=400)
         mock_spawn.assert_not_called()
-
-    @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
-    def test_invalid_approval_cookie_falls_back_to_safe_default(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        """A tampered or post-SDK-upgrade cookie value must snap back to
-        the safe default rather than ride a bogus string into the worker
-        (which would map to ``None`` and silently drop the policy)."""
-        self._patch_codex(mock_codex)
-        mock_discover.return_value = [Path("/repo")]
-        _seed_cookies(self.client, hitch_approval_mode="phantomMode")
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "follow-up"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt="follow-up",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-        )
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
