@@ -1544,3 +1544,53 @@ class StandingOrderWorkflowTests(TestCase):
         )
 
         self.assertNotIn("candidate-thread", system_agents.hidden_thread_ids())
+
+    def test_proposed_session_accepted_into_new_thread_keeps_candidate_hidden(
+        self,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo",
+            project=project,
+        )
+        accepted = SessionMetadata.objects.create(
+            thread_id="implementation-thread",
+            cwd="/repo",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+        )
+        instance = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            thread_id="candidate-thread",
+            instance=instance,
+        )
+        ProposedSession.objects.create(
+            standing_order=standing_order,
+            candidate_session=candidate,
+            accepted_session=accepted,
+            title="Add parser coverage",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        )
+
+        hidden_ids = system_agents.hidden_thread_ids()
+        self.assertIn("candidate-thread", hidden_ids)
+        self.assertNotIn("implementation-thread", hidden_ids)
