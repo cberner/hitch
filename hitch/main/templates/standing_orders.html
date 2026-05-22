@@ -389,6 +389,14 @@
                     <textarea name="goal" required></textarea>
                 </label>
                 <label>
+                    Ambition
+                    <select name="ambition" required>
+                        {% for value, label in ambition_choices %}
+                        <option value="{{ value }}"{% if value == default_ambition %} selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </label>
+                <label>
                     Confidence threshold
                     <select name="confidence_threshold" required>
                         {% for value, label in confidence_choices %}
@@ -412,6 +420,7 @@
                     <h3>{{ order.title }}</h3>
                     <p>{{ order.goal }}</p>
                     <div class="order-meta">
+                        <span class="meta">Ambition: {{ order.get_ambition_display }}</span>
                         <span class="meta">Threshold: {{ order.get_confidence_threshold_display }}</span>
                         {% if order.latest_workflow %}
                         <span class="meta">Last run: {{ order.latest_workflow.get_status_display }}</span>

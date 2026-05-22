@@ -1201,6 +1201,7 @@ class StandingOrderWorkflowTests(TestCase):
             project=project,
             title="Keep docs current",
             goal="Find small documentation improvements.",
+            ambition=StandingOrder.AMBITION_HIGH,
             confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
         )
         mock_spawn.return_value = _instance(
@@ -1220,6 +1221,7 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertEqual(kwargs["agent_kind"], system_agents.STANDING_ORDER_AGENT_KIND)
         self.assertEqual(kwargs["display_author"], system_agents.STANDING_ORDER_DISPLAY_AUTHOR)
         self.assertIn("Keep docs current", kwargs["prompt"])
+        self.assertIn("make high progress", kwargs["prompt"])
         self.assertTrue(
             SessionMetadata.objects.filter(thread_id="candidate-thread").exists()
         )

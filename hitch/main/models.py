@@ -170,6 +170,17 @@ class ProposedTask(models.Model):
 class StandingOrder(models.Model):
     """A project-scoped recurring goal that can propose Codex sessions."""
 
+    AMBITION_INCREMENTAL = "incremental"
+    AMBITION_MEDIUM = "medium"
+    AMBITION_HIGH = "high"
+    AMBITION_YOLO = "yolo"
+    AMBITION_CHOICES: ClassVar[tuple[tuple[str, str], ...]] = (
+        (AMBITION_INCREMENTAL, "Incremental"),
+        (AMBITION_MEDIUM, "Medium"),
+        (AMBITION_HIGH, "High"),
+        (AMBITION_YOLO, "YOLO"),
+    )
+
     CONFIDENCE_MEDIUM = "medium"
     CONFIDENCE_HIGH = "high"
     CONFIDENCE_VERY_HIGH = "very_high"
@@ -186,6 +197,11 @@ class StandingOrder(models.Model):
     )
     title = models.CharField(max_length=200)
     goal = models.TextField()
+    ambition = models.CharField(
+        max_length=32,
+        choices=AMBITION_CHOICES,
+        default=AMBITION_INCREMENTAL,
+    )
     confidence_threshold = models.CharField(
         max_length=32,
         choices=CONFIDENCE_CHOICES,
