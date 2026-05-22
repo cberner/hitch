@@ -5269,6 +5269,57 @@ class StandingOrderViewTests(TestCase):
         self.assertContains(response, 'data-standing-order-edit')
         self.assertNotContains(response, "Other order")
 
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_page_shows_create_form_inline_when_no_orders(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+
+        response = self.client.get(reverse("standing_orders"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-standing-order-create-form')
+        self.assertContains(response, "Create standing order")
+        self.assertNotContains(response, "No standing orders yet.")
+        self.assertNotContains(
+            response,
+            '<button type="button" class="button secondary" data-create-standing-order-open>',
+        )
+        self.assertNotContains(
+            response,
+            '<dialog class="new-session" data-create-standing-order-dialog',
+        )
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_page_moves_create_form_to_header_dialog_when_orders_exist(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+
+        response = self.client.get(reverse("standing_orders"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            '<button type="button" class="button secondary" data-create-standing-order-open>',
+        )
+        self.assertContains(
+            response,
+            '<dialog class="new-session" data-create-standing-order-dialog',
+        )
+        self.assertNotContains(response, '<p class="section-label">Create</p>')
+
     def test_create_standing_order_for_selected_project(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))

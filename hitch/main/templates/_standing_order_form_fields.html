@@ -1,0 +1,24 @@
+<label>
+    Title
+    <input type="text" name="title" maxlength="{{ title_max_len }}" required autocomplete="off"{% if title_input_attrs %} {{ title_input_attrs }}{% endif %}>
+</label>
+<label>
+    Goal
+    <textarea name="goal" required></textarea>
+</label>
+<label>
+    Ambition
+    <select name="ambition" required>
+        {% for value, label in ambition_choices %}
+        <option value="{{ value }}"{% if value == default_ambition %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+    </select>
+</label>
+<label>
+    Confidence threshold
+    <select name="confidence_threshold" required>
+        {% for value, label in confidence_choices %}
+        <option value="{{ value }}"{% if value == default_confidence %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+    </select>
+</label>
