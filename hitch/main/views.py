@@ -1315,6 +1315,9 @@ def _render_session_detail(
     _mark_proposed_tasks_pr_opened(session_id, pr_url)
     active_instance = _active_instance_for(session_id)
     show_active_worker_transcript = _show_active_worker_transcript(active_instance)
+    active_demo_worker = (
+        active_instance is not None and active_instance.agent_kind == demo.DEMO_AGENT_KIND
+    )
     active_system_workflow = system_agents.active_workflow_for_thread(session_id)
     # While a worker is running, drop the entries that belong to its
     # in-progress turn — the SSE stream replays them from byte 0 of the
@@ -1387,6 +1390,7 @@ def _render_session_detail(
                 "resolve_input_request", kwargs={"input_id": 0}
             ),
             "active_worker": active_instance is not None,
+            "active_demo_worker": active_demo_worker,
             "show_active_worker_transcript": show_active_worker_transcript,
             "active_system_workflow": active_system_workflow,
             "demo_start_disabled": (

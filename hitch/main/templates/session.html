@@ -237,6 +237,49 @@
         }
 
         .session-body { min-width: 0; }
+        .session-tab-input {
+            position: absolute;
+            opacity: 0;
+            pointer-events: none;
+        }
+        .session-tab-list {
+            display: inline-flex;
+            gap: 0.25rem;
+            margin: 0 0 0.85rem;
+            padding: 0.2rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--surface-2);
+        }
+        .session-tab {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 2rem;
+            padding: 0.35rem 0.75rem;
+            border-radius: 6px;
+            color: var(--text-muted);
+            font-size: 0.84rem;
+            font-weight: 600;
+            cursor: pointer;
+            user-select: none;
+        }
+        .session-tab-input:focus-visible + .session-tab-input + .session-tab-list .session-tab:first-child,
+        .session-tab-input + .session-tab-input:focus-visible + .session-tab-list .session-tab:last-child {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+        }
+        #session-tab-conversation:checked ~ .session-tab-list .session-tab[for="session-tab-conversation"],
+        #session-tab-demo-agent:checked ~ .session-tab-list .session-tab[for="session-tab-demo-agent"] {
+            background: var(--surface);
+            color: var(--text);
+            box-shadow: var(--shadow);
+        }
+        .session-tab-panel { display: none; }
+        #session-tab-conversation:checked ~ #session-panel-conversation,
+        #session-tab-demo-agent:checked ~ #session-panel-demo-agent {
+            display: block;
+        }
         .session-head { margin: 0.25rem 0 1.25rem; }
         .meta {
             color: var(--text-muted);
@@ -1924,9 +1967,18 @@
         </div>
 
         <div class="session-body">
+        {% if active_demo_worker %}
+        <input class="session-tab-input" type="radio" name="session-tab" id="session-tab-conversation">
+        <input class="session-tab-input" type="radio" name="session-tab" id="session-tab-demo-agent" checked>
+        <div class="session-tab-list" role="tablist" aria-label="Session views">
+            <label class="session-tab" for="session-tab-conversation" role="tab">Conversation</label>
+            <label class="session-tab" for="session-tab-demo-agent" role="tab">Demo agent</label>
+        </div>
+        <div class="session-tab-panel" id="session-panel-conversation" role="tabpanel" aria-labelledby="session-tab-conversation">
+        {% endif %}
         {% if system_prompt or entries or pending_user_prompt or active_worker or session_demo %}
         <section class="thread" data-thread>
-            {% if session_demo %}
+            {% if session_demo and not active_demo_worker %}
             <details class="demo-status" {% if session_demo.status != "active" %}open{% endif %}>
                 <summary>Demo {{ session_demo.status }}</summary>
                 <div class="demo-status-body">
@@ -1962,11 +2014,13 @@
                 </div>
             </div>
             {% endif %}
-            {% if active_worker %}
+            {% if active_worker and not active_demo_worker %}
             <div class="entry"
                  data-live-root
                  data-active-author="{{ pending_user_author }}"
                  data-hide-transcript="{{ show_active_worker_transcript|yesno:'false,true' }}"
+                 data-hide-user-message="false"
+                 data-sanitize-live-details="false"
                  data-read-only="{{ read_only|yesno:'true,false' }}"
                  data-approval-url-template="{{ approval_url_template }}"
                  data-input-url-template="{{ input_url_template }}"></div>
@@ -1975,6 +2029,34 @@
         {% else %}
         <div class="empty-thread">
             <p>No messages in this session yet.</p>
+        </div>
+        {% endif %}
+        {% if active_demo_worker %}
+        </div>
+        <div class="session-tab-panel" id="session-panel-demo-agent" role="tabpanel" aria-labelledby="session-tab-demo-agent">
+            <section class="thread" data-demo-agent-thread>
+                {% if session_demo %}
+                <details class="demo-status" open>
+                    <summary>Demo {{ session_demo.status }}</summary>
+                    <div class="demo-status-body">
+                        <div class="demo-attempt">
+                            {% if session_demo.container_name %}<div class="demo-attempt-meta">{{ session_demo.container_name }}</div>{% endif %}
+                            {% if session_demo.last_error %}<div class="demo-attempt-meta">{{ session_demo.last_error }}</div>{% endif %}
+                            {% if session_demo.logs %}<pre>{{ session_demo.logs }}</pre>{% endif %}
+                        </div>
+                    </div>
+                </details>
+                {% endif %}
+                <div class="entry"
+                     data-live-root
+                     data-active-author="{{ pending_user_author }}"
+                     data-hide-transcript="false"
+                     data-hide-user-message="true"
+                     data-sanitize-live-details="true"
+                     data-read-only="{{ read_only|yesno:'true,false' }}"
+                     data-approval-url-template="{{ approval_url_template }}"
+                     data-input-url-template="{{ input_url_template }}"></div>
+            </section>
         </div>
         {% endif %}
         </div>
@@ -2743,6 +2825,8 @@
             const liveRoot = document.querySelector("[data-live-root]");
             const READ_ONLY = liveRoot && liveRoot.dataset.readOnly === "true";
             const HIDE_LIVE_TRANSCRIPT = liveRoot && liveRoot.dataset.hideTranscript === "true";
+            const HIDE_LIVE_USER_MESSAGE = liveRoot && liveRoot.dataset.hideUserMessage === "true";
+            const SANITIZE_LIVE_DETAILS = liveRoot && liveRoot.dataset.sanitizeLiveDetails === "true";
             // The Django ``resolve_approval`` URL is templated with a
             // placeholder pk of ``0`` server-side; the JS swaps in the
             // real ApprovalRequest id when a decision is posted.
@@ -2892,6 +2976,12 @@
                     return "Demo setup file change approval requested.";
                 }
                 return "Demo setup approval requested.";
+            }
+
+            function sanitizedToolDetail(type) {
+                if (type === "commandExecution") return "Demo setup command";
+                if (type === "fileChange") return "Demo setup file change";
+                return "";
             }
 
             function ensureNoEmpty() {
@@ -3220,6 +3310,10 @@
             }
 
             function toolDetail(item) {
+                if (SANITIZE_LIVE_DETAILS) {
+                    const sanitized = sanitizedToolDetail(item.type);
+                    if (sanitized) return sanitized;
+                }
                 switch (item.type) {
                     case "commandExecution": return item.command || "";
                     case "mcpToolCall": return (item.server || "") + " / " + (item.tool || "");
@@ -3241,7 +3335,9 @@
                 if (!item.id || items.has(item.id)) return;
                 if (HIDE_LIVE_TRANSCRIPT) return;
                 switch (item.type) {
-                    case "userMessage": renderUserItem(item); break;
+                    case "userMessage":
+                        if (!HIDE_LIVE_USER_MESSAGE) renderUserItem(item);
+                        break;
                     case "agentMessage": renderAgentItem(item); break;
                     case "plan": renderPlanItem(item, payload.turnId); break;
                     default: renderToolCallItem(item); break;
@@ -3272,6 +3368,7 @@
             function handleItemCompleted(payload) {
                 const item = payload.item || {};
                 if (HIDE_LIVE_TRANSCRIPT) return;
+                if (HIDE_LIVE_USER_MESSAGE && item.type === "userMessage") return;
                 const entry = items.get(item.id);
                 if (!entry) {
                     // Item that completed without a prior started event —
@@ -3395,7 +3492,7 @@
                 box.appendChild(header);
                 const detail = document.createElement("div");
                 detail.className = "approval-detail";
-                detail.textContent = HIDE_LIVE_TRANSCRIPT
+                detail.textContent = HIDE_LIVE_TRANSCRIPT || SANITIZE_LIVE_DETAILS
                     ? hiddenTranscriptApprovalDetail(payload.method)
                     : approvalDetail(payload.method, payload.params);
                 box.appendChild(detail);
