@@ -11,7 +11,7 @@ import os
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, call, patch
 
 from django.contrib.auth import get_user_model
@@ -4186,6 +4186,14 @@ class StartSessionDemoViewTests(TestCase):
         session_demo = SessionDemo.objects.get(thread_id="abc")
         self.assertTrue(session_demo.registration_token)
         self.assertEqual(spawned_instances[0].agent_kind, demo.DEMO_AGENT_KIND)
+        workflow = SystemWorkflow.objects.get(
+            kind=demo.DEMO_WORKFLOW_KIND,
+            main_thread_id="abc",
+        )
+        run = SystemAgentRun.objects.get(workflow=workflow)
+        self.assertEqual(run.agent_kind, demo.DEMO_AGENT_KIND)
+        self.assertEqual(run.thread_id, "abc")
+        self.assertEqual(run.instance, spawned_instances[0])
 
     @patch("hitch.main.views.demo.cleanup_demo_for_session")
     @patch("hitch.main.views.codex_pool.spawn_turn", side_effect=RuntimeError("spawn failed"))
@@ -4211,6 +4219,152 @@ class StartSessionDemoViewTests(TestCase):
             self.client.post(reverse("start_session_demo", kwargs={"session_id": "abc"}))
 
         mock_cleanup.assert_called_once_with("abc")
+
+    @patch("hitch.main.views.demo.cleanup_unregistered_demo_containers")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_requests_demo_agent_turn_tolerates_existing_system_run(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        _mock_managed: MagicMock,
+        _mock_workflow: MagicMock,
+        mock_spawn: MagicMock,
+        _mock_cleanup: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(cwd="/repo", turns=[])
+        )
+
+        def spawn_side_effect(**kwargs: object) -> CodexInstance:
+            workflow_id = cast(int, kwargs["workflow_id"])
+            instance = CodexInstance.objects.create(
+                thread_id="abc",
+                cwd="/repo",
+                prompt="demo",
+                events_path="/tmp/events.jsonl",
+                status=CodexInstance.STATUS_COMPLETED,
+                pid=123,
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                workflow_id=workflow_id,
+                agent_kind=demo.DEMO_AGENT_KIND,
+            )
+            workflow = SystemWorkflow.objects.get(pk=workflow_id)
+            SystemAgentRun.objects.create(
+                workflow=workflow,
+                agent_kind=demo.DEMO_AGENT_KIND,
+                thread_id="abc",
+                instance=instance,
+                status=SystemAgentRun.STATUS_COMPLETED,
+            )
+            return instance
+
+        mock_spawn.side_effect = spawn_side_effect
+
+        response = self.client.post(
+            reverse("start_session_demo", kwargs={"session_id": "abc"})
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(SystemAgentRun.objects.count(), 1)
+        self.assertEqual(
+            SystemAgentRun.objects.get().status,
+            SystemAgentRun.STATUS_COMPLETED,
+        )
+
+    @patch("hitch.main.views.demo.cleanup_demo_for_session")
+    @patch("hitch.main.views.demo.cleanup_unregistered_demo_containers")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_duplicate_running_demo_workflow_rejects_without_mutating_owner(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        _mock_managed: MagicMock,
+        _mock_workflow: MagicMock,
+        mock_spawn: MagicMock,
+        _mock_sweep: MagicMock,
+        mock_cleanup: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(cwd="/repo", turns=[])
+        )
+        stale_workflow = SystemWorkflow.objects.create(
+            kind=demo.DEMO_WORKFLOW_KIND,
+            main_thread_id="abc",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+        )
+
+        response = self.client.post(
+            reverse("start_session_demo", kwargs={"session_id": "abc"})
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(
+            response,
+            "demo setup workflow is already running",
+            status_code=400,
+        )
+        mock_codex.assert_not_called()
+        mock_spawn.assert_not_called()
+        mock_cleanup.assert_not_called()
+        self.assertFalse(SessionDemo.objects.filter(thread_id="abc").exists())
+        stale_workflow.refresh_from_db()
+        self.assertEqual(stale_workflow.status, SystemWorkflow.STATUS_RUNNING)
+
+    @patch("hitch.main.views.Codex")
+    def test_system_sessions_lists_demo_run_without_hiding_user_session(
+        self, mock_codex: MagicMock
+    ) -> None:
+        thread = _session("thread-1", preview="User feature")
+        _setup_codex(mock_codex, threads=[thread])
+        workflow = SystemWorkflow.objects.create(
+            kind=demo.DEMO_WORKFLOW_KIND,
+            main_thread_id="thread-1",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_FAILED,
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="thread-1",
+            cwd="/repo",
+            prompt="Start an interactive web demo",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            display_author=demo.DEMO_DISPLAY_AUTHOR,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            thread_id="thread-1",
+            instance=instance,
+            status=SystemAgentRun.STATUS_FAILED,
+        )
+
+        index_response = self.client.get(reverse("index"))
+        system_response = self.client.get(reverse("system_sessions"))
+
+        self.assertContains(index_response, "User feature")
+        self.assertContains(system_response, "User feature")
+        self.assertContains(system_response, "Demo agent")
+        self.assertContains(
+            system_response,
+            reverse("system_session", kwargs={"session_id": "thread-1"}),
+        )
 
     @patch("hitch.main.views.demo.request_demo_start")
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
