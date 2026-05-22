@@ -1799,45 +1799,17 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
-    def test_new_session_accepts_and_associates_proposed_task(
+    def test_new_session_accepts_and_associates_proposed_work(
         self,
         mock_discover: MagicMock,
         mock_spawn: MagicMock,
         mock_codex: MagicMock,
     ) -> None:
+        _setup_codex(mock_codex, models=[])
         project = Project.objects.create(name="Hitch", repo_path=self.REPO)
         objective = Objective.objects.create(project=project, title="Improve planning")
         key_result = KeyResult.objects.create(objective=objective, title="Draft plan")
         task = ProposedTask.objects.create(key_result=key_result, title="Add model")
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
-        _setup_codex(mock_codex, models=[])
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={
-                "prompt": "Do this ProposedTask.",
-                "cwd": self.REPO,
-                "proposed_task": str(task.pk),
-            },
-        )
-
-        self.assertEqual(response.status_code, 302)
-        task.refresh_from_db()
-        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
-        self.assertEqual(task.outcome_status, ProposedTask.OUTCOME_ACCEPTED)
-        self.assertEqual(task.session, metadata)
-
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
-    def test_new_session_accepts_and_associates_proposed_session(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
         order = StandingOrder.objects.create(
             project=project,
             title="Improve tests",
@@ -1847,55 +1819,48 @@ class NewSessionViewTests(TestCase):
             standing_order=order,
             title="Add parser coverage",
         )
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
-        _setup_codex(mock_codex, models=[])
+        cases = [
+            ("proposed_task", task, "Do this ProposedTask."),
+            (
+                "proposed_session",
+                proposal,
+                "Go ahead and implement this proposed session.",
+            ),
+        ]
 
-        response = self.client.post(
-            reverse("new_session"),
-            data={
-                "prompt": "Go ahead and implement this proposed session.",
-                "cwd": self.REPO,
-                "proposed_session": str(proposal.pk),
-            },
-        )
+        for index, (field, proposed, prompt) in enumerate(cases):
+            with self.subTest(field=field):
+                mock_discover.return_value = [Path(self.REPO)]
+                mock_spawn.return_value = SimpleNamespace(thread_id=f"thread-{index}")
+                mock_spawn.reset_mock()
 
-        self.assertEqual(response.status_code, 302)
-        proposal.refresh_from_db()
-        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
-        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
-        self.assertEqual(proposal.accepted_session, metadata)
+                response = self.client.post(
+                    reverse("new_session"),
+                    data={
+                        "prompt": prompt,
+                        "cwd": self.REPO,
+                        field: str(proposed.pk),
+                    },
+                )
+
+                self.assertEqual(response.status_code, 302)
+                metadata = SessionMetadata.objects.get(thread_id=f"thread-{index}")
+                proposed.refresh_from_db()
+                if field == "proposed_task":
+                    task = cast(ProposedTask, proposed)
+                    self.assertEqual(task.outcome_status, ProposedTask.OUTCOME_ACCEPTED)
+                    self.assertEqual(task.session, metadata)
+                else:
+                    proposal = cast(ProposedSession, proposed)
+                    self.assertEqual(
+                        proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED
+                    )
+                    self.assertEqual(proposal.accepted_session, metadata)
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos", return_value=[Path(REPO)])
-    def test_new_session_rejects_invalid_proposed_session(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        _setup_codex(mock_codex, models=[])
-
-        for value in ("not-a-number", "0", "999"):
-            with self.subTest(value=value):
-                response = self.client.post(
-                    reverse("new_session"),
-                    data={
-                        "prompt": "Go ahead and implement this proposed session.",
-                        "cwd": self.REPO,
-                        "proposed_session": value,
-                    },
-                )
-
-                self.assertEqual(response.status_code, 400)
-                self.assertEqual(response.content, b"proposed session is required")
-        mock_spawn.assert_not_called()
-
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
-    def test_new_session_rejects_proposed_session_from_different_project(
+    def test_new_session_rejects_invalid_proposed_session_matrix(
         self,
         mock_discover: MagicMock,
         mock_spawn: MagicMock,
@@ -1912,127 +1877,72 @@ class NewSessionViewTests(TestCase):
             standing_order=order,
             title="Add docs coverage",
         )
-        mock_discover.return_value = [Path(self.REPO), Path(other_project.repo_path)]
-        _setup_codex(mock_codex, models=[])
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={
-                "prompt": "Go ahead and implement this proposed session.",
-                "project": str(project.pk),
-                "proposed_session": str(proposal.pk),
-            },
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.content, b"proposed session does not match project")
-        mock_spawn.assert_not_called()
-
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
-    def test_new_session_rejects_implicit_target_proposed_session_from_different_project(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        other_project = Project.objects.create(name="Other", repo_path="/home/user/other")
-        order = StandingOrder.objects.create(
-            project=other_project,
-            title="Improve docs",
-            goal="Find useful docs increments.",
-        )
-        proposal = ProposedSession.objects.create(
-            standing_order=order,
-            title="Add docs coverage",
-        )
-        mock_discover.return_value = [Path(self.REPO), Path(other_project.repo_path)]
-        _setup_codex(mock_codex, models=[])
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={
-                "prompt": "Go ahead and implement this proposed session.",
-                "cwd": self.REPO,
-                "proposed_session": str(proposal.pk),
-            },
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.content, b"proposed session does not match project")
-        mock_spawn.assert_not_called()
-
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
-    def test_new_session_rejects_bare_repo_proposed_session_from_different_project(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        other_project = Project.objects.create(name="Other", repo_path="/home/user/other")
-        order = StandingOrder.objects.create(
-            project=other_project,
-            title="Improve docs",
-            goal="Find useful docs increments.",
-        )
-        proposal = ProposedSession.objects.create(
-            standing_order=order,
-            title="Add docs coverage",
-        )
-        mock_discover.return_value = [Path(self.REPO), Path(other_project.repo_path)]
-        _setup_codex(mock_codex, models=[])
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={
-                "prompt": "Go ahead and implement this proposed session.",
-                "project": views._BARE_REPO_PROJECT_VALUE,
-                "cwd": self.REPO,
-                "proposed_session": str(proposal.pk),
-            },
-        )
-
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.content, b"proposed session does not match project")
-        mock_spawn.assert_not_called()
-
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
-    def test_new_session_rejects_resolved_proposed_session(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
-        order = StandingOrder.objects.create(
+        resolved_order = StandingOrder.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
         )
-        proposal = ProposedSession.objects.create(
-            standing_order=order,
+        resolved = ProposedSession.objects.create(
+            standing_order=resolved_order,
             title="Add parser coverage",
             outcome_status=ProposedSession.OUTCOME_REJECTED,
         )
-        mock_discover.return_value = [Path(self.REPO)]
+        mock_discover.return_value = [Path(self.REPO), Path(other_project.repo_path)]
         _setup_codex(mock_codex, models=[])
+        cases = [
+            (
+                "non-numeric id",
+                {"cwd": self.REPO, "proposed_session": "not-a-number"},
+                b"proposed session is required",
+            ),
+            (
+                "zero id",
+                {"cwd": self.REPO, "proposed_session": "0"},
+                b"proposed session is required",
+            ),
+            (
+                "missing id",
+                {"cwd": self.REPO, "proposed_session": "999"},
+                b"proposed session is required",
+            ),
+            (
+                "posted project mismatch",
+                {"project": str(project.pk), "proposed_session": str(proposal.pk)},
+                b"proposed session does not match project",
+            ),
+            (
+                "implicit cwd mismatch",
+                {"cwd": self.REPO, "proposed_session": str(proposal.pk)},
+                b"proposed session does not match project",
+            ),
+            (
+                "bare repo mismatch",
+                {
+                    "project": views._BARE_REPO_PROJECT_VALUE,
+                    "cwd": self.REPO,
+                    "proposed_session": str(proposal.pk),
+                },
+                b"proposed session does not match project",
+            ),
+            (
+                "resolved proposal",
+                {"project": str(project.pk), "proposed_session": str(resolved.pk)},
+                b"proposed session is required",
+            ),
+        ]
 
-        response = self.client.post(
-            reverse("new_session"),
-            data={
-                "prompt": "Go ahead and implement this proposed session.",
-                "project": str(project.pk),
-                "proposed_session": str(proposal.pk),
-            },
-        )
+        for label, data, message in cases:
+            with self.subTest(label=label):
+                response = self.client.post(
+                    reverse("new_session"),
+                    data={
+                        "prompt": "Go ahead and implement this proposed session.",
+                        **data,
+                    },
+                )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.content, b"proposed session is required")
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.content, message)
         mock_spawn.assert_not_called()
 
     @patch("hitch.main.views.Codex")
@@ -2371,98 +2281,9 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.create_session_thread")
-    @patch("hitch.main.views.discover_repos")
-    def test_pr_slash_command_starts_new_session_with_qa_workflow(
-        self,
-        mock_discover: MagicMock,
-        mock_create_thread: MagicMock,
-        mock_codex: MagicMock,
-        mock_start_workflow: MagicMock,
-    ) -> None:
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_create_thread.return_value = "thread-xyz"
-        _setup_codex(mock_codex, models=[_make_model("gpt-5.4", is_default=True)])
-        _seed_cookies(
-            self.client,
-            hitch_model="gpt-5.4",
-            hitch_reasoning_effort="high",
-            hitch_extra_system_prompt=_encode_extra_system_prompt(
-                "Use repo conventions."
-            ),
-        )
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={"prompt": "/PR", "cwd": self.REPO, "plan_mode": "true"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_create_thread.assert_called_once_with(
-            cwd=self.REPO,
-            name=_PR_PROMPT,
-            developer_instructions="Use repo conventions.",
-            model="gpt-5.4",
-            enable_memories=False,
-        )
-        mock_start_workflow.assert_called_once_with(
-            main_thread_id="thread-xyz",
-            cwd=self.REPO,
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            model="gpt-5.4",
-            reasoning_effort="high",
-            developer_instructions="Use repo conventions.",
-            enable_memories=False,
-            initial_user_message_index=0,
-        )
-
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.create_session_thread")
-    @patch("hitch.main.views.discover_repos")
-    def test_qa_slash_command_starts_new_session_without_pr_prompt(
-        self,
-        mock_discover: MagicMock,
-        mock_create_thread: MagicMock,
-        mock_codex: MagicMock,
-        mock_start_workflow: MagicMock,
-    ) -> None:
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_create_thread.return_value = "thread-xyz"
-        _setup_codex(mock_codex, models=[_make_model("gpt-5.4", is_default=True)])
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={"prompt": "/QA", "cwd": self.REPO, "plan_mode": "true"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_create_thread.assert_called_once_with(
-            cwd=self.REPO,
-            name=_QA_PROMPT,
-            developer_instructions=None,
-            model="gpt-5.4",
-            enable_memories=False,
-        )
-        mock_start_workflow.assert_called_once_with(
-            main_thread_id="thread-xyz",
-            cwd=self.REPO,
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            model="gpt-5.4",
-            reasoning_effort="medium",
-            developer_instructions=None,
-            enable_memories=False,
-            initial_user_message_index=0,
-            open_pr_on_lgtm=False,
-        )
-
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.create_session_thread")
     @patch("hitch.main.views.create_worktree_for_session")
     @patch("hitch.main.views.discover_repos")
-    def test_pr_slash_command_uses_selected_repo_when_worktrees_are_enabled(
+    def test_new_session_qa_workflow_slash_commands(
         self,
         mock_discover: MagicMock,
         mock_create_worktree: MagicMock,
@@ -2471,41 +2292,113 @@ class NewSessionViewTests(TestCase):
         mock_start_workflow: MagicMock,
     ) -> None:
         mock_discover.return_value = [Path(self.REPO)]
-        mock_create_thread.return_value = "thread-xyz"
-        _setup_codex(mock_codex, models=[])
-        _seed_cookies(self.client, **{_USE_WORKTREES_COOKIE: "true"})
+        codex = _setup_codex(
+            mock_codex, models=[_make_model("gpt-5.4", is_default=True)]
+        )
+        cases: list[
+            tuple[
+                str,
+                dict[str, str],
+                dict[str, str],
+                dict[str, Any],
+                dict[str, Any],
+            ]
+        ] = [
+            (
+                "pr",
+                {"prompt": "/PR", "cwd": self.REPO, "plan_mode": "true"},
+                {
+                    _MODEL_COOKIE: "gpt-5.4",
+                    "hitch_reasoning_effort": "high",
+                    _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt(
+                        "Use repo conventions."
+                    ),
+                },
+                {
+                    "name": _PR_PROMPT,
+                    "developer_instructions": "Use repo conventions.",
+                    "model": "gpt-5.4",
+                },
+                {
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "high",
+                    "developer_instructions": "Use repo conventions.",
+                },
+            ),
+            (
+                "qa",
+                {"prompt": "/QA", "cwd": self.REPO, "plan_mode": "true"},
+                {},
+                {
+                    "name": _QA_PROMPT,
+                    "developer_instructions": None,
+                    "model": "gpt-5.4",
+                },
+                {
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "medium",
+                    "developer_instructions": None,
+                    "open_pr_on_lgtm": False,
+                },
+            ),
+            (
+                "pr uses selected repo when worktrees enabled",
+                {"prompt": "/pr", "cwd": self.REPO},
+                {_USE_WORKTREES_COOKIE: "true"},
+                {"name": _PR_PROMPT, "developer_instructions": None, "model": None},
+                {
+                    "model": None,
+                    "reasoning_effort": None,
+                    "developer_instructions": None,
+                },
+            ),
+        ]
 
-        response = self.client.post(
-            reverse("new_session"),
-            data={"prompt": "/pr", "cwd": self.REPO},
-        )
+        for index, (
+            label,
+            data,
+            cookies,
+            thread_kwargs,
+            workflow_kwargs,
+        ) in enumerate(cases):
+            with self.subTest(label=label):
+                client = Client()
+                codex.models.return_value.data = (
+                    []
+                    if cookies.get(_USE_WORKTREES_COOKIE) == "true"
+                    else [_make_model("gpt-5.4", is_default=True)]
+                )
+                mock_create_thread.return_value = f"thread-{index}"
+                mock_create_thread.reset_mock()
+                mock_create_worktree.reset_mock()
+                mock_start_workflow.reset_mock()
+                if cookies:
+                    _seed_cookies(client, **cookies)
 
-        self.assertEqual(response.status_code, 302)
-        mock_create_worktree.assert_not_called()
-        mock_create_thread.assert_called_once_with(
-            cwd=self.REPO,
-            name=_PR_PROMPT,
-            developer_instructions=None,
-            model=None,
-            enable_memories=False,
-        )
-        mock_start_workflow.assert_called_once_with(
-            main_thread_id="thread-xyz",
-            cwd=self.REPO,
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            model=None,
-            reasoning_effort=None,
-            developer_instructions=None,
-            enable_memories=False,
-            initial_user_message_index=0,
-        )
+                response = client.post(reverse("new_session"), data=data)
+
+                self.assertEqual(response.status_code, 302)
+                mock_create_worktree.assert_not_called()
+                mock_create_thread.assert_called_once_with(
+                    cwd=self.REPO,
+                    enable_memories=False,
+                    **thread_kwargs,
+                )
+                mock_start_workflow.assert_called_once_with(
+                    main_thread_id=f"thread-{index}",
+                    cwd=self.REPO,
+                    sandbox_policy=None,
+                    approval_mode="auto_review",
+                    enable_memories=False,
+                    initial_user_message_index=0,
+                    **workflow_kwargs,
+                )
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.create_session_thread")
     @patch("hitch.main.views.discover_repos")
-    def test_pr_new_session_project_comes_from_posted_repository(
+    def test_pr_new_session_project_assignment_matrix(
         self,
         mock_discover: MagicMock,
         mock_create_thread: MagicMock,
@@ -2515,53 +2408,56 @@ class NewSessionViewTests(TestCase):
         repo_b = "/home/user/other"
         project_a = Project.objects.create(name="Project A", repo_path=self.REPO)
         project_b = Project.objects.create(name="Project B", repo_path=repo_b)
-        mock_discover.return_value = [Path(self.REPO), Path(repo_b)]
-        mock_create_thread.return_value = "thread-xyz"
         _setup_codex(mock_codex, models=[])
-        _seed_cookies(self.client, hitch_selected_project_id=str(project_a.pk))
+        cases = [
+            (
+                "posted repository",
+                {"prompt": "/pr", "cwd": repo_b},
+                {Path(self.REPO), Path(repo_b)},
+                project_b,
+                False,
+                {project_a.pk},
+            ),
+            (
+                "bare repo",
+                {
+                    "prompt": "/pr",
+                    "project": views._BARE_REPO_PROJECT_VALUE,
+                    "cwd": self.REPO,
+                },
+                {Path(self.REPO)},
+                None,
+                True,
+                set(),
+            ),
+        ]
 
-        response = self.client.post(
-            reverse("new_session"),
-            data={"prompt": "/pr", "cwd": repo_b},
-        )
+        for index, (
+            label,
+            data,
+            discovered,
+            expected_project,
+            project_cleared,
+            selected_projects,
+        ) in enumerate(cases):
+            with self.subTest(label=label):
+                client = Client()
+                for project_id in selected_projects:
+                    _seed_cookies(client, hitch_selected_project_id=str(project_id))
+                thread_id = f"thread-project-{index}"
+                mock_discover.return_value = list(discovered)
+                mock_create_thread.return_value = thread_id
+                mock_create_thread.reset_mock()
+                mock_start_workflow.reset_mock()
 
-        self.assertEqual(response.status_code, 302)
-        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
-        self.assertEqual(metadata.cwd, repo_b)
-        self.assertEqual(metadata.project, project_b)
-        mock_start_workflow.assert_called_once()
+                response = client.post(reverse("new_session"), data=data)
 
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.create_session_thread")
-    @patch("hitch.main.views.discover_repos")
-    def test_pr_new_session_bare_repo_does_not_set_matching_project(
-        self,
-        mock_discover: MagicMock,
-        mock_create_thread: MagicMock,
-        mock_codex: MagicMock,
-        mock_start_workflow: MagicMock,
-    ) -> None:
-        Project.objects.create(name="Hitch", repo_path=self.REPO)
-        mock_discover.return_value = [Path(self.REPO)]
-        mock_create_thread.return_value = "thread-xyz"
-        _setup_codex(mock_codex, models=[])
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={
-                "prompt": "/pr",
-                "project": views._BARE_REPO_PROJECT_VALUE,
-                "cwd": self.REPO,
-            },
-        )
-
-        self.assertEqual(response.status_code, 302)
-        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
-        self.assertEqual(metadata.cwd, self.REPO)
-        self.assertIsNone(metadata.project)
-        self.assertTrue(metadata.project_cleared)
-        mock_start_workflow.assert_called_once()
+                self.assertEqual(response.status_code, 302)
+                metadata = SessionMetadata.objects.get(thread_id=thread_id)
+                self.assertEqual(metadata.cwd, data["cwd"])
+                self.assertEqual(metadata.project, expected_project)
+                self.assertEqual(metadata.project_cleared, project_cleared)
+                mock_start_workflow.assert_called_once()
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
