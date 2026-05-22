@@ -376,6 +376,8 @@ def _run_turn(
                 discard_notification=_discard_notification,
             )
             resume_kwargs: dict[str, Any] = {}
+            if instance.base_instructions:
+                resume_kwargs["base_instructions"] = instance.base_instructions
             if instance.developer_instructions:
                 resume_kwargs["developer_instructions"] = instance.developer_instructions
             thread = codex.thread_resume(instance.thread_id, **resume_kwargs)

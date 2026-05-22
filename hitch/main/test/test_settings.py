@@ -11,13 +11,14 @@ from django.urls import reverse
 from openai_codex.errors import MethodNotFoundError
 from openai_codex.generated.v2_all import ReasoningEffort
 
-from hitch.main import context_processors
+from hitch.main import coding_agents, context_processors
 from hitch.main.models import Project, UserSettings
 
 _MODEL_COOKIE = "hitch_model"
 _EFFORT_COOKIE = "hitch_reasoning_effort"
 _SANDBOX_COOKIE = "hitch_sandbox_policy"
 _APPROVAL_COOKIE = "hitch_approval_mode"
+_CODING_AGENT_COOKIE = "hitch_coding_agent"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
@@ -29,6 +30,18 @@ _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 # about supported-effort filtering can stay terse; tests that exercise the
 # narrowing logic pass an explicit ``supported_efforts``.
 _ALL_EFFORT_VALUES = [e.value for e in ReasoningEffort]
+
+
+class CodingAgentsTests(SimpleTestCase):
+    def test_codex_agent_uses_default_base_instructions(self) -> None:
+        self.assertIsNone(coding_agents.base_instructions_for("codex"))
+
+    def test_default_codex_base_instructions_strip_hitch_additions(self) -> None:
+        base_instructions = coding_agents.default_codex_base_instructions()
+
+        self.assertIn("You are Codex", base_instructions)
+        self.assertNotIn("You are running inside HITCH", base_instructions)
+        self.assertNotIn("The user expects you to make good engineering calls", base_instructions)
 
 
 def _model(
@@ -242,6 +255,10 @@ class SettingsDialogRenderTests(TestCase):
         self.assertContains(response, 'value="prompt_user"')
         self.assertContains(response, 'value="deny_all"')
         self.assertContains(response, 'value="approve_all"')
+        self.assertContains(response, 'name="coding_agent"')
+        self.assertContains(response, 'value="codex" selected')
+        self.assertContains(response, 'value="hitch"')
+        self.assertContains(response, "Coding agent")
         self.assertContains(response, "Extra developer prompt")
         self.assertContains(response, 'name="extra_system_prompt"')
         self.assertContains(response, 'maxlength="2500"')
@@ -813,6 +830,24 @@ class UpdateSettingsViewTests(TestCase):
             _extra_system_prompt_value(response),
             "Prefer focused tests.\nKeep diffs small.",
         )
+
+    def test_saves_coding_agent_to_signed_cookie(self) -> None:
+        response = self.client.post(
+            reverse("update_settings"),
+            data={"model": "", "reasoning_effort": "", "coding_agent": "hitch"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(_cookie_value(response, _CODING_AGENT_COOKIE), "hitch")
+
+    def test_rejects_invalid_coding_agent(self) -> None:
+        response = self.client.post(
+            reverse("update_settings"),
+            data={"model": "", "reasoning_effort": "", "coding_agent": "other"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn(_CODING_AGENT_COOKIE, response.cookies)
 
     def test_rejects_oversized_extra_system_prompt(self) -> None:
         _seed_cookies(
