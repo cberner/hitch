@@ -5183,6 +5183,38 @@ class StandingOrderViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
+    def test_page_lists_no_proposal_notice_with_dismiss(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        ProposedSession.objects.create(
+            standing_order=order,
+            title="No proposal from Improve tests",
+            inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
+            summary="No concrete test increment was worth proposing.",
+        )
+
+        response = self.client.get(reverse("standing_orders"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "No proposal from Improve tests")
+        self.assertContains(response, "From standing order: Improve tests")
+        self.assertContains(
+            response, "No concrete test increment was worth proposing."
+        )
+        self.assertContains(response, "Dismiss")
+        self.assertNotContains(response, 'data-proposed-session-id="')
+        self.assertNotContains(response, 'data-reject-url="')
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
     def test_page_shows_create_form_inline_when_no_orders(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -5453,3 +5485,70 @@ class StandingOrderViewTests(TestCase):
         proposal.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
         self.assertEqual(proposal.accepted_session, candidate)
+
+    def test_dismiss_notice_updates_outcome(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        notice = ProposedSession.objects.create(
+            standing_order=order,
+            title="No proposal from Improve tests",
+            inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
+            summary="No concrete test increment was worth proposing.",
+        )
+
+        response = self.client.post(
+            reverse("update_proposed_session_outcome", args=[notice.pk]),
+            {"outcome_status": ProposedSession.OUTCOME_DISMISSED},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        notice.refresh_from_db()
+        self.assertEqual(notice.outcome_status, ProposedSession.OUTCOME_DISMISSED)
+
+    def test_notice_rejects_non_dismissed_outcome(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        notice = ProposedSession.objects.create(
+            standing_order=order,
+            title="No proposal from Improve tests",
+            inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
+        )
+
+        response = self.client.post(
+            reverse("update_proposed_session_outcome", args=[notice.pk]),
+            {"outcome_status": ProposedSession.OUTCOME_ACCEPTED},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"outcome status is invalid")
+
+    def test_proposal_rejects_dismissed_outcome(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        proposal = ProposedSession.objects.create(
+            standing_order=order,
+            title="Add parser coverage",
+        )
+
+        response = self.client.post(
+            reverse("update_proposed_session_outcome", args=[proposal.pk]),
+            {"outcome_status": ProposedSession.OUTCOME_DISMISSED},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"outcome status is invalid")

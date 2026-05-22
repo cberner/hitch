@@ -117,13 +117,27 @@ _OKR_TASK_OUTPUT_SCHEMA: dict[str, Any] = {
 _STANDING_ORDER_CANDIDATE_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["title", "summary", "impact", "implementation_direction", "relevant_files"],
+    "required": ["proposal", "message"],
     "properties": {
-        "title": {"type": "string"},
-        "summary": {"type": "string"},
-        "impact": {"type": "string"},
-        "implementation_direction": {"type": "string"},
-        "relevant_files": {"type": "array", "items": {"type": "string"}},
+        "proposal": {
+            "type": ["object", "null"],
+            "additionalProperties": False,
+            "required": [
+                "title",
+                "summary",
+                "impact",
+                "implementation_direction",
+                "relevant_files",
+            ],
+            "properties": {
+                "title": {"type": "string"},
+                "summary": {"type": "string"},
+                "impact": {"type": "string"},
+                "implementation_direction": {"type": "string"},
+                "relevant_files": {"type": "array", "items": {"type": "string"}},
+            },
+        },
+        "message": {"type": "string"},
     },
 }
 
@@ -581,8 +595,8 @@ def _handle_standing_order_agent_finished(
 
     raw_output = _final_agent_text(instance.events_path)
     if workflow.step == STEP_STANDING_ORDER_CANDIDATE_RUNNING:
-        candidate = _parse_standing_order_candidate_output(raw_output)
-        if candidate is None:
+        candidate_output = _parse_standing_order_candidate_output(raw_output)
+        if candidate_output is None:
             _fail_run_and_block_workflow(
                 run,
                 "standing order candidate output was not valid JSON",
@@ -591,9 +605,29 @@ def _handle_standing_order_agent_finished(
             )
             return
         run.status = SystemAgentRun.STATUS_COMPLETED
-        run.output = candidate
+        run.output = candidate_output
         run.raw_output = raw_output
         run.save(update_fields=["status", "output", "raw_output", "updated_at"])
+        if candidate_output["proposal"] is None:
+            message = str(candidate_output["message"])
+            ProposedSession.objects.create(
+                standing_order=standing_order,
+                source_workflow=workflow,
+                title=f"No proposal from {standing_order.title}"[
+                    :_STANDING_ORDER_TITLE_MAX_LEN
+                ],
+                inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
+                summary=message,
+                candidate_session=_session_metadata_from_state(
+                    workflow, "candidate_session_id"
+                ),
+            )
+            workflow.step = STEP_STANDING_ORDER_SKIPPED
+            workflow.status = SystemWorkflow.STATUS_COMPLETED
+            workflow.state = {**workflow.state, "candidate": candidate_output}
+            workflow.save(update_fields=["status", "step", "state", "updated_at"])
+            return
+        candidate = candidate_output["proposal"]
         workflow.step = STEP_STANDING_ORDER_JUDGE_RUNNING
         workflow.state = {**workflow.state, "candidate": candidate}
         workflow.save(update_fields=["step", "state", "updated_at"])
@@ -971,12 +1005,15 @@ def _standing_order_candidate_prompt(
         "Standing order goal:\n"
         f"{standing_order.goal}\n\n"
         "Return only JSON matching this shape: "
-        '{"title": string, "summary": string, "impact": string, '
-        '"implementation_direction": string, "relevant_files": [string]}. '
-        "The title should be concise. The summary should explain the proposed "
-        "session. Impact should describe the likely user-visible or engineering "
-        "benefit. Implementation direction should be specific enough for the "
-        "user to continue the work in this session. "
+        '{"proposal": {"title": string, "summary": string, "impact": string, '
+        '"implementation_direction": string, "relevant_files": [string]} | null, '
+        '"message": string}. If you find a concrete proposal, put it in '
+        '"proposal" and leave "message" empty. If you find nothing worth '
+        'proposing, set "proposal" to null and put a concise user-facing '
+        'explanation in "message". The title should be concise. The summary '
+        "should explain the proposed session. Impact should describe the likely "
+        "user-visible or engineering benefit. Implementation direction should "
+        "be specific enough for the user to continue the work in this session. "
         f"{ambition.candidate_instruction}"
     )
 
@@ -1109,7 +1146,10 @@ def _format_proposed_task_context(key_result: KeyResult, task: ProposedTask) -> 
 
 def _standing_order_history_sections(standing_order: StandingOrder) -> list[str]:
     proposals = (
-        standing_order.proposed_sessions.exclude(outcome_status=ProposedSession.OUTCOME_UNSET)
+        standing_order.proposed_sessions.filter(
+            inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL
+        )
+        .exclude(outcome_status=ProposedSession.OUTCOME_UNSET)
         .select_related("candidate_session")
         .order_by("-updated_at", "-id")[:50]
     )
@@ -1260,6 +1300,28 @@ def _parse_standing_order_candidate_output(raw_output: str) -> dict[str, Any] | 
         return None
     if not isinstance(parsed, dict):
         return None
+    if "proposal" in parsed:
+        proposal = parsed.get("proposal")
+        message = parsed.get("message")
+        if proposal is None:
+            if not isinstance(message, str) or not message.strip():
+                return None
+            return {"proposal": None, "message": message.strip()}
+        if not isinstance(proposal, dict):
+            return None
+        normalized = _parse_standing_order_candidate_proposal(proposal)
+        if normalized is None:
+            return None
+        return {"proposal": normalized, "message": ""}
+    normalized = _parse_standing_order_candidate_proposal(parsed)
+    if normalized is None:
+        return None
+    return {"proposal": normalized, "message": ""}
+
+
+def _parse_standing_order_candidate_proposal(
+    parsed: dict[str, Any],
+) -> dict[str, Any] | None:
     title = parsed.get("title")
     summary = parsed.get("summary")
     impact = parsed.get("impact")

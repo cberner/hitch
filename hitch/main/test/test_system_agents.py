@@ -1192,6 +1192,51 @@ class PrQaWorkflowTests(TestCase):
 
 
 class StandingOrderWorkflowTests(TestCase):
+    def test_standing_order_candidate_parser_accepts_wrapped_proposal(self) -> None:
+        parsed = system_agents._parse_standing_order_candidate_output(
+            json.dumps(
+                {
+                    "proposal": {
+                        "title": "Add parser coverage",
+                        "summary": "Cover parser edge cases.",
+                        "impact": "Fewer regressions.",
+                        "implementation_direction": "Add focused tests.",
+                        "relevant_files": ["hitch/main/rollout.py"],
+                    },
+                    "message": "",
+                }
+            )
+        )
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed["proposal"]["title"], "Add parser coverage")
+        self.assertEqual(parsed["message"], "")
+
+    def test_standing_order_candidate_parser_rejects_invalid_wrapped_output(
+        self,
+    ) -> None:
+        self.assertIsNone(
+            system_agents._parse_standing_order_candidate_output(
+                json.dumps({"proposal": None, "message": "   "})
+            )
+        )
+        self.assertIsNone(
+            system_agents._parse_standing_order_candidate_output(
+                json.dumps({"proposal": "not an object", "message": ""})
+            )
+        )
+        self.assertIsNone(
+            system_agents._parse_standing_order_candidate_output(
+                json.dumps({"proposal": {"title": ""}, "message": ""})
+            )
+        )
+        self.assertIsNone(
+            system_agents._parse_standing_order_candidate_output(
+                json.dumps({"title": "", "summary": "", "impact": ""})
+            )
+        )
+
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_workflow_starts_hidden_candidate_thread(
         self, mock_spawn: MagicMock
@@ -1220,8 +1265,13 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
         self.assertEqual(kwargs["agent_kind"], system_agents.STANDING_ORDER_AGENT_KIND)
         self.assertEqual(kwargs["display_author"], system_agents.STANDING_ORDER_DISPLAY_AUTHOR)
+        schema = kwargs["output_schema"]
+        self.assertEqual(schema["required"], ["proposal", "message"])
+        self.assertEqual(schema["properties"]["proposal"]["type"], ["object", "null"])
+        self.assertEqual(schema["properties"]["message"]["type"], "string")
         self.assertIn("Keep docs current", kwargs["prompt"])
         self.assertIn("make high progress", kwargs["prompt"])
+        self.assertIn('"proposal" to null', kwargs["prompt"])
         self.assertTrue(
             SessionMetadata.objects.filter(thread_id="candidate-thread").exists()
         )
@@ -1317,6 +1367,68 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertEqual(kwargs["agent_kind"], system_agents.STANDING_ORDER_JUDGE_AGENT_KIND)
         self.assertIn("Add parser coverage", kwargs["prompt"])
         self.assertTrue(SessionMetadata.objects.filter(thread_id="judge-thread").exists())
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_candidate_completion_creates_notice_when_no_proposal(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate_metadata = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_STANDING_ORDER_CANDIDATE_RUNNING,
+            state={
+                "standing_order_id": standing_order.pk,
+                "candidate_session_id": candidate_metadata.pk,
+            },
+        )
+        instance = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {
+                    "proposal": None,
+                    "message": "No concrete test increment was worth proposing.",
+                },
+            ),
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            thread_id="candidate-thread",
+            instance=instance,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_STANDING_ORDER_SKIPPED)
+        notice = ProposedSession.objects.get()
+        self.assertEqual(notice.inbox_kind, ProposedSession.INBOX_KIND_NOTICE)
+        self.assertEqual(notice.title, "No proposal from Improve tests")
+        self.assertEqual(
+            notice.summary, "No concrete test increment was worth proposing."
+        )
+        self.assertEqual(notice.candidate_session, candidate_metadata)
+        mock_spawn.assert_not_called()
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_yolo_candidate_completion_starts_judge_thread_with_yolo_guidance(
