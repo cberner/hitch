@@ -19,7 +19,7 @@ from django.http import Http404, HttpRequest, HttpResponse, JsonResponse, Stream
 from django.urls import reverse
 from django.utils.text import slugify
 
-from hitch.main.models import CodexInstance, SessionDemo
+from hitch.main.models import CodexInstance, SessionDemo, SystemAgentRun, SystemWorkflow
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ DEFAULT_CONTAINER_PORT: Final = 3000
 DEFAULT_HOST: Final = "127.0.0.1"
 DEMO_AGENT_KIND: Final = "demo"
 DEMO_DISPLAY_AUTHOR: Final = "Demo agent"
+DEMO_WORKFLOW_KIND: Final = "demo_deployment"
 LOCAL_DEMO_SUFFIX: Final = ".demo.localhost"
 MAX_LOG_CHARS: Final = 20_000
 TOKEN_BYTES: Final = 24
@@ -381,6 +382,9 @@ def on_codex_instance_finished(instance: CodexInstance) -> None:
     if instance.agent_kind != DEMO_AGENT_KIND:
         return
     instance_token = _registration_token_from_instance(instance)
+    run_status = SystemAgentRun.STATUS_COMPLETED
+    run_error = ""
+    workflow_status = SystemWorkflow.STATUS_COMPLETED
     with transaction.atomic():
         demo = SessionDemo.objects.select_for_update().filter(
             thread_id=instance.thread_id
@@ -400,18 +404,67 @@ def on_codex_instance_finished(instance: CodexInstance) -> None:
             else:
                 demo.status = SessionDemo.STATUS_FAILED
                 demo.last_error = instance.error or "demo agent did not complete"
+            run_status = SystemAgentRun.STATUS_FAILED
+            run_error = demo.last_error
+            workflow_status = SystemWorkflow.STATUS_FAILED
             update_fields = ["status", "last_error", "updated_at"]
             try:
                 _remove_container(demo, ignore_missing=True)
             except DemoError as exc:
                 demo.last_error = f"{demo.last_error}; cleanup failed: {exc}"
+                run_error = demo.last_error
                 logger.exception("failed to remove demo container after agent exit")
             else:
                 demo.container_id = ""
                 demo.container_name = ""
                 update_fields.extend(["container_id", "container_name"])
             demo.save(update_fields=update_fields)
+        elif demo is not None and demo.status == SessionDemo.STATUS_FAILED:
+            run_status = SystemAgentRun.STATUS_FAILED
+            run_error = demo.last_error or "demo setup failed"
+            workflow_status = SystemWorkflow.STATUS_FAILED
+        elif instance.status != CodexInstance.STATUS_COMPLETED:
+            run_status = SystemAgentRun.STATUS_FAILED
+            run_error = instance.error or "demo agent did not complete"
+            workflow_status = SystemWorkflow.STATUS_FAILED
+        _finish_demo_system_run(
+            instance,
+            run_status=run_status,
+            run_error=run_error,
+            workflow_status=workflow_status,
+        )
     cleanup_unregistered_demo_containers()
+
+
+def _finish_demo_system_run(
+    instance: CodexInstance,
+    *,
+    run_status: str,
+    run_error: str,
+    workflow_status: str,
+) -> None:
+    if instance.workflow_id is None:
+        return
+    workflow = SystemWorkflow.objects.filter(pk=instance.workflow_id).first()
+    if workflow is None:
+        return
+    run, _created = SystemAgentRun.objects.get_or_create(
+        instance=instance,
+        defaults={
+            "workflow": workflow,
+            "agent_kind": DEMO_AGENT_KIND,
+            "thread_id": instance.thread_id,
+            "status": SystemAgentRun.STATUS_RUNNING,
+            "input": {"cwd": instance.cwd},
+        },
+    )
+    if run.status not in (SystemAgentRun.STATUS_COMPLETED, SystemAgentRun.STATUS_FAILED):
+        run.status = run_status
+        run.error = run_error
+        run.save(update_fields=["status", "error", "updated_at"])
+    if workflow.kind == DEMO_WORKFLOW_KIND and workflow.status == SystemWorkflow.STATUS_RUNNING:
+        workflow.status = workflow_status
+        workflow.save(update_fields=["status", "updated_at"])
 
 
 def _registration_token_from_instance(instance: CodexInstance) -> str:

@@ -1985,6 +1985,7 @@
                     <div class="demo-attempt">
                         {% if session_demo.container_name %}<div class="demo-attempt-meta">{{ session_demo.container_name }}</div>{% endif %}
                         {% if session_demo.last_error %}<div class="demo-attempt-meta">{{ session_demo.last_error }}</div>{% endif %}
+                        {% if session_demo.status == "failed" and demo_system_session_url %}<div class="demo-attempt-meta"><a href="{{ demo_system_session_url }}">View demo agent session</a></div>{% endif %}
                         {% if session_demo.logs %}<pre>{{ session_demo.logs }}</pre>{% endif %}
                     </div>
                 </div>
@@ -2042,6 +2043,7 @@
                         <div class="demo-attempt">
                             {% if session_demo.container_name %}<div class="demo-attempt-meta">{{ session_demo.container_name }}</div>{% endif %}
                             {% if session_demo.last_error %}<div class="demo-attempt-meta">{{ session_demo.last_error }}</div>{% endif %}
+                            {% if session_demo.status == "failed" and demo_system_session_url %}<div class="demo-attempt-meta"><a href="{{ demo_system_session_url }}">View demo agent session</a></div>{% endif %}
                             {% if session_demo.logs %}<pre>{{ session_demo.logs }}</pre>{% endif %}
                         </div>
                     </div>

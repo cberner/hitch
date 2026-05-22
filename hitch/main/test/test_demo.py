@@ -13,7 +13,7 @@ from django.test import RequestFactory, TestCase, override_settings
 from django.urls import reverse
 
 from hitch.main import demo
-from hitch.main.models import CodexInstance, SessionDemo
+from hitch.main.models import CodexInstance, SessionDemo, SystemAgentRun, SystemWorkflow
 
 
 def _inspect_stdout(
@@ -1131,6 +1131,110 @@ class DemoRegistrationTests(TestCase):
             timeout=30,
         ))
         mock_cleanup.assert_called_once()
+
+    @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
+    @patch("hitch.main.demo.subprocess.run")
+    def test_on_codex_instance_finished_fails_demo_system_run_when_unregistered(
+        self, mock_run: MagicMock, _mock_cleanup: MagicMock
+    ) -> None:
+        SessionDemo.objects.create(
+            thread_id="thread-1",
+            host="127.0.0.1",
+            port=3000,
+            status=SessionDemo.STATUS_PREPARING,
+            container_name="hitch-demo-thread-1-abcd",
+            registration_token="token",
+        )
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=_inspect_stdout(token="token", name="hitch-demo-thread-1-abcd"),
+                stderr="",
+            ),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ]
+        workflow = SystemWorkflow.objects.create(
+            kind=demo.DEMO_WORKFLOW_KIND,
+            main_thread_id="thread-1",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+        )
+        instance = CodexInstance.objects.create(
+            thread_id="thread-1",
+            cwd="/repo",
+            prompt="Registration token: token\n",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            pid=1,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=demo.DEMO_AGENT_KIND,
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            thread_id="thread-1",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        demo.on_codex_instance_finished(instance)
+
+        run.refresh_from_db()
+        workflow.refresh_from_db()
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertIn("without registering", run.error)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_FAILED)
+
+    @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
+    @patch("hitch.main.demo.subprocess.run")
+    def test_on_codex_instance_finished_creates_missing_demo_system_run(
+        self, mock_run: MagicMock, _mock_cleanup: MagicMock
+    ) -> None:
+        SessionDemo.objects.create(
+            thread_id="thread-1",
+            host="127.0.0.1",
+            port=3000,
+            status=SessionDemo.STATUS_PREPARING,
+            container_name="hitch-demo-thread-1-abcd",
+            registration_token="token",
+        )
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=_inspect_stdout(token="token", name="hitch-demo-thread-1-abcd"),
+                stderr="",
+            ),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        ]
+        workflow = SystemWorkflow.objects.create(
+            kind=demo.DEMO_WORKFLOW_KIND,
+            main_thread_id="thread-1",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+        )
+        instance = CodexInstance.objects.create(
+            thread_id="thread-1",
+            cwd="/repo",
+            prompt="Registration token: token\n",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            pid=1,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=demo.DEMO_AGENT_KIND,
+        )
+
+        demo.on_codex_instance_finished(instance)
+
+        run = SystemAgentRun.objects.get(instance=instance)
+        workflow.refresh_from_db()
+        self.assertEqual(run.agent_kind, demo.DEMO_AGENT_KIND)
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertIn("without registering", run.error)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_FAILED)
 
     @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
     def test_on_codex_instance_finished_ignores_stale_demo_token(

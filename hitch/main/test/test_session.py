@@ -939,6 +939,94 @@ class SessionViewTests(TestCase):
         self.assertNotContains(response, "Start demo?")
 
     @patch("hitch.main.views.Codex")
+    def test_failed_demo_links_to_system_session_with_full_demo_history(
+        self, mock_codex: MagicMock
+    ) -> None:
+        prompt = "Start an interactive web demo for this session.\n\nRegistration token: secret"
+        thread = _thread(
+            [
+                _turn([_user_message("Show the feature"), _agent_message("Done")]),
+                _turn([_user_message(prompt), _agent_message("container failed")]),
+            ]
+        )
+        _patch_thread(self, mock_codex, thread)
+        SessionDemo.objects.create(
+            thread_id="thread-1",
+            port=3000,
+            status=SessionDemo.STATUS_FAILED,
+            generation=1,
+            last_error="demo agent finished without registering a container",
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=demo.DEMO_WORKFLOW_KIND,
+            main_thread_id="thread-1",
+            cwd="/tmp/demo",
+            status=SystemWorkflow.STATUS_FAILED,
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="thread-1",
+            cwd="/tmp/demo",
+            prompt=prompt,
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            display_author=demo.DEMO_DISPLAY_AUTHOR,
+        )
+        demo_run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            thread_id="thread-1",
+            instance=instance,
+            status=SystemAgentRun.STATUS_FAILED,
+        )
+        qa_workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-1",
+            cwd="/tmp/demo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+        )
+        qa_instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="thread-1",
+            cwd="/tmp/demo",
+            prompt="Review the diff",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=qa_workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+        )
+        SystemAgentRun.objects.create(
+            workflow=qa_workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="thread-1",
+            instance=qa_instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+        )
+
+        response = _get_session(self.client)
+        demo_log_url = (
+            f"{reverse('system_session', kwargs={'session_id': 'thread-1'})}"
+            f"?run_id={demo_run.pk}"
+        )
+        system_response = self.client.get(
+            demo_log_url,
+        )
+
+        self.assertContains(response, "View demo agent session")
+        self.assertContains(response, demo_log_url)
+        self.assertNotContains(response, "Registration token: secret")
+        self.assertNotContains(response, "container failed")
+        self.assertEqual(system_response.status_code, 200)
+        self.assertContains(system_response, "Demo agent log")
+        self.assertContains(system_response, "Registration token: secret")
+        self.assertContains(system_response, "container failed")
+
+    @patch("hitch.main.views.Codex")
     def test_next_message_model_comes_only_from_resumed_thread(
         self, mock_codex: MagicMock
     ) -> None:

@@ -317,6 +317,7 @@ def start_standing_order_workflow(*, standing_order: StandingOrder) -> SystemWor
 def hidden_thread_ids() -> set[str]:
     hidden_ids = set(
         SystemAgentRun.objects.exclude(thread_id="")
+        .exclude(agent_kind="demo")
         .values_list("thread_id", flat=True)
         .distinct()
     )

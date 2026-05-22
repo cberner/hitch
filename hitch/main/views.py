@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 from django.contrib.auth import login as auth_login
 from django.contrib.auth import logout as auth_logout
 from django.contrib.auth.forms import AuthenticationForm, UserCreationForm
+from django.db import IntegrityError, transaction
 from django.db.models import Prefetch
 from django.http import (
     Http404,
@@ -473,7 +474,8 @@ def system_sessions(request: HttpRequest) -> HttpResponse:
         if current_settings.show_archived_sessions:
             threads.extend(_all_threads(codex, archived=True))
     hidden_thread_ids = system_agents.hidden_thread_ids()
-    runs_by_thread_id = _system_agent_runs_by_thread_id(hidden_thread_ids)
+    system_thread_ids = hidden_thread_ids | _demo_system_thread_ids()
+    runs_by_thread_id = _system_agent_runs_by_thread_id(system_thread_ids)
     threads = sorted(threads, key=lambda s: s.updated_at, reverse=True)
     projects = list(Project.objects.all())
     current_project = _selected_project_for_settings(current_settings, projects)
@@ -481,7 +483,7 @@ def system_sessions(request: HttpRequest) -> HttpResponse:
     sessions = []
     for thread in threads:
         thread_id = getattr(thread, "id", None)
-        if not isinstance(thread_id, str) or thread_id not in hidden_thread_ids:
+        if not isinstance(thread_id, str) or thread_id not in system_thread_ids:
             continue
         run = runs_by_thread_id.get(thread_id)
         session_project = _project_for_thread(thread, metadata_by_thread, projects)
@@ -526,7 +528,10 @@ def system_sessions(request: HttpRequest) -> HttpResponse:
 
 @require_http_methods(["GET"])
 def system_session(request: HttpRequest, session_id: str) -> HttpResponse:
-    run = _system_agent_run_for_thread(session_id)
+    run = _system_agent_run_for_thread(
+        session_id,
+        run_id=_positive_int(request.GET.get("run_id", "")),
+    )
     if run is None:
         raise Http404("system session not found")
     return _render_session_detail(
@@ -535,6 +540,7 @@ def system_session(request: HttpRequest, session_id: str) -> HttpResponse:
         read_only=True,
         display_title=_system_agent_run_detail_title(run),
         system_prompt=run.instance.prompt,
+        hide_demo_agent_entries=run.agent_kind != demo.DEMO_AGENT_KIND,
     )
 
 
@@ -1321,6 +1327,14 @@ def _workflow_state_int(workflow: SystemWorkflow, key: str) -> int:
     return 0
 
 
+def _positive_int(value: str) -> int | None:
+    try:
+        parsed = int(value)
+    except ValueError:
+        return None
+    return parsed if parsed > 0 else None
+
+
 def session(request: HttpRequest, session_id: str) -> HttpResponse:
     return _render_session_detail(request, session_id)
 
@@ -1332,6 +1346,7 @@ def _render_session_detail(
     read_only: bool = False,
     display_title: str | None = None,
     system_prompt: str = "",
+    hide_demo_agent_entries: bool = True,
 ) -> HttpResponse:
     # Sweep stuck workers before reading status: a worker that died without
     # writing a terminal status would otherwise leave the page in "streaming"
@@ -1358,7 +1373,8 @@ def _render_session_detail(
     is_archived = _thread_is_archived(thread)
     entries = _apply_system_authors(list(_entries_for(thread)), session_id)
     entries = _apply_qa_approval_messages(entries, session_id)
-    entries = _filter_demo_agent_entries(entries, session_id)
+    if hide_demo_agent_entries:
+        entries = _filter_demo_agent_entries(entries, session_id)
     name_value = getattr(thread, "name", None) or ""
     projects = list(Project.objects.all())
     metadata_by_thread = _metadata_by_thread_id([thread])
@@ -1387,6 +1403,7 @@ def _render_session_detail(
     diff_view = build_worktree_diff(_thread_cwd(thread))
     active_session_demo = demo.active_demo_for(session_id)
     session_demo = demo.latest_demo_for(session_id)
+    demo_system_session_url = _demo_system_session_url(session_id)
     demo_url = (
         demo.demo_url_for_request(request, session_id)
         if active_session_demo is not None
@@ -1475,6 +1492,7 @@ def _render_session_detail(
             "session_demo": session_demo,
             "active_session_demo": active_session_demo,
             "demo_url": demo_url,
+            "demo_system_session_url": demo_system_session_url,
             "projects": projects,
             "session_project": session_project,
             "session_project_id": session_project.pk if session_project is not None else "",
@@ -1743,9 +1761,43 @@ def _system_agent_runs_by_thread_id(
     return by_thread_id
 
 
-def _system_agent_run_for_thread(thread_id: str) -> SystemAgentRun | None:
+def _demo_system_thread_ids() -> set[str]:
+    return set(
+        SystemAgentRun.objects.filter(agent_kind=demo.DEMO_AGENT_KIND)
+        .exclude(thread_id="")
+        .values_list("thread_id", flat=True)
+        .distinct()
+    )
+
+
+def _demo_system_session_url(session_id: str) -> str:
+    if not session_id:
+        return ""
+    run = (
+        SystemAgentRun.objects.filter(
+            thread_id=session_id,
+            agent_kind=demo.DEMO_AGENT_KIND,
+        )
+        .order_by("-created_at", "-pk")
+        .first()
+    )
+    if run is None:
+        return ""
+    path = reverse("system_session", kwargs={"session_id": session_id})
+    return f"{path}?{urlencode({'run_id': run.pk})}"
+
+
+def _system_agent_run_for_thread(
+    thread_id: str, *, run_id: int | None = None
+) -> SystemAgentRun | None:
     if not thread_id:
         return None
+    if run_id is not None:
+        return (
+            SystemAgentRun.objects.filter(pk=run_id, thread_id=thread_id)
+            .select_related("instance", "workflow")
+            .first()
+        )
     return (
         SystemAgentRun.objects.filter(thread_id=thread_id)
         .select_related("instance", "workflow")
@@ -3246,6 +3298,12 @@ def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
         demo.demo_runtime()
     except demo.DemoError as exc:
         return HttpResponse(str(exc), status=500, content_type="text/plain")
+    if SystemWorkflow.objects.filter(
+        kind=demo.DEMO_WORKFLOW_KIND,
+        main_thread_id=session_id,
+        status=SystemWorkflow.STATUS_RUNNING,
+    ).exists():
+        return HttpResponseBadRequest("demo setup workflow is already running")
     settings = _stored_settings(request)
     config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
     with Codex(config=config) as codex:
@@ -3269,7 +3327,19 @@ def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
         demo=session_demo,
     )
     try:
-        codex_pool.spawn_turn(
+        with transaction.atomic():
+            workflow = SystemWorkflow.objects.create(
+                kind=demo.DEMO_WORKFLOW_KIND,
+                main_thread_id=session_id,
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_RUNNING,
+                step="demo_running",
+                state={"session_demo_id": session_demo.pk},
+            )
+    except IntegrityError:
+        return HttpResponseBadRequest("demo setup workflow is already running")
+    try:
+        instance = codex_pool.spawn_turn(
             thread_id=session_id,
             cwd=cwd,
             prompt=prompt,
@@ -3277,11 +3347,24 @@ def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
             approval_mode=_effective_approval_mode(settings),
             enable_memories=settings.enable_memories,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
             agent_kind=demo.DEMO_AGENT_KIND,
             display_author=demo.DEMO_DISPLAY_AUTHOR,
             user_message_index=None,
         )
+        SystemAgentRun.objects.get_or_create(
+            instance=instance,
+            defaults={
+                "workflow": workflow,
+                "agent_kind": demo.DEMO_AGENT_KIND,
+                "thread_id": instance.thread_id,
+                "status": SystemAgentRun.STATUS_RUNNING,
+                "input": {"cwd": cwd, "session_id": session_id},
+            },
+        )
     except Exception:
+        workflow.status = SystemWorkflow.STATUS_FAILED
+        workflow.save(update_fields=["status", "updated_at"])
         demo.cleanup_demo_for_session(session_id)
         raise
     return redirect("session", session_id=session_id)
