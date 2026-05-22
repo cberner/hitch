@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -953,11 +954,12 @@ def _okr_task_generation_prompt(
 def _standing_order_candidate_prompt(
     workflow: SystemWorkflow, standing_order: StandingOrder
 ) -> str:
-    ambition = _standing_order_ambition_phrase(standing_order)
+    ambition = _standing_order_ambition_guidance(standing_order)
     return (
         "You are Hitch's standing order agent.\n\n"
         "Thoroughly analyze the codebase and find one way to make "
-        f"{ambition} progress toward the standing order goal. Do not make code changes. "
+        f"{ambition.candidate_progress} toward the standing order goal. "
+        "Do not make code changes. "
         "Focus on a concrete session that a user could accept and continue from.\n\n"
         f"Repository cwd: {workflow.cwd}\n"
         f"Standing order title: {standing_order.title}\n\n"
@@ -969,15 +971,51 @@ def _standing_order_candidate_prompt(
         "The title should be concise. The summary should explain the proposed "
         "session. Impact should describe the likely user-visible or engineering "
         "benefit. Implementation direction should be specific enough for the "
-        "user to continue the work in this session."
+        "user to continue the work in this session. "
+        f"{ambition.candidate_instruction}"
     )
 
 
-def _standing_order_ambition_phrase(standing_order: StandingOrder) -> str:
+@dataclass(frozen=True)
+class _StandingOrderAmbitionGuidance:
+    candidate_progress: str
+    candidate_instruction: str
+    judge_progress: str
+    judge_instruction: str
+
+
+def _standing_order_ambition_guidance(
+    standing_order: StandingOrder,
+) -> _StandingOrderAmbitionGuidance:
     ambitions = {value for value, _label in StandingOrder.AMBITION_CHOICES}
-    if standing_order.ambition in ambitions:
-        return standing_order.ambition
-    return StandingOrder.AMBITION_INCREMENTAL
+    ambition = (
+        standing_order.ambition
+        if standing_order.ambition in ambitions
+        else StandingOrder.AMBITION_INCREMENTAL
+    )
+    if ambition == StandingOrder.AMBITION_YOLO:
+        return _StandingOrderAmbitionGuidance(
+            candidate_progress="bold, high-leverage progress",
+            candidate_instruction=(
+                "For YOLO ambition, prefer a substantial session with clear "
+                "upside over a cautious cleanup."
+            ),
+            judge_progress="bold, high-leverage progress",
+            judge_instruction=(
+                "For YOLO ambition, confidence should reflect whether this "
+                "specific session is substantial and high-upside, not merely "
+                "a small cleanup."
+            ),
+        )
+    return _StandingOrderAmbitionGuidance(
+        candidate_progress=f"{ambition} progress",
+        candidate_instruction="",
+        judge_progress=f"{ambition} progress",
+        judge_instruction=(
+            "Confidence should reflect whether this specific session is "
+            "likely to advance the goal incrementally."
+        ),
+    )
 
 
 def _standing_order_judge_prompt(
@@ -989,6 +1027,7 @@ def _standing_order_judge_prompt(
     history_file_text = (
         "\n".join(f"- {path}" for path in history_files) if history_files else "(none)"
     )
+    ambition = _standing_order_ambition_guidance(standing_order)
     candidate_text = json.dumps(candidate, indent=2, sort_keys=True)
     candidate_session = _session_metadata_from_state(workflow, "candidate_session_id")
     candidate_thread_id = (
@@ -997,10 +1036,11 @@ def _standing_order_judge_prompt(
     return (
         "You are Hitch's standing order confidence judge.\n\n"
         "Judge whether the candidate session is likely to make meaningful "
-        "progress toward the standing order goal. Use the standing order's "
+        f"{ambition.judge_progress} toward the standing order goal. "
+        "Use the standing order's "
         "accepted and rejected proposal history to calibrate your judgment. "
         "Do not reward broad or vague ideas; confidence should reflect whether "
-        "this specific session is likely to advance the goal incrementally.\n\n"
+        f"the proposal is concrete and well-scoped. {ambition.judge_instruction}\n\n"
         f"Repository cwd: {workflow.cwd}\n"
         f"Standing order title: {standing_order.title}\n"
         f"Confidence threshold: {standing_order.confidence_threshold}\n\n"
