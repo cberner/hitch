@@ -122,6 +122,7 @@ class SpawnNewSessionTests(TestCase):
         self.assertEqual(instance.cwd, "/repo")
         self.assertEqual(instance.prompt, "hi")
         self.assertEqual(instance.developer_instructions, "")
+        self.assertEqual(instance.base_instructions, "")
         self.assertEqual(instance.pid, 4242)
         self.assertEqual(instance.status, CodexInstance.STATUS_STARTING)
         self.assertTrue(instance.events_path.endswith(f"{instance.pk}.jsonl"))
@@ -175,6 +176,53 @@ class SpawnNewSessionTests(TestCase):
                 ):
                     codex_pool.spawn_new_session(cwd="/repo", prompt=prompt)
                 codex._client.thread_set_name.assert_called_once_with("t", expected)
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.codex_pool.Codex")
+    def test_forwards_base_instructions_to_thread_start(
+        self, mock_codex: MagicMock, mock_launch: MagicMock
+    ) -> None:
+        codex = _stub_codex_thread_start(mock_codex)
+        mock_launch.return_value = SimpleNamespace(pid=1)
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_new_session(
+                cwd="/repo",
+                prompt="hi",
+                base_instructions="Base override.",
+            )
+
+        codex.thread_start.assert_called_once_with(
+            cwd="/repo",
+            developer_instructions=None,
+            model=None,
+            base_instructions="Base override.",
+        )
+        self.assertEqual(instance.base_instructions, "Base override.")
+
+    @patch("hitch.main.codex_pool.Codex")
+    def test_create_session_thread_forwards_base_instructions(
+        self, mock_codex: MagicMock
+    ) -> None:
+        codex = _stub_codex_thread_start(mock_codex, "thread-abc")
+
+        thread_id = codex_pool.create_session_thread(
+            cwd="/repo",
+            name="QA",
+            base_instructions="Base override.",
+        )
+
+        self.assertEqual(thread_id, "thread-abc")
+        codex.thread_start.assert_called_once_with(
+            cwd="/repo",
+            developer_instructions=None,
+            model=None,
+            base_instructions="Base override.",
+        )
+        codex._client.thread_set_name.assert_called_once_with("thread-abc", "QA")
 
     @patch("hitch.main.codex_pool._launch_worker_process")
     @patch("hitch.main.codex_pool.Codex")
@@ -386,6 +434,59 @@ class SpawnTurnTests(TestCase):
             )
 
         self.assertEqual(instance.developer_instructions, "Prefer small, typed changes.")
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    def test_copies_base_instructions_from_previous_turn(
+        self, mock_launch: MagicMock
+    ) -> None:
+        mock_launch.return_value = SimpleNamespace(pid=1234)
+        CodexInstance.objects.create(
+            pid=999,
+            thread_id="thread-xyz",
+            cwd="/repo",
+            prompt="first",
+            base_instructions="Base override.",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_turn(
+                thread_id="thread-xyz", cwd="/repo", prompt="follow-up"
+            )
+
+        self.assertEqual(instance.base_instructions, "Base override.")
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    def test_explicit_base_instructions_override_previous_turn(
+        self, mock_launch: MagicMock
+    ) -> None:
+        mock_launch.return_value = SimpleNamespace(pid=1234)
+        CodexInstance.objects.create(
+            pid=999,
+            thread_id="thread-xyz",
+            cwd="/repo",
+            prompt="first",
+            base_instructions="Old base.",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_turn(
+                thread_id="thread-xyz",
+                cwd="/repo",
+                prompt="follow-up",
+                base_instructions="Fresh base.",
+            )
+
+        self.assertEqual(instance.base_instructions, "Fresh base.")
 
     @patch("hitch.main.codex_pool._launch_worker_process")
     def test_explicit_developer_instructions_override_previous_turn(
@@ -1722,6 +1823,7 @@ class CodexWorkerCommandTests(TestCase):
         events_dir: Path,
         *,
         prompt: str = "hi",
+        base_instructions: str = "",
         developer_instructions: str = "",
         enable_memories: bool = False,
     ) -> CodexInstance:
@@ -1730,6 +1832,7 @@ class CodexWorkerCommandTests(TestCase):
             thread_id="thread-1",
             cwd="/repo",
             prompt=prompt,
+            base_instructions=base_instructions,
             developer_instructions=developer_instructions,
             enable_memories=enable_memories,
             events_path=str(events_dir / "events.jsonl"),
@@ -1802,6 +1905,26 @@ class CodexWorkerCommandTests(TestCase):
         codex_ctx.thread_resume.assert_called_once_with(
             "thread-1",
             developer_instructions="Prefer small, typed changes.",
+        )
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_forwards_base_instructions_on_resume(
+        self, mock_codex: MagicMock
+    ) -> None:
+        events = [_completed_event("turn-1", TurnStatus.completed)]
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.return_value = _stub_thread_resume(events)
+
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(
+                Path(raw),
+                base_instructions="Base override.",
+            )
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+
+        codex_ctx.thread_resume.assert_called_once_with(
+            "thread-1",
+            base_instructions="Base override.",
         )
 
     @patch("hitch.main.management.commands.codex_worker.Codex")

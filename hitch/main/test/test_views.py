@@ -20,7 +20,7 @@ from django.test import Client, TestCase, override_settings
 from django.urls import reverse
 from openai_codex.errors import AppServerError, MethodNotFoundError
 
-from hitch.main import demo, streaming, system_agents, views
+from hitch.main import coding_agents, demo, streaming, system_agents, views
 from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
@@ -50,6 +50,7 @@ _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
+_CODING_AGENT_COOKIE = "hitch_coding_agent"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 _PR_PROMPT = (
     "Do a thorough review of the diff. Rebase on master, clean it up, "
@@ -2243,6 +2244,11 @@ class NewSessionViewTests(TestCase):
                 {"hitch_approval_mode": "prompt_user"},
                 {"approval_mode": "prompt_user"},
             ),
+            (
+                "hitch coding agent",
+                {_CODING_AGENT_COOKIE: "hitch"},
+                {"base_instructions": coding_agents.HITCH_BASE_INSTRUCTIONS},
+            ),
         ]
 
         for index, (label, cookies, expected) in enumerate(cases):
@@ -3217,6 +3223,86 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
+    def test_hitch_coding_agent_forwards_base_instructions_to_follow_up(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        _seed_cookies(self.client, **{_CODING_AGENT_COOKIE: "hitch"})
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        base_instructions = mock_spawn.call_args.kwargs["base_instructions"]
+        self.assertIn("You are running inside HITCH", base_instructions)
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_codex_coding_agent_clears_previous_hitch_base_instructions(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        _seed_cookies(self.client, **{_CODING_AGENT_COOKIE: "codex"})
+        CodexInstance.objects.create(
+            pid=999,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="first",
+            base_instructions=coding_agents.HITCH_BASE_INSTRUCTIONS,
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        base_instructions = mock_spawn.call_args.kwargs["base_instructions"]
+        self.assertEqual(
+            base_instructions, coding_agents.default_codex_base_instructions()
+        )
+        self.assertNotIn("You are running inside HITCH", base_instructions)
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_codex_coding_agent_clears_unknown_previous_base_instructions(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        _seed_cookies(self.client, **{_CODING_AGENT_COOKIE: "codex"})
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            mock_spawn.call_args.kwargs["base_instructions"],
+            coding_agents.default_codex_base_instructions(),
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
     def test_auto_pr_session_marks_follow_up_turn(
         self,
         mock_codex: MagicMock,
@@ -3701,6 +3787,62 @@ class SendMessageViewTests(TestCase):
                 }
                 workflow_kwargs.update(expected)
                 mock_start_workflow.assert_called_once_with(**workflow_kwargs)
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_qa_slash_command_forwards_hitch_base_instructions_to_workflow(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex, model="gpt-5.4")
+        mock_discover.return_value = [Path("/repo")]
+        _seed_cookies(self.client, **{_CODING_AGENT_COOKIE: "hitch"})
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "/qa"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        base_instructions = mock_start_workflow.call_args.kwargs["base_instructions"]
+        self.assertIn("You are running inside HITCH", base_instructions)
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_qa_slash_command_clears_hitch_base_instructions_for_codex(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex, model="gpt-5.4")
+        mock_discover.return_value = [Path("/repo")]
+        _seed_cookies(self.client, **{_CODING_AGENT_COOKIE: "codex"})
+        CodexInstance.objects.create(
+            pid=999,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="first",
+            base_instructions=coding_agents.HITCH_BASE_INSTRUCTIONS,
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "/qa"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        base_instructions = mock_start_workflow.call_args.kwargs["base_instructions"]
+        self.assertEqual(
+            base_instructions, coding_agents.default_codex_base_instructions()
+        )
+        self.assertNotIn("You are running inside HITCH", base_instructions)
 
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")

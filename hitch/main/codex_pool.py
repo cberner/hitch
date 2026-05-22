@@ -40,6 +40,7 @@ def spawn_new_session(
     *,
     cwd: str,
     prompt: str,
+    base_instructions: str | None = None,
     developer_instructions: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
@@ -72,6 +73,8 @@ def spawn_new_session(
             "developer_instructions": developer_instructions,
             "model": model,
         }
+        if base_instructions:
+            start_kwargs["base_instructions"] = base_instructions
         if thread_source is not None:
             start_kwargs["thread_source"] = thread_source
         thread = codex.thread_start(**start_kwargs)
@@ -92,6 +95,7 @@ def spawn_new_session(
         thread_id=thread_id,
         cwd=cwd,
         prompt=prompt,
+        base_instructions=base_instructions,
         developer_instructions=developer_instructions,
         model=model if plan_mode else None,
         stored_model=model,
@@ -114,6 +118,7 @@ def create_session_thread(
     *,
     cwd: str,
     name: str,
+    base_instructions: str | None = None,
     developer_instructions: str | None = None,
     model: str | None = None,
     enable_memories: bool = False,
@@ -121,11 +126,14 @@ def create_session_thread(
     """Create and persist a visible Codex thread without starting a turn."""
     config = app_server_config(enable_memories=enable_memories)
     with Codex(config=config) as codex:
-        thread = codex.thread_start(
-            cwd=cwd,
-            developer_instructions=developer_instructions,
-            model=model,
-        )
+        start_kwargs: dict[str, Any] = {
+            "cwd": cwd,
+            "developer_instructions": developer_instructions,
+            "model": model,
+        }
+        if base_instructions:
+            start_kwargs["base_instructions"] = base_instructions
+        thread = codex.thread_start(**start_kwargs)
         codex._client.thread_set_name(thread.id, _initial_thread_name(name))
         return thread.id
 
@@ -162,6 +170,7 @@ def spawn_turn(
     enable_memories: bool = False,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
+    base_instructions: str | None = None,
     developer_instructions: str | None = None,
     purpose: str = CodexInstance.PURPOSE_USER,
     workflow_id: int | None = None,
@@ -172,6 +181,9 @@ def spawn_turn(
     auto_pr_enabled: bool = False,
 ) -> CodexInstance:
     """Detach a worker that resumes an existing thread to run one prompt."""
+    if base_instructions is None:
+        previous = latest_for_thread(thread_id)
+        base_instructions = previous.base_instructions if previous is not None else None
     if developer_instructions is None:
         previous = latest_for_thread(thread_id)
         developer_instructions = (
@@ -181,6 +193,7 @@ def spawn_turn(
         thread_id=thread_id,
         cwd=cwd,
         prompt=prompt,
+        base_instructions=base_instructions or None,
         developer_instructions=developer_instructions or None,
         model=model,
         stored_model=stored_model,
@@ -652,6 +665,7 @@ def _spawn_worker(
     thread_id: str,
     cwd: str,
     prompt: str,
+    base_instructions: str | None = None,
     developer_instructions: str | None = None,
     model: str | None = None,
     stored_model: str | None = None,
@@ -678,6 +692,7 @@ def _spawn_worker(
             thread_id=thread_id,
             cwd=cwd,
             prompt=prompt,
+            base_instructions=base_instructions or "",
             developer_instructions=developer_instructions or "",
             enable_memories=enable_memories,
             model=(stored_model if stored_model is not None else model) or "",

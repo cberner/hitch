@@ -32,7 +32,15 @@ from openai_codex.generated.v2_all import (
     ReasoningEffort,
 )
 
-from hitch.main import codex_events, codex_pool, demo, rollout, streaming, system_agents
+from hitch.main import (
+    codex_events,
+    codex_pool,
+    coding_agents,
+    demo,
+    rollout,
+    streaming,
+    system_agents,
+)
 from hitch.main.diffs import build_worktree_diff
 from hitch.main.formatting import looks_like_markdown, render_markdown
 from hitch.main.models import (
@@ -68,6 +76,7 @@ class SettingsValues(NamedTuple):
     reasoning_effort: str
     sandbox_policy: str
     approval_mode: str
+    coding_agent: str
     extra_system_prompt: str
     use_worktrees: bool
     auto_pr_enabled: bool
@@ -144,6 +153,7 @@ _MODEL_COOKIE = "hitch_model"
 _EFFORT_COOKIE = "hitch_reasoning_effort"
 _SANDBOX_COOKIE = "hitch_sandbox_policy"
 _APPROVAL_COOKIE = "hitch_approval_mode"
+_CODING_AGENT_COOKIE = "hitch_coding_agent"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
@@ -264,10 +274,15 @@ def _settings_dialog_context(
             {"id": value, "display_name": label}
             for value, label in _APPROVAL_MODE_OPTIONS
         ],
+        "coding_agent_options": [
+            {"id": value, "display_name": label}
+            for value, label in coding_agents.CODING_AGENT_OPTIONS
+        ],
         "current_model": current_settings.model,
         "current_effort": current_settings.reasoning_effort,
         "current_sandbox": current_settings.sandbox_policy,
         "current_approval": current_settings.approval_mode,
+        "current_coding_agent": _effective_coding_agent(current_settings),
         "current_extra_system_prompt": current_settings.extra_system_prompt,
         "extra_system_prompt_max_len": _EXTRA_SYSTEM_PROMPT_MAX_LEN,
         "current_use_worktrees": current_settings.use_worktrees,
@@ -1780,6 +1795,23 @@ def _effective_approval_mode(settings: SettingsValues) -> str:
     return settings.approval_mode
 
 
+def _effective_coding_agent(settings: SettingsValues) -> str:
+    if settings.coding_agent in coding_agents.VALID_CODING_AGENTS:
+        return settings.coding_agent
+    return coding_agents.DEFAULT_CODING_AGENT
+
+
+def _base_instructions_for_settings(
+    settings: SettingsValues, *, explicit_default: bool = False
+) -> str | None:
+    agent = _effective_coding_agent(settings)
+    if agent == coding_agents.CODING_AGENT_CODEX:
+        if explicit_default and settings.coding_agent == coding_agents.CODING_AGENT_CODEX:
+            return coding_agents.default_codex_base_instructions()
+        return None
+    return coding_agents.base_instructions_for(agent)
+
+
 def _string_value(value: Any) -> str:
     raw = getattr(value, "value", value)
     return raw.strip() if isinstance(raw, str) else ""
@@ -2444,6 +2476,7 @@ def _stored_settings(request: HttpRequest) -> SettingsValues:
         reasoning_effort=_read_cookie(request, _EFFORT_COOKIE),
         sandbox_policy=_read_cookie(request, _SANDBOX_COOKIE),
         approval_mode=_read_cookie(request, _APPROVAL_COOKIE),
+        coding_agent=_read_cookie(request, _CODING_AGENT_COOKIE),
         extra_system_prompt=_read_extra_system_prompt_cookie(request),
         use_worktrees=_read_cookie(request, _USE_WORKTREES_COOKIE) == "true",
         auto_pr_enabled=_read_cookie(request, _AUTO_PR_COOKIE) == "true",
@@ -2465,6 +2498,7 @@ def _settings_values_for_user(settings: UserSettings) -> SettingsValues:
         reasoning_effort=settings.reasoning_effort,
         sandbox_policy=settings.sandbox_policy,
         approval_mode=settings.approval_mode,
+        coding_agent=settings.coding_agent,
         extra_system_prompt=settings.extra_system_prompt,
         use_worktrees=settings.use_worktrees,
         auto_pr_enabled=settings.auto_pr_enabled,
@@ -2483,6 +2517,7 @@ def _save_user_settings(user: Any, values: SettingsValues) -> UserSettings:
         ("reasoning_effort", values.reasoning_effort),
         ("sandbox_policy", values.sandbox_policy),
         ("approval_mode", values.approval_mode),
+        ("coding_agent", values.coding_agent),
         ("extra_system_prompt", values.extra_system_prompt),
         ("use_worktrees", values.use_worktrees),
         ("auto_pr_enabled", values.auto_pr_enabled),
@@ -2505,6 +2540,7 @@ def _settings_cookie_updates(values: SettingsValues) -> dict[str, str]:
         _EFFORT_COOKIE: values.reasoning_effort,
         _SANDBOX_COOKIE: values.sandbox_policy,
         _APPROVAL_COOKIE: values.approval_mode,
+        _CODING_AGENT_COOKIE: _effective_coding_agent(values),
         _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt_cookie(
             values.extra_system_prompt
         ),
@@ -2546,6 +2582,13 @@ def _valid_cookie_setting_updates(request: HttpRequest) -> dict[str, str | bool 
     if approval is not None:
         updates["approval_mode"] = (
             approval if approval in _VALID_APPROVAL_MODES else _DEFAULT_APPROVAL_MODE
+        )
+    coding_agent = _read_signed_cookie_if_present(request, _CODING_AGENT_COOKIE)
+    if coding_agent is not None:
+        updates["coding_agent"] = (
+            coding_agent
+            if coding_agent in coding_agents.VALID_CODING_AGENTS
+            else coding_agents.DEFAULT_CODING_AGENT
         )
     extra_prompt = _read_signed_cookie_if_present(request, _EXTRA_SYSTEM_PROMPT_COOKIE)
     if extra_prompt is not None:
@@ -2753,6 +2796,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     effort = request.POST.get("reasoning_effort", "").strip()
     sandbox = request.POST.get("sandbox_policy", "").strip()
     approval = request.POST.get("approval_mode", "").strip()
+    coding_agent = request.POST.get("coding_agent", "").strip()
     extra_system_prompt = request.POST.get("extra_system_prompt", "").strip()
     use_worktrees = request.POST.get("use_worktrees", "").strip()
     auto_pr = request.POST.get("auto_pr", "").strip()
@@ -2780,6 +2824,10 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest("invalid approval mode")
     if not approval:
         approval = _DEFAULT_APPROVAL_MODE
+    if coding_agent and coding_agent not in coding_agents.VALID_CODING_AGENTS:
+        return HttpResponseBadRequest("invalid coding agent")
+    if not coding_agent:
+        coding_agent = coding_agents.DEFAULT_CODING_AGENT
     if use_worktrees not in {"", "true"}:
         return HttpResponseBadRequest("invalid worktree setting")
     use_worktrees = "true" if use_worktrees == "true" else "false"
@@ -2808,6 +2856,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         reasoning_effort=effort,
         sandbox_policy=sandbox,
         approval_mode=approval,
+        coding_agent=coding_agent,
         extra_system_prompt=extra_system_prompt,
         use_worktrees=use_worktrees == "true",
         auto_pr_enabled=auto_pr == "true",
@@ -3334,9 +3383,12 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     # elevated permissions or stricter escalation handling.
     sandbox_policy = _effective_sandbox_policy(settings)
     approval_mode = _effective_approval_mode(settings)
+    previous_instance = codex_pool.latest_for_thread(session_id)
+    base_instructions = _base_instructions_for_settings(
+        settings, explicit_default=True
+    )
     auto_pr_enabled = _auto_pr_enabled_for_session(session_id)
     if qa_workflow_activation:
-        previous_instance = codex_pool.latest_for_thread(session_id)
         developer_instructions = (
             previous_instance.developer_instructions
             if previous_instance is not None
@@ -3358,6 +3410,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             "enable_memories": settings.enable_memories,
             "initial_user_message_index": _count_user_entries(thread_entries),
         }
+        if base_instructions:
+            workflow_kwargs["base_instructions"] = base_instructions
         if qa_activation:
             workflow_kwargs["open_pr_on_lgtm"] = False
         system_agents.start_pr_qa_workflow(**workflow_kwargs)
@@ -3369,6 +3423,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         "sandbox_policy": sandbox_policy or None,
         "approval_mode": approval_mode,
     }
+    if base_instructions:
+        spawn_kwargs["base_instructions"] = base_instructions
     if settings.enable_memories:
         spawn_kwargs["enable_memories"] = True
     if auto_pr_enabled:
@@ -3786,13 +3842,17 @@ def new_session(request: HttpRequest) -> HttpResponse:
     # worktree would be clean and miss uncommitted changes.
     if qa_workflow_activation:
         thread_name = _PR_SLASH_PROMPT if pr_activation else _QA_SLASH_PROMPT
-        thread_id = codex_pool.create_session_thread(
-            cwd=session_cwd,
-            name=thread_name,
-            developer_instructions=settings.extra_system_prompt or None,
-            model=settings.model or None,
-            enable_memories=settings.enable_memories,
-        )
+        base_instructions = _base_instructions_for_settings(settings)
+        create_thread_kwargs: dict[str, Any] = {
+            "cwd": session_cwd,
+            "name": thread_name,
+            "developer_instructions": settings.extra_system_prompt or None,
+            "model": settings.model or None,
+            "enable_memories": settings.enable_memories,
+        }
+        if base_instructions:
+            create_thread_kwargs["base_instructions"] = base_instructions
+        thread_id = codex_pool.create_session_thread(**create_thread_kwargs)
         workflow_kwargs: dict[str, Any] = {
             "main_thread_id": thread_id,
             "cwd": session_cwd,
@@ -3804,6 +3864,8 @@ def new_session(request: HttpRequest) -> HttpResponse:
             "enable_memories": settings.enable_memories,
             "initial_user_message_index": 0,
         }
+        if base_instructions:
+            workflow_kwargs["base_instructions"] = base_instructions
         if qa_activation:
             workflow_kwargs["open_pr_on_lgtm"] = False
         system_agents.start_pr_qa_workflow(**workflow_kwargs)
@@ -3854,6 +3916,9 @@ def new_session(request: HttpRequest) -> HttpResponse:
         "sandbox_policy": settings.sandbox_policy or None,
         "approval_mode": settings.approval_mode,
     }
+    base_instructions = _base_instructions_for_settings(settings)
+    if base_instructions:
+        spawn_kwargs["base_instructions"] = base_instructions
     if settings.enable_memories:
         spawn_kwargs["enable_memories"] = True
     if plan_mode:
