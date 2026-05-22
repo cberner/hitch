@@ -100,6 +100,88 @@ class WorktreeDiffTests(SimpleTestCase):
         self.assertEqual(diff.additions, 1)
         self.assertEqual(diff.deletions, 1)
 
+    def test_branch_diff_prefers_origin_head_over_stale_origin_main(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            worktree = root / "feature-worktree"
+            subprocess.run(["git", "init", "--initial-branch=master", str(repo)], check=True, capture_output=True)
+            tracked = repo / "example.py"
+            tracked.write_text("def answer():\n    return 1\n")
+            _git(repo, "add", "example.py")
+            _git(repo, "commit", "-m", "initial")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+            (repo / "upstream.py").write_text("def upstream():\n    return 10\n")
+            _git(repo, "add", "upstream.py")
+            _git(repo, "commit", "-m", "upstream change")
+            _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
+            _git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
+            _git(repo, "worktree", "add", "-b", "feature", str(worktree), "master")
+
+            branch_file = worktree / "example.py"
+            branch_file.write_text("def answer():\n    return 2\n")
+            _git(worktree, "commit", "-am", "feature change")
+
+            diff = build_worktree_diff(str(worktree))
+
+        self.assertTrue(diff.has_changes)
+        self.assertEqual(diff.file_count, 1)
+        self.assertEqual(diff.files[0].path, "example.py")
+
+    def test_branch_diff_origin_head_beats_closer_non_default_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            worktree = root / "feature-worktree"
+            subprocess.run(["git", "init", "--initial-branch=main", str(repo)], check=True, capture_output=True)
+            tracked = repo / "example.py"
+            tracked.write_text("def answer():\n    return 1\n")
+            _git(repo, "add", "example.py")
+            _git(repo, "commit", "-m", "initial")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            _git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+            _git(repo, "worktree", "add", "-b", "feature", str(worktree), "main")
+
+            branch_file = worktree / "example.py"
+            branch_file.write_text("def answer():\n    return 2\n")
+            _git(worktree, "commit", "-am", "feature change")
+            _git(worktree, "update-ref", "refs/remotes/origin/master", "HEAD")
+
+            diff = build_worktree_diff(str(worktree))
+
+        self.assertTrue(diff.has_changes)
+        self.assertEqual(diff.file_count, 1)
+        self.assertEqual(diff.files[0].path, "example.py")
+
+    def test_branch_diff_prefers_closest_remote_base_without_origin_head(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            worktree = root / "feature-worktree"
+            subprocess.run(["git", "init", "--initial-branch=master", str(repo)], check=True, capture_output=True)
+            tracked = repo / "example.py"
+            tracked.write_text("def answer():\n    return 1\n")
+            _git(repo, "add", "example.py")
+            _git(repo, "commit", "-m", "initial")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+            (repo / "upstream.py").write_text("def upstream():\n    return 10\n")
+            _git(repo, "add", "upstream.py")
+            _git(repo, "commit", "-m", "upstream change")
+            _git(repo, "update-ref", "refs/remotes/origin/master", "HEAD")
+            _git(repo, "worktree", "add", "-b", "feature", str(worktree), "master")
+
+            branch_file = worktree / "example.py"
+            branch_file.write_text("def answer():\n    return 2\n")
+            _git(worktree, "commit", "-am", "feature change")
+
+            diff = build_worktree_diff(str(worktree))
+
+        self.assertTrue(diff.has_changes)
+        self.assertEqual(diff.file_count, 1)
+        self.assertEqual(diff.files[0].path, "example.py")
+
     def test_branch_diff_falls_back_to_origin_master_without_merge_base(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = Path(raw)
@@ -142,6 +224,31 @@ class WorktreeDiffTests(SimpleTestCase):
 
         self.assertTrue(diff.has_changes)
         self.assertEqual(diff.files[0].path, "example.py")
+
+    def test_builds_diff_for_committed_branch_changes_against_origin_main(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            worktree = root / "feature-worktree"
+            subprocess.run(["git", "init", "--initial-branch=main", str(repo)], check=True, capture_output=True)
+            tracked = repo / "example.py"
+            tracked.write_text("def answer():\n    return 1\n")
+            _git(repo, "add", "example.py")
+            _git(repo, "commit", "-m", "initial")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            _git(repo, "worktree", "add", "-b", "feature", str(worktree), "main")
+
+            branch_file = worktree / "example.py"
+            branch_file.write_text("def answer():\n    return 2\n")
+            _git(worktree, "commit", "-am", "feature change")
+
+            diff = build_worktree_diff(str(worktree))
+
+        self.assertTrue(diff.has_changes)
+        self.assertEqual(diff.file_count, 1)
+        self.assertEqual(diff.files[0].path, "example.py")
+        self.assertEqual(diff.additions, 1)
+        self.assertEqual(diff.deletions, 1)
 
     def test_committed_branch_changes_fall_back_to_head_without_origin_master(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
