@@ -5372,6 +5372,7 @@ class StandingOrderViewTests(TestCase):
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
+            ambition=StandingOrder.AMBITION_HIGH,
         )
         StandingOrder.objects.create(
             project=other_project,
@@ -5408,7 +5409,7 @@ class StandingOrderViewTests(TestCase):
         self.assertContains(response, "--shadow-lg")
         self.assertContains(response, "Improve tests")
         self.assertContains(response, "Ambition")
-        self.assertContains(response, "Incremental")
+        self.assertContains(response, "High ambition")
         self.assertContains(response, "Add parser coverage")
         self.assertContains(response, "This adds focused parser coverage.")
         self.assertContains(response, "hitch/main/rollout.py")
