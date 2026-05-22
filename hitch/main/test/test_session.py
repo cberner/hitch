@@ -198,6 +198,21 @@ def _diff_view() -> DiffView:
 
 
 class PrUrlDetectionTests(TestCase):
+    LEGACY_PR_PROMPT = (
+        "Do a thorough review of the diff. Rebase on master, clean it up, "
+        "and then open a PR"
+    )
+    LEGACY_PR_FINAL_PROMPT = (
+        f"{LEGACY_PR_PROMPT}. After opening it, poll the PR every 2 minutes "
+        "until you have CI status and at least one review signal: code review "
+        "comments, a thumbs up emoji on the PR, or an explicit review approval. "
+        "On each poll, check whether the PR has merge conflicts. Address CI "
+        "failures, review comments, merge conflicts, and any other blocking issues; "
+        "push fixes and keep looping until CI, review, and mergeability are all clean. "
+        "Stop and report back if any single polling iteration has no results after "
+        "30 minutes."
+    )
+
     def test_detects_pr_url_from_latest_pr_turn_github_mcp_result(self) -> None:
         earlier = "https://github.com/cberner/hitch/pull/93"
         latest = "https://github.com/cberner/hitch/pull/94"
@@ -237,6 +252,31 @@ class PrUrlDetectionTests(TestCase):
         )
 
         self.assertEqual(_pr_url_for_thread(thread), latest)
+
+    def test_detects_pr_url_from_legacy_pr_prompt_strings(self) -> None:
+        display_url = "https://github.com/cberner/hitch/pull/93"
+        final_url = "https://github.com/cberner/hitch/pull/94"
+
+        for prompt, url in (
+            (self.LEGACY_PR_PROMPT, display_url),
+            (self.LEGACY_PR_FINAL_PROMPT, final_url),
+        ):
+            with self.subTest(prompt=prompt):
+                thread = _thread(
+                    [
+                        _turn(
+                            [
+                                _user_message(prompt),
+                                _mcp_tool_call(
+                                    "github", "_create_pull_request", {"url": url}
+                                ),
+                                _agent_message("Opened the PR."),
+                            ]
+                        )
+                    ]
+                )
+
+                self.assertEqual(_pr_url_for_thread(thread), url)
 
     def test_ignores_non_pr_turns_and_non_github_tools(self) -> None:
         url = "https://github.com/cberner/hitch/pull/94"
@@ -2911,7 +2951,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "data-slash-qa")
         self.assertContains(
             response,
-            "Do a thorough review of the diff. Rebase on master, clean it up, and then open a PR",
+            "Rebase on master, clean it up, and then open a PR",
         )
         self.assertContains(
             response,

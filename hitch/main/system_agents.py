@@ -36,8 +36,7 @@ OKR_TASK_DISPLAY_AUTHOR = "Task planning agent"
 STANDING_ORDER_DISPLAY_AUTHOR = "Standing order agent"
 STANDING_ORDER_JUDGE_DISPLAY_AUTHOR = "Standing order judge"
 PR_SLASH_DISPLAY_PROMPT = (
-    "Do a thorough review of the diff. Rebase on master, clean it up, "
-    "and then open a PR"
+    "Rebase on master, clean it up, and then open a PR"
 )
 QA_SLASH_DISPLAY_PROMPT = (
     "Run the QA agent on the current diff and fix anything it finds"
@@ -875,7 +874,7 @@ def _qa_prompt(cwd: str, diff_text: str) -> str:
     return (
         "You are Hitch's QA agent for a PR workflow.\n\n"
         "Thoroughly review the current code diff before the PR agent runs its final "
-        "review/cleanup/open-PR pass.\n\n"
+        "cleanup/open-PR pass.\n\n"
         f"{_CODEX_REVIEW_GUIDANCE}\n"
         "Also do your own manual QA: if there is an interactive interface related "
         "to the diff, manually test it out and include concrete failures or gaps in "
