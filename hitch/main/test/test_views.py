@@ -52,8 +52,7 @@ _AUTO_PR_COOKIE = "hitch_auto_pr"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 _PR_PROMPT = (
-    "Do a thorough review of the diff. Rebase on master, clean it up, "
-    "and then open a PR"
+    "Rebase on master, clean it up, and then open a PR"
 )
 _QA_PROMPT = "Run the QA agent on the current diff and fix anything it finds"
 

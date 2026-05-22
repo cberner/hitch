@@ -202,6 +202,28 @@ _VALID_PLAN_ACTIONS = frozenset({"", _PLAN_ACTION_APPROVE, _PLAN_ACTION_REVISE})
 _PR_SLASH_COMMAND = "/pr"
 _PR_SLASH_PROMPT = system_agents.PR_SLASH_DISPLAY_PROMPT
 _PR_SLASH_FINAL_PROMPT = system_agents.PR_SLASH_PROMPT
+_LEGACY_PR_SLASH_PROMPT = (
+    "Do a thorough review of the diff. Rebase on master, clean it up, "
+    "and then open a PR"
+)
+_LEGACY_PR_SLASH_FINAL_PROMPT = (
+    f"{_LEGACY_PR_SLASH_PROMPT}. After opening it, poll the PR every 2 minutes "
+    "until you have CI status and at least one review signal: code review "
+    "comments, a thumbs up emoji on the PR, or an explicit review approval. "
+    "On each poll, check whether the PR has merge conflicts. Address CI "
+    "failures, review comments, merge conflicts, and any other blocking issues; "
+    "push fixes and keep looping until CI, review, and mergeability are all clean. "
+    "Stop and report back if any single polling iteration has no results after "
+    "30 minutes."
+)
+_PR_PROMPT_ALIASES = frozenset(
+    {
+        _PR_SLASH_PROMPT,
+        _PR_SLASH_FINAL_PROMPT,
+        _LEGACY_PR_SLASH_PROMPT,
+        _LEGACY_PR_SLASH_FINAL_PROMPT,
+    }
+)
 _QA_SLASH_COMMAND = "/qa"
 _QA_SLASH_PROMPT = system_agents.QA_SLASH_DISPLAY_PROMPT
 _PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium.value
@@ -3420,7 +3442,7 @@ def _is_pr_prompt_turn(items: list[Any]) -> bool:
     for item in items:
         if _value_for(item, "type") != "userMessage":
             continue
-        if _user_message_text(item).strip() in {_PR_SLASH_PROMPT, _PR_SLASH_FINAL_PROMPT}:
+        if _user_message_text(item).strip() in _PR_PROMPT_ALIASES:
             return True
     return False
 
@@ -3537,7 +3559,7 @@ def _message_intent(request: HttpRequest) -> _MessageIntent:
         return _MessageIntent(_PR_SLASH_PROMPT, False, False, False)
     if command == _QA_SLASH_COMMAND:
         return _MessageIntent(_QA_SLASH_PROMPT, False, False, False)
-    if not plan_mode and prompt in {_PR_SLASH_PROMPT, _PR_SLASH_FINAL_PROMPT}:
+    if not plan_mode and prompt in _PR_PROMPT_ALIASES:
         return _MessageIntent(prompt, False, False, False)
     if not plan_mode and prompt == _QA_SLASH_PROMPT:
         return _MessageIntent(prompt, False, False, False)
@@ -3547,10 +3569,10 @@ def _message_intent(request: HttpRequest) -> _MessageIntent:
 def _is_pr_activation(request: HttpRequest) -> bool:
     prompt = request.POST.get("prompt", "").strip()
     parts = prompt.split(maxsplit=1)
-    return bool(parts and parts[0].lower() == _PR_SLASH_COMMAND) or prompt in {
-        _PR_SLASH_PROMPT,
-        _PR_SLASH_FINAL_PROMPT,
-    }
+    return (
+        bool(parts and parts[0].lower() == _PR_SLASH_COMMAND)
+        or prompt in _PR_PROMPT_ALIASES
+    )
 
 
 def _is_qa_activation(request: HttpRequest) -> bool:
