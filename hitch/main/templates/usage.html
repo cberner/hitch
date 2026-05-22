@@ -182,7 +182,7 @@
         }
         .lifetime-stats {
             display: grid;
-            grid-template-columns: 1.4fr repeat(3, minmax(0, 1fr));
+            grid-template-columns: repeat(3, minmax(0, 1fr));
             gap: 0.65rem;
         }
         .lifetime-stat {
@@ -329,6 +329,16 @@
                 <div class="lifetime-stat">
                     <span class="lifetime-label">All sessions</span>
                     <span class="lifetime-value">{{ lifetime_usage.total }}</span>
+                    <span class="lifetime-unit">tokens</span>
+                </div>
+                <div class="lifetime-stat">
+                    <span class="lifetime-label">Sessions</span>
+                    <span class="lifetime-value">{{ lifetime_usage.sessions_total }}</span>
+                    <span class="lifetime-unit">tokens</span>
+                </div>
+                <div class="lifetime-stat">
+                    <span class="lifetime-label">HITCH system</span>
+                    <span class="lifetime-value">{{ lifetime_usage.system_total }}</span>
                     <span class="lifetime-unit">tokens</span>
                 </div>
                 <div class="lifetime-stat">
