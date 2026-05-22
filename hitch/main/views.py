@@ -3401,6 +3401,13 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
     return redirect("session", session_id=session_id)
 
 
+def _mark_workflow_failed(workflow: SystemWorkflow) -> None:
+    SystemWorkflow.objects.filter(pk=workflow.pk).update(
+        status=SystemWorkflow.STATUS_FAILED,
+        updated_at=timezone.now(),
+    )
+
+
 @require_http_methods(["POST"])
 def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
     if system_agents.active_workflow_for_thread(session_id) is not None:
@@ -3431,18 +3438,6 @@ def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
     if cwd not in _allowed_session_cwds():
         return HttpResponseBadRequest("thread cwd is not an allowed repository")
     try:
-        session_demo = demo.request_demo_start(session_id)
-    except demo.DemoAlreadyRunningError as exc:
-        return HttpResponseBadRequest(str(exc))
-    except demo.DemoError as exc:
-        return HttpResponse(str(exc), status=500, content_type="text/plain")
-    prompt = demo.start_demo_prompt_for(
-        request=request,
-        session_id=session_id,
-        cwd=cwd,
-        demo=session_demo,
-    )
-    try:
         with transaction.atomic():
             workflow = SystemWorkflow.objects.create(
                 kind=demo.DEMO_WORKFLOW_KIND,
@@ -3450,11 +3445,30 @@ def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
                 cwd=cwd,
                 status=SystemWorkflow.STATUS_RUNNING,
                 step="demo_running",
-                state={"session_demo_id": session_demo.pk},
+                state={},
             )
     except IntegrityError:
         return HttpResponseBadRequest("demo setup workflow is already running")
     try:
+        session_demo = demo.request_demo_start(session_id)
+    except demo.DemoAlreadyRunningError as exc:
+        _mark_workflow_failed(workflow)
+        return HttpResponseBadRequest(str(exc))
+    except demo.DemoError as exc:
+        _mark_workflow_failed(workflow)
+        return HttpResponse(str(exc), status=500, content_type="text/plain")
+    except Exception:
+        _mark_workflow_failed(workflow)
+        raise
+    try:
+        workflow.state = {"session_demo_id": session_demo.pk}
+        workflow.save(update_fields=["state", "updated_at"])
+        prompt = demo.start_demo_prompt_for(
+            request=request,
+            session_id=session_id,
+            cwd=cwd,
+            demo=session_demo,
+        )
         instance = codex_pool.spawn_turn(
             thread_id=session_id,
             cwd=cwd,
@@ -3479,8 +3493,7 @@ def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
             },
         )
     except Exception:
-        workflow.status = SystemWorkflow.STATUS_FAILED
-        workflow.save(update_fields=["status", "updated_at"])
+        _mark_workflow_failed(workflow)
         demo.cleanup_demo_for_session(session_id)
         raise
     return redirect("session", session_id=session_id)
