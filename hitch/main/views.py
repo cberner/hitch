@@ -778,6 +778,9 @@ def standing_orders(request: HttpRequest) -> HttpResponse:
     _attach_standing_order_run_state(orders)
     _attach_proposed_session_display_state(inbox)
     settings_dialog_context = _settings_dialog_context(current_settings, models_data)
+    new_session_dialog_context = _new_session_dialog_context(
+        current_settings, current_project, settings_dialog_context["projects"]
+    )
     response = render(
         request,
         "standing_orders.html",
@@ -796,6 +799,7 @@ def standing_orders(request: HttpRequest) -> HttpResponse:
             "proposed_session_rejected_status": ProposedSession.OUTCOME_REJECTED,
             "title_max_len": _STANDING_ORDER_TITLE_MAX_LEN,
             **settings_dialog_context,
+            **new_session_dialog_context,
         },
     )
     _apply_cookie_updates(response, cookie_updates)
@@ -1137,6 +1141,26 @@ def _attach_proposed_session_display_state(
             )
         else:
             proposed_session.judge_log_url = ""  # type: ignore[attr-defined]
+        proposed_session.session_prompt = _proposed_session_prompt(  # type: ignore[attr-defined]
+            proposed_session
+        )
+
+
+def _proposed_session_prompt(proposed_session: ProposedSession) -> str:
+    parts = [
+        "Go ahead and implement this proposed session.",
+        "",
+        f"Standing order: {proposed_session.standing_order.title}",
+    ]
+    if proposed_session.standing_order.goal:
+        parts.extend(["", f"Standing order goal:\n{proposed_session.standing_order.goal}"])
+    parts.extend(["", f"Proposed session: {proposed_session.title}"])
+    if proposed_session.summary:
+        parts.extend(["", f"Summary:\n{proposed_session.summary}"])
+    files = proposed_session.display_files  # type: ignore[attr-defined]
+    if files:
+        parts.extend(["", "Relevant files:", *[f"- {file}" for file in files]])
+    return "\n".join(parts)
 
 
 def _standing_order_log_urls(workflows: Iterable[SystemWorkflow]) -> dict[int, str]:
@@ -2907,6 +2931,33 @@ def _posted_proposed_task_for_new_session(
     return task, None
 
 
+def _posted_proposed_session_for_new_session(
+    request: HttpRequest, target: _NewSessionTarget
+) -> tuple[ProposedSession | None, str | None]:
+    raw_session_id = request.POST.get("proposed_session", "").strip()
+    if not raw_session_id:
+        return None, None
+    try:
+        session_id = int(raw_session_id)
+    except ValueError:
+        return None, "proposed session is required"
+    if session_id < 1 or session_id > _MAX_BIGAUTOFIELD:
+        return None, "proposed session is required"
+    proposed_session = (
+        ProposedSession.objects.select_related("standing_order__project")
+        .filter(pk=session_id, outcome_status=ProposedSession.OUTCOME_UNSET)
+        .first()
+    )
+    if proposed_session is None:
+        return None, "proposed session is required"
+    session_project = proposed_session.standing_order.project
+    if target.project is not None and target.project != session_project:
+        return None, "proposed session does not match project"
+    if target.project is None and target.cwd != session_project.repo_path:
+        return None, "proposed session does not match project"
+    return proposed_session, None
+
+
 def _accept_proposed_task_for_session(
     task: ProposedTask | None, session_metadata: SessionMetadata
 ) -> None:
@@ -2916,6 +2967,18 @@ def _accept_proposed_task_for_session(
     task.session = session_metadata
     task.pr_url = ""
     task.save(update_fields=["outcome_status", "session", "pr_url", "updated_at"])
+
+
+def _accept_proposed_session_for_session(
+    proposed_session: ProposedSession | None, session_metadata: SessionMetadata
+) -> None:
+    if proposed_session is None:
+        return
+    proposed_session.outcome_status = ProposedSession.OUTCOME_ACCEPTED
+    proposed_session.accepted_session = session_metadata
+    proposed_session.save(
+        update_fields=["outcome_status", "accepted_session", "updated_at"]
+    )
 
 
 def _posted_auto_pr_override(raw: str | None, *, default: bool) -> tuple[bool, str | None]:
@@ -3550,6 +3613,11 @@ def new_session(request: HttpRequest) -> HttpResponse:
     )
     if proposed_task_error is not None:
         return HttpResponseBadRequest(proposed_task_error)
+    proposed_session, proposed_session_error = _posted_proposed_session_for_new_session(
+        request, target
+    )
+    if proposed_session_error is not None:
+        return HttpResponseBadRequest(proposed_session_error)
     cwd = target.cwd
     if not prompt:
         return HttpResponseBadRequest("prompt is required")
@@ -3624,6 +3692,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
             },
         )
         _accept_proposed_task_for_session(proposed_task, session_metadata)
+        _accept_proposed_session_for_session(proposed_session, session_metadata)
         remembered_values = settings._replace(last_selected_repo=cwd)
         user = _authenticated_user(request)
         if user is not None:
@@ -3687,6 +3756,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
         },
     )
     _accept_proposed_task_for_session(proposed_task, session_metadata)
+    _accept_proposed_session_for_session(proposed_session, session_metadata)
     remembered_values = settings._replace(last_selected_repo=cwd)
     user = _authenticated_user(request)
     if user is not None:
