@@ -21,7 +21,11 @@ _MAX_UNTRACKED_FILES = 25
 _MAX_UNTRACKED_FILE_BYTES = 200_000
 _HUNK_RE = re.compile(r"^@@ -(?P<old>\d+)(?:,\d+)? \+(?P<new>\d+)(?:,\d+)? @@")
 _FORMATTER = HtmlFormatter(nowrap=True)
-_BRANCH_DIFF_BASE_REF = "refs/remotes/origin/master"
+_BRANCH_DIFF_DEFAULT_REF = "refs/remotes/origin/HEAD"
+_BRANCH_DIFF_FALLBACK_REFS = (
+    "refs/remotes/origin/main",
+    "refs/remotes/origin/master",
+)
 _DIFF_ARGS = [
     "diff",
     "--no-color",
@@ -138,11 +142,47 @@ def build_worktree_diff_text(cwd: str | None) -> str:
 
 
 def _branch_diff_base_ref(repo: Path) -> str | None:
-    output = _git_output(repo, ["rev-parse", "--verify", "--quiet", _BRANCH_DIFF_BASE_REF])
+    default_base = _merge_base_or_ref(repo, _BRANCH_DIFF_DEFAULT_REF)
+    if default_base is not None:
+        return default_base
+
+    fallback_ref = None
+    closest_merge_base = None
+    closest_distance = None
+    for base_ref in _BRANCH_DIFF_FALLBACK_REFS:
+        output = _git_output(repo, ["rev-parse", "--verify", "--quiet", base_ref])
+        if not output or not output.strip():
+            continue
+        if fallback_ref is None:
+            fallback_ref = base_ref
+        merge_base = _git_output(repo, ["merge-base", "HEAD", base_ref])
+        if not merge_base or not merge_base.strip():
+            continue
+        distance = _commit_distance_from_head(repo, merge_base.strip())
+        if distance is None:
+            continue
+        if closest_distance is None or distance < closest_distance:
+            closest_merge_base = merge_base.strip()
+            closest_distance = distance
+    return closest_merge_base or fallback_ref
+
+
+def _merge_base_or_ref(repo: Path, base_ref: str) -> str | None:
+    output = _git_output(repo, ["rev-parse", "--verify", "--quiet", base_ref])
     if not output or not output.strip():
         return None
-    merge_base = _git_output(repo, ["merge-base", "HEAD", _BRANCH_DIFF_BASE_REF])
-    return merge_base.strip() if merge_base and merge_base.strip() else _BRANCH_DIFF_BASE_REF
+    merge_base = _git_output(repo, ["merge-base", "HEAD", base_ref])
+    return merge_base.strip() if merge_base and merge_base.strip() else base_ref
+
+
+def _commit_distance_from_head(repo: Path, commit: str) -> int | None:
+    output = _git_output(repo, ["rev-list", "--count", f"{commit}..HEAD"])
+    if output is None:
+        return None
+    try:
+        return int(output.strip())
+    except ValueError:
+        return None
 
 
 def _repo_root(cwd: Path) -> Path | None:
