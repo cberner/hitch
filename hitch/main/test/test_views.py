@@ -5133,6 +5133,8 @@ class StandingOrderViewTests(TestCase):
         self.assertContains(response, "--accent-soft")
         self.assertContains(response, "--shadow-lg")
         self.assertContains(response, "Improve tests")
+        self.assertContains(response, "Ambition")
+        self.assertContains(response, "Incremental")
         self.assertContains(response, "Add parser coverage")
         self.assertContains(response, "This adds focused parser coverage.")
         self.assertContains(response, "hitch/main/rollout.py")
@@ -5147,6 +5149,7 @@ class StandingOrderViewTests(TestCase):
             {
                 "title": "Improve tests",
                 "goal": "Find useful test coverage increments.",
+                "ambition": StandingOrder.AMBITION_YOLO,
                 "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
             },
         )
@@ -5155,6 +5158,7 @@ class StandingOrderViewTests(TestCase):
         order = StandingOrder.objects.get()
         self.assertEqual(order.project, project)
         self.assertEqual(order.title, "Improve tests")
+        self.assertEqual(order.ambition, StandingOrder.AMBITION_YOLO)
         self.assertEqual(
             order.confidence_threshold,
             StandingOrder.CONFIDENCE_VERY_HIGH,

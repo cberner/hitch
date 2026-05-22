@@ -789,6 +789,8 @@ def standing_orders(request: HttpRequest) -> HttpResponse:
             "proposed_sessions": inbox,
             "standing_order_create_url": reverse("create_standing_order"),
             "standing_order_run_all_url": reverse("run_standing_orders"),
+            "ambition_choices": StandingOrder.AMBITION_CHOICES,
+            "default_ambition": StandingOrder.AMBITION_INCREMENTAL,
             "confidence_choices": StandingOrder.CONFIDENCE_CHOICES,
             "default_confidence": StandingOrder.CONFIDENCE_HIGH,
             "proposed_session_rejected_status": ProposedSession.OUTCOME_REJECTED,
@@ -811,6 +813,10 @@ def create_standing_order(request: HttpRequest) -> HttpResponse:
     goal = request.POST.get("goal", "").strip()
     if not goal:
         return HttpResponseBadRequest("goal is required")
+    ambition = request.POST.get("ambition", "").strip()
+    valid_ambitions = {value for value, _label in StandingOrder.AMBITION_CHOICES}
+    if ambition not in valid_ambitions:
+        return HttpResponseBadRequest("ambition is invalid")
     threshold = request.POST.get("confidence_threshold", "").strip()
     valid_thresholds = {value for value, _label in StandingOrder.CONFIDENCE_CHOICES}
     if threshold not in valid_thresholds:
@@ -819,6 +825,7 @@ def create_standing_order(request: HttpRequest) -> HttpResponse:
         project=project,
         title=title,
         goal=goal,
+        ambition=ambition,
         confidence_threshold=threshold,
     )
     return redirect("standing_orders")

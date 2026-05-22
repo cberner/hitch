@@ -953,10 +953,11 @@ def _okr_task_generation_prompt(
 def _standing_order_candidate_prompt(
     workflow: SystemWorkflow, standing_order: StandingOrder
 ) -> str:
+    ambition = _standing_order_ambition_phrase(standing_order)
     return (
         "You are Hitch's standing order agent.\n\n"
-        "Thoroughly analyze the codebase and find one incremental way to make "
-        "progress toward the standing order goal. Do not make code changes. "
+        "Thoroughly analyze the codebase and find one way to make "
+        f"{ambition} progress toward the standing order goal. Do not make code changes. "
         "Focus on a concrete session that a user could accept and continue from.\n\n"
         f"Repository cwd: {workflow.cwd}\n"
         f"Standing order title: {standing_order.title}\n\n"
@@ -970,6 +971,13 @@ def _standing_order_candidate_prompt(
         "benefit. Implementation direction should be specific enough for the "
         "user to continue the work in this session."
     )
+
+
+def _standing_order_ambition_phrase(standing_order: StandingOrder) -> str:
+    ambitions = {value for value, _label in StandingOrder.AMBITION_CHOICES}
+    if standing_order.ambition in ambitions:
+        return standing_order.ambition
+    return StandingOrder.AMBITION_INCREMENTAL
 
 
 def _standing_order_judge_prompt(
