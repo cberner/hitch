@@ -4,6 +4,7 @@ import json
 import logging
 import re
 from collections.abc import Iterable, Iterator, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NamedTuple
 from urllib.parse import urlencode
@@ -273,6 +274,11 @@ _TOKEN_USAGE_KEYS = (
     "total_tokens",
     "context_tokens",
     "model_context_window",
+)
+_HUMAN_TOKEN_UNITS = (
+    (1_000_000_000, "B"),
+    (1_000_000, "M"),
+    (1_000, "K"),
 )
 
 
@@ -1819,35 +1825,135 @@ def _system_agent_run_detail_title(run: SystemAgentRun) -> str:
     return f"{label} log" if label else "System session"
 
 
-def _lifetime_token_usage_for(threads: list[Any]) -> dict[str, str]:
+def _lifetime_token_usage_for(threads: list[Any]) -> dict[str, Any]:
     hidden_thread_ids = system_agents.hidden_thread_ids()
-    totals = {key: 0 for key in _TOKEN_USAGE_KEYS}
-    display_total = 0
-    session_display_total = 0
-    system_display_total = 0
-    display_input = 0
+    session_usage = _empty_lifetime_token_usage()
+    system_usage = _empty_lifetime_token_usage()
+    session_by_date: dict[str, dict[str, int]] = {}
+    system_by_date: dict[str, dict[str, int]] = {}
     for thread in threads:
         usage = _token_usage_numbers_for(thread)
         if usage is None:
             continue
         thread_id = getattr(thread, "id", None)
-        thread_display_total = _display_total_tokens(usage)
-        for key in _TOKEN_USAGE_KEYS:
-            totals[key] += usage.get(key, 0)
-        display_total += thread_display_total
-        if isinstance(thread_id, str) and thread_id in hidden_thread_ids:
-            system_display_total += thread_display_total
-        else:
-            session_display_total += thread_display_total
-        display_input += _non_cached_input_tokens(usage)
+        is_system = isinstance(thread_id, str) and thread_id in hidden_thread_ids
+        bucket = system_usage if is_system else session_usage
+        bucket["input"] += _non_cached_input_tokens(usage)
+        bucket["output"] += usage.get("output_tokens", 0)
+        bucket["cached"] += usage.get("cached_input_tokens", 0)
+        _add_token_usage_history_by_date(
+            system_by_date if is_system else session_by_date,
+            thread,
+        )
     return {
-        "total": _format_token_count(display_total),
-        "sessions_total": _format_token_count(session_display_total),
-        "system_total": _format_token_count(system_display_total),
-        "input": _format_token_count(display_input),
-        "output": _format_token_count(totals["output_tokens"]),
-        "cached": _format_token_count(totals["cached_input_tokens"]),
+        "sessions": {
+            **_format_lifetime_token_usage(session_usage),
+            "chart": _format_lifetime_token_chart(session_by_date),
+        },
+        "system": {
+            **_format_lifetime_token_usage(system_usage),
+            "chart": _format_lifetime_token_chart(system_by_date),
+        },
     }
+
+
+def _empty_lifetime_token_usage() -> dict[str, int]:
+    return {"input": 0, "output": 0, "cached": 0}
+
+
+def _format_lifetime_token_usage(usage: Mapping[str, int]) -> dict[str, str]:
+    return {
+        "input": _format_human_token_count(usage["input"]),
+        "output": _format_human_token_count(usage["output"]),
+        "cached": _format_human_token_count(usage["cached"]),
+    }
+
+
+def _format_human_token_count(value: int) -> str:
+    value = max(0, value)
+    for index, (scale, suffix) in enumerate(_HUMAN_TOKEN_UNITS):
+        if value < scale:
+            continue
+        amount = _format_human_token_amount(value, scale)
+        if amount == "1000" and index > 0:
+            next_scale, next_suffix = _HUMAN_TOKEN_UNITS[index - 1]
+            return _format_human_token_amount(value, next_scale) + next_suffix
+        return amount + suffix
+    return str(value)
+
+
+def _format_human_token_amount(value: int, scale: int) -> str:
+    if value >= 10 * scale:
+        return str((value + scale // 2) // scale)
+    tenths = (value * 10 + scale // 2) // scale
+    whole, fraction = divmod(tenths, 10)
+    if fraction == 0:
+        return str(whole)
+    return f"{whole}.{fraction}"
+
+
+def _add_token_usage_history_by_date(
+    usage_by_date: dict[str, dict[str, int]], thread: Any
+) -> None:
+    rollout_path = _rollout_path_for(thread)
+    if rollout_path is None:
+        return
+    previous = _empty_raw_token_usage()
+    for event in rollout.token_usage_history(rollout_path):
+        date_key = datetime.fromtimestamp(event["timestamp"], UTC).date().isoformat()
+        bucket = usage_by_date.setdefault(date_key, _empty_lifetime_token_usage())
+        input_delta = max(event["input_tokens"] - previous["input_tokens"], 0)
+        cached_delta = max(
+            event["cached_input_tokens"] - previous["cached_input_tokens"], 0
+        )
+        output_delta = max(event["output_tokens"] - previous["output_tokens"], 0)
+        bucket["input"] += max(input_delta - cached_delta, 0)
+        bucket["output"] += output_delta
+        bucket["cached"] += cached_delta
+        previous = {
+            "input_tokens": event["input_tokens"],
+            "cached_input_tokens": event["cached_input_tokens"],
+            "output_tokens": event["output_tokens"],
+        }
+
+
+def _empty_raw_token_usage() -> dict[str, int]:
+    return {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+
+
+def _format_lifetime_token_chart(
+    usage_by_date: Mapping[str, Mapping[str, int]],
+) -> list[dict[str, str | int]]:
+    max_total = max(
+        (
+            values["input"] + values["output"] + values["cached"]
+            for values in usage_by_date.values()
+        ),
+        default=0,
+    )
+    chart: list[dict[str, str | int]] = []
+    for date_key in sorted(usage_by_date):
+        values = usage_by_date[date_key]
+        total = values["input"] + values["output"] + values["cached"]
+        chart.append(
+            {
+                "date": date_key,
+                "input": _format_human_token_count(values["input"]),
+                "output": _format_human_token_count(values["output"]),
+                "cached": _format_human_token_count(values["cached"]),
+                "total": _format_human_token_count(total),
+                "input_percent": _chart_segment_percent(values["input"], max_total),
+                "output_percent": _chart_segment_percent(values["output"], max_total),
+                "cached_percent": _chart_segment_percent(values["cached"], max_total),
+            }
+        )
+    return chart
+
+
+def _chart_segment_percent(value: int, max_total: int) -> int:
+    if value <= 0 or max_total <= 0:
+        return 0
+    return round((value / max_total) * 100)
 
 
 def _next_message_config(

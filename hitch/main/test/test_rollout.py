@@ -1407,6 +1407,76 @@ class IterEntriesTests(TestCase):
         self.assertIsNone(rollout.latest_token_usage(path))
         self.assertIsNone(rollout.latest_token_usage(Path("/nonexistent/rollout.jsonl")))
 
+    def test_token_usage_history_returns_timestamped_totals(self) -> None:
+        path = self._make(
+            [
+                "{not json",
+                _line(
+                    "event_msg",
+                    {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 100,
+                                "cached_input_tokens": 20,
+                                "output_tokens": 50,
+                                "total_tokens": 170,
+                            }
+                        },
+                    },
+                    timestamp="2025-01-05T12:00:00Z",
+                ),
+                _line("event_msg", {"type": "user_message", "message": "x"}),
+                _line("event_msg", {"type": "token_count"}),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 300,
+                                "cached_input_tokens": True,
+                                "output_tokens": 175,
+                                "total_tokens": "ignored",
+                            }
+                        },
+                    },
+                    timestamp="2025-01-06T12:00:00Z",
+                ),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "token_count",
+                        "info": {"total_token_usage": {"input_tokens": 999}},
+                    },
+                    timestamp="",
+                ),
+            ]
+        )
+
+        self.assertEqual(
+            rollout.token_usage_history(path),
+            [
+                {
+                    "timestamp": 1736078400,
+                    "input_tokens": 100,
+                    "cached_input_tokens": 20,
+                    "output_tokens": 50,
+                    "total_tokens": 170,
+                },
+                {
+                    "timestamp": 1736164800,
+                    "input_tokens": 300,
+                    "cached_input_tokens": 0,
+                    "output_tokens": 175,
+                    "total_tokens": 0,
+                },
+            ],
+        )
+
+    def test_token_usage_history_returns_empty_when_unreadable(self) -> None:
+        self.assertEqual(rollout.token_usage_history(Path("/nonexistent/rollout.jsonl")), [])
+
     def test_function_call_arguments_edge_cases(self) -> None:
         # Non-string arguments fall through as empty; malformed JSON falls
         # back to the raw string; a JSON literal that isn't a dict also falls
