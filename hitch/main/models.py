@@ -224,14 +224,24 @@ class StandingOrder(models.Model):
 class ProposedSession(models.Model):
     """A standing-order session proposal awaiting user acceptance."""
 
+    INBOX_KIND_PROPOSAL = "proposal"
+    INBOX_KIND_NOTICE = "notice"
+
     OUTCOME_UNSET = ""
     OUTCOME_ACCEPTED = "accepted"
     OUTCOME_REJECTED = "rejected"
+    OUTCOME_DISMISSED = "dismissed"
+
+    INBOX_KIND_CHOICES: ClassVar[tuple[tuple[str, str], ...]] = (
+        (INBOX_KIND_PROPOSAL, "Proposal"),
+        (INBOX_KIND_NOTICE, "Notice"),
+    )
 
     OUTCOME_CHOICES: ClassVar[tuple[tuple[str, str], ...]] = (
         (OUTCOME_UNSET, "Not set"),
         (OUTCOME_ACCEPTED, "Accepted"),
         (OUTCOME_REJECTED, "Rejected"),
+        (OUTCOME_DISMISSED, "Dismissed"),
     )
 
     standing_order = models.ForeignKey(
@@ -247,6 +257,11 @@ class ProposedSession(models.Model):
         related_name="proposed_sessions",
     )
     title = models.CharField(max_length=200)
+    inbox_kind = models.CharField(
+        max_length=16,
+        choices=INBOX_KIND_CHOICES,
+        default=INBOX_KIND_PROPOSAL,
+    )
     summary = models.TextField(blank=True, default="")
     confidence = models.CharField(
         max_length=32,

@@ -841,6 +841,7 @@ def standing_orders(request: HttpRequest) -> HttpResponse:
             "confidence_choices": StandingOrder.CONFIDENCE_CHOICES,
             "default_confidence": StandingOrder.CONFIDENCE_HIGH,
             "proposed_session_rejected_status": ProposedSession.OUTCOME_REJECTED,
+            "proposed_session_dismissed_status": ProposedSession.OUTCOME_DISMISSED,
             "title_max_len": _STANDING_ORDER_TITLE_MAX_LEN,
             **settings_dialog_context,
             **new_session_dialog_context,
@@ -946,8 +947,22 @@ def update_proposed_session_outcome(
     outcome_notes = request.POST.get(
         "reason", request.POST.get("outcome_notes", "")
     ).strip()
-    if outcome_status == ProposedSession.OUTCOME_REJECTED and not outcome_notes:
+    if (
+        proposed_session.inbox_kind == ProposedSession.INBOX_KIND_PROPOSAL
+        and outcome_status == ProposedSession.OUTCOME_REJECTED
+        and not outcome_notes
+    ):
         return HttpResponseBadRequest("reason is required")
+    if (
+        proposed_session.inbox_kind == ProposedSession.INBOX_KIND_NOTICE
+        and outcome_status != ProposedSession.OUTCOME_DISMISSED
+    ):
+        return HttpResponseBadRequest("outcome status is invalid")
+    if (
+        proposed_session.inbox_kind == ProposedSession.INBOX_KIND_PROPOSAL
+        and outcome_status == ProposedSession.OUTCOME_DISMISSED
+    ):
+        return HttpResponseBadRequest("outcome status is invalid")
     proposed_session.outcome_status = outcome_status
     proposed_session.outcome_notes = outcome_notes
     update_fields = ["outcome_status", "outcome_notes", "updated_at"]
@@ -3125,7 +3140,11 @@ def _posted_proposed_session_for_new_session(
         return None, "proposed session is required"
     proposed_session = (
         ProposedSession.objects.select_related("standing_order__project")
-        .filter(pk=session_id, outcome_status=ProposedSession.OUTCOME_UNSET)
+        .filter(
+            pk=session_id,
+            inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL,
+            outcome_status=ProposedSession.OUTCOME_UNSET,
+        )
         .first()
     )
     if proposed_session is None:
