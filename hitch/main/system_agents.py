@@ -13,7 +13,7 @@ from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 from openai_codex.generated.v2_all import ThreadSource
 
-from hitch.main import codex_events, codex_pool
+from hitch.main import codex_events, codex_pool, demo
 from hitch.main.diffs import build_worktree_diff_text
 from hitch.main.models import (
     CodexInstance,
@@ -568,21 +568,21 @@ def stop_active_workflow(main_thread_id: str) -> bool:
     return True
 
 
-def on_codex_instance_finished(instance: CodexInstance) -> None:
+def on_codex_instance_finished(instance: CodexInstance) -> bool:
     """Route a terminal worker to its owning system workflow, if any."""
     if instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT:
-        _handle_system_agent_finished(instance)
-        return
+        return _handle_system_agent_finished(instance)
     if instance.purpose == CodexInstance.PURPOSE_SYSTEM_FEEDBACK:
         _handle_system_feedback_finished(instance)
-        return
+        return True
     if (
         instance.purpose == CodexInstance.PURPOSE_USER
         and instance.workflow_id is not None
     ):
         _handle_workflow_user_turn_finished(instance)
-        return
+        return True
     _maybe_start_auto_pr_workflow(instance)
+    return False
 
 
 def _maybe_start_auto_pr_workflow(instance: CodexInstance) -> None:
@@ -640,25 +640,52 @@ def _record_auto_pr_workflow_for_proposals(
         proposal.save(update_fields=["outcome_metadata", "updated_at"])
 
 
-def _handle_system_agent_finished(instance: CodexInstance) -> None:
+def _handle_system_agent_finished(instance: CodexInstance) -> bool:
     run = _system_agent_run_for_instance(instance)
     if run is None:
-        return
+        return False
     if run.status in (SystemAgentRun.STATUS_COMPLETED, SystemAgentRun.STATUS_FAILED):
-        return
+        return True
     workflow = run.workflow
     if workflow.kind == STANDING_ORDER_AGENT_KIND:
         _handle_standing_order_agent_finished(instance, run, workflow)
-        return
+        return True
+    if (
+        workflow.kind == demo.DEMO_WORKFLOW_KIND
+        and run.agent_kind == demo.DEMO_AGENT_KIND
+        and instance.agent_kind == demo.DEMO_AGENT_KIND
+    ):
+        _handle_demo_agent_finished(instance, run, workflow)
+        return True
     if workflow.kind == SystemWorkflow.KIND_PR_QA and run.agent_kind == (
         PR_FOLLOWUP_MONITOR_AGENT_KIND
     ):
         _handle_pr_followup_monitor_finished(instance, run, workflow)
-        return
+        return True
     if workflow.kind != SystemWorkflow.KIND_PR_QA:
         _fail_unsupported_system_agent_run(run, workflow)
-        return
+        return True
     _handle_pr_qa_agent_finished(instance, run, workflow)
+    return True
+
+
+def _handle_demo_agent_finished(
+    instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
+) -> None:
+    try:
+        demo.on_codex_instance_finished(instance)
+    except Exception as exc:
+        logger.exception(
+            "failed to route completed worker %s to demo workflow", instance.pk
+        )
+        error = f"demo workflow router failed: {exc}"
+        if run.status not in (SystemAgentRun.STATUS_COMPLETED, SystemAgentRun.STATUS_FAILED):
+            run.status = SystemAgentRun.STATUS_FAILED
+            run.error = error
+            run.save(update_fields=["status", "error", "updated_at"])
+        if workflow.status == SystemWorkflow.STATUS_RUNNING:
+            workflow.status = SystemWorkflow.STATUS_FAILED
+            workflow.save(update_fields=["status", "updated_at"])
 
 
 def _handle_system_feedback_finished(instance: CodexInstance) -> None:

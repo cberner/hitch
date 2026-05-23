@@ -47,7 +47,7 @@ from openai_codex.generated.v2_all import (
 from openai_codex.models import Notification
 from pydantic import BaseModel
 
-from hitch.main import codex_events, codex_pool, coding_agents, streaming
+from hitch.main import codex_events, codex_pool, coding_agents, demo, streaming
 from hitch.main.management.commands import codex_worker as codex_worker_module
 from hitch.main.management.commands.codex_worker import (
     _DEFAULT_COLLABORATION_INSTRUCTIONS,
@@ -959,6 +959,53 @@ class ReconcileAndLookupTests(TestCase):
         notified = mock_notify.call_args.args[0]
         self.assertEqual(notified.pk, system_agent.pk)
         self.assertEqual(notified.status, CodexInstance.STATUS_FAILED)
+
+    @patch("hitch.main.demo.on_codex_instance_finished")
+    @patch("hitch.main.system_agents.on_codex_instance_finished")
+    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_does_not_double_route_demo_system_agent(
+        self,
+        _mock_worker_alive: MagicMock,
+        mock_system_notify: MagicMock,
+        mock_demo_notify: MagicMock,
+    ) -> None:
+        mock_system_notify.return_value = True
+        system_agent = self._make(
+            pid=10,
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        )
+        system_agent.agent_kind = demo.DEMO_AGENT_KIND
+        system_agent.save(update_fields=["agent_kind"])
+
+        n = codex_pool.reconcile_dead()
+
+        self.assertEqual(n, 1)
+        mock_system_notify.assert_called_once()
+        mock_demo_notify.assert_not_called()
+
+    @patch("hitch.main.demo.on_codex_instance_finished")
+    @patch("hitch.main.system_agents.on_codex_instance_finished", return_value=False)
+    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_keeps_demo_fallback_when_system_agents_noop(
+        self,
+        _mock_worker_alive: MagicMock,
+        mock_system_notify: MagicMock,
+        mock_demo_notify: MagicMock,
+    ) -> None:
+        system_agent = self._make(
+            pid=10,
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        )
+        system_agent.agent_kind = demo.DEMO_AGENT_KIND
+        system_agent.save(update_fields=["agent_kind"])
+
+        n = codex_pool.reconcile_dead()
+
+        self.assertEqual(n, 1)
+        mock_system_notify.assert_called_once()
+        mock_demo_notify.assert_called_once_with(system_agent)
 
     @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=False)
     @patch("hitch.main.codex_pool.is_alive", return_value=True)
@@ -2161,6 +2208,47 @@ class CodexWorkerCommandTests(TestCase):
             status=CodexInstance.STATUS_STARTING,
         )
 
+    @patch("hitch.main.demo.on_codex_instance_finished")
+    @patch("hitch.main.system_agents.on_codex_instance_finished")
+    def test_notify_system_agents_does_not_double_route_demo_system_agent(
+        self, mock_system_notify: MagicMock, mock_demo_notify: MagicMock
+    ) -> None:
+        mock_system_notify.return_value = True
+        instance = CodexInstance.objects.create(
+            pid=12345,
+            thread_id="thread-1",
+            cwd="/repo",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=demo.DEMO_AGENT_KIND,
+        )
+
+        codex_worker_module._notify_system_agents(instance)
+
+        mock_system_notify.assert_called_once_with(instance)
+        mock_demo_notify.assert_not_called()
+
+    @patch("hitch.main.demo.on_codex_instance_finished")
+    @patch("hitch.main.system_agents.on_codex_instance_finished", return_value=False)
+    def test_notify_system_agents_keeps_demo_fallback_when_system_agents_noop(
+        self, mock_system_notify: MagicMock, mock_demo_notify: MagicMock
+    ) -> None:
+        instance = CodexInstance.objects.create(
+            pid=12345,
+            thread_id="thread-1",
+            cwd="/repo",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=demo.DEMO_AGENT_KIND,
+        )
+
+        codex_worker_module._notify_system_agents(instance)
+
+        mock_system_notify.assert_called_once_with(instance)
+        mock_demo_notify.assert_called_once_with(instance)
+
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_streams_notifications_and_marks_completed(self, mock_codex: MagicMock) -> None:
         events = [
@@ -2188,6 +2276,7 @@ class CodexWorkerCommandTests(TestCase):
             os.environ["HITCH_MANAGE_PY"],
             str(Path(settings.BASE_DIR) / "manage.py"),
         )
+        self.assertEqual(os.environ["HITCH_MANAGE_COMMAND"], "uv")
         self.assertEqual(os.environ["HITCH_PROPOSE_SESSION_COMMAND"], "uv")
         self.assertEqual(len(lines), 2)
         self.assertEqual(lines[0]["method"], "item/agentMessage/delta")
