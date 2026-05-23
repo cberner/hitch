@@ -4811,6 +4811,13 @@ class StandingOrderViewTests(TestCase):
             standing_order=order,
             title="Add parser coverage",
             summary="This adds focused parser coverage.",
+            prompt=(
+                "Go ahead and implement this proposed session.\n\n"
+                "Standing order goal:\n"
+                "Find useful test coverage increments.\n\n"
+                "Implementation guidance:\n"
+                "Add focused rollout parser tests before changing behavior."
+            ),
             confidence=StandingOrder.CONFIDENCE_HIGH,
             relevant_files=["hitch/main/rollout.py"],
             candidate_session=candidate,
@@ -4835,6 +4842,10 @@ class StandingOrderViewTests(TestCase):
         self.assertContains(response, "High ambition")
         self.assertContains(response, "Add parser coverage")
         self.assertContains(response, "This adds focused parser coverage.")
+        self.assertContains(response, "Implementation guidance:")
+        self.assertContains(
+            response, "Add focused rollout parser tests before changing behavior."
+        )
         self.assertContains(response, "hitch/main/rollout.py")
         self.assertContains(response, 'data-proposed-session-do')
         self.assertContains(response, 'data-proposed-session-id="')
