@@ -3897,30 +3897,49 @@ class SendMessageViewTests(TestCase):
 
         # cwd-missing and cwd-outside-allowlist need the resumed thread set up;
         # the empty-prompt cases never reach Codex, but stubbing it is cheap.
-        cases = [
-            ({"prompt": ""}, "/repo", "empty prompt"),
-            ({"prompt": "   \n  "}, "/repo", "whitespace-only prompt"),
+        cases: list[tuple[dict[str, str], str | None, str, str, bool]] = [
+            ({"prompt": ""}, "/repo", "empty prompt", "prompt is required", False),
+            (
+                {"prompt": "   \n  "},
+                "/repo",
+                "whitespace-only prompt",
+                "prompt is required",
+                False,
+            ),
             (
                 {"prompt": "Implement the plan.", "plan_action": "ship"},
                 "/repo",
                 "invalid plan action",
+                "invalid plan action",
+                False,
             ),
-            ({"prompt": "hi"}, None, "thread without cwd"),
+            ({"prompt": "hi"}, None, "thread without cwd", "thread has no cwd", True),
             # The session list shows every thread the app-server knows about,
             # so a resumed thread's cwd can point outside the discover_repos()
             # allowlist (e.g. for threads created by another tool). The
             # composer must refuse to spawn a worker in such a directory.
-            ({"prompt": "hi"}, "/etc", "cwd outside allowed list"),
+            (
+                {"prompt": "hi"},
+                "/etc",
+                "cwd outside allowed list",
+                "thread cwd is not an allowed repository",
+                True,
+            ),
         ]
-        for data, cwd, label in cases:
+        for data, cwd, label, message, codex_called in cases:
             with self.subTest(label=label):
                 self._patch_codex(mock_codex, cwd=cwd)
+                mock_codex.reset_mock()
                 mock_spawn.reset_mock()
                 response = self.client.post(
                     reverse("send_message", kwargs={"session_id": "abc"}),
                     data=data,
                 )
-                self.assertEqual(response.status_code, 400)
+                self.assertContains(response, message, status_code=400)
+                if codex_called:
+                    mock_codex.assert_called_once()
+                else:
+                    mock_codex.assert_not_called()
                 mock_spawn.assert_not_called()
 
     @patch("hitch.main.views.codex_pool.spawn_turn")
