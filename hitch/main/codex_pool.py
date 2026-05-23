@@ -236,11 +236,6 @@ def is_alive(pid: int) -> bool:
     """
     if pid <= 0:
         return False
-    with _TRACKED_WORKER_PROCS_LOCK:
-        has_tracked_proc = pid in _TRACKED_WORKER_PROCS
-        has_reaped_worker = any(reaped_pid == pid for reaped_pid, _ in _REAPED_WORKERS)
-        if has_reaped_worker and not has_tracked_proc:
-            return False
     if _reap_tracked_worker(pid):
         return False
     try:

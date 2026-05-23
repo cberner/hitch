@@ -700,13 +700,20 @@ class IsAliveTests(TestCase):
             if proc.returncode is None:
                 proc.wait(timeout=5)
 
-    def test_reaped_untracked_worker_is_not_alive(self) -> None:
+    def test_worker_is_alive_uses_reaped_instance_key(self) -> None:
         pid = 98765
+        instance = CodexInstance.objects.create(
+            pid=pid,
+            thread_id="t",
+            cwd="/r",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+        )
         try:
             with codex_pool._TRACKED_WORKER_PROCS_LOCK:
-                codex_pool._REAPED_WORKERS.add((pid, 42))
+                codex_pool._REAPED_WORKERS.add((pid, instance.pk))
 
-            self.assertFalse(codex_pool.is_alive(pid))
+            self.assertFalse(codex_pool.worker_is_alive(instance))
         finally:
             _forget_worker_pid(pid)
 
