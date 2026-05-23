@@ -121,6 +121,14 @@ def _wait_for_process_exit(
     raise AssertionError(f"pid {proc.pid} was not reaped")
 
 
+def _forget_worker_pid(pid: int) -> None:
+    with codex_pool._TRACKED_WORKER_PROCS_LOCK:
+        codex_pool._TRACKED_WORKER_PROCS.pop(pid, None)
+        codex_pool._REAPED_WORKERS.difference_update(
+            {worker for worker in codex_pool._REAPED_WORKERS if worker[0] == pid}
+        )
+
+
 class SpawnNewSessionTests(TestCase):
     def test_memories_are_explicitly_disabled_by_default(self) -> None:
         config = codex_pool.app_server_config()
@@ -596,15 +604,7 @@ class SpawnTurnTests(TestCase):
             if proc.returncode is None:
                 proc.kill()
                 proc.wait(timeout=5)
-            with codex_pool._TRACKED_WORKER_PROCS_LOCK:
-                codex_pool._TRACKED_WORKER_PROCS.pop(proc.pid, None)
-                codex_pool._REAPED_WORKERS.difference_update(
-                    {
-                        worker
-                        for worker in codex_pool._REAPED_WORKERS
-                        if worker[0] == proc.pid
-                    }
-                )
+            _forget_worker_pid(proc.pid)
 
 
 class LaunchWorkerProcessTests(TestCase):
@@ -699,6 +699,82 @@ class IsAliveTests(TestCase):
         finally:
             if proc.returncode is None:
                 proc.wait(timeout=5)
+
+    def test_reaped_untracked_worker_is_not_alive(self) -> None:
+        pid = 98765
+        try:
+            with codex_pool._TRACKED_WORKER_PROCS_LOCK:
+                codex_pool._REAPED_WORKERS.add((pid, 42))
+
+            self.assertFalse(codex_pool.is_alive(pid))
+        finally:
+            _forget_worker_pid(pid)
+
+    def test_tracked_finished_worker_is_reaped_by_liveness_check(self) -> None:
+        pid = 98766
+        proc = MagicMock()
+        proc.wait.return_value = 0
+        try:
+            with codex_pool._TRACKED_WORKER_PROCS_LOCK:
+                codex_pool._TRACKED_WORKER_PROCS[pid] = (
+                    42,
+                    cast(subprocess.Popen[bytes], proc),
+                )
+
+            self.assertFalse(codex_pool.is_alive(pid))
+
+            proc.wait.assert_called_once_with(timeout=0)
+            with codex_pool._TRACKED_WORKER_PROCS_LOCK:
+                self.assertNotIn(pid, codex_pool._TRACKED_WORKER_PROCS)
+                self.assertIn((pid, 42), codex_pool._REAPED_WORKERS)
+        finally:
+            _forget_worker_pid(pid)
+
+    def test_worker_is_alive_handles_unset_pid_and_tracked_running_process(self) -> None:
+        self.assertFalse(codex_pool.worker_is_alive(CodexInstance(pid=0)))
+
+        pid = 98767
+        instance = CodexInstance.objects.create(
+            pid=pid,
+            thread_id="t",
+            cwd="/r",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        proc = MagicMock()
+        proc.wait.side_effect = subprocess.TimeoutExpired(cmd="worker", timeout=0)
+        try:
+            with codex_pool._TRACKED_WORKER_PROCS_LOCK:
+                codex_pool._TRACKED_WORKER_PROCS[pid] = (
+                    instance.pk,
+                    cast(subprocess.Popen[bytes], proc),
+                )
+
+            self.assertTrue(codex_pool.worker_is_alive(instance))
+
+            proc.wait.assert_called_once_with(timeout=0)
+        finally:
+            _forget_worker_pid(pid)
+
+    def test_linux_proc_state_defensive_branches(self) -> None:
+        with patch("hitch.main.codex_pool.Path") as mock_path:
+            proc_root = mock_path.return_value
+            proc_root.exists.return_value = False
+            self.assertIsNone(codex_pool._linux_proc_state(1))
+
+        with patch("hitch.main.codex_pool.Path") as mock_path:
+            proc_root = mock_path.return_value
+            proc_root.exists.return_value = True
+            stat_path = proc_root.__truediv__.return_value.__truediv__.return_value
+            stat_path.read_text.side_effect = FileNotFoundError
+            self.assertEqual(codex_pool._linux_proc_state(1), "")
+
+        with patch("hitch.main.codex_pool.Path") as mock_path:
+            proc_root = mock_path.return_value
+            proc_root.exists.return_value = True
+            stat_path = proc_root.__truediv__.return_value.__truediv__.return_value
+            stat_path.read_text.return_value = "malformed"
+            self.assertIsNone(codex_pool._linux_proc_state(1))
 
     @patch("hitch.main.codex_pool.os.kill")
     def test_permission_error_means_alive(self, mock_kill: MagicMock) -> None:
@@ -841,10 +917,31 @@ class ReconcileAndLookupTests(TestCase):
         finally:
             if proc.returncode is None:
                 proc.wait(timeout=5)
+            _forget_worker_pid(proc.pid)
+
+    def test_reconcile_sweeps_finished_tracked_workers(self) -> None:
+        pid = 98768
+        instance = self._make(pid=pid, status=CodexInstance.STATUS_RUNNING)
+        proc = MagicMock()
+        proc.wait.return_value = 0
+        try:
             with codex_pool._TRACKED_WORKER_PROCS_LOCK:
-                codex_pool._TRACKED_WORKER_PROCS.pop(proc.pid, None)
-                if instance is not None:
-                    codex_pool._REAPED_WORKERS.discard((proc.pid, instance.pk))
+                codex_pool._TRACKED_WORKER_PROCS[pid] = (
+                    instance.pk,
+                    cast(subprocess.Popen[bytes], proc),
+                )
+
+            n = codex_pool.reconcile_dead()
+
+            self.assertEqual(n, 1)
+            proc.wait.assert_called_once_with(timeout=0)
+            instance.refresh_from_db()
+            self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+            with codex_pool._TRACKED_WORKER_PROCS_LOCK:
+                self.assertNotIn(pid, codex_pool._TRACKED_WORKER_PROCS)
+                self.assertNotIn((pid, instance.pk), codex_pool._REAPED_WORKERS)
+        finally:
+            _forget_worker_pid(pid)
 
     def test_list_and_latest_for_thread(self) -> None:
         first = self._make(thread_id="t1")
