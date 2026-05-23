@@ -252,7 +252,12 @@ def is_alive(pid: int) -> bool:
 
 
 def worker_is_alive(instance: CodexInstance) -> bool:
-    """Return whether ``instance`` still has a live worker process."""
+    """Return whether ``instance`` still has its original live worker process.
+
+    Generic pid existence is not enough here: a crashed worker's pid can be
+    recycled to an unrelated process while the CodexInstance row is still
+    marked running.
+    """
     if instance.pid <= 0:
         return False
     with _TRACKED_WORKER_PROCS_LOCK:
@@ -265,7 +270,7 @@ def worker_is_alive(instance: CodexInstance) -> bool:
             return not _reap_tracked_worker_process(
                 instance.pid, tracked_instance_id, proc
             )
-    return is_alive(instance.pid)
+    return _pid_is_our_worker(instance.pid, instance.pk)
 
 
 def _track_worker_process(instance_id: int, proc: subprocess.Popen[bytes]) -> None:
