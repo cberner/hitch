@@ -1982,7 +1982,7 @@
         </div>
         <div class="session-tab-panel" id="session-panel-conversation" role="tabpanel" aria-labelledby="session-tab-conversation">
         {% endif %}
-        {% if system_prompt or entries or pending_user_prompt or active_worker or session_demo %}
+        {% if system_prompt or entries or pending_user_prompt or active_worker or active_system_workflow or session_demo %}
         <section class="thread" data-thread>
             {% if session_demo and not active_demo_worker %}
             <details class="demo-status" {% if session_demo.status != "active" %}open{% endif %}>
@@ -2028,6 +2028,17 @@
                  data-hide-transcript="{{ show_active_worker_transcript|yesno:'false,true' }}"
                  data-hide-user-message="false"
                  data-sanitize-live-details="false"
+                 data-read-only="{{ read_only|yesno:'true,false' }}"
+                 data-approval-url-template="{{ approval_url_template }}"
+                 data-input-url-template="{{ input_url_template }}"></div>
+            {% endif %}
+            {% if active_system_workflow and not active_worker %}
+            <div class="entry"
+                 data-live-root
+                 data-active-author=""
+                 data-hide-transcript="true"
+                 data-hide-user-message="true"
+                 data-sanitize-live-details="true"
                  data-read-only="{{ read_only|yesno:'true,false' }}"
                  data-approval-url-template="{{ approval_url_template }}"
                  data-input-url-template="{{ input_url_template }}"></div>
@@ -2205,15 +2216,15 @@
                       required
                       {% if active_system_workflow %}disabled{% endif %}
                       autocomplete="off"
-                      placeholder="{% if active_system_workflow %}QA workflow is running…{% elif active_worker %}Add instructions…{% else %}Send a message…{% endif %}"
-                      aria-label="{% if active_system_workflow %}QA workflow is running{% elif active_worker %}Add instructions{% else %}Send a message{% endif %}"
+                      placeholder="{% if active_system_workflow %}{{ workflow_composer_label }} is running…{% elif active_worker %}Add instructions…{% else %}Send a message…{% endif %}"
+                      aria-label="{% if active_system_workflow %}{{ workflow_composer_label }} is running{% elif active_worker %}Add instructions{% else %}Send a message{% endif %}"
                       data-composer-input></textarea>
             <button type="submit" data-composer-submit {% if active_system_workflow %}disabled{% endif %}>{% if active_system_workflow %}Waiting{% elif active_worker %}Steer{% else %}Send{% endif %}</button>
             {% if active_worker or active_system_workflow %}
             {% if active_worker %}
             <button type="submit" class="stop" formaction="{{ stop_url }}" formnovalidate name="instance" value="{{ active_instance.id }}" data-composer-stop aria-label="Stop the running turn">Stop</button>
             {% else %}
-            <button type="submit" class="stop" formaction="{{ stop_url }}" formnovalidate data-composer-stop aria-label="Stop the QA workflow">Stop</button>
+            <button type="submit" class="stop" formaction="{{ stop_url }}" formnovalidate data-composer-stop aria-label="Stop the {{ workflow_composer_label }}">Stop</button>
             {% endif %}
             {% endif %}
         </div>
@@ -3571,6 +3582,13 @@
                 followRenderedContent();
             }
 
+            function inputAnswerPresent(value) {
+                if (typeof value === "string") return value.trim().length > 0;
+                if (Array.isArray(value)) return value.length > 0;
+                if (value && typeof value === "object") return Object.keys(value).length > 0;
+                return value != null;
+            }
+
             function handleInputRequested(payload) {
                 ensureNoEmpty();
                 const id = payload.id;
@@ -3615,9 +3633,13 @@
                     return;
                 }
                 const answers = {};
+                const requiredQuestionIds = [];
+                let refreshSubmitState = () => {};
                 for (const question of questions) {
                     const qid = typeof question.id === "string" ? question.id : "";
                     if (!qid) continue;
+                    const requiresExplicitChoice = question.requires_explicit_choice === true;
+                    if (requiresExplicitChoice) requiredQuestionIds.push(qid);
                     const qbox = document.createElement("div");
                     qbox.className = "input-question";
                     const qheader = document.createElement("div");
@@ -3633,9 +3655,14 @@
                     optionRow.className = "input-options";
                     const buttons = [];
                     const setAnswer = (value, selected) => {
-                        answers[qid] = value;
+                        if (inputAnswerPresent(value)) {
+                            answers[qid] = value;
+                        } else {
+                            delete answers[qid];
+                        }
                         for (const btn of buttons) btn.setAttribute("aria-pressed", "false");
                         if (selected) selected.setAttribute("aria-pressed", "true");
+                        refreshSubmitState();
                     };
                     for (const option of options) {
                         const label = typeof option.label === "string" ? option.label : "";
@@ -3668,7 +3695,7 @@
                     other.addEventListener("focus", () => setAnswer(other.value, null));
                     other.addEventListener("input", () => setAnswer(other.value, null));
                     optionRow.appendChild(other);
-                    if (buttons.length) {
+                    if (buttons.length && !requiresExplicitChoice) {
                         const firstLabel = buttons[0].querySelector(".input-option-label");
                         setAnswer(firstLabel ? firstLabel.textContent || "" : "", buttons[0]);
                     }
@@ -3683,23 +3710,31 @@
                 submit.textContent = "Submit";
                 submit.addEventListener("click", () => submitInputRequest(id));
                 actions.appendChild(submit);
-                const skip = document.createElement("button");
-                skip.type = "button";
-                skip.textContent = "Skip";
-                skip.addEventListener("click", () => {
-                    const entry = inputRequests.get(id);
-                    if (entry) {
-                        for (const key of Object.keys(entry.answers)) {
-                            delete entry.answers[key];
+                refreshSubmitState = () => {
+                    submit.disabled = requiredQuestionIds.some((qid) => {
+                        return !inputAnswerPresent(answers[qid]);
+                    });
+                };
+                refreshSubmitState();
+                if (!requiredQuestionIds.length) {
+                    const skip = document.createElement("button");
+                    skip.type = "button";
+                    skip.textContent = "Skip";
+                    skip.addEventListener("click", () => {
+                        const entry = inputRequests.get(id);
+                        if (entry) {
+                            for (const key of Object.keys(entry.answers)) {
+                                delete entry.answers[key];
+                            }
                         }
-                    }
-                    submitInputRequest(id);
-                });
-                actions.appendChild(skip);
+                        submitInputRequest(id);
+                    });
+                    actions.appendChild(skip);
+                }
                 box.appendChild(actions);
                 wrap.appendChild(box);
                 insertBeforeLive(wrap);
-                inputRequests.set(id, { node: wrap, box, actions, answers, resolved: false });
+                inputRequests.set(id, { node: wrap, box, actions, answers, requiredQuestionIds, resolved: false });
                 followRenderedContent();
             }
 
@@ -3754,6 +3789,12 @@
             function submitInputRequest(id) {
                 const entry = inputRequests.get(id);
                 if (!entry || entry.resolved) return;
+                if (Array.isArray(entry.requiredQuestionIds)) {
+                    const missingRequired = entry.requiredQuestionIds.some((qid) => {
+                        return !inputAnswerPresent((entry.answers || {})[qid]);
+                    });
+                    if (missingRequired) return;
+                }
                 const controls = entry.box.querySelectorAll("button, input");
                 for (const btn of controls) btn.disabled = true;
                 const body = new URLSearchParams({ answers: JSON.stringify(entry.answers || {}) });

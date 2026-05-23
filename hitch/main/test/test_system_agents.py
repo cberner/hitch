@@ -18,6 +18,7 @@ from hitch.main.models import (
     StandingOrderMemory,
     SystemAgentRun,
     SystemWorkflow,
+    UserInputRequest,
 )
 
 
@@ -207,6 +208,553 @@ class PrQaWorkflowTests(TestCase):
 
         run = SystemAgentRun.objects.get(workflow=workflow)
         self.assertEqual(run.thread_id, "qa-thread")
+
+
+class SpecCriticWorkflowTests(TestCase):
+    def test_prompt_classifier_targets_vague_broad_and_high_impact_prompts(self) -> None:
+        self.assertTrue(system_agents.spec_critic_should_run("Improve the app"))
+        self.assertTrue(
+            system_agents.spec_critic_should_run(
+                "Implement authentication and permission handling"
+            )
+        )
+        self.assertTrue(
+            system_agents.spec_critic_should_run("Change token rotation")
+        )
+        self.assertFalse(
+            system_agents.spec_critic_should_run(
+                'Change the settings checkbox label from "Auto-PR" to "Open PR automatically".'
+            )
+        )
+        self.assertFalse(system_agents.spec_critic_should_run("Change tokenizer tests"))
+        self.assertFalse(system_agents.spec_critic_should_run("Explain how sessions work"))
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_spec_critic_starts_hidden_specialized_agents(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        def _spawn(**kwargs: Any) -> CodexInstance:
+            return _instance(
+                thread_id=f"{kwargs['agent_kind']}-thread",
+                purpose=kwargs["purpose"],
+                status=CodexInstance.STATUS_RUNNING,
+                agent_kind=kwargs["agent_kind"],
+            )
+
+        mock_spawn.side_effect = _spawn
+
+        workflow = system_agents.start_spec_critic_workflow(
+            main_thread_id="main-thread",
+            cwd="/repo",
+            prompt="Improve onboarding",
+            sandbox_policy="workspaceWrite",
+            approval_mode="prompt_user",
+            model="gpt-5.4",
+            reasoning_effort="high",
+            developer_instructions="Use repo conventions.",
+            enable_memories=True,
+            initial_user_message_index=2,
+            auto_pr_enabled=True,
+            qa_panel_enabled=True,
+        )
+
+        self.assertEqual(workflow.kind, system_agents.SPEC_CRITIC_WORKFLOW_KIND)
+        self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_ANALYZING)
+        self.assertEqual(mock_spawn.call_count, 3)
+        agent_kinds = {call.kwargs["agent_kind"] for call in mock_spawn.call_args_list}
+        self.assertEqual(
+            agent_kinds,
+            {
+                system_agents.SPEC_REQUIREMENTS_AGENT_KIND,
+                system_agents.SPEC_RISK_AGENT_KIND,
+                system_agents.SPEC_TEST_AGENT_KIND,
+            },
+        )
+        for call in mock_spawn.call_args_list:
+            self.assertEqual(call.kwargs["thread_source"], ThreadSource.subagent)
+            self.assertEqual(call.kwargs["purpose"], CodexInstance.PURPOSE_SYSTEM_AGENT)
+            self.assertEqual(call.kwargs["display_author"], "Spec Critic")
+            self.assertEqual(call.kwargs["approval_mode"], "auto_review")
+            self.assertEqual(call.kwargs["sandbox_policy"], "readOnly")
+            self.assertEqual(call.kwargs["model"], "gpt-5.4")
+            self.assertEqual(call.kwargs["reasoning_effort"], "high")
+            self.assertIn("output_schema", call.kwargs)
+        prompts = "\n\n".join(call.kwargs["prompt"] for call in mock_spawn.call_args_list)
+        self.assertIn("requirements extractor", prompts)
+        self.assertIn("ambiguity and risk agent", prompts)
+        self.assertIn("acceptance and test strategist", prompts)
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_spec_critic_gates_on_required_clarification(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        def _spawn(**kwargs: Any) -> CodexInstance:
+            return _instance(
+                thread_id=f"{kwargs['agent_kind']}-{mock_spawn.call_count}",
+                purpose=kwargs["purpose"],
+                status=CodexInstance.STATUS_RUNNING,
+                agent_kind=kwargs["agent_kind"],
+            )
+
+        mock_spawn.side_effect = _spawn
+        workflow = system_agents.start_spec_critic_workflow(
+            main_thread_id="main-thread",
+            cwd="/repo",
+            prompt="Improve onboarding",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
+        outputs: dict[str, dict[str, object]] = {
+            system_agents.SPEC_REQUIREMENTS_AGENT_KIND: {
+                "summary": "Onboarding needs work.",
+                "requirements": ["Improve onboarding."],
+                "assumptions": [],
+                "repo_signals": ["Existing session UI."],
+            },
+            system_agents.SPEC_RISK_AGENT_KIND: {
+                "summary": "Scope is unclear.",
+                "ambiguities": ["Onboarding surface is not specified."],
+                "risks": ["Could expand into unrelated UX work."],
+                "questions": [
+                    {
+                        "id": "scope",
+                        "header": "Scope",
+                        "question": "Which onboarding scope should this cover?",
+                        "required": True,
+                        "allow_safe_default": False,
+                        "safe_default": None,
+                        "options": [
+                            {
+                                "label": "New session flow",
+                                "description": "Focus on first-run session creation.",
+                            },
+                            {
+                                "label": "Settings flow",
+                                "description": "Focus on setup and preferences.",
+                            },
+                        ],
+                    },
+                    {
+                        "id": "tone",
+                        "header": "Tone",
+                        "question": "Which tone should the UI use?",
+                        "required": True,
+                        "allow_safe_default": True,
+                        "safe_default": "Minimal (Recommended)",
+                        "options": [
+                            {
+                                "label": "Minimal (Recommended)",
+                                "description": "Keep the implementation restrained.",
+                            },
+                            {
+                                "label": "Guided",
+                                "description": "Add more instructional UI.",
+                            },
+                        ],
+                    },
+                ],
+            },
+            system_agents.SPEC_TEST_AGENT_KIND: {
+                "summary": "Test the selected flow.",
+                "acceptance_criteria": ["Chosen flow is covered."],
+                "test_strategy": ["Add a Django view test."],
+                "manual_checks": ["Exercise the form in browser."],
+            },
+        }
+        for run in workflow.agent_runs.order_by("created_at", "id"):
+            instance = run.instance
+            instance.events_path = _events_file(self, outputs[run.agent_kind])
+            instance.status = CodexInstance.STATUS_COMPLETED
+            instance.save(update_fields=["events_path", "status"])
+            system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_CLARIFYING)
+        self.assertEqual(mock_spawn.call_count, 3)
+        input_request = UserInputRequest.objects.get(
+            method=system_agents.SPEC_CRITIC_CLARIFICATION_METHOD
+        )
+        self.assertEqual(input_request.params["questions"][0]["id"], "scope")
+        self.assertEqual(len(input_request.params["questions"]), 1)
+        self.assertTrue(input_request.params["questions"][0]["required"])
+        self.assertTrue(
+            input_request.params["questions"][0]["requires_explicit_choice"]
+        )
+        self.assertEqual(
+            input_request.params["questions"][0]["options"][0]["label"],
+            "New session flow",
+        )
+        self.assertEqual(
+            workflow.state["clarification_answers"], {"tone": "Minimal (Recommended)"}
+        )
+
+        input_request.response = {"answers": {"scope": "New session flow"}}
+        input_request.save(update_fields=["response"])
+        system_agents.on_user_input_resolved(input_request)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_SYNTHESIZING)
+        self.assertEqual(
+            workflow.state["clarification_answers"],
+            {
+                "scope": "New session flow",
+                "tone": "Minimal (Recommended)",
+            },
+        )
+        self.assertEqual(mock_spawn.call_count, 4)
+        self.assertEqual(
+            mock_spawn.call_args.kwargs["agent_kind"],
+            system_agents.SPEC_SYNTHESIZER_AGENT_KIND,
+        )
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_spec_critic_preserves_partial_clarification_answers_across_reprompt(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.SPEC_CRITIC_WORKFLOW_KIND,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_SPEC_CRITIC_CLARIFYING,
+            state={
+                "original_prompt": "Improve onboarding",
+                "clarification_questions": [
+                    {
+                        "id": "scope",
+                        "header": "Scope",
+                        "question": "Which scope?",
+                        "options": [
+                            {"label": "New sessions", "description": "Session setup."},
+                            {"label": "Settings", "description": "Settings setup."},
+                        ],
+                    },
+                    {
+                        "id": "tone",
+                        "header": "Tone",
+                        "question": "Which tone?",
+                        "options": [
+                            {"label": "Minimal", "description": "Keep it quiet."},
+                            {"label": "Guided", "description": "Add more guidance."},
+                        ],
+                    },
+                ],
+                "clarification_safe_defaults": {},
+            },
+        )
+        instance = _instance(
+            thread_id="risk-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_COMPLETED,
+            agent_kind=system_agents.SPEC_RISK_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.SPEC_RISK_AGENT_KIND,
+            thread_id=instance.thread_id,
+            instance=instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+        )
+        first_request = UserInputRequest.objects.create(
+            instance=instance,
+            method=system_agents.SPEC_CRITIC_CLARIFICATION_METHOD,
+            params={"questions": workflow.state["clarification_questions"]},
+            response={"answers": {"scope": "New sessions", "tone": ""}},
+        )
+
+        system_agents.on_user_input_resolved(first_request)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_CLARIFYING)
+        self.assertEqual(
+            workflow.state["clarification_answers"], {"scope": "New sessions"}
+        )
+        mock_spawn.assert_not_called()
+        follow_up = UserInputRequest.objects.exclude(pk=first_request.pk).get(
+            method=system_agents.SPEC_CRITIC_CLARIFICATION_METHOD
+        )
+        self.assertEqual(follow_up.params["questions"][0]["id"], "tone")
+
+        def _spawn(**kwargs: Any) -> CodexInstance:
+            return _instance(
+                thread_id=f"{kwargs['agent_kind']}-thread",
+                purpose=kwargs["purpose"],
+                status=CodexInstance.STATUS_RUNNING,
+                agent_kind=kwargs["agent_kind"],
+            )
+
+        mock_spawn.side_effect = _spawn
+        follow_up.response = {"answers": {"tone": "Minimal"}}
+        follow_up.save(update_fields=["response"])
+
+        system_agents.on_user_input_resolved(follow_up)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_SYNTHESIZING)
+        self.assertEqual(
+            workflow.state["clarification_answers"],
+            {"scope": "New sessions", "tone": "Minimal"},
+        )
+        mock_spawn.assert_called_once()
+        self.assertEqual(
+            mock_spawn.call_args.kwargs["agent_kind"],
+            system_agents.SPEC_SYNTHESIZER_AGENT_KIND,
+        )
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_spec_critic_analysis_advance_claims_synthesizer_once(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.SPEC_CRITIC_WORKFLOW_KIND,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_SPEC_CRITIC_ANALYZING,
+            state={"original_prompt": "Improve onboarding"},
+        )
+        analysis_outputs: dict[str, dict[str, object]] = {
+            system_agents.SPEC_REQUIREMENTS_AGENT_KIND: {
+                "summary": "Onboarding needs work.",
+                "requirements": ["Improve onboarding."],
+                "assumptions": [],
+                "repo_signals": [],
+            },
+            system_agents.SPEC_RISK_AGENT_KIND: {
+                "summary": "No required clarification.",
+                "ambiguities": [],
+                "risks": [],
+                "questions": [],
+            },
+            system_agents.SPEC_TEST_AGENT_KIND: {
+                "summary": "Add focused coverage.",
+                "acceptance_criteria": ["Onboarding behavior is covered."],
+                "test_strategy": ["Add a focused Django test."],
+                "manual_checks": [],
+            },
+        }
+        for agent_kind, output in analysis_outputs.items():
+            instance = _instance(
+                thread_id=f"{agent_kind}-thread",
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                workflow_id=workflow.pk,
+                status=CodexInstance.STATUS_COMPLETED,
+                agent_kind=agent_kind,
+            )
+            SystemAgentRun.objects.create(
+                workflow=workflow,
+                agent_kind=agent_kind,
+                thread_id=instance.thread_id,
+                instance=instance,
+                status=SystemAgentRun.STATUS_COMPLETED,
+                output=output,
+            )
+        mock_spawn.return_value = _instance(
+            thread_id="synth-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind=system_agents.SPEC_SYNTHESIZER_AGENT_KIND,
+        )
+
+        system_agents._maybe_advance_spec_critic_after_analysis(workflow)
+        system_agents._maybe_advance_spec_critic_after_analysis(workflow)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_SYNTHESIZING)
+        mock_spawn.assert_called_once()
+        self.assertEqual(
+            SystemAgentRun.objects.filter(
+                workflow=workflow,
+                agent_kind=system_agents.SPEC_SYNTHESIZER_AGENT_KIND,
+            ).count(),
+            1,
+        )
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_spec_critic_invalid_json_failure_surfaces_to_visible_thread(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.SPEC_CRITIC_WORKFLOW_KIND,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_SPEC_CRITIC_ANALYZING,
+            state={
+                "original_prompt": "Improve onboarding",
+                "next_user_message_index": 3,
+            },
+        )
+        with tempfile.NamedTemporaryFile(mode="w", delete=False) as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "method": "item/completed",
+                        "payload": {
+                            "item": {
+                                "id": "a1",
+                                "type": "agentMessage",
+                                "text": "not json",
+                            }
+                        },
+                    }
+                )
+                + "\n"
+            )
+            events_path = fh.name
+        self.addCleanup(Path(events_path).unlink, missing_ok=True)
+        instance = _instance(
+            thread_id="requirements-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_COMPLETED,
+            events_path=events_path,
+            agent_kind=system_agents.SPEC_REQUIREMENTS_AGENT_KIND,
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.SPEC_REQUIREMENTS_AGENT_KIND,
+            thread_id=instance.thread_id,
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        run.refresh_from_db()
+        workflow.refresh_from_db()
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertTrue(workflow.state["failure_surfaced"])
+        mock_spawn.assert_called_once()
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(kwargs["thread_id"], "main-thread")
+        self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_SYSTEM_FEEDBACK)
+        self.assertEqual(kwargs["agent_kind"], system_agents.SPEC_CRITIC_WORKFLOW_KIND)
+        self.assertEqual(kwargs["display_author"], system_agents.SPEC_CRITIC_DISPLAY_AUTHOR)
+        self.assertEqual(kwargs["user_message_index"], 3)
+        self.assertIn("Spec Critic could not complete", kwargs["prompt"])
+        self.assertIn("Improve onboarding", kwargs["prompt"])
+        self.assertIn("output was not valid JSON", kwargs["prompt"])
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_spec_critic_synthesis_injects_visible_implementation_brief(
+        self, mock_spawn_turn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.SPEC_CRITIC_WORKFLOW_KIND,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_SPEC_CRITIC_SYNTHESIZING,
+            state={
+                "original_prompt": "Improve onboarding",
+                "sandbox_policy": "workspaceWrite",
+                "approval_mode": "prompt_user",
+                "model": "gpt-5.4",
+                "reasoning_effort": "high",
+                "base_instructions": "Base",
+                "developer_instructions": "Developer",
+                "enable_memories": True,
+                "next_user_message_index": 4,
+                "auto_pr_enabled": True,
+                "qa_panel_enabled": True,
+                "clarification_answers": {"scope": "New session flow"},
+            },
+        )
+        instance = _instance(
+            thread_id="synth-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_COMPLETED,
+            agent_kind=system_agents.SPEC_SYNTHESIZER_AGENT_KIND,
+            events_path=_events_file(
+                self,
+                {"brief": "Implement a focused onboarding pass for new sessions."},
+            ),
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.SPEC_SYNTHESIZER_AGENT_KIND,
+            thread_id=instance.thread_id,
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(
+            workflow.step, system_agents.STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED
+        )
+        mock_spawn_turn.assert_called_once()
+        kwargs = mock_spawn_turn.call_args.kwargs
+        self.assertEqual(kwargs["thread_id"], "main-thread")
+        self.assertNotIn("workflow_id", kwargs)
+        self.assertTrue(kwargs["auto_pr_enabled"])
+        self.assertTrue(kwargs["qa_panel_enabled"])
+        self.assertEqual(kwargs["user_message_index"], 4)
+        self.assertIn("Hitch Spec Critic synthesized", kwargs["prompt"])
+        self.assertIn("Improve onboarding", kwargs["prompt"])
+        self.assertIn(
+            "Implement a focused onboarding pass for new sessions.", kwargs["prompt"]
+        )
+        self.assertIn("scope: New session flow", kwargs["prompt"])
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_stop_active_workflow_cancels_spec_critic_clarification_without_running_agent(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.SPEC_CRITIC_WORKFLOW_KIND,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_SPEC_CRITIC_CLARIFYING,
+            state={
+                "original_prompt": "Improve onboarding",
+                "next_user_message_index": 5,
+            },
+        )
+        instance = _instance(
+            thread_id="risk-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_COMPLETED,
+            agent_kind=system_agents.SPEC_RISK_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.SPEC_RISK_AGENT_KIND,
+            thread_id=instance.thread_id,
+            instance=instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+        )
+        input_request = UserInputRequest.objects.create(
+            instance=instance,
+            method=system_agents.SPEC_CRITIC_CLARIFICATION_METHOD,
+            params={"questions": [{"id": "scope"}]},
+        )
+
+        stopped = system_agents.stop_active_workflow("main-thread")
+
+        self.assertTrue(stopped)
+        workflow.refresh_from_db()
+        input_request.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        response = input_request.response
+        assert response is not None
+        self.assertEqual(response.get("cancelled"), True)
+        self.assertIsNotNone(input_request.responded_at)
+        mock_spawn.assert_called_once()
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_SYSTEM_FEEDBACK)
+        self.assertEqual(kwargs["display_author"], system_agents.SPEC_CRITIC_DISPLAY_AUTHOR)
+        self.assertEqual(kwargs["user_message_index"], 5)
+        self.assertIn("stopped by user", kwargs["prompt"])
 
     def test_pr_monitor_output_schema_is_strict_for_response_format(self) -> None:
         schema = system_agents._PR_MONITOR_OUTPUT_SCHEMA

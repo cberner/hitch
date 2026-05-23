@@ -80,6 +80,7 @@ class SettingsValues(NamedTuple):
     use_worktrees: bool
     auto_pr_enabled: bool
     qa_panel_enabled: bool
+    spec_critic_enabled: bool
     show_archived_sessions: bool
     last_selected_repo: str
     selected_project_id: int | None
@@ -159,6 +160,7 @@ _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
 _QA_PANEL_COOKIE = "hitch_qa_panel"
+_SPEC_CRITIC_COOKIE = "hitch_spec_critic"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
 _SELECTED_PROJECT_COOKIE = "hitch_selected_project_id"
@@ -316,6 +318,7 @@ def _settings_dialog_context(
         "current_use_worktrees": current_settings.use_worktrees,
         "current_auto_pr": current_settings.auto_pr_enabled,
         "current_qa_panel": current_settings.qa_panel_enabled,
+        "current_spec_critic": current_settings.spec_critic_enabled,
         "current_enable_memories": current_settings.enable_memories,
         "projects": projects,
         "current_project": current_project,
@@ -1164,6 +1167,7 @@ def _render_session_detail(
             "active_demo_worker": active_demo_worker,
             "show_active_worker_transcript": show_active_worker_transcript,
             "active_system_workflow": active_system_workflow,
+            "workflow_composer_label": _workflow_composer_label(active_system_workflow),
             "demo_start_disabled": (
                 active_system_workflow is not None or active_instance is not None
             ),
@@ -1990,6 +1994,12 @@ def _workflow_status_text(workflow: Any | None) -> str:
     return streaming.system_workflow_status_text(workflow)
 
 
+def _workflow_composer_label(workflow: SystemWorkflow | None) -> str:
+    if workflow is not None and workflow.kind == SystemWorkflow.KIND_PR_QA:
+        return "QA workflow"
+    return "Hitch workflow"
+
+
 def _active_worker_status_text(active: CodexInstance | None) -> str:
     if active is not None and active.agent_kind == demo.DEMO_AGENT_KIND:
         return "Demo agent is working"
@@ -2419,6 +2429,7 @@ def _stored_settings(request: HttpRequest) -> SettingsValues:
         use_worktrees=_read_cookie(request, _USE_WORKTREES_COOKIE) == "true",
         auto_pr_enabled=_read_cookie(request, _AUTO_PR_COOKIE) == "true",
         qa_panel_enabled=_read_cookie(request, _QA_PANEL_COOKIE) == "true",
+        spec_critic_enabled=_read_cookie(request, _SPEC_CRITIC_COOKIE) == "true",
         show_archived_sessions=_read_cookie(request, _SHOW_ARCHIVED_COOKIE) == "true",
         last_selected_repo=_read_cookie(request, _LAST_SELECTED_REPO_COOKIE),
         selected_project_id=_read_selected_project_cookie(request),
@@ -2442,6 +2453,7 @@ def _settings_values_for_user(settings: UserSettings) -> SettingsValues:
         use_worktrees=settings.use_worktrees,
         auto_pr_enabled=settings.auto_pr_enabled,
         qa_panel_enabled=settings.qa_panel_enabled,
+        spec_critic_enabled=settings.spec_critic_enabled,
         show_archived_sessions=settings.show_archived_sessions,
         last_selected_repo=settings.last_selected_repo,
         selected_project_id=settings.selected_project_id,
@@ -2462,6 +2474,7 @@ def _save_user_settings(user: Any, values: SettingsValues) -> UserSettings:
         ("use_worktrees", values.use_worktrees),
         ("auto_pr_enabled", values.auto_pr_enabled),
         ("qa_panel_enabled", values.qa_panel_enabled),
+        ("spec_critic_enabled", values.spec_critic_enabled),
         ("show_archived_sessions", values.show_archived_sessions),
         ("last_selected_repo", values.last_selected_repo),
         ("selected_project_id", values.selected_project_id),
@@ -2488,6 +2501,7 @@ def _settings_cookie_updates(values: SettingsValues) -> dict[str, str]:
         _USE_WORKTREES_COOKIE: "true" if values.use_worktrees else "false",
         _AUTO_PR_COOKIE: "true" if values.auto_pr_enabled else "false",
         _QA_PANEL_COOKIE: "true" if values.qa_panel_enabled else "false",
+        _SPEC_CRITIC_COOKIE: "true" if values.spec_critic_enabled else "false",
         _SHOW_ARCHIVED_COOKIE: "true" if values.show_archived_sessions else "false",
         _LAST_SELECTED_REPO_COOKIE: values.last_selected_repo,
         _SELECTED_PROJECT_COOKIE: (
@@ -2549,6 +2563,9 @@ def _valid_cookie_setting_updates(request: HttpRequest) -> dict[str, str | bool 
     qa_panel = _read_signed_cookie_if_present(request, _QA_PANEL_COOKIE)
     if qa_panel in {"true", "false"}:
         updates["qa_panel_enabled"] = qa_panel == "true"
+    spec_critic = _read_signed_cookie_if_present(request, _SPEC_CRITIC_COOKIE)
+    if spec_critic in {"true", "false"}:
+        updates["spec_critic_enabled"] = spec_critic == "true"
     last_selected_repo = _read_signed_cookie_if_present(
         request, _LAST_SELECTED_REPO_COOKIE
     )
@@ -2746,6 +2763,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     use_worktrees = request.POST.get("use_worktrees", "").strip()
     auto_pr = request.POST.get("auto_pr", "").strip()
     qa_panel = request.POST.get("qa_panel", "").strip()
+    spec_critic = request.POST.get("spec_critic", "").strip()
     posted_show_archived = request.POST.get("show_archived_sessions")
     show_archived = (
         posted_show_archived.strip() if posted_show_archived is not None else None
@@ -2783,6 +2801,9 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     if qa_panel not in {"", "true"}:
         return HttpResponseBadRequest("invalid QA panel setting")
     qa_panel = "true" if qa_panel == "true" else "false"
+    if spec_critic not in {"", "true"}:
+        return HttpResponseBadRequest("invalid Spec Critic setting")
+    spec_critic = "true" if spec_critic == "true" else "false"
     if show_archived is not None and show_archived not in {"", "true"}:
         return HttpResponseBadRequest("invalid archived sessions visibility")
     if enable_memories not in {"", "true"}:
@@ -2810,6 +2831,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         use_worktrees=use_worktrees == "true",
         auto_pr_enabled=auto_pr == "true",
         qa_panel_enabled=qa_panel == "true",
+        spec_critic_enabled=spec_critic == "true",
         show_archived_sessions=(
             stored.show_archived_sessions
             if show_archived is None
@@ -3453,6 +3475,41 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             return HttpResponseBadRequest("default collaboration mode requires a model")
         spawn_kwargs["model"] = collaboration_model
         spawn_kwargs["collaboration_mode"] = collaboration_mode
+    if (
+        settings.spec_critic_enabled
+        and not plan_mode
+        and not collaboration_mode
+        and system_agents.spec_critic_should_run(prompt)
+    ):
+        workflow_model = _string_value(getattr(resumed, "model", None)) or settings.model
+        workflow_reasoning_effort = (
+            _string_value(getattr(resumed, "reasoning_effort", None))
+            or settings.reasoning_effort
+        )
+        spec_workflow_kwargs: dict[str, Any] = {
+            "main_thread_id": session_id,
+            "cwd": cwd,
+            "prompt": prompt,
+            "sandbox_policy": sandbox_policy or None,
+            "approval_mode": approval_mode,
+            "model": workflow_model or None,
+            "reasoning_effort": workflow_reasoning_effort or None,
+            "developer_instructions": (
+                previous_instance.developer_instructions
+                if previous_instance is not None
+                else settings.extra_system_prompt
+            )
+            or None,
+            "enable_memories": settings.enable_memories,
+            "initial_user_message_index": _count_user_entries(thread_entries),
+            "auto_pr_enabled": auto_pr_enabled,
+        }
+        if base_instructions:
+            spec_workflow_kwargs["base_instructions"] = base_instructions
+        if auto_pr_enabled and settings.qa_panel_enabled:
+            spec_workflow_kwargs["qa_panel_enabled"] = True
+        system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
+        return redirect("session", session_id=session_id)
     codex_pool.spawn_turn(**spawn_kwargs)
     return redirect("session", session_id=session_id)
 
@@ -3756,6 +3813,11 @@ def resolve_input_request(request: HttpRequest, input_id: int) -> HttpResponse:
     )
     if not updated:
         return HttpResponse("input request already resolved", status=409)
+    input_request.refresh_from_db()
+    try:
+        system_agents.on_user_input_resolved(input_request)
+    except Exception:
+        logger.exception("failed to resume workflow for input request %s", input_id)
     return HttpResponse(json.dumps(response), content_type="application/json")
 
 
@@ -3944,6 +4006,73 @@ def new_session(request: HttpRequest) -> HttpResponse:
         spawn_kwargs["auto_pr_enabled"] = True
         if settings.qa_panel_enabled:
             spawn_kwargs["qa_panel_enabled"] = True
+    if (
+        settings.spec_critic_enabled
+        and not plan_mode
+        and system_agents.spec_critic_should_run(prompt)
+    ):
+        spec_create_thread_kwargs: dict[str, Any] = {
+            "cwd": session_cwd,
+            "name": (
+                proposed_session.title
+                if proposed_session is not None
+                else prompt.split("\n", 1)[0]
+            ),
+            "developer_instructions": settings.extra_system_prompt or None,
+            "model": settings.model or None,
+            "enable_memories": settings.enable_memories,
+        }
+        if base_instructions:
+            spec_create_thread_kwargs["base_instructions"] = base_instructions
+        try:
+            thread_id = codex_pool.create_session_thread(**spec_create_thread_kwargs)
+        except Exception:
+            if managed_worktree is not None:
+                try:
+                    cleanup_worktree(managed_worktree)
+                except WorktreeCleanupError:
+                    logger.exception(
+                        "failed to clean up managed worktree %s", managed_worktree.path
+                    )
+            raise
+        spec_workflow_kwargs: dict[str, Any] = {
+            "main_thread_id": thread_id,
+            "cwd": session_cwd,
+            "prompt": prompt,
+            "sandbox_policy": settings.sandbox_policy or None,
+            "approval_mode": settings.approval_mode,
+            "model": settings.model or None,
+            "reasoning_effort": settings.reasoning_effort or None,
+            "developer_instructions": settings.extra_system_prompt or None,
+            "enable_memories": settings.enable_memories,
+            "initial_user_message_index": 0,
+            "auto_pr_enabled": auto_pr_enabled,
+        }
+        if base_instructions:
+            spec_workflow_kwargs["base_instructions"] = base_instructions
+        if auto_pr_enabled and settings.qa_panel_enabled:
+            spec_workflow_kwargs["qa_panel_enabled"] = True
+        system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
+        session_metadata, _created = SessionMetadata.objects.update_or_create(
+            thread_id=thread_id,
+            defaults={
+                "cwd": session_cwd,
+                "project": session_project,
+                "project_cleared": target.project_cleared,
+                "auto_pr_enabled": auto_pr_enabled,
+            },
+        )
+        _accept_proposed_session_for_session(proposed_session, session_metadata)
+        remembered_values = settings._replace(last_selected_repo=cwd)
+        user = _authenticated_user(request)
+        if user is not None:
+            _save_user_settings(user, remembered_values)
+            cookie_updates = _settings_cookie_updates(remembered_values)
+        else:
+            cookie_updates = {**cookie_updates, _LAST_SELECTED_REPO_COOKIE: cwd}
+        response = redirect("session", session_id=thread_id)
+        _apply_cookie_updates(response, cookie_updates)
+        return response
     try:
         instance = codex_pool.spawn_new_session(**spawn_kwargs)
     except Exception:

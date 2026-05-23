@@ -48,6 +48,7 @@ _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
 _QA_PANEL_COOKIE = "hitch_qa_panel"
+_SPEC_CRITIC_COOKIE = "hitch_spec_critic"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
 _CODING_AGENT_COOKIE = "hitch_coding_agent"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
@@ -1308,6 +1309,57 @@ class NewSessionViewTests(TestCase):
             sandbox_policy=None,
             approval_mode="auto_review",
         )
+
+    @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
+    @patch("hitch.main.views.codex_pool.create_session_thread", return_value="thread-spec")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_spec_critic_new_session_creates_visible_thread_before_implementation(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_create_thread: MagicMock,
+        mock_start_spec_critic: MagicMock,
+    ) -> None:
+        _seed_cookies(self.client, **{_SPEC_CRITIC_COOKIE: "true"})
+        mock_discover.return_value = [Path(self.REPO)]
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "Improve onboarding", "cwd": self.REPO},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.headers["Location"],
+            reverse("session", kwargs={"session_id": "thread-spec"}),
+        )
+        mock_spawn.assert_not_called()
+        mock_create_thread.assert_called_once_with(
+            cwd=self.REPO,
+            name="Improve onboarding",
+            developer_instructions=None,
+            model=None,
+            enable_memories=False,
+        )
+        mock_start_spec_critic.assert_called_once_with(
+            main_thread_id="thread-spec",
+            cwd=self.REPO,
+            prompt="Improve onboarding",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model=None,
+            reasoning_effort=None,
+            developer_instructions=None,
+            enable_memories=False,
+            initial_user_message_index=0,
+            auto_pr_enabled=False,
+        )
+        metadata = SessionMetadata.objects.get(thread_id="thread-spec")
+        self.assertEqual(metadata.cwd, self.REPO)
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
@@ -2582,6 +2634,77 @@ class SendMessageViewTests(TestCase):
             thread_id="abc",
             cwd="/repo",
             prompt="follow-up question",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
+
+    @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_spec_critic_resume_intercepts_ambiguous_implementation_prompt(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+        mock_start_spec_critic: MagicMock,
+    ) -> None:
+        _seed_cookies(self.client, **{_SPEC_CRITIC_COOKIE: "true"})
+        self._patch_codex(mock_codex, model="gpt-5.4", reasoning_effort="high")
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "Improve onboarding"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_not_called()
+        mock_start_spec_critic.assert_called_once_with(
+            main_thread_id="abc",
+            cwd="/repo",
+            prompt="Improve onboarding",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model="gpt-5.4",
+            reasoning_effort="high",
+            developer_instructions=None,
+            enable_memories=False,
+            initial_user_message_index=0,
+            auto_pr_enabled=False,
+        )
+
+    @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_spec_critic_resume_leaves_specific_prompt_on_normal_path(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+        mock_start_spec_critic: MagicMock,
+    ) -> None:
+        _seed_cookies(self.client, **{_SPEC_CRITIC_COOKIE: "true"})
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={
+                "prompt": (
+                    'Change the settings checkbox label from "Auto-PR" '
+                    'to "Open PR automatically".'
+                )
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_start_spec_critic.assert_not_called()
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt='Change the settings checkbox label from "Auto-PR" to "Open PR automatically".',
             sandbox_policy=None,
             approval_mode="auto_review",
         )
@@ -4796,6 +4919,8 @@ class SessionViewApprovalContextTests(TestCase):
                 "resolve_input_request", kwargs={"input_id": 0}
             ),
         )
+        self.assertContains(response, "requires_explicit_choice")
+        self.assertContains(response, "requiredQuestionIds")
 
 
 class StandingOrderViewTests(TestCase):
