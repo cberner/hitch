@@ -182,13 +182,13 @@
         }
         .lifetime-stats {
             display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
+            grid-template-columns: repeat(2, minmax(0, 1fr));
             gap: 0.65rem;
         }
         .lifetime-stat {
             display: flex;
             flex-direction: column;
-            gap: 0.1rem;
+            gap: 0.75rem;
             border: 1px solid var(--border);
             border-radius: var(--radius);
             background: var(--surface);
@@ -203,6 +203,21 @@
             font-size: 0.66rem;
             font-weight: 600;
         }
+        .lifetime-breakdown {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.65rem;
+        }
+        .lifetime-metric {
+            display: flex;
+            flex-direction: column;
+            gap: 0.1rem;
+            min-width: 0;
+        }
+        .lifetime-metric-label {
+            color: var(--text-muted);
+            font-size: 0.72rem;
+        }
         .lifetime-value {
             color: var(--text);
             font-size: 1.15rem;
@@ -210,10 +225,6 @@
             line-height: 1.25;
             font-variant-numeric: tabular-nums;
             white-space: nowrap;
-        }
-        .lifetime-unit {
-            color: var(--text-muted);
-            font-size: 0.78rem;
         }
         .rate-limit-list {
             display: flex;
@@ -327,34 +338,38 @@
             {% if lifetime_usage %}
             <div class="lifetime-stats" aria-label="Lifetime token usage">
                 <div class="lifetime-stat">
-                    <span class="lifetime-label">All sessions</span>
-                    <span class="lifetime-value">{{ lifetime_usage.total }}</span>
-                    <span class="lifetime-unit">tokens</span>
-                </div>
-                <div class="lifetime-stat">
                     <span class="lifetime-label">Sessions</span>
-                    <span class="lifetime-value">{{ lifetime_usage.sessions_total }}</span>
-                    <span class="lifetime-unit">tokens</span>
+                    <div class="lifetime-breakdown">
+                        <span class="lifetime-metric">
+                            <span class="lifetime-metric-label">Input</span>
+                            <span class="lifetime-value">{{ lifetime_usage.sessions.input }}</span>
+                        </span>
+                        <span class="lifetime-metric">
+                            <span class="lifetime-metric-label">Output</span>
+                            <span class="lifetime-value">{{ lifetime_usage.sessions.output }}</span>
+                        </span>
+                        <span class="lifetime-metric">
+                            <span class="lifetime-metric-label">Cached</span>
+                            <span class="lifetime-value">{{ lifetime_usage.sessions.cached }}</span>
+                        </span>
+                    </div>
                 </div>
                 <div class="lifetime-stat">
                     <span class="lifetime-label">HITCH system</span>
-                    <span class="lifetime-value">{{ lifetime_usage.system_total }}</span>
-                    <span class="lifetime-unit">tokens</span>
-                </div>
-                <div class="lifetime-stat">
-                    <span class="lifetime-label">Input</span>
-                    <span class="lifetime-value">{{ lifetime_usage.input }}</span>
-                    <span class="lifetime-unit">tokens</span>
-                </div>
-                <div class="lifetime-stat">
-                    <span class="lifetime-label">Output</span>
-                    <span class="lifetime-value">{{ lifetime_usage.output }}</span>
-                    <span class="lifetime-unit">tokens</span>
-                </div>
-                <div class="lifetime-stat">
-                    <span class="lifetime-label">Cached</span>
-                    <span class="lifetime-value">{{ lifetime_usage.cached }}</span>
-                    <span class="lifetime-unit">tokens</span>
+                    <div class="lifetime-breakdown">
+                        <span class="lifetime-metric">
+                            <span class="lifetime-metric-label">Input</span>
+                            <span class="lifetime-value">{{ lifetime_usage.system.input }}</span>
+                        </span>
+                        <span class="lifetime-metric">
+                            <span class="lifetime-metric-label">Output</span>
+                            <span class="lifetime-value">{{ lifetime_usage.system.output }}</span>
+                        </span>
+                        <span class="lifetime-metric">
+                            <span class="lifetime-metric-label">Cached</span>
+                            <span class="lifetime-value">{{ lifetime_usage.system.cached }}</span>
+                        </span>
+                    </div>
                 </div>
             </div>
             {% else %}

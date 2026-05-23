@@ -1707,10 +1707,6 @@ def _non_cached_input_tokens(usage: Mapping[str, int]) -> int:
     return max(usage.get("input_tokens", 0) - usage.get("cached_input_tokens", 0), 0)
 
 
-def _display_total_tokens(usage: Mapping[str, int]) -> int:
-    return max(usage.get("total_tokens", 0) - usage.get("cached_input_tokens", 0), 0)
-
-
 def _threads_for_usage(codex: Codex) -> list[Any] | None:
     threads: list[Any] = []
     failed = False
@@ -1819,34 +1815,42 @@ def _system_agent_run_detail_title(run: SystemAgentRun) -> str:
     return f"{label} log" if label else "System session"
 
 
-def _lifetime_token_usage_for(threads: list[Any]) -> dict[str, str]:
+def _lifetime_token_usage_for(threads: list[Any]) -> dict[str, dict[str, str]]:
     hidden_thread_ids = system_agents.hidden_thread_ids()
-    totals = {key: 0 for key in _TOKEN_USAGE_KEYS}
-    display_total = 0
-    session_display_total = 0
-    system_display_total = 0
-    display_input = 0
+    session_usage = _empty_lifetime_token_usage()
+    system_usage = _empty_lifetime_token_usage()
     for thread in threads:
         usage = _token_usage_numbers_for(thread)
         if usage is None:
             continue
         thread_id = getattr(thread, "id", None)
-        thread_display_total = _display_total_tokens(usage)
-        for key in _TOKEN_USAGE_KEYS:
-            totals[key] += usage.get(key, 0)
-        display_total += thread_display_total
         if isinstance(thread_id, str) and thread_id in hidden_thread_ids:
-            system_display_total += thread_display_total
+            _add_lifetime_token_usage(system_usage, usage)
         else:
-            session_display_total += thread_display_total
-        display_input += _non_cached_input_tokens(usage)
+            _add_lifetime_token_usage(session_usage, usage)
     return {
-        "total": _format_token_count(display_total),
-        "sessions_total": _format_token_count(session_display_total),
-        "system_total": _format_token_count(system_display_total),
-        "input": _format_token_count(display_input),
-        "output": _format_token_count(totals["output_tokens"]),
-        "cached": _format_token_count(totals["cached_input_tokens"]),
+        "sessions": _format_lifetime_token_usage(session_usage),
+        "system": _format_lifetime_token_usage(system_usage),
+    }
+
+
+def _empty_lifetime_token_usage() -> dict[str, int]:
+    return {"input": 0, "output": 0, "cached": 0}
+
+
+def _add_lifetime_token_usage(
+    lifetime_usage: dict[str, int], usage: Mapping[str, int]
+) -> None:
+    lifetime_usage["input"] += _non_cached_input_tokens(usage)
+    lifetime_usage["output"] += usage.get("output_tokens", 0)
+    lifetime_usage["cached"] += usage.get("cached_input_tokens", 0)
+
+
+def _format_lifetime_token_usage(usage: Mapping[str, int]) -> dict[str, str]:
+    return {
+        "input": streaming._format_compact_token_count(usage.get("input", 0)),
+        "output": streaming._format_compact_token_count(usage.get("output", 0)),
+        "cached": streaming._format_compact_token_count(usage.get("cached", 0)),
     }
 
 

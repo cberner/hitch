@@ -574,7 +574,9 @@ class IndexViewTests(TestCase):
         response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "113,456")
+        self.assertContains(response, "90K")
+        self.assertContains(response, "23K")
+        self.assertContains(response, "10K")
         self.assertNotContains(response, "123,456")
         cache = ArchivedSessionTokenUsage.objects.get(thread_id="archived")
         self.assertEqual(cache.total_tokens, 123_456)
@@ -593,7 +595,9 @@ class IndexViewTests(TestCase):
 
         response = self.client.get(reverse("usage"))
 
-        self.assertContains(response, "909,999")
+        self.assertContains(response, "810K")
+        self.assertContains(response, "100K")
+        self.assertContains(response, "90K")
         self.assertNotContains(response, "999,999")
         self.assertNotContains(response, "123,456")
         cache.refresh_from_db()
@@ -659,11 +663,11 @@ class IndexViewTests(TestCase):
             self,
             [
                 _token_count_line(
-                    input_tokens=400,
-                    cached_input_tokens=50,
-                    output_tokens=600,
+                    input_tokens=1_800_000,
+                    cached_input_tokens=300_000,
+                    output_tokens=2_300_000,
                     reasoning_output_tokens=40,
-                    total_tokens=1_040,
+                    total_tokens=4_100_000,
                 )
             ],
         )
@@ -671,11 +675,11 @@ class IndexViewTests(TestCase):
             self,
             [
                 _token_count_line(
-                    input_tokens=1_000,
-                    cached_input_tokens=200,
-                    output_tokens=1_500,
+                    input_tokens=500_000,
+                    cached_input_tokens=100_000,
+                    output_tokens=900_000,
                     reasoning_output_tokens=300,
-                    total_tokens=3_000,
+                    total_tokens=1_400_000,
                 )
             ],
             archived=True,
@@ -684,11 +688,11 @@ class IndexViewTests(TestCase):
             self,
             [
                 _token_count_line(
-                    input_tokens=300,
-                    cached_input_tokens=100,
-                    output_tokens=700,
+                    input_tokens=2_200_000,
+                    cached_input_tokens=700_000,
+                    output_tokens=800_000,
                     reasoning_output_tokens=80,
-                    total_tokens=1_100,
+                    total_tokens=3_000_000,
                 )
             ],
         )
@@ -729,20 +733,20 @@ class IndexViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Lifetime")
-        self.assertContains(response, "All sessions")
         self.assertContains(response, "Sessions")
         self.assertContains(response, "HITCH system")
-        self.assertContains(response, "4,790")
-        self.assertContains(response, "3,790")
-        self.assertContains(response, "1,000")
-        self.assertContains(response, "1,350")
-        self.assertContains(response, "2,800")
-        self.assertContains(response, "350")
-        self.assertNotContains(response, "4,040")
-        self.assertNotContains(response, "3,250")
-        self.assertNotContains(response, "1,400")
+        self.assertNotContains(response, "All sessions")
+        self.assertContains(response, "1.9M")
+        self.assertContains(response, "3.2M")
+        self.assertContains(response, "400K")
+        self.assertContains(response, "1.5M")
+        self.assertContains(response, "800K")
+        self.assertContains(response, "700K")
+        self.assertNotContains(response, "1,900,000")
+        self.assertNotContains(response, "3,200,000")
+        self.assertNotContains(response, "7,700,000")
         cache = ArchivedSessionTokenUsage.objects.get(thread_id="archived")
-        self.assertEqual(cache.total_tokens, 3_000)
+        self.assertEqual(cache.total_tokens, 1_400_000)
         client = mock_codex.return_value.__enter__.return_value
         client.thread_list.assert_any_call()
         client.thread_list.assert_any_call(archived=True)
