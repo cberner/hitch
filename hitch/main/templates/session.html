@@ -2978,7 +2978,6 @@
                 "item/commandExecution/requestApproval": "Run command?",
                 "item/fileChange/requestApproval": "Apply file change?",
             };
-
             function csrfToken() {
                 const match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
                 return match ? decodeURIComponent(match[1]) : "";
@@ -2996,19 +2995,38 @@
                 return JSON.stringify(item, null, 2);
             }
 
-            function hiddenTranscriptApprovalDetail(method) {
+            function demoCommandDetail(command) {
+                return String(command || "").trim() ? "Command details hidden in demo panel." : "";
+            }
+
+            function demoFileChangeDetail(changes) {
+                const count = (changes || []).filter((c) => c.path).length;
+                if (!count) return "";
+                return count === 1 ? "1 file" : count + " files";
+            }
+
+            function sanitizedApprovalDetail(method, params) {
+                const item = (params && params.item) || params || {};
                 if (method === "item/commandExecution/requestApproval") {
+                    const detail = demoCommandDetail(item.command || "");
+                    if (detail) return "Demo setup command approval requested. " + detail;
                     return "Demo setup command approval requested.";
                 }
                 if (method === "item/fileChange/requestApproval") {
+                    const detail = demoFileChangeDetail(item.changes || []);
+                    if (detail) return "Demo setup file change approval requested. " + detail;
                     return "Demo setup file change approval requested.";
                 }
                 return "Demo setup approval requested.";
             }
 
-            function sanitizedToolDetail(type) {
-                if (type === "commandExecution") return "Demo setup command";
-                if (type === "fileChange") return "Demo setup file change";
+            function sanitizedToolDetail(item) {
+                if (item.type === "commandExecution") {
+                    return demoCommandDetail(item.command || "") || "Demo setup command details hidden.";
+                }
+                if (item.type === "fileChange") {
+                    return demoFileChangeDetail(item.changes || []) || "Demo setup file change";
+                }
                 return "";
             }
 
@@ -3339,7 +3357,7 @@
 
             function toolDetail(item) {
                 if (SANITIZE_LIVE_DETAILS) {
-                    const sanitized = sanitizedToolDetail(item.type);
+                    const sanitized = sanitizedToolDetail(item);
                     if (sanitized) return sanitized;
                 }
                 switch (item.type) {
@@ -3521,7 +3539,7 @@
                 const detail = document.createElement("div");
                 detail.className = "approval-detail";
                 detail.textContent = HIDE_LIVE_TRANSCRIPT || SANITIZE_LIVE_DETAILS
-                    ? hiddenTranscriptApprovalDetail(payload.method)
+                    ? sanitizedApprovalDetail(payload.method, payload.params)
                     : approvalDetail(payload.method, payload.params);
                 box.appendChild(detail);
                 if (READ_ONLY) {
