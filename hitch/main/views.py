@@ -353,6 +353,7 @@ def _new_session_dialog_context(
         current_new_session_project,
         global_enabled=current_settings.auto_pr_enabled,
     )
+    current_coding_agent = _effective_coding_agent(current_settings)
     return {
         "repos": repos,
         "new_session_projects": new_session_projects,
@@ -367,6 +368,13 @@ def _new_session_dialog_context(
         ),
         "current_new_session_auto_pr": current_new_session_auto_pr,
         "bare_repo_project_value": _BARE_REPO_PROJECT_VALUE,
+        "new_session_coding_agent_options": [
+            {"id": value, "display_name": label}
+            for value, label in coding_agents.CODING_AGENT_OPTIONS
+        ],
+        "new_session_default_coding_agent_label": _option_label(
+            coding_agents.CODING_AGENT_OPTIONS, current_coding_agent
+        ),
         "pr_slash_prompt": _PR_SLASH_PROMPT,
         "qa_slash_prompt": _QA_SLASH_PROMPT,
     }
@@ -3359,6 +3367,15 @@ def _posted_auto_pr_override(raw: str | None, *, default: bool) -> tuple[bool, s
     return False, "invalid auto-PR setting"
 
 
+def _posted_new_session_coding_agent(raw: str | None) -> tuple[str, str | None]:
+    value = (raw or "").strip()
+    if not value:
+        return "", None
+    if value in coding_agents.VALID_CODING_AGENTS:
+        return value, None
+    return "", "invalid coding agent"
+
+
 @require_http_methods(["POST"])
 def set_session_name(request: HttpRequest, session_id: str) -> HttpResponse:
     name = request.POST.get("name", "").strip()
@@ -4056,6 +4073,11 @@ def new_session(request: HttpRequest) -> HttpResponse:
     )
     if proposed_session_error is not None:
         return HttpResponseBadRequest(proposed_session_error)
+    coding_agent_override, coding_agent_error = _posted_new_session_coding_agent(
+        request.POST.get("coding_agent")
+    )
+    if coding_agent_error is not None:
+        return HttpResponseBadRequest(coding_agent_error)
     cwd = target.cwd
     if not prompt:
         return HttpResponseBadRequest("prompt is required")
@@ -4080,6 +4102,11 @@ def new_session(request: HttpRequest) -> HttpResponse:
         models_data = list(codex.models().data)
     resolved_settings = _resolved_settings(request, models_data)
     settings = resolved_settings.values
+    spawn_settings = (
+        settings._replace(coding_agent=coding_agent_override)
+        if coding_agent_override
+        else settings
+    )
     cookie_updates = resolved_settings.cookie_updates
     source_project = target.project
     default_auto_pr_enabled = _effective_auto_pr_enabled(
@@ -4102,7 +4129,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
             thread_name = proposed_session.title
         else:
             thread_name = _PR_SLASH_PROMPT if pr_activation else _QA_SLASH_PROMPT
-        base_instructions = _base_instructions_for_settings(settings)
+        base_instructions = _base_instructions_for_settings(spawn_settings)
         create_thread_kwargs: dict[str, Any] = {
             "cwd": session_cwd,
             "name": thread_name,
@@ -4178,7 +4205,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
     }
     if proposed_session is not None:
         spawn_kwargs["thread_name"] = proposed_session.title
-    base_instructions = _base_instructions_for_settings(settings)
+    base_instructions = _base_instructions_for_settings(spawn_settings)
     if base_instructions:
         spawn_kwargs["base_instructions"] = base_instructions
     if settings.enable_memories:

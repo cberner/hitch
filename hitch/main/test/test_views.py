@@ -970,6 +970,23 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    def test_new_session_dialog_exposes_coding_agent_override(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex)
+        mock_discover.return_value = [Path("/home/user/proj")]
+        _seed_cookies(self.client, **{_CODING_AGENT_COOKIE: "hitch"})
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, "data-new-session-coding-agent")
+        self.assertContains(response, "Use settings (HITCH)")
+        self.assertContains(response, 'name="coding_agent"')
+        self.assertContains(response, 'value="codex"')
+        self.assertContains(response, 'value="hitch"')
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
     def test_title_rendering(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -2294,6 +2311,72 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
+    def test_new_session_coding_agent_override_matrix(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        _setup_codex(mock_codex, models=[])
+        cases: list[tuple[str, dict[str, str], dict[str, str], dict[str, Any]]] = [
+            (
+                "hitch override from codex setting",
+                {_CODING_AGENT_COOKIE: "codex"},
+                {"coding_agent": "hitch"},
+                {"base_instructions": coding_agents.HITCH_BASE_INSTRUCTIONS},
+            ),
+            (
+                "codex override from hitch setting",
+                {_CODING_AGENT_COOKIE: "hitch"},
+                {"coding_agent": "codex"},
+                {},
+            ),
+        ]
+
+        for index, (label, cookies, data, expected) in enumerate(cases):
+            with self.subTest(label=label):
+                client = Client()
+                _seed_cookies(client, **cookies)
+                mock_spawn.return_value = SimpleNamespace(thread_id=f"thread-{index}")
+                mock_spawn.reset_mock()
+
+                response = client.post(
+                    reverse("new_session"),
+                    data={"prompt": "do thing", "cwd": self.REPO, **data},
+                )
+
+                self.assertEqual(response.status_code, 302)
+                self._assert_new_session_spawn(mock_spawn, **expected)
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_rejects_invalid_coding_agent_override(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "do thing",
+                "cwd": self.REPO,
+                "coding_agent": "not-a-real-agent",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, "invalid coding agent", status_code=400)
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
     def test_new_session_plan_mode_matrix(
         self,
         mock_discover: MagicMock,
@@ -2408,6 +2491,24 @@ class NewSessionViewTests(TestCase):
                     "model": "gpt-5.4",
                     "reasoning_effort": "medium",
                     "developer_instructions": None,
+                    "open_pr_on_lgtm": False,
+                },
+            ),
+            (
+                "qa hitch coding agent override",
+                {"prompt": "/QA", "cwd": self.REPO, "coding_agent": "hitch"},
+                {},
+                {
+                    "name": _QA_PROMPT,
+                    "developer_instructions": None,
+                    "model": "gpt-5.4",
+                    "base_instructions": coding_agents.HITCH_BASE_INSTRUCTIONS,
+                },
+                {
+                    "model": "gpt-5.4",
+                    "reasoning_effort": "medium",
+                    "developer_instructions": None,
+                    "base_instructions": coding_agents.HITCH_BASE_INSTRUCTIONS,
                     "open_pr_on_lgtm": False,
                 },
             ),
