@@ -47,6 +47,7 @@ _MODEL_COOKIE = "hitch_model"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
+_QA_PANEL_COOKIE = "hitch_qa_panel"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
 _CODING_AGENT_COOKIE = "hitch_coding_agent"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
@@ -3126,6 +3127,27 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         base_instructions = mock_start_workflow.call_args.kwargs["base_instructions"]
         self.assertIn("You are running inside HITCH", base_instructions)
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_qa_slash_command_forwards_parallel_panel_setting(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex, model="gpt-5.4")
+        mock_discover.return_value = [Path("/repo")]
+        _seed_cookies(self.client, **{_QA_PANEL_COOKIE: "true"})
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "/qa"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(mock_start_workflow.call_args.kwargs["qa_panel_enabled"])
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.discover_repos")
