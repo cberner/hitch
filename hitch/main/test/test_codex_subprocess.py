@@ -763,6 +763,23 @@ class IsAliveTests(TestCase):
         finally:
             _forget_worker_pid(pid)
 
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=False)
+    @patch("hitch.main.codex_pool.is_alive", return_value=True)
+    def test_worker_is_alive_rejects_recycled_untracked_pid(
+        self, mock_alive: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        instance = CodexInstance.objects.create(
+            pid=4321,
+            thread_id="t",
+            cwd="/r",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+
+        self.assertFalse(codex_pool.worker_is_alive(instance))
+        mock_identity.assert_called_once_with(4321, instance.pk)
+        mock_alive.assert_not_called()
+
     def test_linux_proc_state_defensive_branches(self) -> None:
         with patch("hitch.main.codex_pool.Path") as mock_path:
             proc_root = mock_path.return_value
@@ -855,14 +872,14 @@ class ReconcileAndLookupTests(TestCase):
             purpose=purpose,
         )
 
-    @patch("hitch.main.codex_pool.is_alive")
+    @patch("hitch.main.codex_pool.worker_is_alive")
     def test_reconcile_marks_only_dead_pending_rows_failed(
-        self, mock_alive: MagicMock
+        self, mock_worker_alive: MagicMock
     ) -> None:
         dead_running = self._make(pid=10, status=CodexInstance.STATUS_RUNNING)
         live_running = self._make(pid=11, status=CodexInstance.STATUS_RUNNING)
         completed = self._make(pid=12, status=CodexInstance.STATUS_COMPLETED)
-        mock_alive.side_effect = lambda pid: pid == 11
+        mock_worker_alive.side_effect = lambda instance: instance.pk == live_running.pk
 
         n = codex_pool.reconcile_dead()
 
@@ -878,9 +895,9 @@ class ReconcileAndLookupTests(TestCase):
         self.assertIn("exited", dead_running.error)
 
     @patch("hitch.main.system_agents.on_codex_instance_finished")
-    @patch("hitch.main.codex_pool.is_alive", return_value=False)
+    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_notifies_system_agents_for_dead_system_rows(
-        self, _mock_alive: MagicMock, mock_notify: MagicMock
+        self, _mock_worker_alive: MagicMock, mock_notify: MagicMock
     ) -> None:
         system_agent = self._make(
             pid=10,
@@ -895,6 +912,22 @@ class ReconcileAndLookupTests(TestCase):
         notified = mock_notify.call_args.args[0]
         self.assertEqual(notified.pk, system_agent.pk)
         self.assertEqual(notified.status, CodexInstance.STATUS_FAILED)
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=False)
+    @patch("hitch.main.codex_pool.is_alive", return_value=True)
+    def test_reconcile_marks_recycled_pid_failed(
+        self, mock_alive: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        instance = self._make(pid=4321, status=CodexInstance.STATUS_RUNNING)
+
+        n = codex_pool.reconcile_dead()
+
+        self.assertEqual(n, 1)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertIn("exited", instance.error)
+        mock_identity.assert_called_once_with(4321, instance.pk)
+        mock_alive.assert_not_called()
 
     @unittest.skipUnless(Path("/proc").exists(), "requires Linux /proc")
     def test_tracked_exited_workers_are_reaped_and_reconciled(self) -> None:
@@ -3356,9 +3389,9 @@ class WorkerCancellationTests(TestCase):
         captured["turn"].interrupt.assert_not_called()
 
 
-# A pid we know is alive (this Python process) lets the streaming tests
-# create CodexInstance rows that survive ``reconcile_dead`` without faking
-# the ``is_alive`` helper.
+# A pid we know exists (this Python process). Tests that need it to represent
+# a Codex worker patch ``worker_is_alive`` because worker liveness now verifies
+# process identity, not just pid existence.
 _LIVE_PID = os.getpid()
 
 
@@ -3728,7 +3761,10 @@ class StreamForInstanceTests(TestCase):
 
     @patch("hitch.main.streaming._POLL_INTERVAL", 0.005)
     @patch("hitch.main.streaming._FILE_APPEAR_TIMEOUT", 0.001)
-    def test_appearance_timeout_when_file_never_arrives(self) -> None:
+    @patch("hitch.main.streaming.codex_pool.worker_is_alive", return_value=True)
+    def test_appearance_timeout_when_file_never_arrives(
+        self, _mock_worker_alive: MagicMock
+    ) -> None:
         # A live worker that's stuck before its first write should bail via
         # the appearance timeout rather than hanging the request handler.
         instance = _make_streaming_instance(
@@ -3742,7 +3778,10 @@ class StreamForInstanceTests(TestCase):
     @patch("hitch.main.streaming._POLL_INTERVAL", 0.001)
     @patch("hitch.main.streaming._HEARTBEAT_INTERVAL", 0.0)
     @patch("hitch.main.streaming._FILE_APPEAR_TIMEOUT", 0.02)
-    def test_heartbeat_yielded_while_waiting_for_events_file(self) -> None:
+    @patch("hitch.main.streaming.codex_pool.worker_is_alive", return_value=True)
+    def test_heartbeat_yielded_while_waiting_for_events_file(
+        self, _mock_worker_alive: MagicMock
+    ) -> None:
         # The pre-file-open wait loop also has to refresh the heartbeat so
         # the page's connection indicator stays green during a worker's
         # startup latency, not just once the file is being tailed.
@@ -3775,7 +3814,10 @@ class StreamForInstanceTests(TestCase):
 
     @patch("hitch.main.streaming._POLL_INTERVAL", 0.005)
     @patch("hitch.main.streaming._MAX_STREAM_SECONDS", 0.001)
-    def test_read_loop_hits_stream_timeout(self) -> None:
+    @patch("hitch.main.streaming.codex_pool.worker_is_alive", return_value=True)
+    def test_read_loop_hits_stream_timeout(
+        self, _mock_worker_alive: MagicMock
+    ) -> None:
         # A live worker that goes silent for longer than the per-stream cap
         # must release the request thread; the browser's EventSource will
         # reconnect if the user is still on the page.
@@ -3787,6 +3829,33 @@ class StreamForInstanceTests(TestCase):
             )
             frames = list(streaming.stream_for_instance(instance))
         self.assertIn(b'"timeout"', frames[-1])
+
+    @patch("hitch.main.streaming._POLL_INTERVAL", 0.01)
+    @patch("hitch.main.streaming.codex_pool._pid_is_our_worker", return_value=False)
+    @patch("hitch.main.streaming.codex_pool.is_alive", return_value=True)
+    def test_running_instance_with_recycled_pid_terminates(
+        self,
+        mock_alive: MagicMock,
+        mock_identity: MagicMock,
+    ) -> None:
+        # Generic pid checks can say "alive" after PID reuse. The stream must
+        # still end because the process no longer matches this worker row.
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            Path(events_path).write_text(
+                json.dumps({"method": "item/started", "payload": {}}) + "\n",
+                encoding="utf-8",
+            )
+            instance = _make_streaming_instance(
+                events_path, status=CodexInstance.STATUS_RUNNING, pid=4321
+            )
+            frames = list(streaming.stream_for_instance(instance))
+
+        data_frames = [f for f in frames if f.startswith(b"data: ")]
+        self.assertEqual(len(data_frames), 1)
+        self.assertTrue(frames[-1].startswith(b"event: end"))
+        mock_identity.assert_called_once_with(4321, instance.pk)
+        mock_alive.assert_not_called()
 
     @patch("hitch.main.streaming._POLL_INTERVAL", 0.001)
     @patch("hitch.main.streaming._HEARTBEAT_INTERVAL", 0.0)

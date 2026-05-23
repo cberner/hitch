@@ -1463,8 +1463,12 @@ class OKRViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
     def test_okrs_page_links_running_task_generation_log(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
+        self,
+        _mock_worker_alive: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
     ) -> None:
         _setup_codex(mock_codex)
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -5350,8 +5354,9 @@ class SessionViewApprovalContextTests(TestCase):
     streaming approval or structured-input loops."""
 
     @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
     def test_session_template_renders_prompt_url_templates(
-        self, mock_codex: MagicMock
+        self, _mock_worker_alive: MagicMock, mock_codex: MagicMock
     ) -> None:
         ctx: MagicMock = mock_codex.return_value.__enter__.return_value
         ctx._client.thread_resume.return_value = SimpleNamespace(

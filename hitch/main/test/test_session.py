@@ -4,6 +4,7 @@ import tempfile
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import override
 from unittest.mock import MagicMock, patch
 
 from django.core import signing
@@ -30,6 +31,10 @@ from hitch.main.views import _pr_url_for_thread, _tool_call_detail, _tool_call_s
 # ``reconcile_dead`` sweep doesn't mark the row failed before the assertions
 # run; the current process pid is by definition alive.
 _LIVE_PID = os.getpid()
+
+
+def _worker_is_live_for_test(instance: CodexInstance) -> bool:
+    return instance.pid == _LIVE_PID
 
 
 def _root(item: SimpleNamespace) -> SimpleNamespace:
@@ -346,6 +351,16 @@ class PrUrlDetectionTests(TestCase):
 
 
 class SessionViewTests(TestCase):
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        patcher = patch(
+            "hitch.main.codex_pool.worker_is_alive",
+            side_effect=_worker_is_live_for_test,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     @patch("hitch.main.views.Codex")
     def test_renders_primary_nav_menu_instead_of_back_link(
         self, mock_codex: MagicMock
@@ -2280,6 +2295,16 @@ class SessionViewActiveWorkerTests(TestCase):
     streaming UI guard, the pending user bubble, the in-progress turn
     trim, and the dead-worker reconciliation sweep.
     """
+
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        patcher = patch(
+            "hitch.main.codex_pool.worker_is_alive",
+            side_effect=_worker_is_live_for_test,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     @patch("hitch.main.views.Codex")
     def test_inactive_thread_renders_status_pill_idle_with_no_live_root(
