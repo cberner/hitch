@@ -14,6 +14,7 @@ from hitch.main.models import (
     ProposedSession,
     SessionMetadata,
     StandingOrder,
+    StandingOrderMemory,
     SystemAgentRun,
     SystemWorkflow,
 )
@@ -1307,6 +1308,9 @@ class StandingOrderWorkflowTests(TestCase):
                         "relevant_files": ["hitch/main/rollout.py"],
                     },
                     "message": "",
+                    "next_steps_summary": (
+                        "Checked parser coverage and next should add focused tests."
+                    ),
                 }
             )
         )
@@ -1315,30 +1319,96 @@ class StandingOrderWorkflowTests(TestCase):
         assert parsed is not None
         self.assertEqual(parsed["proposal"]["title"], "Add parser coverage")
         self.assertEqual(parsed["message"], "")
+        self.assertEqual(
+            parsed["next_steps_summary"],
+            "Checked parser coverage and next should add focused tests.",
+        )
 
     def test_standing_order_candidate_parser_rejects_invalid_wrapped_output(
         self,
     ) -> None:
         self.assertIsNone(
             system_agents._parse_standing_order_candidate_output(
-                json.dumps({"proposal": None, "message": "   "})
+                json.dumps(
+                    {
+                        "proposal": None,
+                        "message": "   ",
+                        "next_steps_summary": "looked around",
+                    }
+                )
             )
         )
         self.assertIsNone(
             system_agents._parse_standing_order_candidate_output(
-                json.dumps({"proposal": "not an object", "message": ""})
+                json.dumps(
+                    {
+                        "proposal": "not an object",
+                        "message": "",
+                        "next_steps_summary": "looked around",
+                    }
+                )
             )
         )
         self.assertIsNone(
             system_agents._parse_standing_order_candidate_output(
-                json.dumps({"proposal": {"title": ""}, "message": ""})
+                json.dumps(
+                    {
+                        "proposal": {"title": ""},
+                        "message": "",
+                        "next_steps_summary": "looked around",
+                    }
+                )
             )
         )
         self.assertIsNone(
             system_agents._parse_standing_order_candidate_output(
-                json.dumps({"title": "", "summary": "", "impact": ""})
+                json.dumps(
+                    {
+                        "title": "",
+                        "summary": "",
+                        "impact": "",
+                        "next_steps_summary": "looked around",
+                    }
+                )
             )
         )
+    def test_standing_order_candidate_parser_accepts_legacy_output(
+        self,
+    ) -> None:
+        parsed = system_agents._parse_standing_order_candidate_output(
+            json.dumps(
+                {
+                    "proposal": {
+                        "title": "Add parser coverage",
+                        "summary": "Cover parser edge cases.",
+                        "impact": "Fewer regressions.",
+                        "implementation_direction": "Add focused tests.",
+                        "relevant_files": ["hitch/main/rollout.py"],
+                    },
+                    "message": "",
+                }
+            )
+        )
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed["proposal"]["title"], "Add parser coverage")
+        self.assertIn("Legacy standing-order candidate output", parsed["next_steps_summary"])
+        self.assertIn("Add parser coverage", parsed["next_steps_summary"])
+
+        skipped = system_agents._parse_standing_order_candidate_output(
+            json.dumps(
+                {
+                    "proposal": None,
+                    "message": "Nothing worth proposing.",
+                }
+            )
+        )
+
+        self.assertIsNotNone(skipped)
+        assert skipped is not None
+        self.assertEqual(skipped["proposal"], None)
+        self.assertIn("Nothing worth proposing", skipped["next_steps_summary"])
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_workflow_starts_hidden_candidate_thread(
@@ -1369,12 +1439,22 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertEqual(kwargs["agent_kind"], system_agents.STANDING_ORDER_AGENT_KIND)
         self.assertEqual(kwargs["display_author"], system_agents.STANDING_ORDER_DISPLAY_AUTHOR)
         schema = kwargs["output_schema"]
-        self.assertEqual(schema["required"], ["proposal", "message"])
+        self.assertEqual(
+            schema["required"], ["proposal", "message", "next_steps_summary"]
+        )
         self.assertEqual(schema["properties"]["proposal"]["type"], ["object", "null"])
         self.assertEqual(schema["properties"]["message"]["type"], "string")
+        self.assertEqual(
+            schema["properties"]["next_steps_summary"]["type"], "string"
+        )
+        self.assertEqual(
+            schema["properties"]["next_steps_summary"]["maxLength"],
+            system_agents._STANDING_ORDER_MEMORY_STORED_SUMMARY_CHARS,
+        )
         self.assertIn("Keep docs current", kwargs["prompt"])
         self.assertIn("make high progress", kwargs["prompt"])
         self.assertIn('"proposal" to null', kwargs["prompt"])
+        self.assertIn("next_steps_summary", kwargs["prompt"])
         self.assertTrue(
             SessionMetadata.objects.filter(thread_id="candidate-thread").exists()
         )
@@ -1402,6 +1482,157 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertIn("bold, high-leverage progress", prompt)
         self.assertIn("substantial session", prompt)
         self.assertNotIn("incremental", prompt.lower())
+
+    def test_candidate_prompt_includes_past_memory(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Touch one file",
+            goal="Pick one file and improve its docs.",
+        )
+        session = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo",
+            project=project,
+        )
+        StandingOrderMemory.objects.create(
+            standing_order=standing_order,
+            candidate_session=session,
+            title="Document parser",
+            summary="Processed hitch/main/rollout.py; next pick a different file.",
+            relevant_files=["hitch/main/rollout.py"],
+            had_proposal=True,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+        )
+
+        prompt = system_agents._standing_order_candidate_prompt(
+            workflow, standing_order
+        )
+
+        self.assertIn("Standing-order memory from past candidate runs", prompt)
+        self.assertIn("Processed hitch/main/rollout.py", prompt)
+        self.assertIn("Candidate session ID: candidate-thread", prompt)
+        self.assertIn("prefer files that have not been processed recently", prompt)
+
+    @patch.object(system_agents, "_STANDING_ORDER_MEMORY_INLINE_CONTEXT_CHARS", 1)
+    def test_candidate_prompt_compacts_large_past_memory(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Touch one file",
+            goal="Pick one file and improve its docs.",
+        )
+        for idx in range(3):
+            StandingOrderMemory.objects.create(
+                standing_order=standing_order,
+                title=f"Document file {idx}",
+                summary=f"Processed docs/file_{idx}.md and next should choose another file.",
+                relevant_files=[f"docs/file_{idx}.md"],
+                had_proposal=True,
+            )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+        )
+
+        prompt = system_agents._standing_order_candidate_prompt(
+            workflow, standing_order
+        )
+
+        self.assertIn("Compacted standing-order memory", prompt)
+        self.assertIn("Preserve this continuity", prompt)
+        self.assertIn("docs/file_0.md", prompt)
+        self.assertIn("docs/file_1.md", prompt)
+        self.assertIn("docs/file_2.md", prompt)
+
+    @patch.object(system_agents, "_STANDING_ORDER_MEMORY_CONTEXT_ENTRY_LIMIT", 2)
+    def test_candidate_prompt_limits_loaded_past_memory_entries(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Touch one file",
+            goal="Pick one file and improve its docs.",
+        )
+        for idx in range(4):
+            StandingOrderMemory.objects.create(
+                standing_order=standing_order,
+                title=f"Document file {idx}",
+                summary=f"Processed docs/file_{idx}.md.",
+                relevant_files=[f"docs/file_{idx}.md"],
+                had_proposal=True,
+            )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+        )
+
+        prompt = system_agents._standing_order_candidate_prompt(
+            workflow, standing_order
+        )
+
+        self.assertIn("Older standing-order memories were omitted", prompt)
+        self.assertIn("docs/file_3.md", prompt)
+        self.assertIn("docs/file_2.md", prompt)
+        self.assertNotIn("docs/file_0.md", prompt)
+
+    @patch.object(system_agents, "_STANDING_ORDER_MEMORY_STORED_SUMMARY_CHARS", 25)
+    @patch.object(system_agents, "_STANDING_ORDER_MEMORY_STORED_RELEVANT_FILES_LIMIT", 2)
+    def test_standing_order_memory_creation_caps_stored_fields(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Touch one file",
+            goal="Pick one file and improve its docs.",
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+        )
+
+        memory = system_agents._create_standing_order_memory(
+            standing_order=standing_order,
+            workflow=workflow,
+            candidate_output={
+                "proposal": {
+                    "title": "Document files",
+                    "relevant_files": ["a.py", "b.py", "c.py"],
+                },
+                "next_steps_summary": "x" * 80,
+            },
+        )
+
+        self.assertLessEqual(len(memory.summary), 25)
+        self.assertTrue(memory.summary.endswith("..."))
+        self.assertEqual(memory.relevant_files, ["a.py", "b.py"])
+
+    def test_memory_compaction_text_join_is_bounded(self) -> None:
+        text = system_agents._bounded_join_text(
+            ["a" * 80, "b" * 80, "c" * 80],
+            120,
+            "recent raw memory entries",
+        )
+
+        self.assertLessEqual(len(text), 120)
+        self.assertIn("a" * 80, text)
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_candidate_completion_starts_judge_thread(
@@ -1445,6 +1676,10 @@ class StandingOrderWorkflowTests(TestCase):
                     "impact": "Fewer regressions.",
                     "implementation_direction": "Add focused tests.",
                     "relevant_files": ["hitch/main/rollout.py"],
+                    "next_steps_summary": (
+                        "Selected hitch/main/rollout.py for parser coverage; "
+                        "future runs should avoid reselecting it immediately."
+                    ),
                 },
             ),
             agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
@@ -1466,6 +1701,14 @@ class StandingOrderWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertEqual(workflow.step, system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING)
         self.assertEqual(workflow.state["candidate"]["title"], "Add parser coverage")
+        memory = StandingOrderMemory.objects.get()
+        self.assertEqual(memory.standing_order, standing_order)
+        self.assertEqual(memory.source_workflow, workflow)
+        self.assertEqual(memory.candidate_session, candidate_metadata)
+        self.assertEqual(memory.title, "Add parser coverage")
+        self.assertTrue(memory.had_proposal)
+        self.assertEqual(memory.relevant_files, ["hitch/main/rollout.py"])
+        self.assertIn("avoid reselecting it", memory.summary)
         kwargs = mock_spawn.call_args.kwargs
         self.assertEqual(kwargs["agent_kind"], system_agents.STANDING_ORDER_JUDGE_AGENT_KIND)
         self.assertIn("Add parser coverage", kwargs["prompt"])
@@ -1508,6 +1751,10 @@ class StandingOrderWorkflowTests(TestCase):
                 {
                     "proposal": None,
                     "message": "No concrete test increment was worth proposing.",
+                    "next_steps_summary": (
+                        "Checked available test increments but did not find a "
+                        "worthwhile next file."
+                    ),
                 },
             ),
             agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
@@ -1531,6 +1778,12 @@ class StandingOrderWorkflowTests(TestCase):
             notice.summary, "No concrete test increment was worth proposing."
         )
         self.assertEqual(notice.candidate_session, candidate_metadata)
+        memory = StandingOrderMemory.objects.get()
+        self.assertEqual(memory.candidate_session, candidate_metadata)
+        self.assertFalse(memory.had_proposal)
+        self.assertEqual(memory.title, "")
+        self.assertEqual(memory.relevant_files, [])
+        self.assertIn("did not find a worthwhile next file", memory.summary)
         mock_spawn.assert_not_called()
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -1576,6 +1829,10 @@ class StandingOrderWorkflowTests(TestCase):
                     "impact": "Less duplicated test maintenance.",
                     "implementation_direction": "Refactor adjacent tests.",
                     "relevant_files": ["hitch/main/test/test_views.py"],
+                    "next_steps_summary": (
+                        "Selected hitch/main/test/test_views.py for command "
+                        "test consolidation."
+                    ),
                 },
             ),
             agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,

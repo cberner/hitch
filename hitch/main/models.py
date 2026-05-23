@@ -224,6 +224,50 @@ class ProposedSession(models.Model):
         super().save(*args, **kwargs)
 
 
+class StandingOrderMemory(models.Model):
+    """Durable memory produced by standing-order candidate runs."""
+
+    standing_order = models.ForeignKey(
+        StandingOrder,
+        on_delete=models.CASCADE,
+        related_name="memories",
+    )
+    source_workflow = models.ForeignKey(
+        "SystemWorkflow",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="standing_order_memories",
+    )
+    candidate_session = models.ForeignKey(
+        "SessionMetadata",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="standing_order_memories",
+    )
+    title = models.CharField(max_length=200, blank=True, default="")
+    summary = models.TextField()
+    relevant_files = models.JSONField(default=list, blank=True)
+    had_proposal = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+        indexes = [
+            models.Index(
+                fields=["standing_order", "-created_at"],
+                name="main_somem_order_created_idx",
+            ),
+            models.Index(fields=["source_workflow"], name="main_somem_workflow_idx"),
+        ]
+
+    @override
+    def __str__(self) -> str:
+        return self.title or f"StandingOrderMemory({self.pk})"
+
+
 class SessionMetadata(models.Model):
     """Local metadata for a Codex thread that Hitch does not own on disk."""
 
