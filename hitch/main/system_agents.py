@@ -561,6 +561,7 @@ def _handle_standing_order_agent_finished(
         if candidate_output["proposal"] is None:
             message = str(candidate_output["message"])
             ProposedSession.objects.create(
+                project=standing_order.project,
                 standing_order=standing_order,
                 source_workflow=workflow,
                 title=f"No proposal from {standing_order.title}"[
@@ -614,6 +615,7 @@ def _handle_standing_order_agent_finished(
         judgment["confidence"], standing_order.confidence_threshold
     ):
         ProposedSession.objects.create(
+            project=standing_order.project,
             standing_order=standing_order,
             source_workflow=workflow,
             title=str(candidate.get("title", standing_order.title))[

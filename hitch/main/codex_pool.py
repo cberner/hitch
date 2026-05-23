@@ -32,6 +32,7 @@ from django.utils import timezone
 from openai_codex import AppServerConfig, Codex
 from openai_codex.generated.v2_all import ThreadSource
 
+from hitch.main.codex_tools import registered_dynamic_tool_specs
 from hitch.main.models import CodexInstance
 
 logger = logging.getLogger(__name__)
@@ -76,15 +77,17 @@ def spawn_new_session(
     with Codex(config=config) as codex:
         start_kwargs: dict[str, Any] = {
             "cwd": cwd,
-            "developer_instructions": developer_instructions,
+            "developerInstructions": developer_instructions,
             "model": model,
         }
         if base_instructions:
-            start_kwargs["base_instructions"] = base_instructions
+            start_kwargs["baseInstructions"] = base_instructions
         if thread_source is not None:
-            start_kwargs["thread_source"] = thread_source
-        thread = codex.thread_start(**start_kwargs)
-        thread_id = thread.id
+            start_kwargs["threadSource"] = thread_source.value
+        if purpose == CodexInstance.PURPOSE_USER:
+            start_kwargs["dynamicTools"] = registered_dynamic_tool_specs()
+        response = codex._client.thread_start(start_kwargs)
+        thread_id = response.thread.id
         # ``thread/start`` only creates the thread in the app-server's
         # in-memory map; the rollout file on disk is not written until
         # something triggers a metadata persist. Without this step, the

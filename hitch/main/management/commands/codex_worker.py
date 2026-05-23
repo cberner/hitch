@@ -31,6 +31,7 @@ import dataclasses
 import itertools
 import json
 import logging
+import os
 import signal
 import threading
 import time
@@ -39,6 +40,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import IO, Any, Protocol, override
 
+from django.conf import settings
 from django.core.management.base import BaseCommand, CommandParser
 from django.utils import timezone
 from openai_codex import (
@@ -74,6 +76,11 @@ from pydantic import BaseModel
 
 from hitch.main.codex_events import GOAL_METHODS
 from hitch.main.codex_pool import app_server_config, control_path_for
+from hitch.main.codex_tools import (
+    ToolContext,
+    handle_dynamic_tool_call,
+    is_dynamic_tool_call,
+)
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
 
 logger = logging.getLogger(__name__)
@@ -301,6 +308,13 @@ def _run_turn(
     plan_mode: bool = False,
     output_schema: dict[str, Any] | None = None,
 ) -> Turn | None:
+    os.environ["HITCH_THREAD_ID"] = instance.thread_id
+    os.environ["HITCH_CWD"] = instance.cwd
+    project_dir = Path(settings.BASE_DIR)
+    manage_py = Path(settings.BASE_DIR) / "manage.py"
+    os.environ["HITCH_PROJECT_DIR"] = str(project_dir)
+    os.environ["HITCH_MANAGE_PY"] = str(manage_py)
+    os.environ["HITCH_PROPOSE_SESSION_COMMAND"] = "uv"
     config = app_server_config(enable_memories=enable_memories)
     effort: ReasoningEffort | None = None
     if reasoning_effort:
@@ -984,6 +998,11 @@ def _make_approval_handler(
         def _approve_all_handler(
             method: str, _params: dict[str, Any] | None
         ) -> dict[str, Any]:
+            if is_dynamic_tool_call(method):
+                return handle_dynamic_tool_call(
+                    _params,
+                    ToolContext(cwd=instance.cwd, thread_id=instance.thread_id),
+                )
             if _is_user_input_request_method(method):
                 return _handle_user_input_request(
                     instance=instance,
@@ -1000,6 +1019,11 @@ def _make_approval_handler(
     def _interactive_handler(
         method: str, params: dict[str, Any] | None
     ) -> dict[str, Any]:
+        if is_dynamic_tool_call(method):
+            return handle_dynamic_tool_call(
+                params,
+                ToolContext(cwd=instance.cwd, thread_id=instance.thread_id),
+            )
         if _is_user_input_request_method(method):
             return _handle_user_input_request(
                 instance=instance,
