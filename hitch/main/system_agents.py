@@ -13,7 +13,7 @@ from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 from openai_codex.generated.v2_all import ThreadSource
 
-from hitch.main import codex_pool
+from hitch.main import codex_events, codex_pool
 from hitch.main.diffs import build_worktree_diff_text
 from hitch.main.models import (
     CodexInstance,
@@ -28,9 +28,11 @@ from hitch.main.models import (
 logger = logging.getLogger(__name__)
 
 PR_QA_AGENT_KIND = "pr_qa"
+PR_FOLLOWUP_MONITOR_AGENT_KIND = "pr_followup_monitor"
 STANDING_ORDER_AGENT_KIND = SystemWorkflow.KIND_STANDING_ORDER_RUN
 STANDING_ORDER_JUDGE_AGENT_KIND = "standing_order_judge"
 QA_DISPLAY_AUTHOR = "QA agent"
+PR_MONITOR_DISPLAY_AUTHOR = "PR monitor"
 STANDING_ORDER_DISPLAY_AUTHOR = "Standing order agent"
 STANDING_ORDER_JUDGE_DISPLAY_AUTHOR = "Standing order judge"
 PR_SLASH_DISPLAY_PROMPT = (
@@ -58,6 +60,11 @@ STEP_BLOCKED = "blocked"
 STEP_MAX_ITERATIONS_REACHED = "max_iterations_reached"
 STEP_QA_APPROVED = "qa_approved"
 STEP_PR_PROMPT_SPAWNED = "pr_prompt_spawned"
+STEP_PR_PROMPT_RUNNING = "pr_prompt_running"
+STEP_PR_MONITORING = "pr_monitoring"
+STEP_PR_FEEDBACK_RUNNING = "pr_feedback_running"
+STEP_PR_READY = "pr_ready"
+STEP_PR_CLOSED = "pr_closed"
 STEP_STANDING_ORDER_CANDIDATE_RUNNING = "standing_order_candidate_running"
 STEP_STANDING_ORDER_JUDGE_RUNNING = "standing_order_judge_running"
 STEP_STANDING_ORDER_PROPOSED = "standing_order_proposed"
@@ -68,6 +75,54 @@ _QA_DESIGN_SYNTHESIS_MIN_CATEGORY_OVERLAP = 2
 _QA_DESIGN_SYNTHESIS_RECENT_RUN_LIMIT = 50
 _QA_DESIGN_SYNTHESIS_MATCH_LIMIT = 3
 _QA_DESIGN_FEEDBACK_SUMMARY_CHARS = 360
+_PR_HANDOFF_STATE_KEY = "pr_handoff"
+_PR_MONITOR_STATE_KEY = "last_pr_monitor"
+QA_APPROVAL_INSERT_INDEX_STATE_KEY = "qa_approval_insert_index"
+_PR_HANDOFF_FIELDS = (
+    "url",
+    "repository_full_name",
+    "pr_number",
+    "state",
+    "merged",
+    "mergeable",
+    "draft",
+    "title",
+    "base",
+    "base_sha",
+    "head",
+    "head_sha",
+    "merge_commit_sha",
+    "created_at",
+    "updated_at",
+    "closed_at",
+    "merged_at",
+    "last_observed_at",
+    "latest_commit_sha",
+    "source_tool",
+    "review_thread_count",
+    "unresolved_thread_count",
+    "unresolved_threads",
+    "comment_count",
+    "latest_comments",
+    "review_count",
+    "review_signal",
+    "reaction_count",
+    "ci_status",
+    "failing_jobs",
+    "pending_jobs",
+)
+_PR_HANDOFF_BOOLEAN_FIELDS = frozenset({"merged", "mergeable", "draft"})
+_PR_HANDOFF_INTEGER_FIELDS = frozenset(
+    {
+        "pr_number",
+        "last_observed_at",
+        "review_thread_count",
+        "unresolved_thread_count",
+        "comment_count",
+        "review_count",
+        "reaction_count",
+    }
+)
 _QA_DESIGN_URL_RE = re.compile(r"\b(?:https?://|www\.)[^\s`<>()\[\]]+", re.IGNORECASE)
 _QA_DESIGN_FILE_RE = re.compile(
     r"(?<![\w.:/-])(?:[\w.-]+/)+[\w.-]+\.[A-Za-z0-9]+(?=$|[^\w/.-])"
@@ -199,6 +254,22 @@ _STANDING_ORDER_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
         },
         "summary": {"type": "string"},
         "rationale": {"type": "string"},
+    },
+}
+
+_PR_MONITOR_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["status", "summary", "feedback", "pr", "blockers"],
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": ["blocked", "ready", "terminal"],
+        },
+        "summary": {"type": "string"},
+        "feedback": {"type": "string"},
+        "pr": {"type": "object"},
+        "blockers": {"type": "array", "items": {"type": "string"}},
     },
 }
 
@@ -380,6 +451,12 @@ def on_codex_instance_finished(instance: CodexInstance) -> None:
     if instance.purpose == CodexInstance.PURPOSE_SYSTEM_FEEDBACK:
         _handle_system_feedback_finished(instance)
         return
+    if (
+        instance.purpose == CodexInstance.PURPOSE_USER
+        and instance.workflow_id is not None
+    ):
+        _handle_workflow_user_turn_finished(instance)
+        return
     _maybe_start_auto_pr_workflow(instance)
 
 
@@ -426,6 +503,11 @@ def _handle_system_agent_finished(instance: CodexInstance) -> None:
     if workflow.kind == STANDING_ORDER_AGENT_KIND:
         _handle_standing_order_agent_finished(instance, run, workflow)
         return
+    if workflow.kind == SystemWorkflow.KIND_PR_QA and run.agent_kind == (
+        PR_FOLLOWUP_MONITOR_AGENT_KIND
+    ):
+        _handle_pr_followup_monitor_finished(instance, run, workflow)
+        return
     if workflow.kind != SystemWorkflow.KIND_PR_QA:
         _fail_unsupported_system_agent_run(run, workflow)
         return
@@ -458,14 +540,13 @@ def _handle_system_agent_finished(instance: CodexInstance) -> None:
             workflow.step = STEP_QA_APPROVED
             workflow.save(update_fields=["status", "step", "state", "updated_at"])
             return
+        workflow.step = STEP_PR_PROMPT_RUNNING
+        workflow.save(update_fields=["step", "state", "updated_at"])
         try:
             _spawn_pr_prompt(workflow)
         except Exception as exc:
             _block_workflow(workflow, f"failed to start PR prompt: {exc!r}")
             return
-        workflow.status = SystemWorkflow.STATUS_COMPLETED
-        workflow.step = STEP_PR_PROMPT_SPAWNED
-        workflow.save(update_fields=["status", "step", "state", "updated_at"])
         return
 
     if workflow.iteration >= workflow.max_iterations:
@@ -501,15 +582,24 @@ def _handle_system_agent_finished(instance: CodexInstance) -> None:
 
 
 def _handle_system_feedback_finished(instance: CodexInstance) -> None:
-    if instance.status != CodexInstance.STATUS_COMPLETED:
-        workflow = _workflow_for_instance(instance)
-        if workflow is not None:
-            _block_workflow(workflow, f"QA feedback worker failed: {instance.error}")
-        return
     workflow = _workflow_for_instance(instance)
     if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
         return
-    if workflow.status != SystemWorkflow.STATUS_RUNNING or workflow.step != STEP_FEEDBACK_RUNNING:
+    if instance.status != CodexInstance.STATUS_COMPLETED:
+        if workflow.step == STEP_PR_FEEDBACK_RUNNING:
+            _block_workflow(workflow, f"PR feedback worker failed: {instance.error}")
+        else:
+            _block_workflow(workflow, f"QA feedback worker failed: {instance.error}")
+        return
+    if (
+        workflow.status != SystemWorkflow.STATUS_RUNNING
+        or workflow.step != STEP_FEEDBACK_RUNNING
+    ):
+        if (
+            workflow.status == SystemWorkflow.STATUS_RUNNING
+            and workflow.step == STEP_PR_FEEDBACK_RUNNING
+        ):
+            _handle_pr_feedback_finished(instance, workflow)
         return
     workflow.step = STEP_QA_RUNNING
     workflow.save(update_fields=["step", "updated_at"])
@@ -517,6 +607,123 @@ def _handle_system_feedback_finished(instance: CodexInstance) -> None:
         _spawn_pr_qa_run(workflow)
     except Exception as exc:
         _block_workflow(workflow, f"failed to restart QA agent: {exc!r}")
+
+
+def _handle_workflow_user_turn_finished(instance: CodexInstance) -> None:
+    workflow = _workflow_for_instance(instance)
+    if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
+        return
+    if workflow.status != SystemWorkflow.STATUS_RUNNING:
+        return
+    if workflow.step == STEP_PR_PROMPT_RUNNING:
+        _handle_pr_prompt_finished(instance, workflow)
+
+
+def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow) -> None:
+    if instance.status != CodexInstance.STATUS_COMPLETED:
+        _block_workflow(workflow, f"PR prompt worker failed: {instance.error}")
+        return
+    snapshot = codex_events.latest_pr_snapshot_for_instance(instance)
+    if snapshot is None:
+        workflow.status = SystemWorkflow.STATUS_COMPLETED
+        workflow.step = STEP_PR_PROMPT_SPAWNED
+        workflow.save(update_fields=["status", "step", "updated_at"])
+        return
+    _merge_pr_handoff(workflow, snapshot)
+    if _pr_handoff_is_terminal(_pr_handoff_from_workflow(workflow)):
+        workflow.status = SystemWorkflow.STATUS_COMPLETED
+        workflow.step = STEP_PR_CLOSED
+        workflow.save(update_fields=["status", "step", "state", "updated_at"])
+        return
+    workflow.step = STEP_PR_MONITORING
+    workflow.save(update_fields=["step", "state", "updated_at"])
+    try:
+        _spawn_pr_followup_monitor_run(workflow)
+    except Exception as exc:
+        _block_workflow(workflow, f"failed to start PR follow-up monitor: {exc!r}")
+
+
+def _handle_pr_followup_monitor_finished(
+    instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
+) -> None:
+    if (
+        workflow.status != SystemWorkflow.STATUS_RUNNING
+        or workflow.step != STEP_PR_MONITORING
+    ):
+        return
+    if instance.status != CodexInstance.STATUS_COMPLETED:
+        _fail_run_and_block_workflow(
+            run,
+            f"PR follow-up monitor failed: {instance.error}",
+        )
+        return
+
+    raw_output = _final_agent_text(instance.events_path)
+    parsed = _parse_pr_monitor_output(raw_output)
+    if parsed is None:
+        _fail_run_and_block_workflow(
+            run,
+            "PR follow-up monitor output was not valid JSON",
+            raw_output,
+        )
+        return
+
+    monitor_pr = parsed["pr"]
+    if monitor_pr:
+        _merge_pr_handoff(workflow, monitor_pr)
+    workflow.state = {**workflow.state, _PR_MONITOR_STATE_KEY: parsed}
+    run.status = SystemAgentRun.STATUS_COMPLETED
+    run.output = parsed
+    run.raw_output = raw_output
+    run.save(update_fields=["status", "output", "raw_output", "updated_at"])
+
+    status = parsed["status"]
+    if status == "ready":
+        workflow.status = SystemWorkflow.STATUS_COMPLETED
+        workflow.step = STEP_PR_READY
+        workflow.save(update_fields=["status", "step", "state", "updated_at"])
+        return
+    if status == "terminal":
+        workflow.status = SystemWorkflow.STATUS_COMPLETED
+        workflow.step = STEP_PR_CLOSED
+        workflow.save(update_fields=["status", "step", "state", "updated_at"])
+        return
+
+    if workflow.iteration >= workflow.max_iterations:
+        workflow.status = SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED
+        workflow.step = STEP_MAX_ITERATIONS_REACHED
+        workflow.save(update_fields=["status", "step", "state", "updated_at"])
+        _surface_workflow_failure(
+            workflow,
+            (
+                "PR follow-up monitor reached the maximum feedback loop count "
+                "without reaching a clean PR state."
+            ),
+        )
+        return
+
+    feedback = _pr_monitor_feedback(parsed)
+    workflow.iteration += 1
+    workflow.step = STEP_PR_FEEDBACK_RUNNING
+    workflow.save(update_fields=["iteration", "step", "state", "updated_at"])
+    try:
+        _spawn_pr_followup_feedback_turn(workflow, feedback)
+    except Exception as exc:
+        _block_workflow(workflow, f"failed to start PR follow-up turn: {exc!r}")
+
+
+def _handle_pr_feedback_finished(
+    instance: CodexInstance, workflow: SystemWorkflow
+) -> None:
+    snapshot = codex_events.latest_pr_snapshot_for_instance(instance)
+    if snapshot is not None:
+        _merge_pr_handoff(workflow, snapshot)
+    workflow.step = STEP_PR_MONITORING
+    workflow.save(update_fields=["step", "state", "updated_at"])
+    try:
+        _spawn_pr_followup_monitor_run(workflow)
+    except Exception as exc:
+        _block_workflow(workflow, f"failed to restart PR follow-up monitor: {exc!r}")
 
 
 def _fail_unsupported_system_agent_run(
@@ -781,6 +988,36 @@ def _spawn_standing_order_judge_run(
     return run
 
 
+def _spawn_pr_followup_monitor_run(workflow: SystemWorkflow) -> SystemAgentRun:
+    handoff = _pr_handoff_from_workflow(workflow)
+    prompt = _pr_followup_monitor_prompt(workflow, handoff)
+    instance = codex_pool.spawn_new_session(
+        cwd=workflow.cwd,
+        prompt=prompt,
+        approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
+        thread_source=ThreadSource.subagent,
+        purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        workflow_id=workflow.pk,
+        agent_kind=PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        display_author=PR_MONITOR_DISPLAY_AUTHOR,
+        output_schema=_PR_MONITOR_OUTPUT_SCHEMA,
+    )
+    run, _created = SystemAgentRun.objects.get_or_create(
+        instance=instance,
+        defaults={
+            "workflow": workflow,
+            "agent_kind": PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            "thread_id": instance.thread_id,
+            "status": SystemAgentRun.STATUS_RUNNING,
+            "input": {
+                "cwd": workflow.cwd,
+                "pr_handoff": handoff,
+            },
+        },
+    )
+    return run
+
+
 def _spawn_qa_feedback_turn(
     workflow: SystemWorkflow,
     feedback: str,
@@ -799,7 +1036,27 @@ def _spawn_qa_feedback_turn(
     )
 
 
+def _spawn_pr_followup_feedback_turn(
+    workflow: SystemWorkflow, feedback: str
+) -> CodexInstance:
+    return _spawn_workflow_turn(
+        workflow,
+        prompt=_pr_followup_feedback_prompt(workflow, feedback),
+        purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+        display_author=PR_MONITOR_DISPLAY_AUTHOR,
+        agent_kind=PR_FOLLOWUP_MONITOR_AGENT_KIND,
+    )
+
+
 def _spawn_pr_prompt(workflow: SystemWorkflow) -> CodexInstance:
+    workflow.state = {
+        **workflow.state,
+        QA_APPROVAL_INSERT_INDEX_STATE_KEY: _state_int(
+            workflow,
+            "next_user_message_index",
+        ),
+    }
+    workflow.save(update_fields=["state", "updated_at"])
     return _spawn_workflow_turn(
         workflow,
         prompt=_state_string(workflow, "pr_prompt") or PR_SLASH_PROMPT,
@@ -827,6 +1084,7 @@ def _spawn_workflow_turn(
     prompt: str,
     purpose: str = CodexInstance.PURPOSE_USER,
     display_author: str = "",
+    agent_kind: str = "",
 ) -> CodexInstance:
     user_message_index = _state_int(workflow, "next_user_message_index")
     instance = codex_pool.spawn_turn(
@@ -842,7 +1100,11 @@ def _spawn_workflow_turn(
         enable_memories=_state_bool(workflow, "enable_memories"),
         purpose=purpose,
         workflow_id=workflow.pk,
-        agent_kind=PR_QA_AGENT_KIND if purpose != CodexInstance.PURPOSE_USER else "",
+        agent_kind=(
+            agent_kind or PR_QA_AGENT_KIND
+            if purpose != CodexInstance.PURPOSE_USER
+            else ""
+        ),
         display_author=display_author,
         user_message_index=user_message_index,
     )
@@ -878,6 +1140,52 @@ def _qa_prompt(cwd: str, diff_text: str) -> str:
         "Return only JSON matching this shape: "
         '{"feedback": string, "lgtm": boolean}. Put the prioritized review '
         "findings, manual-QA results, or a clear no-findings statement in feedback."
+    )
+
+
+def _pr_followup_monitor_prompt(
+    workflow: SystemWorkflow, handoff: dict[str, Any]
+) -> str:
+    return (
+        "You are Hitch's PR follow-up monitor.\n\n"
+        "Do not edit files, push branches, resolve threads, post comments, or mutate "
+        "GitHub state. Use read-only GitHub MCP tools to check the persisted PR. "
+        "Inspect PR info/mergeability, review threads, reviews, PR reactions, "
+        "comments, and CI/check status for the current head SHA. If the PR is "
+        "open and has unresolved review threads, failing or pending CI, merge "
+        "conflicts, requested changes, or no review signal yet, return "
+        '"status": "blocked" with precise feedback for the work agent. If CI, '
+        "review signal, review threads, and mergeability are clean, return "
+        '"status": "ready". If the PR was merged or closed, return '
+        '"status": "terminal".\n\n'
+        f"Repository cwd: {workflow.cwd}\n"
+        "Persisted PR handoff:\n"
+        f"{_format_pr_handoff(handoff)}\n\n"
+        "Return only JSON matching this shape: "
+        '{"status": "blocked" | "ready" | "terminal", '
+        '"summary": string, "feedback": string, "pr": object, '
+        '"blockers": [string]}. Put any updated PR fields you observed in '
+        '"pr", including url, repository_full_name, pr_number, state, merged, '
+        "mergeable, head, head_sha, review_signal, unresolved_thread_count, and "
+        "ci_status when available."
+    )
+
+
+def _pr_followup_feedback_prompt(workflow: SystemWorkflow, feedback: str) -> str:
+    handoff = _pr_handoff_from_workflow(workflow)
+    return (
+        "Hitch PR monitor found follow-up work on the active PR.\n\n"
+        "Before changing code, re-check this PR and branch state. If the PR is "
+        "merged, closed, or its head branch is missing, do not keep pushing to "
+        "that stale branch; create a fresh branch from current master and open a "
+        "follow-up PR that addresses the feedback instead. If the PR is still "
+        "open, address the blockers on that PR, push fixes, reply to review "
+        "comments, and resolve threads as appropriate. Keep the diff focused; "
+        "Hitch will run the PR monitor again after this turn.\n\n"
+        "Persisted PR handoff:\n"
+        f"{_format_pr_handoff(handoff)}\n\n"
+        "Monitor feedback:\n\n"
+        f"{feedback}"
     )
 
 
@@ -1620,6 +1928,33 @@ def _parse_standing_order_judge_output(raw_output: str) -> dict[str, str] | None
     }
 
 
+def _parse_pr_monitor_output(raw_output: str) -> dict[str, Any] | None:
+    text = _strip_json_markdown_fence(raw_output)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    status = parsed.get("status")
+    summary = parsed.get("summary")
+    feedback = parsed.get("feedback")
+    pr = parsed.get("pr")
+    if status not in {"blocked", "ready", "terminal"}:
+        return None
+    if not isinstance(summary, str) or not isinstance(feedback, str):
+        return None
+    if not isinstance(pr, dict):
+        return None
+    return {
+        "status": status,
+        "summary": summary.strip(),
+        "feedback": feedback.strip(),
+        "pr": _compact_pr_handoff(pr),
+        "blockers": _string_list(parsed.get("blockers")),
+    }
+
+
 def _strip_json_markdown_fence(raw_output: str) -> str:
     text = raw_output.strip()
     if text.startswith("```"):
@@ -1662,6 +1997,124 @@ def _final_agent_text(events_path: str) -> str:
             ):
                 latest = item["text"]
     return latest
+
+
+def _merge_pr_handoff(workflow: SystemWorkflow, update: dict[str, Any]) -> None:
+    current = _pr_handoff_from_workflow(workflow)
+    merged = _merge_pr_handoff_dicts(current, _compact_pr_handoff(update))
+    workflow.state = {**workflow.state, _PR_HANDOFF_STATE_KEY: merged}
+
+
+def _merge_pr_handoff_dicts(
+    current: dict[str, Any], update: dict[str, Any]
+) -> dict[str, Any]:
+    if _pr_handoff_identity_changed(current, update):
+        current = {}
+    merged = dict(current)
+    for key, value in update.items():
+        if value in ("", None, [], {}):
+            continue
+        merged[key] = value
+    return merged
+
+
+def _pr_handoff_identity_changed(
+    current: dict[str, Any], update: dict[str, Any]
+) -> bool:
+    if not current:
+        return False
+    current_number = current.get("pr_number")
+    update_number = update.get("pr_number")
+    if (
+        isinstance(current_number, int)
+        and not isinstance(current_number, bool)
+        and isinstance(update_number, int)
+        and not isinstance(update_number, bool)
+    ):
+        return current_number != update_number
+    current_url = current.get("url")
+    update_url = update.get("url")
+    return (
+        isinstance(current_url, str)
+        and isinstance(update_url, str)
+        and bool(current_url)
+        and bool(update_url)
+        and current_url != update_url
+    )
+
+
+def _pr_handoff_from_workflow(workflow: SystemWorkflow) -> dict[str, Any]:
+    return _compact_pr_handoff(workflow.state.get(_PR_HANDOFF_STATE_KEY))
+
+
+def _compact_pr_handoff(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    compact: dict[str, Any] = {}
+    for key in _PR_HANDOFF_FIELDS:
+        raw = value.get(key)
+        if (
+            (key in _PR_HANDOFF_BOOLEAN_FIELDS and isinstance(raw, bool))
+            or (
+                key in _PR_HANDOFF_INTEGER_FIELDS
+                and isinstance(raw, int)
+                and not isinstance(raw, bool)
+            )
+        ):
+            compact[key] = raw
+        elif isinstance(raw, str) and raw.strip():
+            compact[key] = raw.strip()
+        elif key in {
+            "unresolved_threads",
+            "latest_comments",
+            "failing_jobs",
+            "pending_jobs",
+        } and isinstance(raw, list):
+            compact[key] = _compact_pr_list(raw)
+    return compact
+
+
+def _compact_pr_list(items: list[Any]) -> list[Any]:
+    compacted: list[Any] = []
+    for item in items[:5]:
+        if isinstance(item, str):
+            text = item.strip()
+            if text:
+                compacted.append(text[:500])
+        elif isinstance(item, dict):
+            compact_item: dict[str, Any] = {}
+            for key, value in item.items():
+                if isinstance(value, bool | int):
+                    compact_item[key] = value
+                elif isinstance(value, str) and value.strip():
+                    compact_item[key] = value.strip()[:500]
+            if compact_item:
+                compacted.append(compact_item)
+    return compacted
+
+
+def _pr_handoff_is_terminal(handoff: dict[str, Any]) -> bool:
+    state = handoff.get("state")
+    return handoff.get("merged") is True or (
+        isinstance(state, str) and state.lower() == "closed"
+    )
+
+
+def _pr_monitor_feedback(parsed: dict[str, Any]) -> str:
+    feedback = parsed.get("feedback")
+    if isinstance(feedback, str) and feedback.strip():
+        return feedback.strip()
+    blockers = _string_list(parsed.get("blockers"))
+    if blockers:
+        return "\n".join(f"- {blocker}" for blocker in blockers)
+    summary = parsed.get("summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary.strip()
+    return "The PR monitor found blockers, but did not provide details."
+
+
+def _format_pr_handoff(handoff: dict[str, Any]) -> str:
+    return json.dumps(handoff or {}, indent=2, sort_keys=True)
 
 
 def _fail_run_and_block_workflow(

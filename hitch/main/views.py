@@ -2020,6 +2020,8 @@ def _qa_approval_entries(session_id: str) -> Iterator[tuple[int, dict[str, Any]]
             step__in=[
                 system_agents.STEP_PR_PROMPT_SPAWNED,
                 system_agents.STEP_QA_APPROVED,
+                system_agents.STEP_PR_READY,
+                system_agents.STEP_PR_CLOSED,
             ],
         )
         .order_by("created_at")
@@ -2039,7 +2041,14 @@ def _qa_approval_entries(session_id: str) -> Iterator[tuple[int, dict[str, Any]]
         if workflow.step == system_agents.STEP_QA_APPROVED:
             insert_index = next_user_message_index
         else:
-            insert_index = max(next_user_message_index - 1, 0)
+            prompt_index = workflow.state.get(
+                system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY
+            )
+            insert_index = (
+                prompt_index
+                if isinstance(prompt_index, int) and not isinstance(prompt_index, bool)
+                else max(next_user_message_index - 1, 0)
+            )
         yield insert_index, {
             "kind": "agent",
             "display_author": system_agents.QA_DISPLAY_AUTHOR,

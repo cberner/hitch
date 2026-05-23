@@ -62,6 +62,10 @@ _FILE_APPEAR_TIMEOUT = 30.0
 
 _QA_AGENT_DISPLAY_AUTHOR = "QA agent"
 _QA_AGENT_KIND = "pr_qa"
+_PR_MONITOR_AGENT_KIND = "pr_followup_monitor"
+_STEP_PR_PROMPT_RUNNING = "pr_prompt_running"
+_STEP_PR_MONITORING = "pr_monitoring"
+_STEP_PR_FEEDBACK_RUNNING = "pr_feedback_running"
 _COMPACT_TOKEN_UNITS = (
     (1_000_000_000, "B"),
     (1_000_000, "M"),
@@ -280,7 +284,17 @@ def _heartbeat_frame(*, working: bool, status_text: str = "") -> bytes:
 
 
 def qa_agent_status_text_for_instance(instance: CodexInstance | None) -> str:
-    if instance is None or not _is_qa_agent_instance(instance):
+    if instance is None:
+        return ""
+    if instance.agent_kind == _PR_MONITOR_AGENT_KIND:
+        tokens_used = codex_events.latest_goal_tokens_for_instance(instance)
+        if tokens_used is None:
+            return "PR follow-up agent working..."
+        return (
+            "PR follow-up agent working..."
+            f"{_format_compact_token_count(tokens_used)} tokens"
+        )
+    if not _is_qa_agent_instance(instance):
         return ""
     tokens_used = codex_events.latest_goal_tokens_for_instance(instance)
     if tokens_used is None:
@@ -293,6 +307,15 @@ def system_workflow_status_text(workflow: SystemWorkflow | None) -> str:
         return ""
     if workflow.kind != SystemWorkflow.KIND_PR_QA:
         return "Hitch system agent is working..."
+    if workflow.step == _STEP_PR_PROMPT_RUNNING:
+        return "PR agent is opening and following up..."
+    if workflow.step == _STEP_PR_FEEDBACK_RUNNING:
+        return "PR follow-up agent is fixing feedback..."
+    if workflow.step == _STEP_PR_MONITORING:
+        instance = _running_system_agent_instance(workflow.pk)
+        if instance is not None and instance.agent_kind == _PR_MONITOR_AGENT_KIND:
+            return "PR monitor is checking GitHub..."
+        return "PR monitor is waiting..."
     instance = _running_system_agent_instance(workflow.pk)
     status_text = qa_agent_status_text_for_instance(instance)
     return status_text or "QA agent working..."

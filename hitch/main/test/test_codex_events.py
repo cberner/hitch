@@ -478,3 +478,372 @@ class LatestTaskPlanFromEventPathsTests(SimpleTestCase):
             )
 
         self.assertIsNone(snapshot)
+
+
+class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
+    def test_recovers_latest_pr_handoff_from_github_mcp_results(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_create_pull_request",
+                                    "arguments": {
+                                        "repository_full_name": "cberner/hitch"
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "url": (
+                                                "https://github.com/cberner/hitch/pull/169"
+                                            ),
+                                            "number": 169,
+                                            "state": "open",
+                                            "merged": False,
+                                            "mergeable": True,
+                                            "head": "feature",
+                                            "head_sha": "abc123",
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_list_pull_request_review_threads",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "pr_number": 169,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "review_threads": [
+                                                {
+                                                    "id": "resolved",
+                                                    "is_resolved": True,
+                                                    "path": "a.py",
+                                                },
+                                                {
+                                                    "id": "open",
+                                                    "is_resolved": False,
+                                                    "is_outdated": False,
+                                                    "path": "b.py",
+                                                    "line": 12,
+                                                    "comments": [],
+                                                },
+                                            ]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_fetch_commit_workflow_runs",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "commit_sha": "abc123",
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "workflow_runs": [
+                                                {
+                                                    "status": "completed",
+                                                    "conclusion": "success",
+                                                }
+                                            ]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=30,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["url"], "https://github.com/cberner/hitch/pull/169")
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertEqual(snapshot["pr_number"], 169)
+        self.assertEqual(snapshot["head_sha"], "abc123")
+        self.assertEqual(snapshot["unresolved_thread_count"], 1)
+        self.assertEqual(snapshot["ci_status"], "success")
+        self.assertEqual(snapshot["latest_commit_sha"], "abc123")
+
+    def test_latest_pr_identity_replaces_stale_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_create_pull_request",
+                                    "result": {
+                                        "structuredContent": {
+                                            "url": (
+                                                "https://github.com/cberner/hitch/pull/168"
+                                            ),
+                                            "number": 168,
+                                            "state": "open",
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_create_pull_request",
+                                    "result": {
+                                        "structuredContent": {
+                                            "url": (
+                                                "https://github.com/cberner/hitch/pull/169"
+                                            ),
+                                            "number": 169,
+                                            "state": "open",
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["pr_number"], 169)
+        self.assertEqual(snapshot["url"], "https://github.com/cberner/hitch/pull/169")
+
+    def test_pr_identity_from_followup_tool_replaces_stale_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_create_pull_request",
+                                    "result": {
+                                        "structuredContent": {
+                                            "url": (
+                                                "https://github.com/cberner/hitch/pull/168"
+                                            ),
+                                            "number": 168,
+                                            "head": "stale-branch",
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_fetch_pr_comments",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "pr_number": 169,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "comments": [{"body": "new PR feedback"}]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertEqual(snapshot["pr_number"], 169)
+        self.assertEqual(snapshot["comment_count"], 1)
+        self.assertNotIn("url", snapshot)
+        self.assertNotIn("head", snapshot)
+
+    def test_review_signal_prefers_requested_changes_over_approval_and_reactions(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_list_pull_request_reviews",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "pr_number": 169,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "reviews": [
+                                                {"state": "APPROVED"},
+                                                {"state": "CHANGES_REQUESTED"},
+                                            ]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_get_pr_reactions",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "pr_number": 169,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "reactions": [{"content": "+1"}]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["review_count"], 2)
+        self.assertEqual(snapshot["reaction_count"], 1)
+        self.assertEqual(snapshot["review_signal"], "changes_requested")
+
+    def test_pr_snapshot_ignores_other_threads_and_non_github_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        "{not json",
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "other-thread",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_create_pull_request",
+                                    "result": {
+                                        "structuredContent": {
+                                            "url": (
+                                                "https://github.com/cberner/hitch/pull/169"
+                                            )
+                                        }
+                                    },
+                                },
+                            },
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "linear",
+                                    "tool": "create_issue",
+                                    "result": {"structuredContent": {"number": 169}},
+                                },
+                            },
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)

@@ -84,6 +84,39 @@ def _events_file(test: TestCase, payload: dict[str, object]) -> str:
     return events_path
 
 
+def _raw_events_file(test: TestCase, events: list[dict[str, object]]) -> str:
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as fh:
+        for event in events:
+            fh.write(json.dumps(event) + "\n")
+        events_path = fh.name
+    test.addCleanup(Path(events_path).unlink, missing_ok=True)
+    return events_path
+
+
+def _pr_tool_event(
+    *,
+    thread_id: str,
+    tool: str,
+    arguments: dict[str, object] | None = None,
+    structured_content: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "method": "item/completed",
+        "payload": {
+            "threadId": thread_id,
+            "item": {
+                "type": "mcpToolCall",
+                "server": "codex_apps",
+                "tool": tool,
+                "arguments": arguments or {},
+                "result": {
+                    "structuredContent": structured_content or {},
+                },
+            },
+        },
+    }
+
+
 class PrQaWorkflowTests(TestCase):
     @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -998,9 +1031,12 @@ class PrQaWorkflowTests(TestCase):
         )
         self.assertEqual(mock_spawn.call_args.kwargs["user_message_index"], 4)
         workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
-        self.assertEqual(workflow.step, "pr_prompt_spawned")
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
         self.assertEqual(workflow.state["next_user_message_index"], 5)
+        self.assertEqual(
+            workflow.state[system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY], 4
+        )
 
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
     def test_qa_lgtm_can_complete_without_pr_prompt(self, mock_spawn: MagicMock) -> None:
@@ -1052,6 +1088,275 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(workflow.state["next_user_message_index"], 4)
         self.assertEqual(workflow.state["last_feedback"], "Looks good")
 
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_pr_prompt_completion_stores_handoff_and_starts_monitor(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={"next_user_message_index": 5},
+        )
+        events_path = _raw_events_file(
+            self,
+            [
+                _pr_tool_event(
+                    thread_id="main-thread",
+                    tool="github_create_pull_request",
+                    arguments={"repository_full_name": "cberner/hitch"},
+                    structured_content={
+                        "url": "https://github.com/cberner/hitch/pull/169",
+                        "number": 169,
+                        "state": "open",
+                        "merged": False,
+                        "mergeable": True,
+                        "head": "feature",
+                        "head_sha": "abc123",
+                    },
+                )
+            ],
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+            workflow_id=workflow.pk,
+            events_path=events_path,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="monitor-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+        handoff = workflow.state[system_agents._PR_HANDOFF_STATE_KEY]
+        self.assertEqual(handoff["url"], "https://github.com/cberner/hitch/pull/169")
+        self.assertEqual(handoff["repository_full_name"], "cberner/hitch")
+        self.assertEqual(handoff["pr_number"], 169)
+        self.assertEqual(handoff["head_sha"], "abc123")
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_SYSTEM_AGENT)
+        self.assertEqual(
+            kwargs["agent_kind"], system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND
+        )
+        self.assertEqual(kwargs["display_author"], system_agents.PR_MONITOR_DISPLAY_AUTHOR)
+        self.assertEqual(kwargs["output_schema"], system_agents._PR_MONITOR_OUTPUT_SCHEMA)
+        self.assertIn("Do not edit files", kwargs["prompt"])
+        self.assertIn("https://github.com/cberner/hitch/pull/169", kwargs["prompt"])
+        run = SystemAgentRun.objects.get(workflow=workflow)
+        self.assertEqual(run.thread_id, "monitor-thread")
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_pr_prompt_completion_without_handoff_preserves_completion(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={"next_user_message_index": 5},
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+            workflow_id=workflow.pk,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_SPAWNED)
+        self.assertNotIn(system_agents._PR_HANDOFF_STATE_KEY, workflow.state)
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_monitor_blocker_spawns_pr_feedback_with_stale_branch_guard(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={
+                "next_user_message_index": 5,
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": "https://github.com/cberner/hitch/pull/169",
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 169,
+                    "head": "feature",
+                    "head_sha": "abc123",
+                },
+            },
+        )
+        events_path = _events_file(
+            self,
+            {
+                "status": "blocked",
+                "summary": "Review feedback arrived.",
+                "feedback": "Address the unresolved review thread.",
+                "pr": {
+                    "url": "https://github.com/cberner/hitch/pull/169",
+                    "unresolved_thread_count": 1,
+                },
+                "blockers": ["1 unresolved review thread"],
+            },
+        )
+        instance = _instance(
+            thread_id="monitor-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=events_path,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            thread_id="monitor-thread",
+            instance=instance,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_PR_FEEDBACK_RUNNING)
+        self.assertEqual(workflow.iteration, 1)
+        self.assertEqual(
+            workflow.state[system_agents._PR_HANDOFF_STATE_KEY][
+                "unresolved_thread_count"
+            ],
+            1,
+        )
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(kwargs["thread_id"], "main-thread")
+        self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_SYSTEM_FEEDBACK)
+        self.assertEqual(
+            kwargs["display_author"], system_agents.PR_MONITOR_DISPLAY_AUTHOR
+        )
+        self.assertEqual(
+            kwargs["agent_kind"], system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND
+        )
+        self.assertEqual(kwargs["user_message_index"], 5)
+        self.assertIn("Hitch PR monitor found follow-up work", kwargs["prompt"])
+        self.assertIn("merged, closed, or its head branch is missing", kwargs["prompt"])
+        self.assertIn("Address the unresolved review thread.", kwargs["prompt"])
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_pr_feedback_completion_restarts_monitor_with_updated_handoff(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_FEEDBACK_RUNNING,
+            state={
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": "https://github.com/cberner/hitch/pull/169",
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 169,
+                    "head_sha": "oldsha",
+                }
+            },
+        )
+        events_path = _raw_events_file(
+            self,
+            [
+                _pr_tool_event(
+                    thread_id="main-thread",
+                    tool="github_get_pr_info",
+                    arguments={
+                        "repository_full_name": "cberner/hitch",
+                        "pr_number": 169,
+                    },
+                    structured_content={
+                        "url": "https://github.com/cberner/hitch/pull/169",
+                        "number": 169,
+                        "state": "open",
+                        "merged": False,
+                        "head_sha": "newsha",
+                    },
+                )
+            ],
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            workflow_id=workflow.pk,
+            events_path=events_path,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="monitor-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+        self.assertEqual(
+            workflow.state[system_agents._PR_HANDOFF_STATE_KEY]["head_sha"],
+            "newsha",
+        )
+        self.assertEqual(
+            mock_spawn.call_args.kwargs["agent_kind"],
+            system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        )
+
+    def test_monitor_ready_completes_workflow(self) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={system_agents._PR_HANDOFF_STATE_KEY: {"pr_number": 169}},
+        )
+        events_path = _events_file(
+            self,
+            {
+                "status": "ready",
+                "summary": "PR is clean.",
+                "feedback": "",
+                "pr": {"pr_number": 169, "ci_status": "success"},
+                "blockers": [],
+            },
+        )
+        instance = _instance(
+            thread_id="monitor-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=events_path,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            thread_id="monitor-thread",
+            instance=instance,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
+
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
     def test_qa_completion_recovers_when_run_row_does_not_exist_yet(
         self, mock_spawn: MagicMock
@@ -1096,7 +1401,8 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(run.status, SystemAgentRun.STATUS_COMPLETED)
         mock_spawn.assert_called_once()
         workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_PROMPT_RUNNING)
 
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
     def test_invalid_qa_output_blocks_workflow_and_surfaces_failure(
@@ -1293,6 +1599,32 @@ class PrQaWorkflowTests(TestCase):
             system_agents._final_agent_text(events_path),
             '{"feedback": "Done", "lgtm": true}',
         )
+
+    def test_pr_monitor_output_rejects_boolean_numeric_handoff_fields(self) -> None:
+        parsed = system_agents._parse_pr_monitor_output(
+            json.dumps(
+                {
+                    "status": "blocked",
+                    "summary": "CI pending.",
+                    "feedback": "Wait for CI.",
+                    "pr": {
+                        "url": "https://github.com/cberner/hitch/pull/169",
+                        "pr_number": True,
+                        "merged": False,
+                        "review_count": True,
+                    },
+                    "blockers": ["CI pending"],
+                }
+            )
+        )
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        pr = parsed["pr"]
+        self.assertEqual(pr["url"], "https://github.com/cberner/hitch/pull/169")
+        self.assertIs(pr["merged"], False)
+        self.assertNotIn("pr_number", pr)
+        self.assertNotIn("review_count", pr)
 
 
 class StandingOrderWorkflowTests(TestCase):
