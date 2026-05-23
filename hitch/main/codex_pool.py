@@ -759,6 +759,7 @@ def _prune_reaped_workers() -> None:
 
 
 def _notify_system_agents_if_needed(instance: CodexInstance) -> None:
+    system_agents_handled = False
     if instance.purpose in (
         CodexInstance.PURPOSE_SYSTEM_AGENT,
         CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
@@ -769,7 +770,7 @@ def _notify_system_agents_if_needed(instance: CodexInstance) -> None:
         try:
             from hitch.main import system_agents
 
-            system_agents.on_codex_instance_finished(instance)
+            system_agents_handled = system_agents.on_codex_instance_finished(instance)
         except Exception:
             logger.exception(
                 "failed to notify system workflow for reconciled instance %s",
@@ -778,6 +779,12 @@ def _notify_system_agents_if_needed(instance: CodexInstance) -> None:
     try:
         from hitch.main import demo
 
+        if (
+            system_agents_handled
+            and instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
+            and instance.agent_kind == demo.DEMO_AGENT_KIND
+        ):
+            return
         demo.on_codex_instance_finished(instance)
     except Exception:
         logger.exception(

@@ -2,17 +2,22 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 import threading
 from collections.abc import Iterable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import cast, override
 from unittest.mock import MagicMock, call, patch
 
+from django.core.management import call_command
+from django.core.management.base import CommandError
 from django.http import StreamingHttpResponse
 from django.test import RequestFactory, TestCase, override_settings
 from django.urls import reverse
 
 from hitch.main import demo
+from hitch.main.management.commands import register_demo as register_demo_command
 from hitch.main.models import CodexInstance, SessionDemo, SystemAgentRun, SystemWorkflow
 
 
@@ -409,6 +414,42 @@ class DemoProxyTests(TestCase):
         )
         self.assertIsNone(demo.session_id_from_demo_host("thread_1.demo.localhost"))
 
+    def test_start_demo_prompt_uses_management_command_registration(self) -> None:
+        request = RequestFactory().get(
+            "/",
+            SERVER_PORT="8000",
+            headers={"host": "testserver"},
+        )
+        session_demo = SessionDemo(thread_id="thread-1", registration_token="-token")
+
+        prompt = demo.start_demo_prompt_for(
+            request=request,
+            session_id="thread-1",
+            cwd="/repo",
+            demo=session_demo,
+        )
+
+        self.assertIn(
+            'Registration command prefix: $HITCH_MANAGE_COMMAND run --project '
+            '"$HITCH_PROJECT_DIR" "$HITCH_MANAGE_PY" register_demo '
+            "--session-id=thread-1 --token=-token",
+            prompt,
+        )
+        self.assertIn(
+            "$HITCH_MANAGE_COMMAND run --project "
+            '"$HITCH_PROJECT_DIR" "$HITCH_MANAGE_PY" register_demo '
+            "--session-id=thread-1 --token=-token --status preparing "
+            "--container-name CONTAINER_NAME --logs 'starting demo container'",
+            prompt,
+        )
+        self.assertIn(
+            "replace CONTAINER_NAME, HOST_PORT, CONTAINER_ID, and logs",
+            prompt,
+        )
+        self.assertIn("--status active", prompt)
+        self.assertIn("--status failed", prompt)
+        self.assertNotIn("curl -fsS", prompt)
+
 
 class DemoRegistrationTests(TestCase):
     @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
@@ -478,6 +519,184 @@ class DemoRegistrationTests(TestCase):
         self.assertEqual(session_demo.generation, 2)
         self.assertNotEqual(session_demo.registration_token, "old-token")
         self.assertEqual(session_demo.container_id, "")
+
+    def test_register_demo_management_command_marks_preparing(self) -> None:
+        SessionDemo.objects.create(
+            thread_id="thread-1",
+            host="127.0.0.1",
+            port=3000,
+            runtime="podman",
+            status=SessionDemo.STATUS_REQUESTED,
+            registration_token="-token",
+            generation=1,
+        )
+
+        output = call_command(
+            "register_demo",
+            "--session-id",
+            "thread-1",
+            "--token=-token",
+            "--status",
+            "preparing",
+            "--container-name",
+            "hitch-demo-thread-1-cli",
+            "--logs",
+            "starting",
+            "--json",
+        )
+
+        self.assertEqual(
+            json.loads(output),
+            {
+                "demo_url": "/sessions/thread-1/demo/",
+                "status": SessionDemo.STATUS_PREPARING,
+            },
+        )
+        session_demo = SessionDemo.objects.get(thread_id="thread-1")
+        self.assertEqual(session_demo.status, SessionDemo.STATUS_PREPARING)
+        self.assertEqual(session_demo.container_name, "hitch-demo-thread-1-cli")
+        self.assertEqual(session_demo.logs, "starting")
+
+    def test_register_demo_management_command_reads_logs_file(self) -> None:
+        SessionDemo.objects.create(
+            thread_id="thread-1",
+            host="127.0.0.1",
+            port=3000,
+            runtime="podman",
+            status=SessionDemo.STATUS_REQUESTED,
+            registration_token="token",
+            generation=1,
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            logs_file = Path(raw) / "logs.txt"
+            logs_file.write_text("from file", encoding="utf-8")
+
+            output = call_command(
+                "register_demo",
+                "--session-id=thread-1",
+                "--token=token",
+                "--status=preparing",
+                "--container-name=hitch-demo-thread-1-cli",
+                "--port=4567",
+                "--logs-file",
+                str(logs_file),
+            )
+
+        self.assertEqual(output, "Registered demo as preparing\nDemo: /sessions/thread-1/demo/")
+        session_demo = SessionDemo.objects.get(thread_id="thread-1")
+        self.assertEqual(session_demo.logs, "from file")
+        self.assertEqual(session_demo.port, 4567)
+
+    def test_register_demo_management_command_bounds_logs_file(self) -> None:
+        SessionDemo.objects.create(
+            thread_id="thread-1",
+            host="127.0.0.1",
+            port=3000,
+            runtime="podman",
+            status=SessionDemo.STATUS_REQUESTED,
+            registration_token="token",
+            generation=1,
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            logs_file = Path(raw) / "logs.txt"
+            logs_file.write_text(
+                "prefix" + ("x" * (demo.MAX_LOG_CHARS + 20)),
+                encoding="utf-8",
+            )
+
+            call_command(
+                "register_demo",
+                "--session-id=thread-1",
+                "--token=token",
+                "--status=preparing",
+                "--container-name=hitch-demo-thread-1-cli",
+                "--logs-file",
+                str(logs_file),
+            )
+
+        session_demo = SessionDemo.objects.get(thread_id="thread-1")
+        self.assertEqual(session_demo.logs, "x" * demo.MAX_LOG_CHARS)
+
+    def test_register_demo_management_command_rejects_conflicting_log_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            logs_file = Path(raw) / "logs.txt"
+            logs_file.write_text("from file", encoding="utf-8")
+
+            with self.assertRaisesRegex(CommandError, "use either --logs or --logs-file"):
+                call_command(
+                    "register_demo",
+                    "--session-id=thread-1",
+                    "--token=token",
+                    "--status=preparing",
+                    "--container-name=hitch-demo-thread-1-cli",
+                    "--logs",
+                    "inline",
+                    "--logs-file",
+                    str(logs_file),
+                )
+
+    def test_register_demo_management_command_reports_unreadable_logs_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            missing_logs = Path(raw) / "missing.log"
+
+            with self.assertRaisesRegex(CommandError, "failed to read --logs-file"):
+                call_command(
+                    "register_demo",
+                    "--session-id=thread-1",
+                    "--token=token",
+                    "--status=preparing",
+                    "--container-name=hitch-demo-thread-1-cli",
+                    "--logs-file",
+                    str(missing_logs),
+                )
+
+    def test_register_demo_management_command_reports_non_utf8_logs_file(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            logs_file = Path(raw) / "logs.bin"
+            logs_file.write_bytes(b"\xff")
+
+            with self.assertRaisesRegex(CommandError, "file is not valid UTF-8"):
+                call_command(
+                    "register_demo",
+                    "--session-id=thread-1",
+                    "--token=token",
+                    "--status=preparing",
+                    "--container-name=hitch-demo-thread-1-cli",
+                    "--logs-file",
+                    str(logs_file),
+                )
+
+    def test_register_demo_management_command_decodes_empty_file_tail(self) -> None:
+        self.assertEqual(
+            register_demo_command._decode_bounded_utf8(b"", truncated=False),
+            "",
+        )
+
+    def test_register_demo_management_command_decodes_split_utf8_tail(self) -> None:
+        self.assertEqual(
+            register_demo_command._decode_bounded_utf8(b"\xa9tail", truncated=True),
+            "tail",
+        )
+
+    def test_register_demo_management_command_reports_registration_errors(self) -> None:
+        SessionDemo.objects.create(
+            thread_id="thread-1",
+            host="127.0.0.1",
+            port=3000,
+            runtime="podman",
+            status=SessionDemo.STATUS_REQUESTED,
+            registration_token="token",
+            generation=1,
+        )
+
+        with self.assertRaisesRegex(CommandError, "invalid demo registration token"):
+            call_command(
+                "register_demo",
+                "--session-id=thread-1",
+                "--token=wrong",
+                "--status=preparing",
+                "--container-name=hitch-demo-thread-1-cli",
+            )
 
     @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
     @patch("hitch.main.demo.subprocess.run")
@@ -1275,6 +1494,12 @@ class DemoRegistrationTests(TestCase):
             registration_token="token",
             container_name="hitch-demo-thread-1-abcd",
         )
+        workflow = SystemWorkflow.objects.create(
+            kind=demo.DEMO_WORKFLOW_KIND,
+            main_thread_id="thread-1",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+        )
         instance = CodexInstance.objects.create(
             thread_id="thread-1",
             cwd="/repo",
@@ -1282,14 +1507,27 @@ class DemoRegistrationTests(TestCase):
             events_path="/tmp/events.jsonl",
             status=CodexInstance.STATUS_COMPLETED,
             pid=1,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
             agent_kind=demo.DEMO_AGENT_KIND,
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            thread_id="thread-1",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
         )
 
         demo.on_codex_instance_finished(instance)
 
         session_demo = SessionDemo.objects.get(thread_id="thread-1")
+        run.refresh_from_db()
+        workflow.refresh_from_db()
         self.assertEqual(session_demo.status, SessionDemo.STATUS_ACTIVE)
         self.assertEqual(session_demo.container_name, "hitch-demo-thread-1-abcd")
+        self.assertEqual(run.status, SystemAgentRun.STATUS_COMPLETED)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
         mock_cleanup.assert_called_once()
 
     @patch("hitch.main.demo.cleanup_unregistered_demo_containers")

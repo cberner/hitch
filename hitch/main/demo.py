@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import secrets
+import shlex
 import subprocess
 from collections.abc import Iterator
 from typing import Any, Final, cast
@@ -124,12 +125,6 @@ def demo_url_for_request(request: HttpRequest, session_id: str) -> str:
     )
 
 
-def register_url_for_request(request: HttpRequest, session_id: str) -> str:
-    return request.build_absolute_uri(
-        reverse("session_demo_register", kwargs={"session_id": session_id})
-    )
-
-
 def start_demo_prompt_for(
     *,
     request: HttpRequest,
@@ -138,24 +133,28 @@ def start_demo_prompt_for(
     demo: SessionDemo,
 ) -> str:
     demo_url = demo_url_for_request(request, session_id)
-    register_url = register_url_for_request(request, session_id)
     container_prefix = _container_name_prefix(session_id)
+    register_command = (
+        '$HITCH_MANAGE_COMMAND run --project "$HITCH_PROJECT_DIR" '
+        '"$HITCH_MANAGE_PY" register_demo '
+        f"--session-id={shlex.quote(session_id)} "
+        f"--token={shlex.quote(demo.registration_token)}"
+    )
     return (
         "Start an interactive web demo for this session.\n\n"
         "You own the container startup. Use normal shell commands and the user's "
         "configured command approvals. Do not return JSON for Hitch to execute.\n\n"
         f"Repository cwd: {cwd}\n"
         f"Demo URL for the user: {demo_url}\n"
-        f"Registration URL: {register_url}\n"
+        f"Registration command prefix: {register_command}\n"
         f"Registration token: {demo.registration_token}\n\n"
+        "Register demo state with the management command from the worker; do not "
+        "route registration through the public browser host.\n\n"
         "Process:\n"
         f"1. Choose a unique container name beginning with {container_prefix}.\n"
         "2. Before creating or running the container, register it as preparing:\n"
-        f"   curl -sS -X POST {register_url} "
-        "-H 'Content-Type: application/json' "
-        f"--data '{{\"token\":\"{demo.registration_token}\","
-        "\"status\":\"preparing\",\"container_name\":\"CONTAINER_NAME\","
-        "\"logs\":\"starting demo container\"}}'\n"
+        f"   {register_command} --status preparing "
+        "--container-name CONTAINER_NAME --logs 'starting demo container'\n"
         "3. Run Podman yourself. Label the container with:\n"
         f"   --label {HITCH_DEMO_LABEL}={HITCH_DEMO_LABEL_VALUE}\n"
         f"   --label {HITCH_SESSION_LABEL}={session_id}\n"
@@ -164,9 +163,16 @@ def start_demo_prompt_for(
         "4. Bind the web server to 0.0.0.0 inside the container and publish it "
         "on 127.0.0.1 on the host.\n"
         "5. Inspect logs and retry in this same turn until the demo responds.\n"
-        "6. When it works, register it as active with host, host port, container "
-        "name, container id, and concise logs. If you cannot make it work, "
-        "register failed with the relevant error and logs."
+        "6. When it works, replace CONTAINER_NAME, HOST_PORT, CONTAINER_ID, "
+        "and logs, then register it as active:\n"
+        f"   {register_command} --status active "
+        "--container-name CONTAINER_NAME --container-id CONTAINER_ID "
+        f"--host {DEFAULT_HOST} --port HOST_PORT --logs 'concise startup logs'\n"
+        "   If you cannot make it work, register failed with the relevant "
+        "error and logs:\n"
+        f"   {register_command} --status failed "
+        "--error 'ERROR' --logs 'relevant failure logs'\n"
+        "   For long logs, write them to a file and pass --logs-file PATH instead."
     )
 
 

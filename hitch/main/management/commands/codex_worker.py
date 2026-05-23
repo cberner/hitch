@@ -280,15 +280,22 @@ class Command(BaseCommand):
 
 
 def _notify_system_agents(instance: CodexInstance) -> None:
+    system_agents_handled = False
     try:
         from hitch.main import system_agents
 
-        system_agents.on_codex_instance_finished(instance)
+        system_agents_handled = system_agents.on_codex_instance_finished(instance)
     except Exception:
         logger.exception("failed to route completed worker %s to system agents", instance.pk)
     try:
         from hitch.main import demo
 
+        if (
+            system_agents_handled
+            and instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
+            and instance.agent_kind == demo.DEMO_AGENT_KIND
+        ):
+            return
         demo.on_codex_instance_finished(instance)
     except Exception:
         logger.exception("failed to route completed worker %s to demo workflow", instance.pk)
@@ -314,6 +321,7 @@ def _run_turn(
     manage_py = Path(settings.BASE_DIR) / "manage.py"
     os.environ["HITCH_PROJECT_DIR"] = str(project_dir)
     os.environ["HITCH_MANAGE_PY"] = str(manage_py)
+    os.environ["HITCH_MANAGE_COMMAND"] = "uv"
     os.environ["HITCH_PROPOSE_SESSION_COMMAND"] = "uv"
     config = app_server_config(enable_memories=enable_memories)
     effort: ReasoningEffort | None = None

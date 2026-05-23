@@ -8,7 +8,7 @@ from django.db import IntegrityError, transaction
 from django.test import TestCase
 from openai_codex.generated.v2_all import ThreadSource
 
-from hitch.main import system_agents
+from hitch.main import demo, system_agents
 from hitch.main.models import (
     CodexInstance,
     Project,
@@ -647,6 +647,229 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
         self.assertIn("no longer supported", workflow.state["error"])
         self.assertNotIn("failure_surfaced", workflow.state)
+
+    @patch("hitch.main.system_agents.demo.on_codex_instance_finished")
+    def test_demo_system_workflow_is_routed_to_demo_router(
+        self, mock_demo_finished: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=demo.DEMO_WORKFLOW_KIND,
+            main_thread_id="demo-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step="demo_running",
+        )
+        instance = _instance(
+            thread_id="demo-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=demo.DEMO_AGENT_KIND,
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            thread_id="demo-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        mock_demo_finished.assert_called_once_with(instance)
+        run.refresh_from_db()
+        workflow.refresh_from_db()
+        self.assertEqual(run.status, SystemAgentRun.STATUS_RUNNING)
+        self.assertEqual(run.error, "")
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, "demo_running")
+
+    @patch("hitch.main.system_agents.demo.on_codex_instance_finished")
+    def test_demo_workflow_requires_demo_agent_kind(
+        self, mock_demo_finished: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=demo.DEMO_WORKFLOW_KIND,
+            main_thread_id="demo-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step="demo_running",
+        )
+        instance = _instance(
+            thread_id="demo-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind="unexpected",
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind="unexpected",
+            thread_id="demo-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        handled = system_agents.on_codex_instance_finished(instance)
+
+        self.assertTrue(handled)
+        mock_demo_finished.assert_not_called()
+        run.refresh_from_db()
+        workflow.refresh_from_db()
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertIn("no longer supported", run.error)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+
+    @patch("hitch.main.system_agents.demo.on_codex_instance_finished")
+    def test_demo_workflow_requires_demo_instance_kind(
+        self, mock_demo_finished: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=demo.DEMO_WORKFLOW_KIND,
+            main_thread_id="demo-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step="demo_running",
+        )
+        instance = _instance(
+            thread_id="demo-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind="unexpected",
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            thread_id="demo-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        handled = system_agents.on_codex_instance_finished(instance)
+
+        self.assertTrue(handled)
+        mock_demo_finished.assert_not_called()
+        run.refresh_from_db()
+        workflow.refresh_from_db()
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertIn("no longer supported", run.error)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+
+    @patch(
+        "hitch.main.system_agents.demo.on_codex_instance_finished",
+        side_effect=RuntimeError("boom"),
+    )
+    def test_demo_system_workflow_fails_if_demo_router_raises(
+        self, mock_demo_finished: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=demo.DEMO_WORKFLOW_KIND,
+            main_thread_id="demo-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step="demo_running",
+        )
+        instance = _instance(
+            thread_id="demo-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=demo.DEMO_AGENT_KIND,
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            thread_id="demo-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        mock_demo_finished.assert_called_once_with(instance)
+        run.refresh_from_db()
+        workflow.refresh_from_db()
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertIn("demo workflow router failed: boom", run.error)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_FAILED)
+
+    @patch("hitch.main.system_agents.demo.on_codex_instance_finished")
+    def test_demo_agent_kind_does_not_route_non_demo_workflow(
+        self, mock_demo_finished: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="demo-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_QA_RUNNING,
+        )
+        instance = _instance(
+            thread_id="demo-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=demo.DEMO_AGENT_KIND,
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            thread_id="demo-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        mock_demo_finished.assert_not_called()
+        run.refresh_from_db()
+        workflow.refresh_from_db()
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        self.assertIn("unsupported PR QA agent kind 'demo'", workflow.state["error"])
+
+    def test_system_agent_without_run_returns_false(self) -> None:
+        instance = _instance(
+            thread_id="orphan-system-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=12345,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+        )
+
+        handled = system_agents.on_codex_instance_finished(instance)
+
+        self.assertFalse(handled)
+
+    def test_terminal_system_agent_run_returns_true_without_changes(self) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="terminal-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_QA_RUNNING,
+        )
+        instance = _instance(
+            thread_id="terminal-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="terminal-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+            output={"feedback": "", "lgtm": True},
+        )
+
+        handled = system_agents.on_codex_instance_finished(instance)
+
+        self.assertTrue(handled)
+        run.refresh_from_db()
+        workflow.refresh_from_db()
+        self.assertEqual(run.status, SystemAgentRun.STATUS_COMPLETED)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_QA_RUNNING)
 
     def test_retired_system_agent_run_does_not_reopen_terminal_workflow(self) -> None:
         workflow = SystemWorkflow.objects.create(
