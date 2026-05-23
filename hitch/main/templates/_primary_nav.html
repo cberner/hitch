@@ -8,6 +8,10 @@
         <a href="{% url 'index' %}#new-session" data-new-session-open>new session</a>
         {% with current_route=request.resolver_match.url_name %}
         <a href="{% url 'index' %}"{% if current_route == "index" %} aria-current="page"{% endif %}>sessions</a>
+        <a class="primary-nav-with-badge" href="{% url 'inbox' %}"{% if current_route == "inbox" %} aria-current="page"{% endif %}>
+            <span>inbox</span>
+            {% if inbox_count %}<span class="primary-nav-badge" aria-label="{{ inbox_count }} inbox message{{ inbox_count|pluralize }}">{{ inbox_count }}</span>{% endif %}
+        </a>
         <a href="{% url 'system_sessions' %}"{% if current_route == "system_sessions" or current_route == "system_session" %} aria-current="page"{% endif %}>system sessions</a>
         {% if current_project %}
         <a href="{% url 'standing_orders' %}"{% if current_route == "standing_orders" %} aria-current="page"{% endif %}>standing orders</a>

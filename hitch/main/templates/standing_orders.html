@@ -412,78 +412,6 @@
         </section>
 
         {% if current_project %}
-        <section class="section" aria-labelledby="inbox-title">
-            <p class="section-label">Inbox</p>
-            <h2 id="inbox-title" hidden>Proposed sessions</h2>
-            {% if proposed_sessions %}
-            <ul class="proposal-list">
-                {% for proposed_session in proposed_sessions %}
-                <li class="proposal">
-                    <h3>{{ proposed_session.title }}</h3>
-                    <p class="meta">
-                        {% if proposed_session.inbox_kind == "notice" %}
-                        From standing order: {{ proposed_session.standing_order.title }}
-                        {% elif proposed_session.standing_order %}
-                        {{ proposed_session.standing_order.title }} - {{ proposed_session.standing_order.get_ambition_display }} ambition - {{ proposed_session.get_confidence_display }} confidence
-                        {% else %}
-                        From coding agent - {{ proposed_session.get_confidence_display }} confidence
-                        {% endif %}
-                    </p>
-                    {% if proposed_session.summary %}
-                    <p>{{ proposed_session.summary }}</p>
-                    {% endif %}
-                    {% if proposed_session.display_files %}
-                    <div class="file-list" aria-label="Relevant files">
-                        {% for file in proposed_session.display_files %}
-                        <code>{{ file }}</code>
-                        {% endfor %}
-                    </div>
-                    {% endif %}
-                    <div class="proposal-actions">
-                        {% if proposed_session.inbox_kind == "notice" %}
-                        <form method="post" action="{% url 'update_proposed_session_outcome' proposed_session.pk %}">
-                            {% csrf_token %}
-                            <input type="hidden" name="outcome_status" value="{{ proposed_session_dismissed_status }}">
-                            <button type="submit" class="button secondary">Dismiss</button>
-                        </form>
-                        {% else %}
-                        <form method="post" action="{% url 'update_proposed_session_outcome' proposed_session.pk %}">
-                            {% csrf_token %}
-                            <input type="hidden" name="outcome_status" value="accepted">
-                            <button
-                                type="button"
-                                class="button"
-                                data-proposed-session-do
-                                data-proposed-session-id="{{ proposed_session.pk }}"
-                                data-proposed-session-project="{{ proposed_session.project.pk }}"
-                                data-proposed-session-prompt="{{ proposed_session.session_prompt }}"
-                            >Do it</button>
-                        </form>
-                        <button
-                            type="button"
-                            class="button danger"
-                            data-proposed-session-reject
-                            data-reject-url="{% url 'update_proposed_session_outcome' proposed_session.pk %}"
-                            data-session-title="{{ proposed_session.title }}"
-                        >Reject</button>
-                        {% if proposed_session.candidate_log_url %}
-                        <a class="button secondary" href="{{ proposed_session.candidate_log_url }}">Candidate log</a>
-                        {% endif %}
-                        {% if proposed_session.judge_log_url %}
-                        <a class="button secondary" href="{{ proposed_session.judge_log_url }}">Judge log</a>
-                        {% endif %}
-                        {% endif %}
-                    </div>
-                </li>
-                {% endfor %}
-            </ul>
-            {% else %}
-            <div class="empty">
-                <p>No proposed sessions.</p>
-            </div>
-            {% endif %}
-        </section>
-
         <section class="section" aria-labelledby="standing-order-list-title">
             <p class="section-label">Orders</p>
             <h2 id="standing-order-list-title" hidden>Orders</h2>
@@ -549,64 +477,6 @@
         </form>
     </dialog>
     {% endif %}
-    <dialog class="new-session" data-new-session-dialog aria-labelledby="new-session-title">
-        <form method="post" action="{{ new_session_url }}">
-            {% csrf_token %}
-            <input type="hidden" name="plan_mode" value="">
-            <input type="hidden" name="proposed_session" value="" data-proposed-session-input>
-            <h2 id="new-session-title">Start a new session</h2>
-            <label>
-                Prompt
-                <textarea id="new-session-prompt" name="prompt" required autocomplete="off" placeholder="Describe what you want the agent to do..."></textarea>
-            </label>
-            <label>
-                Project
-                <select name="project" required data-new-session-project>
-                    {% for project in new_session_projects %}
-                    <option
-                        value="{{ project.pk }}"{% if project.pk == current_new_session_project_id %} selected{% endif %}
-                        data-auto-pr-default="{% if project.auto_pr_mode == project_auto_pr_on %}true{% elif project.auto_pr_mode == project_auto_pr_off %}false{% elif current_auto_pr %}true{% else %}false{% endif %}"
-                    >{{ project.name }}</option>
-                    {% endfor %}
-                    <option
-                        value="{{ bare_repo_project_value }}"{% if not current_new_session_project_id %} selected{% endif %}
-                        data-auto-pr-default="{% if current_auto_pr %}true{% else %}false{% endif %}"
-                    >&lt;bare repo&gt;</option>
-                </select>
-            </label>
-            <label>
-                Coding agent
-                <select name="coding_agent" data-new-session-coding-agent>
-                    <option value="" selected>Use settings ({{ new_session_default_coding_agent_label }})</option>
-                    {% for option in new_session_coding_agent_options %}
-                    <option value="{{ option.id }}">{{ option.display_name }}</option>
-                    {% endfor %}
-                </select>
-            </label>
-            <div data-new-session-repo-field {% if current_new_session_project_id %}hidden{% endif %}>
-                <label for="new-session-cwd">Repository</label>
-                {% if repos %}
-                <select id="new-session-cwd" name="cwd" required data-new-session-repo>
-                    {% for repo in repos %}
-                    <option value="{{ repo }}"{% if repo == current_repo %} selected{% endif %}>{{ repo }}</option>
-                    {% endfor %}
-                </select>
-                {% else %}
-                <select id="new-session-cwd" name="cwd" required disabled data-new-session-repo></select>
-                <p class="meta">No git repositories found within two levels of your home directory.</p>
-                {% endif %}
-            </div>
-            <label class="checkbox-label">
-                <span>Auto-PR</span>
-                <input type="hidden" name="auto_pr" value="false">
-                <input type="checkbox" name="auto_pr" value="true" data-new-session-auto-pr {% if current_new_session_auto_pr %}checked{% endif %}>
-            </label>
-            <div class="actions">
-                <button type="button" class="button secondary" data-new-session-cancel>Cancel</button>
-                <button type="submit" class="button" {% if not repos %}disabled{% endif %}>Start session</button>
-            </div>
-        </form>
-    </dialog>
     <dialog class="new-session" data-edit-standing-order-dialog aria-labelledby="edit-standing-order-title">
         <form method="post" data-edit-standing-order-form>
             {% csrf_token %}
@@ -641,22 +511,6 @@
             </div>
         </form>
     </dialog>
-    <dialog class="new-session" data-reject-session-dialog aria-labelledby="reject-session-title">
-        <form method="post" data-reject-session-form>
-            {% csrf_token %}
-            <input type="hidden" name="outcome_status" value="{{ proposed_session_rejected_status }}">
-            <h2 id="reject-session-title">Reject proposed session</h2>
-            <p class="meta" data-reject-session-title></p>
-            <label>
-                Reason
-                <textarea name="reason" required autocomplete="off"></textarea>
-            </label>
-            <div class="actions">
-                <button type="button" class="button secondary" data-reject-session-cancel>Cancel</button>
-                <button type="submit" class="button danger">Reject</button>
-            </div>
-        </form>
-    </dialog>
     <script>
         (function () {
             const modalScrollLockClass = "modal-scroll-locked";
@@ -686,11 +540,6 @@
             for (const dialog of document.querySelectorAll("dialog")) {
                 dialog.addEventListener("close", syncModalScrollLock);
             }
-            const rejectDialog = document.querySelector("[data-reject-session-dialog]");
-            const rejectForm = rejectDialog && rejectDialog.querySelector("[data-reject-session-form]");
-            const rejectTitle = rejectDialog && rejectDialog.querySelector("[data-reject-session-title]");
-            const rejectReason = rejectDialog && rejectDialog.querySelector("textarea[name='reason']");
-            const rejectCancel = rejectDialog && rejectDialog.querySelector("[data-reject-session-cancel]");
             const editOrderDialog = document.querySelector("[data-edit-standing-order-dialog]");
             const editOrderForm = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-form]");
             const editOrderTitle = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-title]");
@@ -705,46 +554,6 @@
             const pageMenu = document.querySelector("[data-page-menu]");
             const pageMenuButton = pageMenu && pageMenu.querySelector("[data-page-menu-open]");
             const pageMenuPanel = pageMenu && pageMenu.querySelector("[data-page-menu-panel]");
-            const newSessionDialog = document.querySelector("[data-new-session-dialog]");
-            const newSessionForm = newSessionDialog && newSessionDialog.querySelector("form");
-            const newSessionInput = newSessionForm && newSessionForm.querySelector("textarea[name='prompt']");
-            const proposedSessionInput = newSessionForm && newSessionForm.querySelector("[data-proposed-session-input]");
-            const newSessionProjectSelect = newSessionForm && newSessionForm.querySelector("[data-new-session-project]");
-            const newSessionRepoField = newSessionForm && newSessionForm.querySelector("[data-new-session-repo-field]");
-            const newSessionRepoSelect = newSessionForm && newSessionForm.querySelector("[data-new-session-repo]");
-            const newSessionAutoPr = newSessionForm && newSessionForm.querySelector("[data-new-session-auto-pr]");
-            const newSessionCancel = newSessionDialog && newSessionDialog.querySelector("[data-new-session-cancel]");
-            const bareRepoProjectValue = "{{ bare_repo_project_value|escapejs }}";
-            function syncNewSessionProjectFields() {
-                if (!newSessionProjectSelect) return;
-                const bareRepoSelected = newSessionProjectSelect.value === bareRepoProjectValue;
-                if (newSessionRepoField) newSessionRepoField.hidden = !bareRepoSelected;
-                if (newSessionRepoSelect) newSessionRepoSelect.required = bareRepoSelected;
-                if (newSessionAutoPr) {
-                    const option = newSessionProjectSelect.selectedOptions && newSessionProjectSelect.selectedOptions[0];
-                    newSessionAutoPr.checked = option && option.dataset.autoPrDefault === "true";
-                }
-            }
-            function openNewSessionDialog(prompt, proposedSessionId, proposedSessionProjectId) {
-                if (newSessionProjectSelect && proposedSessionProjectId) {
-                    for (const option of newSessionProjectSelect.options) {
-                        if (option.value === proposedSessionProjectId) {
-                            newSessionProjectSelect.value = proposedSessionProjectId;
-                            break;
-                        }
-                    }
-                }
-                syncNewSessionProjectFields();
-                if (newSessionInput && typeof prompt === "string") newSessionInput.value = prompt;
-                if (proposedSessionInput) proposedSessionInput.value = proposedSessionId || "";
-                showDialog(newSessionDialog);
-                if (newSessionInput) newSessionInput.focus();
-            }
-            syncNewSessionProjectFields();
-            if (newSessionProjectSelect) {
-                newSessionProjectSelect.addEventListener("change", syncNewSessionProjectFields);
-            }
-            if (newSessionCancel) newSessionCancel.addEventListener("click", () => hideDialog(newSessionDialog));
             function closePageMenu() {
                 if (!pageMenuButton || !pageMenuPanel) return;
                 pageMenuPanel.hidden = true;
@@ -786,26 +595,6 @@
                 });
             }
             if (editOrderCancel) editOrderCancel.addEventListener("click", () => hideDialog(editOrderDialog));
-            for (const button of document.querySelectorAll("[data-proposed-session-do]")) {
-                button.addEventListener("click", () => {
-                    openNewSessionDialog(
-                        button.dataset.proposedSessionPrompt || "",
-                        button.dataset.proposedSessionId || "",
-                        button.dataset.proposedSessionProject || "",
-                    );
-                });
-            }
-            for (const button of document.querySelectorAll("[data-proposed-session-reject]")) {
-                button.addEventListener("click", () => {
-                    if (!rejectForm) return;
-                    rejectForm.action = button.dataset.rejectUrl || "";
-                    if (rejectTitle) rejectTitle.textContent = button.dataset.sessionTitle || "";
-                    if (rejectReason) rejectReason.value = "";
-                    showDialog(rejectDialog);
-                    if (rejectReason) rejectReason.focus();
-                });
-            }
-            if (rejectCancel) rejectCancel.addEventListener("click", () => hideDialog(rejectDialog));
             {% include "_primary_nav_script.html" %}
         })();
     </script>

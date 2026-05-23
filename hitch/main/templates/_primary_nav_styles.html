@@ -133,6 +133,27 @@
             color: var(--text);
             padding: 0.5rem 0.65rem;
         }
+        .primary-nav-panel a.primary-nav-with-badge {
+            gap: 0.45rem;
+        }
+        .primary-nav.primary-nav-js .primary-nav-panel a.primary-nav-with-badge {
+            justify-content: space-between;
+        }
+        .primary-nav-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 1.35rem;
+            height: 1.35rem;
+            padding: 0 0.42rem;
+            border-radius: 999px;
+            background: var(--accent);
+            color: var(--accent-fg);
+            font-size: 0.72rem;
+            font-weight: 700;
+            line-height: 1;
+            font-variant-numeric: tabular-nums;
+        }
         .primary-nav-panel a[aria-current="page"] {
             background: var(--accent-soft, rgba(79, 143, 102, 0.12));
             color: var(--text);

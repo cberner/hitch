@@ -11,6 +11,7 @@ urlpatterns = [
     path("login/", hitch.main.views.login, name="login"),
     path("logout/", hitch.main.views.logout, name="logout"),
     path("usage/", hitch.main.views.usage, name="usage"),
+    path("inbox/", hitch.main.views.inbox, name="inbox"),
     path("standing-orders/", hitch.main.views.standing_orders, name="standing_orders"),
     path(
         "standing-orders/create/",

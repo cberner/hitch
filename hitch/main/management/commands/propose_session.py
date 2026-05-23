@@ -49,7 +49,7 @@ class Command(BaseCommand):
             "id": proposal.pk,
             "title": proposal.title,
             "project_id": proposal.project_id,
-            "inbox_url": reverse("standing_orders"),
+            "inbox_url": reverse("inbox"),
         }
         if options["json_output"]:
             return json.dumps(payload, sort_keys=True)
