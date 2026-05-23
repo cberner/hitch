@@ -13,7 +13,6 @@ from django.contrib.auth import login as auth_login
 from django.contrib.auth import logout as auth_logout
 from django.contrib.auth.forms import AuthenticationForm, UserCreationForm
 from django.db import IntegrityError, transaction
-from django.db.models import Prefetch
 from django.http import (
     Http404,
     HttpRequest,
@@ -49,11 +48,8 @@ from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
     CodexInstance,
-    KeyResult,
-    Objective,
     Project,
     ProposedSession,
-    ProposedTask,
     SessionMetadata,
     StandingOrder,
     SystemAgentRun,
@@ -194,7 +190,6 @@ _MINUTES_PER_DAY = 24 * _MINUTES_PER_HOUR
 # unbounded blob through.
 _NAME_MAX_LEN = 200
 _PROJECT_NAME_MAX_LEN = 200
-_OKR_TITLE_MAX_LEN = 200
 _STANDING_ORDER_TITLE_MAX_LEN = 200
 _LAST_SELECTED_REPO_MAX_LEN = 4096
 _VALID_PROJECT_AUTO_PR_MODES = {value for value, _label in Project.AUTO_PR_CHOICES}
@@ -593,217 +588,6 @@ def usage(request: HttpRequest) -> HttpResponse:
 
 
 @require_http_methods(["GET"])
-def okrs(request: HttpRequest) -> HttpResponse:
-    codex_pool.reconcile_dead()
-    show_hidden_tasks = request.GET.get("show_hidden_tasks", "").strip() in {
-        "1",
-        "true",
-        "on",
-    }
-    initial_settings = _stored_settings(request)
-    config = codex_pool.app_server_config(
-        enable_memories=initial_settings.enable_memories
-    )
-    with Codex(config=config) as codex:
-        models_data = _models_for_plan_mode_fallback(codex)
-        resolved_settings = _resolved_settings(request, models_data)
-        current_settings = resolved_settings.values
-        cookie_updates = resolved_settings.cookie_updates
-        current_project = _selected_project_for_settings(current_settings)
-        objectives = (
-            list(
-                Objective.objects.filter(project=current_project).prefetch_related(
-                    Prefetch(
-                        "key_results__proposed_tasks",
-                        queryset=ProposedTask.objects.select_related("session"),
-                    )
-                )
-            )
-            if current_project is not None
-            else []
-        )
-        _refresh_proposed_task_pr_state(codex, objectives)
-    _attach_proposed_task_display_state(objectives, show_hidden_tasks)
-    _attach_okr_task_generation_state(objectives)
-    settings_dialog_context = _settings_dialog_context(current_settings, models_data)
-    new_session_dialog_context = _new_session_dialog_context(
-        current_settings, current_project, settings_dialog_context["projects"]
-    )
-    response = render(
-        request,
-        "okrs.html",
-        {
-            "login_url": reverse("login"),
-            "register_url": reverse("register"),
-            "objectives": objectives,
-            "objective_create_url": reverse("create_objective"),
-            "proposed_task_rejected_status": ProposedTask.OUTCOME_REJECTED,
-            "show_hidden_tasks": show_hidden_tasks,
-            "title_max_len": _OKR_TITLE_MAX_LEN,
-            **settings_dialog_context,
-            **new_session_dialog_context,
-        },
-    )
-    _apply_cookie_updates(response, cookie_updates)
-    return response
-
-
-@require_http_methods(["GET"])
-def okr_task_generation_log(request: HttpRequest, workflow_id: int) -> HttpResponse:
-    workflow = _okr_task_generation_workflow_for_log(request, workflow_id)
-    run = (
-        workflow.agent_runs.exclude(thread_id="")
-        .order_by("-created_at")
-        .first()
-    )
-    if run is None:
-        raise Http404("task generation log not found")
-    return _render_session_detail(
-        request,
-        run.thread_id,
-        read_only=True,
-        display_title="Task generation log",
-    )
-
-
-def _validated_okr_title(raw_title: str) -> tuple[str, str | None]:
-    title = raw_title.strip()
-    if not title:
-        return "", "title is required"
-    if len(title) > _OKR_TITLE_MAX_LEN:
-        return "", "title is too long"
-    return title, None
-
-
-def _proposed_task_session_prompt(
-    task: ProposedTask, key_result: KeyResult, objective: Objective
-) -> str:
-    parts = [
-        "Do this ProposedTask.",
-        "",
-        "This task is part of the following Key Result (KR), which is part of "
-        "the following Objective.",
-        "",
-        f"Objective: {objective.title}",
-    ]
-    if objective.description:
-        parts.extend(["", f"Objective description:\n{objective.description}"])
-    parts.extend(["", f"Key Result: {key_result.title}"])
-    if key_result.description:
-        parts.extend(["", f"Key Result description:\n{key_result.description}"])
-    if key_result.work_instructions:
-        parts.extend(
-            ["", f"Key Result work instructions:\n{key_result.work_instructions}"]
-        )
-    parts.extend(
-        [
-            "",
-            "There will be other tasks to complete the rest of this Key Result. "
-            "Only do this part, even if the result seems incomplete without the "
-            "other tasks.",
-            "",
-            f"Title: {task.title}",
-        ]
-    )
-    if task.description:
-        parts.extend(["", f"Description:\n{task.description}"])
-    if task.success_criteria:
-        parts.extend(["", f"Success criteria:\n{task.success_criteria}"])
-    if task.rationale:
-        parts.extend(["", f"Rationale:\n{task.rationale}"])
-    return "\n".join(parts)
-
-
-def _attach_proposed_task_display_state(
-    objectives: list[Objective], show_hidden_tasks: bool
-) -> None:
-    for objective in objectives:
-        for key_result in objective.key_results.all():
-            tasks = list(key_result.proposed_tasks.all())
-            for task in tasks:
-                task.session_prompt = _proposed_task_session_prompt(  # type: ignore[attr-defined]
-                    task, key_result, objective
-                )
-            visible_tasks = (
-                tasks
-                if show_hidden_tasks
-                else [task for task in tasks if not task.outcome_status]
-            )
-            key_result.visible_proposed_tasks = visible_tasks  # type: ignore[attr-defined]
-            key_result.hidden_proposed_task_count = len(tasks) - len(  # type: ignore[attr-defined]
-                visible_tasks
-            )
-
-
-def _refresh_proposed_task_pr_state(codex: Codex, objectives: list[Objective]) -> None:
-    tasks_by_thread: dict[str, list[ProposedTask]] = {}
-    for objective in objectives:
-        for key_result in objective.key_results.all():
-            for task in key_result.proposed_tasks.all():
-                if (
-                    task.session_id is None
-                    or task.outcome_status
-                    not in {
-                        ProposedTask.OUTCOME_ACCEPTED,
-                        ProposedTask.OUTCOME_PR_OPENED,
-                    }
-                ):
-                    continue
-                session = task.session
-                if session is None:
-                    continue
-                tasks_by_thread.setdefault(session.thread_id, []).append(task)
-    for thread_id, tasks in tasks_by_thread.items():
-        try:
-            thread = codex._client.thread_resume(thread_id).thread
-        except AppServerError:
-            logger.info("could not refresh PR state for proposed task session %s", thread_id)
-            continue
-        pr_url = _pr_url_for_thread(thread)
-        _mark_proposed_tasks_pr_opened(thread_id, pr_url, tasks)
-
-
-def _mark_proposed_tasks_pr_opened(
-    session_id: str, pr_url: str | None, tasks: list[ProposedTask] | None = None
-) -> None:
-    if not pr_url:
-        return
-    if tasks is None:
-        ProposedTask.objects.filter(
-            session__thread_id=session_id,
-            outcome_status__in=[
-                ProposedTask.OUTCOME_ACCEPTED,
-                ProposedTask.OUTCOME_PR_OPENED,
-            ],
-        ).update(
-            outcome_status=ProposedTask.OUTCOME_PR_OPENED,
-            pr_url=pr_url,
-            updated_at=timezone.now(),
-        )
-        return
-    for task in tasks:
-        if task.outcome_status not in {
-            ProposedTask.OUTCOME_ACCEPTED,
-            ProposedTask.OUTCOME_PR_OPENED,
-        }:
-            continue
-        if (
-            task.outcome_status == ProposedTask.OUTCOME_PR_OPENED
-            and task.pr_url == pr_url
-        ):
-            continue
-        task.outcome_status = ProposedTask.OUTCOME_PR_OPENED
-        task.pr_url = pr_url
-        task.save(update_fields=["outcome_status", "pr_url", "updated_at"])
-
-
-def _redirect_to_okrs_from_post(request: HttpRequest) -> HttpResponse:
-    if request.POST.get("show_hidden_tasks", "").strip() in {"1", "true", "on"}:
-        return redirect(f"{reverse('okrs')}?{urlencode({'show_hidden_tasks': '1'})}")
-    return redirect("okrs")
-
-
-@require_http_methods(["GET"])
 def standing_orders(request: HttpRequest) -> HttpResponse:
     codex_pool.reconcile_dead()
     initial_settings = _stored_settings(request)
@@ -1027,183 +811,6 @@ def _validated_standing_order_values(
     ), None
 
 
-@require_http_methods(["POST"])
-def create_objective(request: HttpRequest) -> HttpResponse:
-    project = _active_project_from_request(request)
-    if project is None:
-        return HttpResponseBadRequest("active project is required")
-    title, error = _validated_okr_title(request.POST.get("title", ""))
-    if error is not None:
-        return HttpResponseBadRequest(error)
-    Objective.objects.create(
-        project=project,
-        title=title,
-        description=request.POST.get("description", "").strip(),
-    )
-    return redirect("okrs")
-
-
-@require_http_methods(["POST"])
-def create_key_result(request: HttpRequest, objective_id: int) -> HttpResponse:
-    project = _active_project_from_request(request)
-    if project is None:
-        return HttpResponseBadRequest("active project is required")
-    if objective_id < 1 or objective_id > _MAX_BIGAUTOFIELD:
-        return HttpResponseBadRequest("objective is required")
-    objective = Objective.objects.filter(pk=objective_id, project=project).first()
-    if objective is None:
-        return HttpResponseBadRequest("objective is required")
-    title, error = _validated_okr_title(request.POST.get("title", ""))
-    if error is not None:
-        return HttpResponseBadRequest(error)
-    KeyResult.objects.create(
-        objective=objective,
-        title=title,
-        description=request.POST.get("description", "").strip(),
-        work_instructions=request.POST.get("work_instructions", "").strip(),
-    )
-    return redirect("okrs")
-
-
-@require_http_methods(["POST"])
-def generate_key_result_tasks(request: HttpRequest, key_result_id: int) -> HttpResponse:
-    project = _active_project_from_request(request)
-    if project is None:
-        return HttpResponseBadRequest("active project is required")
-    if key_result_id < 1 or key_result_id > _MAX_BIGAUTOFIELD:
-        return HttpResponseBadRequest("key result is required")
-    key_result = (
-        KeyResult.objects.select_related("objective__project")
-        .filter(pk=key_result_id, objective__project=project)
-        .first()
-    )
-    if key_result is None:
-        return HttpResponseBadRequest("key result is required")
-    try:
-        system_agents.start_okr_task_generation_workflow(key_result=key_result)
-    except KeyResult.DoesNotExist:
-        return HttpResponseBadRequest("key result is required")
-    return redirect("okrs")
-
-
-@require_http_methods(["POST"])
-def update_proposed_task_outcome(request: HttpRequest, task_id: int) -> HttpResponse:
-    project = _active_project_from_request(request)
-    if project is None:
-        return HttpResponseBadRequest("active project is required")
-    if task_id < 1 or task_id > _MAX_BIGAUTOFIELD:
-        return HttpResponseBadRequest("proposed task is required")
-    task = (
-        ProposedTask.objects.select_related("key_result__objective__project")
-        .filter(pk=task_id, key_result__objective__project=project)
-        .first()
-    )
-    if task is None:
-        return HttpResponseBadRequest("proposed task is required")
-    outcome_status = request.POST.get("outcome_status", "")
-    valid_statuses = {choice[0] for choice in ProposedTask.OUTCOME_CHOICES}
-    if outcome_status not in valid_statuses:
-        return HttpResponseBadRequest("outcome status is invalid")
-    outcome_notes = request.POST.get(
-        "reason", request.POST.get("outcome_notes", "")
-    ).strip()
-    if outcome_status == ProposedTask.OUTCOME_REJECTED and not outcome_notes:
-        return HttpResponseBadRequest("reason is required")
-    task.outcome_status = outcome_status
-    task.outcome_notes = outcome_notes
-    task.save(update_fields=["outcome_status", "outcome_notes", "updated_at"])
-    return _redirect_to_okrs_from_post(request)
-
-
-def _attach_okr_task_generation_state(objectives: list[Objective]) -> None:
-    key_result_ids = [
-        key_result.pk
-        for objective in objectives
-        for key_result in objective.key_results.all()
-    ]
-    if not key_result_ids:
-        return
-    workflows = (
-        SystemWorkflow.objects.filter(
-            kind=system_agents.OKR_TASK_AGENT_KIND,
-            main_thread_id__in=[
-                system_agents._okr_task_main_thread_id(key_result_id)
-                for key_result_id in key_result_ids
-            ],
-        )
-        .order_by("main_thread_id", "-created_at")
-    )
-    workflows_by_thread: dict[str, SystemWorkflow] = {}
-    for workflow in workflows:
-        workflows_by_thread.setdefault(workflow.main_thread_id, workflow)
-    log_urls_by_workflow_id = _okr_task_generation_log_urls(
-        workflows_by_thread.values()
-    )
-    for objective in objectives:
-        for key_result in objective.key_results.all():
-            latest_workflow: SystemWorkflow | None = workflows_by_thread.get(
-                system_agents._okr_task_main_thread_id(key_result.pk)
-            )
-            key_result.task_generation_workflow = latest_workflow  # type: ignore[attr-defined]
-            key_result.task_generation_running = (  # type: ignore[attr-defined]
-                latest_workflow is not None
-                and latest_workflow.status == SystemWorkflow.STATUS_RUNNING
-            )
-            key_result.task_generation_log_url = (  # type: ignore[attr-defined]
-                log_urls_by_workflow_id.get(latest_workflow.pk)
-                if latest_workflow is not None
-                else ""
-            )
-
-
-def _okr_task_generation_log_urls(
-    workflows: Iterable[SystemWorkflow],
-) -> dict[int, str]:
-    workflow_ids = [workflow.pk for workflow in workflows]
-    if not workflow_ids:
-        return {}
-    runs = (
-        SystemAgentRun.objects.filter(workflow_id__in=workflow_ids)
-        .exclude(thread_id="")
-        .order_by("workflow_id", "-created_at")
-    )
-    urls: dict[int, str] = {}
-    for run in runs:
-        urls.setdefault(
-            run.workflow_id,
-            reverse("okr_task_generation_log", kwargs={"workflow_id": run.workflow_id}),
-        )
-    return urls
-
-
-def _okr_task_generation_workflow_for_log(
-    request: HttpRequest, workflow_id: int
-) -> SystemWorkflow:
-    if workflow_id < 1 or workflow_id > _MAX_BIGAUTOFIELD:
-        raise Http404("task generation log not found")
-    project = _active_project_from_request(request)
-    if project is None:
-        raise Http404("task generation log not found")
-    workflow = (
-        SystemWorkflow.objects.filter(
-            pk=workflow_id,
-            kind=system_agents.OKR_TASK_AGENT_KIND,
-        )
-        .first()
-    )
-    if workflow is None:
-        raise Http404("task generation log not found")
-    key_result_id = _workflow_state_int(workflow, "key_result_id")
-    key_result = (
-        KeyResult.objects.select_related("objective__project")
-        .filter(pk=key_result_id, objective__project=project)
-        .first()
-    )
-    if key_result is None:
-        raise Http404("task generation log not found")
-    return workflow
-
-
 def _attach_standing_order_run_state(orders: list[StandingOrder]) -> None:
     order_ids = [order.pk for order in orders]
     if not order_ids:
@@ -1394,7 +1001,6 @@ def _render_session_detail(
     metadata_by_thread = _metadata_by_thread_id([thread])
     session_project = _project_for_thread(thread, metadata_by_thread, projects)
     pr_url = _pr_url_for_thread(thread)
-    _mark_proposed_tasks_pr_opened(session_id, pr_url)
     active_instance = _active_instance_for(session_id)
     show_active_worker_transcript = _show_active_worker_transcript(active_instance)
     active_demo_worker = (
@@ -3299,33 +2905,6 @@ def _posted_new_session_target(
     return _NewSessionTarget(project.repo_path, project, False), None
 
 
-def _posted_proposed_task_for_new_session(
-    request: HttpRequest, target: _NewSessionTarget
-) -> tuple[ProposedTask | None, str | None]:
-    raw_task_id = request.POST.get("proposed_task", "").strip()
-    if not raw_task_id:
-        return None, None
-    try:
-        task_id = int(raw_task_id)
-    except ValueError:
-        return None, "proposed task is required"
-    if task_id < 1 or task_id > _MAX_BIGAUTOFIELD:
-        return None, "proposed task is required"
-    task = (
-        ProposedTask.objects.select_related("key_result__objective__project")
-        .filter(pk=task_id)
-        .first()
-    )
-    if task is None:
-        return None, "proposed task is required"
-    task_project = task.key_result.objective.project
-    if target.project is not None and target.project != task_project:
-        return None, "proposed task does not match project"
-    if target.project_cleared and target.cwd != task_project.repo_path:
-        return None, "proposed task does not match project"
-    return task, None
-
-
 def _posted_proposed_session_for_new_session(
     request: HttpRequest, target: _NewSessionTarget
 ) -> tuple[ProposedSession | None, str | None]:
@@ -3355,17 +2934,6 @@ def _posted_proposed_session_for_new_session(
     if target.project is None and target.cwd != session_project.repo_path:
         return None, "proposed session does not match project"
     return proposed_session, None
-
-
-def _accept_proposed_task_for_session(
-    task: ProposedTask | None, session_metadata: SessionMetadata
-) -> None:
-    if task is None:
-        return
-    task.outcome_status = ProposedTask.OUTCOME_ACCEPTED
-    task.session = session_metadata
-    task.pr_url = ""
-    task.save(update_fields=["outcome_status", "session", "pr_url", "updated_at"])
 
 
 def _accept_proposed_session_for_session(
@@ -4087,11 +3655,6 @@ def new_session(request: HttpRequest) -> HttpResponse:
     target, target_error = _posted_new_session_target(request, projects)
     if target_error is not None or target is None:
         return HttpResponseBadRequest(target_error or "invalid project")
-    proposed_task, proposed_task_error = _posted_proposed_task_for_new_session(
-        request, target
-    )
-    if proposed_task_error is not None:
-        return HttpResponseBadRequest(proposed_task_error)
     proposed_session, proposed_session_error = _posted_proposed_session_for_new_session(
         request, target
     )
@@ -4189,7 +3752,6 @@ def new_session(request: HttpRequest) -> HttpResponse:
                 "auto_pr_enabled": False,
             },
         )
-        _accept_proposed_task_for_session(proposed_task, session_metadata)
         _accept_proposed_session_for_session(proposed_session, session_metadata)
         remembered_values = settings._replace(last_selected_repo=cwd)
         user = _authenticated_user(request)
@@ -4258,7 +3820,6 @@ def new_session(request: HttpRequest) -> HttpResponse:
             "auto_pr_enabled": auto_pr_enabled,
         },
     )
-    _accept_proposed_task_for_session(proposed_task, session_metadata)
     _accept_proposed_session_for_session(proposed_session, session_metadata)
     remembered_values = settings._replace(last_selected_repo=cwd)
     user = _authenticated_user(request)
