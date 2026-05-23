@@ -318,6 +318,9 @@
                     {% if proposed_session.summary %}
                     <p>{{ proposed_session.summary }}</p>
                     {% endif %}
+                    {% if proposed_session.outcome_notes %}
+                    <p class="meta">Automation note: {{ proposed_session.outcome_notes }}</p>
+                    {% endif %}
                     {% if proposed_session.display_files %}
                     <div class="file-list" aria-label="Relevant files">
                         {% for file in proposed_session.display_files %}
@@ -332,6 +335,12 @@
                             <input type="hidden" name="outcome_status" value="{{ proposed_session_dismissed_status }}">
                             <button type="submit" class="button secondary">Dismiss</button>
                         </form>
+                        {% if proposed_session.candidate_log_url %}
+                        <a class="button secondary" href="{{ proposed_session.candidate_log_url }}">Candidate log</a>
+                        {% endif %}
+                        {% if proposed_session.judge_log_url %}
+                        <a class="button secondary" href="{{ proposed_session.judge_log_url }}">Judge log</a>
+                        {% endif %}
                         {% else %}
                         <form method="post" action="{% url 'update_proposed_session_outcome' proposed_session.pk %}">
                             {% csrf_token %}

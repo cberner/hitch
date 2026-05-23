@@ -54,6 +54,7 @@ PR_SLASH_PROMPT = (
     "30 minutes."
 )
 SYSTEM_AGENT_APPROVAL_MODE = "auto_review"
+STANDING_ORDER_IMPLEMENTATION_SANDBOX_POLICY = "workspaceWrite"
 QA_WORKFLOW_MAX_ITERATIONS = 3
 PR_QA_WORKFLOW_MAX_ITERATIONS = QA_WORKFLOW_MAX_ITERATIONS + 3
 STEP_QA_RUNNING = "qa_running"
@@ -70,6 +71,7 @@ STEP_PR_CLOSED = "pr_closed"
 STEP_STANDING_ORDER_CANDIDATE_RUNNING = "standing_order_candidate_running"
 STEP_STANDING_ORDER_JUDGE_RUNNING = "standing_order_judge_running"
 STEP_STANDING_ORDER_PROPOSED = "standing_order_proposed"
+STEP_STANDING_ORDER_DRAFT_STARTED = "standing_order_draft_started"
 STEP_STANDING_ORDER_SKIPPED = "standing_order_skipped"
 
 _QA_DESIGN_SYNTHESIS_STATE_KEY = "qa_design_synthesis_gate"
@@ -510,10 +512,10 @@ def start_standing_order_workflow(*, standing_order: StandingOrder) -> SystemWor
     try:
         _spawn_standing_order_candidate_run(workflow, standing_order)
     except Exception as exc:
-        _block_workflow(
+        _block_standing_order_workflow(
             workflow,
+            standing_order,
             f"failed to start standing order agent: {exc!r}",
-            surface_to_thread=False,
         )
     return workflow
 
@@ -613,10 +615,29 @@ def _maybe_start_auto_pr_workflow(instance: CodexInstance) -> None:
         }
         if instance.qa_panel_enabled:
             workflow_kwargs["qa_panel_enabled"] = True
-        start_pr_qa_workflow(**workflow_kwargs)
+        workflow = start_pr_qa_workflow(**workflow_kwargs)
+        if isinstance(workflow, SystemWorkflow):
+            _record_auto_pr_workflow_for_proposals(instance, workflow)
     except Exception:
         CodexInstance.objects.filter(pk=instance.pk).update(auto_pr_triggered_at=None)
         raise
+
+
+def _record_auto_pr_workflow_for_proposals(
+    instance: CodexInstance, workflow: SystemWorkflow
+) -> None:
+    metadata = SessionMetadata.objects.filter(thread_id=instance.thread_id).first()
+    if metadata is None:
+        return
+    for proposal in ProposedSession.objects.filter(accepted_session=metadata):
+        proposal.outcome_metadata = _proposal_outcome_metadata(
+            proposal,
+            {
+                "auto_pr_status": "started",
+                "auto_pr_workflow_id": workflow.pk,
+            },
+        )
+        proposal.save(update_fields=["outcome_metadata", "updated_at"])
 
 
 def _handle_system_agent_finished(instance: CodexInstance) -> None:
@@ -953,14 +974,6 @@ def _handle_standing_order_agent_finished(
 ) -> None:
     if workflow.status != SystemWorkflow.STATUS_RUNNING:
         return
-    if instance.status != CodexInstance.STATUS_COMPLETED:
-        _fail_run_and_block_workflow(
-            run,
-            f"standing order worker failed: {instance.error}",
-            surface_to_thread=False,
-        )
-        return
-
     standing_order = (
         StandingOrder.objects.select_related("project")
         .filter(pk=_state_int(workflow, "standing_order_id"))
@@ -973,16 +986,23 @@ def _handle_standing_order_agent_finished(
             surface_to_thread=False,
         )
         return
+    if instance.status != CodexInstance.STATUS_COMPLETED:
+        _fail_standing_order_run_and_block_workflow(
+            run,
+            standing_order,
+            f"standing order worker failed: {instance.error}",
+        )
+        return
 
     raw_output = _final_agent_text(instance.events_path)
     if workflow.step == STEP_STANDING_ORDER_CANDIDATE_RUNNING:
         candidate_output = _parse_standing_order_candidate_output(raw_output)
         if candidate_output is None:
-            _fail_run_and_block_workflow(
+            _fail_standing_order_run_and_block_workflow(
                 run,
+                standing_order,
                 "standing order candidate output was not valid JSON",
                 raw_output,
-                surface_to_thread=False,
             )
             return
         run.status = SystemAgentRun.STATUS_COMPLETED
@@ -1017,10 +1037,10 @@ def _handle_standing_order_agent_finished(
         try:
             _spawn_standing_order_judge_run(workflow, standing_order, candidate)
         except Exception as exc:
-            _block_workflow(
+            _block_standing_order_workflow(
                 workflow,
+                standing_order,
                 f"failed to start standing order judge: {exc!r}",
-                surface_to_thread=False,
             )
         return
 
@@ -1028,11 +1048,11 @@ def _handle_standing_order_agent_finished(
         return
     judgment = _parse_standing_order_judge_output(raw_output)
     if judgment is None:
-        _fail_run_and_block_workflow(
+        _fail_standing_order_run_and_block_workflow(
             run,
+            standing_order,
             "standing order judge output was not valid JSON",
             raw_output,
-            surface_to_thread=False,
         )
         return
     run.status = SystemAgentRun.STATUS_COMPLETED
@@ -1046,7 +1066,7 @@ def _handle_standing_order_agent_finished(
     if _confidence_meets_threshold(
         judgment["confidence"], standing_order.confidence_threshold
     ):
-        ProposedSession.objects.create(
+        proposal = ProposedSession.objects.create(
             project=standing_order.project,
             standing_order=standing_order,
             source_workflow=workflow,
@@ -1063,7 +1083,43 @@ def _handle_standing_order_agent_finished(
                 workflow, "candidate_session_id"
             ),
             judge_session=_session_metadata_from_state(workflow, "judge_session_id"),
+            outcome_metadata={
+                "standing_order_autonomy": standing_order.autonomy,
+                "automation_status": "proposed",
+            },
         )
+        workflow.state = {
+            **workflow.state,
+            "judgment": judgment,
+            "proposal_id": proposal.pk,
+            "autonomy": standing_order.autonomy,
+        }
+        if standing_order.autonomy != StandingOrder.AUTONOMY_PROPOSE_ONLY:
+            try:
+                implementation = _start_standing_order_implementation_session(
+                    standing_order, proposal
+                )
+            except Exception as exc:
+                _record_proposal_automation_failure(
+                    proposal,
+                    standing_order.autonomy,
+                    f"failed to start implementation session: {exc!r}",
+                )
+                _block_workflow(
+                    workflow,
+                    f"failed to start standing order implementation: {exc!r}",
+                    surface_to_thread=False,
+                )
+                return
+            workflow.step = STEP_STANDING_ORDER_DRAFT_STARTED
+            workflow.status = SystemWorkflow.STATUS_COMPLETED
+            workflow.state = {
+                **workflow.state,
+                "implementation_session_id": implementation.pk,
+                "implementation_thread_id": implementation.thread_id,
+            }
+            workflow.save(update_fields=["status", "step", "state", "updated_at"])
+            return
         workflow.step = STEP_STANDING_ORDER_PROPOSED
     else:
         workflow.step = STEP_STANDING_ORDER_SKIPPED
@@ -1281,6 +1337,116 @@ def _spawn_standing_order_judge_run(
         },
     )
     return run
+
+
+def _start_standing_order_implementation_session(
+    standing_order: StandingOrder, proposal: ProposedSession
+) -> SessionMetadata:
+    auto_pr_enabled = standing_order.autonomy == StandingOrder.AUTONOMY_DRAFT_PR
+    prompt = proposal.prompt.strip() or _fallback_proposed_session_prompt(proposal)
+    instance = codex_pool.spawn_new_session(
+        cwd=standing_order.project.repo_path,
+        prompt=prompt,
+        thread_name=proposal.title,
+        sandbox_policy=STANDING_ORDER_IMPLEMENTATION_SANDBOX_POLICY,
+        approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
+        auto_pr_enabled=auto_pr_enabled,
+        user_message_index=0,
+    )
+    metadata, _created = SessionMetadata.objects.update_or_create(
+        thread_id=instance.thread_id,
+        defaults={
+            "cwd": standing_order.project.repo_path,
+            "project": standing_order.project,
+            "project_cleared": False,
+            "auto_pr_enabled": auto_pr_enabled,
+        },
+    )
+    _record_proposal_automation_success(
+        proposal,
+        metadata,
+        autonomy=standing_order.autonomy,
+        auto_pr_enabled=auto_pr_enabled,
+    )
+    return metadata
+
+
+def _fallback_proposed_session_prompt(proposal: ProposedSession) -> str:
+    parts = ["Go ahead and implement this proposed session.", "", proposal.title]
+    if proposal.summary:
+        parts.extend(["", f"Summary:\n{proposal.summary}"])
+    files = _string_list(proposal.relevant_files)
+    if files:
+        parts.extend(["", "Relevant files:", *[f"- {file}" for file in files]])
+    return "\n".join(parts)
+
+
+def _record_proposal_automation_success(
+    proposal: ProposedSession,
+    implementation: SessionMetadata,
+    *,
+    autonomy: str,
+    auto_pr_enabled: bool,
+) -> None:
+    proposal.outcome_status = ProposedSession.OUTCOME_ACCEPTED
+    proposal.accepted_session = implementation
+    note = "Standing order autonomy started an implementation session automatically."
+    if auto_pr_enabled:
+        note = f"{note} Auto-PR will run after that session completes."
+    proposal.outcome_notes = note
+    proposal.outcome_metadata = _proposal_outcome_metadata(
+        proposal,
+        {
+            "accepted_by": "standing_order_autonomy",
+            "standing_order_autonomy": autonomy,
+            "automation_status": "implementation_started",
+            "accepted_session_id": implementation.pk,
+            "accepted_thread_id": implementation.thread_id,
+            "implementation_session_id": implementation.pk,
+            "implementation_thread_id": implementation.thread_id,
+            "auto_pr_enabled": auto_pr_enabled,
+        },
+    )
+    proposal.save(
+        update_fields=[
+            "outcome_status",
+            "outcome_notes",
+            "outcome_metadata",
+            "accepted_session",
+            "updated_at",
+        ]
+    )
+
+
+def _record_proposal_automation_failure(
+    proposal: ProposedSession, autonomy: str, error: str
+) -> None:
+    proposal.outcome_notes = error
+    proposal.outcome_metadata = _proposal_outcome_metadata(
+        proposal,
+        {
+            "standing_order_autonomy": autonomy,
+            "automation_status": "implementation_start_failed",
+            "automation_error": error,
+        },
+    )
+    proposal.save(update_fields=["outcome_notes", "outcome_metadata", "updated_at"])
+
+
+def _proposal_outcome_metadata(
+    proposal: ProposedSession, updates: dict[str, object]
+) -> dict[str, object]:
+    metadata = (
+        dict(proposal.outcome_metadata)
+        if isinstance(proposal.outcome_metadata, dict)
+        else {}
+    )
+    for key, value in updates.items():
+        if value is None:
+            metadata.pop(key, None)
+        else:
+            metadata[key] = value
+    return metadata
 
 
 def _spawn_pr_followup_monitor_run(workflow: SystemWorkflow) -> SystemAgentRun:
@@ -2193,7 +2359,7 @@ def _standing_order_history_sections(standing_order: StandingOrder) -> list[str]
             inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL
         )
         .exclude(outcome_status=ProposedSession.OUTCOME_UNSET)
-        .select_related("candidate_session")
+        .select_related("candidate_session", "accepted_session")
         .order_by("-updated_at", "-id")[:50]
     )
     return [_format_proposed_session_context(proposal) for proposal in proposals]
@@ -2204,6 +2370,15 @@ def _format_proposed_session_context(proposal: ProposedSession) -> str:
     candidate_id = (
         proposal.candidate_session.thread_id if proposal.candidate_session else "(none)"
     )
+    accepted_id = (
+        proposal.accepted_session.thread_id if proposal.accepted_session else "(none)"
+    )
+    outcome_metadata = (
+        json.dumps(proposal.outcome_metadata, sort_keys=True)
+        if isinstance(proposal.outcome_metadata, dict)
+        and proposal.outcome_metadata
+        else "(none)"
+    )
     notes_label = (
         "Reject reason"
         if proposal.outcome_status == ProposedSession.OUTCOME_REJECTED
@@ -2212,12 +2387,14 @@ def _format_proposed_session_context(proposal: ProposedSession) -> str:
     return (
         f"ProposedSession ID: {proposal.pk}\n"
         f"Candidate session ID: {candidate_id}\n"
+        f"Accepted session ID: {accepted_id}\n"
         f"Title: {proposal.title}\n"
         f"Confidence: {proposal.confidence}\n"
         f"Summary: {proposal.summary or '(none)'}\n"
         f"Prompt: {proposal.prompt or '(none)'}\n"
         f"Relevant files: {', '.join(files) if files else '(none)'}\n"
         f"Outcome status: {proposal.outcome_status}\n"
+        f"Outcome metadata: {outcome_metadata}\n"
         f"{notes_label}: {proposal.outcome_notes or '(none)'}"
     )
 
@@ -2571,12 +2748,7 @@ def _compact_pr_handoff(value: Any) -> dict[str, Any]:
             compact[key] = raw
         elif isinstance(raw, str) and raw.strip():
             compact[key] = raw.strip()
-        elif key in {
-            "unresolved_threads",
-            "latest_comments",
-            "failing_jobs",
-            "pending_jobs",
-        } and isinstance(raw, list):
+        elif key in _PR_HANDOFF_LIST_FIELDS and isinstance(raw, list):
             compact[key] = _compact_pr_list(raw)
     return compact
 
@@ -2656,6 +2828,53 @@ def _fail_run(
         return
     workflow = run.workflow
     _block_workflow(workflow, error, surface_to_thread=surface_to_thread)
+
+
+def _fail_standing_order_run_and_block_workflow(
+    run: SystemAgentRun,
+    standing_order: StandingOrder,
+    error: str,
+    raw_output: str = "",
+) -> None:
+    run.status = SystemAgentRun.STATUS_FAILED
+    run.error = error
+    run.raw_output = raw_output
+    run.save(update_fields=["status", "error", "raw_output", "updated_at"])
+    _block_standing_order_workflow(run.workflow, standing_order, error)
+
+
+def _block_standing_order_workflow(
+    workflow: SystemWorkflow, standing_order: StandingOrder, error: str
+) -> None:
+    _create_standing_order_failure_notice(workflow, standing_order, error)
+    _block_workflow(workflow, error, surface_to_thread=False)
+
+
+def _create_standing_order_failure_notice(
+    workflow: SystemWorkflow, standing_order: StandingOrder, error: str
+) -> None:
+    if ProposedSession.objects.filter(
+        source_workflow=workflow,
+        outcome_status=ProposedSession.OUTCOME_UNSET,
+    ).exists():
+        return
+    ProposedSession.objects.create(
+        project=standing_order.project,
+        standing_order=standing_order,
+        source_workflow=workflow,
+        title=f"Standing order failed: {standing_order.title}"[
+            :_STANDING_ORDER_TITLE_MAX_LEN
+        ],
+        inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
+        summary=f"Hitch could not finish this standing order run: {error}",
+        candidate_session=_session_metadata_from_state(workflow, "candidate_session_id"),
+        judge_session=_session_metadata_from_state(workflow, "judge_session_id"),
+        outcome_metadata={
+            "standing_order_autonomy": standing_order.autonomy,
+            "automation_status": "failed",
+            "automation_error": error,
+        },
+    )
 
 
 def _block_workflow(

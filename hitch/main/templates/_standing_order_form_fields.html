@@ -15,6 +15,14 @@
     </select>
 </label>
 <label>
+    Autonomy
+    <select name="autonomy" required>
+        {% for value, label in autonomy_choices %}
+        <option value="{{ value }}"{% if value == default_autonomy %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+    </select>
+</label>
+<label>
     Confidence threshold
     <select name="confidence_threshold" required>
         {% for value, label in confidence_choices %}

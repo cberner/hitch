@@ -95,6 +95,7 @@ class StandingOrderValues(NamedTuple):
     title: str
     goal: str
     ambition: str
+    autonomy: str
     confidence_threshold: str
 
 
@@ -689,6 +690,8 @@ def standing_orders(request: HttpRequest) -> HttpResponse:
             "standing_order_run_all_url": reverse("run_standing_orders"),
             "ambition_choices": StandingOrder.AMBITION_CHOICES,
             "default_ambition": StandingOrder.AMBITION_INCREMENTAL,
+            "autonomy_choices": StandingOrder.AUTONOMY_CHOICES,
+            "default_autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
             "confidence_choices": StandingOrder.CONFIDENCE_CHOICES,
             "default_confidence": StandingOrder.CONFIDENCE_HIGH,
             "title_max_len": _STANDING_ORDER_TITLE_MAX_LEN,
@@ -713,6 +716,7 @@ def create_standing_order(request: HttpRequest) -> HttpResponse:
         title=values.title,
         goal=values.goal,
         ambition=values.ambition,
+        autonomy=values.autonomy,
         confidence_threshold=values.confidence_threshold,
     )
     return redirect("standing_orders")
@@ -729,13 +733,16 @@ def edit_standing_order(request: HttpRequest, standing_order_id: int) -> HttpRes
     ).first()
     if standing_order is None:
         raise Http404("standing order not found")
-    values, error = _validated_standing_order_values(request)
+    values, error = _validated_standing_order_values(
+        request,
+        autonomy_default=standing_order.autonomy,
+    )
     if error is not None:
         return HttpResponseBadRequest(error)
     assert values is not None
 
     updates: list[str] = []
-    for field in ("title", "goal", "ambition", "confidence_threshold"):
+    for field in ("title", "goal", "ambition", "autonomy", "confidence_threshold"):
         value = getattr(values, field)
         if getattr(standing_order, field) != value:
             setattr(standing_order, field, value)
@@ -814,7 +821,23 @@ def update_proposed_session_outcome(
     update_fields = ["outcome_status", "outcome_notes", "updated_at"]
     if outcome_status == ProposedSession.OUTCOME_ACCEPTED:
         proposed_session.accepted_session = proposed_session.candidate_session
-        update_fields.append("accepted_session")
+        proposed_session.outcome_metadata = _proposal_outcome_metadata(
+            proposed_session,
+            {
+                "accepted_by": "user",
+                "accepted_session_id": (
+                    proposed_session.candidate_session_id
+                    if proposed_session.candidate_session_id is not None
+                    else None
+                ),
+                "accepted_thread_id": (
+                    proposed_session.candidate_session.thread_id
+                    if proposed_session.candidate_session is not None
+                    else ""
+                ),
+            },
+        )
+        update_fields.extend(["accepted_session", "outcome_metadata"])
     proposed_session.save(update_fields=update_fields)
     return redirect("inbox")
 
@@ -830,6 +853,8 @@ def _validated_standing_order_title(raw_title: str) -> tuple[str, str | None]:
 
 def _validated_standing_order_values(
     request: HttpRequest,
+    *,
+    autonomy_default: str = StandingOrder.AUTONOMY_PROPOSE_ONLY,
 ) -> tuple[StandingOrderValues | None, str | None]:
     title, error = _validated_standing_order_title(request.POST.get("title", ""))
     if error is not None:
@@ -841,6 +866,13 @@ def _validated_standing_order_values(
     valid_ambitions = {value for value, _label in StandingOrder.AMBITION_CHOICES}
     if ambition not in valid_ambitions:
         return None, "ambition is invalid"
+    autonomy = (
+        request.POST.get("autonomy", autonomy_default).strip()
+        or autonomy_default
+    )
+    valid_autonomies = {value for value, _label in StandingOrder.AUTONOMY_CHOICES}
+    if autonomy not in valid_autonomies:
+        return None, "autonomy is invalid"
     threshold = request.POST.get("confidence_threshold", "").strip()
     valid_thresholds = {value for value, _label in StandingOrder.CONFIDENCE_CHOICES}
     if threshold not in valid_thresholds:
@@ -849,6 +881,7 @@ def _validated_standing_order_values(
         title=title,
         goal=goal,
         ambition=ambition,
+        autonomy=autonomy,
         confidence_threshold=threshold,
     ), None
 
@@ -3017,9 +3050,38 @@ def _accept_proposed_session_for_session(
         return
     proposed_session.outcome_status = ProposedSession.OUTCOME_ACCEPTED
     proposed_session.accepted_session = session_metadata
-    proposed_session.save(
-        update_fields=["outcome_status", "accepted_session", "updated_at"]
+    proposed_session.outcome_metadata = _proposal_outcome_metadata(
+        proposed_session,
+        {
+            "accepted_by": "user",
+            "accepted_session_id": session_metadata.pk,
+            "accepted_thread_id": session_metadata.thread_id,
+        },
     )
+    proposed_session.save(
+        update_fields=[
+            "outcome_status",
+            "accepted_session",
+            "outcome_metadata",
+            "updated_at",
+        ]
+    )
+
+
+def _proposal_outcome_metadata(
+    proposed_session: ProposedSession, updates: dict[str, object]
+) -> dict[str, object]:
+    metadata = (
+        dict(proposed_session.outcome_metadata)
+        if isinstance(proposed_session.outcome_metadata, dict)
+        else {}
+    )
+    for key, value in updates.items():
+        if value is None:
+            metadata.pop(key, None)
+        else:
+            metadata[key] = value
+    return metadata
 
 
 def _posted_auto_pr_override(raw: str | None, *, default: bool) -> tuple[bool, str | None]:

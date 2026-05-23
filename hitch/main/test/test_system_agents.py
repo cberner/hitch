@@ -2241,6 +2241,334 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertEqual(proposal.candidate_session, candidate_metadata)
         self.assertEqual(proposal.judge_session, judge_metadata)
 
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_draft_patch_autonomy_starts_implementation_session(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+        )
+        candidate_metadata = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo",
+            project=project,
+        )
+        judge_metadata = SessionMetadata.objects.create(
+            thread_id="judge-thread",
+            cwd="/repo",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            state={
+                "standing_order_id": standing_order.pk,
+                "candidate_session_id": candidate_metadata.pk,
+                "judge_session_id": judge_metadata.pk,
+                "candidate": {
+                    "title": "Add parser coverage",
+                    "implementation_direction": "Add focused tests.",
+                    "relevant_files": ["hitch/main/rollout.py"],
+                },
+            },
+        )
+        instance = _instance(
+            thread_id="judge-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {
+                    "confidence": "high",
+                    "summary": "This adds focused parser coverage.",
+                    "rationale": "The files are well-scoped.",
+                },
+            ),
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            thread_id="judge-thread",
+            instance=instance,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="implementation-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(
+            workflow.step, system_agents.STEP_STANDING_ORDER_DRAFT_STARTED
+        )
+        proposal = ProposedSession.objects.get()
+        implementation = SessionMetadata.objects.get(thread_id="implementation-thread")
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
+        self.assertEqual(proposal.accepted_session, implementation)
+        self.assertEqual(
+            proposal.outcome_metadata["standing_order_autonomy"],
+            StandingOrder.AUTONOMY_DRAFT_PATCH,
+        )
+        self.assertEqual(
+            proposal.outcome_metadata["automation_status"],
+            "implementation_started",
+        )
+        self.assertFalse(proposal.outcome_metadata["auto_pr_enabled"])
+        self.assertFalse(implementation.auto_pr_enabled)
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(kwargs["cwd"], "/repo")
+        self.assertEqual(kwargs["thread_name"], "Add parser coverage")
+        self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
+        self.assertEqual(
+            kwargs["sandbox_policy"],
+            system_agents.STANDING_ORDER_IMPLEMENTATION_SANDBOX_POLICY,
+        )
+        self.assertFalse(kwargs["auto_pr_enabled"])
+        self.assertIn("Implementation guidance:\nAdd focused tests.", kwargs["prompt"])
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_draft_pr_autonomy_enables_auto_pr_for_implementation(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+            autonomy=StandingOrder.AUTONOMY_DRAFT_PR,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            state={
+                "standing_order_id": standing_order.pk,
+                "candidate": {
+                    "title": "Add parser coverage",
+                    "implementation_direction": "Add focused tests.",
+                    "relevant_files": [],
+                },
+            },
+        )
+        instance = _instance(
+            thread_id="judge-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {
+                    "confidence": "high",
+                    "summary": "This adds focused parser coverage.",
+                    "rationale": "The files are well-scoped.",
+                },
+            ),
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            thread_id="judge-thread",
+            instance=instance,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="implementation-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+            auto_pr_enabled=True,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        proposal = ProposedSession.objects.get()
+        implementation = SessionMetadata.objects.get(thread_id="implementation-thread")
+        self.assertTrue(mock_spawn.call_args.kwargs["auto_pr_enabled"])
+        self.assertTrue(implementation.auto_pr_enabled)
+        self.assertTrue(proposal.outcome_metadata["auto_pr_enabled"])
+        self.assertIn("Auto-PR will run", proposal.outcome_notes)
+
+    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    def test_draft_pr_implementation_completion_records_pr_workflow(
+        self, mock_start: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        implementation = SessionMetadata.objects.create(
+            thread_id="implementation-thread",
+            cwd="/repo",
+            project=project,
+            auto_pr_enabled=True,
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Add parser coverage",
+            accepted_session=implementation,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            outcome_metadata={"standing_order_autonomy": StandingOrder.AUTONOMY_DRAFT_PR},
+        )
+        pr_workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="implementation-thread",
+            cwd="/repo",
+        )
+        mock_start.return_value = pr_workflow
+        instance = _instance(
+            thread_id="implementation-thread",
+            auto_pr_enabled=True,
+            user_message_index=0,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        mock_start.assert_called_once()
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_metadata["auto_pr_status"], "started")
+        self.assertEqual(
+            proposal.outcome_metadata["auto_pr_workflow_id"], pr_workflow.pk
+        )
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_draft_patch_start_failure_leaves_visible_proposal(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        mock_spawn.side_effect = RuntimeError("app-server unavailable")
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            state={
+                "standing_order_id": standing_order.pk,
+                "candidate": {
+                    "title": "Add parser coverage",
+                    "implementation_direction": "Add focused tests.",
+                    "relevant_files": [],
+                },
+            },
+        )
+        instance = _instance(
+            thread_id="judge-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {
+                    "confidence": "high",
+                    "summary": "This adds focused parser coverage.",
+                    "rationale": "The files are well-scoped.",
+                },
+            ),
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            thread_id="judge-thread",
+            instance=instance,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        proposal = ProposedSession.objects.get()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertIsNone(proposal.accepted_session)
+        self.assertIn("failed to start implementation session", proposal.outcome_notes)
+        self.assertEqual(
+            proposal.outcome_metadata["automation_status"],
+            "implementation_start_failed",
+        )
+
+    def test_candidate_failure_creates_visible_notice(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate_metadata = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_STANDING_ORDER_CANDIDATE_RUNNING,
+            state={
+                "standing_order_id": standing_order.pk,
+                "candidate_session_id": candidate_metadata.pk,
+            },
+        )
+        instance = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_raw_events_file(
+                self,
+                [
+                    {
+                        "method": "item/completed",
+                        "payload": {
+                            "item": {
+                                "id": "a1",
+                                "type": "agentMessage",
+                                "text": "not json",
+                            }
+                        },
+                    }
+                ],
+            ),
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            thread_id="candidate-thread",
+            instance=instance,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        notice = ProposedSession.objects.get()
+        self.assertEqual(notice.inbox_kind, ProposedSession.INBOX_KIND_NOTICE)
+        self.assertEqual(notice.candidate_session, candidate_metadata)
+        self.assertIn("Standing order failed: Improve tests", notice.title)
+        self.assertIn("candidate output was not valid JSON", notice.summary)
+
     def test_judge_skips_proposal_below_threshold(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         standing_order = StandingOrder.objects.create(
