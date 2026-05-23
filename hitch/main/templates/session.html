@@ -1308,6 +1308,12 @@
             border-color: var(--accent);
             box-shadow: 0 0 0 3px var(--accent-soft);
         }
+        @media (max-width: 640px) {
+            .composer textarea {
+                /* Keep iOS from input-zooming, which breaks the keyboard offset math. */
+                font-size: 16px;
+            }
+        }
         .composer button {
             font: inherit;
             background: var(--accent);
