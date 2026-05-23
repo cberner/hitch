@@ -1,6 +1,7 @@
 import json
 import tempfile
 from pathlib import Path
+from typing import NamedTuple
 from unittest.mock import MagicMock, patch
 
 from django.db import IntegrityError, transaction
@@ -115,6 +116,18 @@ def _pr_tool_event(
             },
         },
     }
+
+
+class _DesignGateCase(NamedTuple):
+    name: str
+    current_feedback: str
+    expect_gate: bool
+    prior_feedback: str | None = None
+    prior_lgtm: bool = False
+    iteration: int = 1
+    expected_categories: tuple[str, ...] = ()
+    expected_files: tuple[str, ...] = ()
+    prompt_includes: tuple[str, ...] = ()
 
 
 class PrQaWorkflowTests(TestCase):
@@ -453,500 +466,138 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(workflow.state["next_user_message_index"], 3)
 
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    def test_repeated_design_feedback_triggers_synthesis_gate(
-        self, mock_spawn: MagicMock
-    ) -> None:
-        prior_workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="prior-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_PROMPT_SPAWNED,
-            iteration=1,
-        )
-        prior_instance = _instance(
-            thread_id="prior-qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=prior_workflow.pk,
-        )
-        SystemAgentRun.objects.create(
-            workflow=prior_workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="prior-qa-thread",
-            instance=prior_instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-            output={
-                "feedback": (
+    def test_qa_design_synthesis_gate_cases(self, mock_spawn: MagicMock) -> None:
+        cases = (
+            _DesignGateCase(
+                name="recurring file and state lifecycle feedback",
+                prior_feedback=(
                     "[P2] hitch/main/demo.py:230 lets stale superseded attempts "
                     "overwrite the active generation after cleanup."
                 ),
-                "lgtm": False,
-            },
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            iteration=1,
-            state={"next_user_message_index": 2},
-        )
-        events_path = _events_file(
-            self,
-            {
-                "feedback": (
+                current_feedback=(
                     "[P2] hitch/main/demo.py:287 still has a stale generation "
                     "race where a cancelled attempt overwrites active state."
                 ),
-                "lgtm": False,
-            },
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=events_path,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        gate = workflow.state[system_agents._QA_DESIGN_SYNTHESIS_STATE_KEY]
-        self.assertEqual(gate["triggered_at_iteration"], 2)
-        self.assertIn("state_lifecycle", gate["recurring_categories"])
-        self.assertIn("hitch/main/demo.py", gate["recurring_files"])
-        prompt = mock_spawn.call_args.kwargs["prompt"]
-        self.assertIn("QA Design Synthesis Gate", prompt)
-        self.assertIn("pause and simplify", prompt)
-        self.assertIn("Prior related QA feedback", prompt)
-
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    def test_unrelated_first_qa_feedback_does_not_trigger_synthesis_gate(
-        self, mock_spawn: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            state={"next_user_message_index": 2},
-        )
-        events_path = _events_file(
-            self,
-            {
-                "feedback": (
+                expect_gate=True,
+                expected_categories=("state_lifecycle",),
+                expected_files=("hitch/main/demo.py",),
+                prompt_includes=(
+                    "QA Design Synthesis Gate",
+                    "pause and simplify",
+                    "Prior related QA feedback",
+                ),
+            ),
+            _DesignGateCase(
+                name="first unrelated feedback",
+                current_feedback=(
                     "[P2] hitch/main/views.py:120 returns the wrong template "
                     "for this single path."
                 ),
-                "lgtm": False,
-            },
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=events_path,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        self.assertNotIn(system_agents._QA_DESIGN_SYNTHESIS_STATE_KEY, workflow.state)
-        self.assertIn("Feedback from Hitch QA agent", mock_spawn.call_args.kwargs["prompt"])
-        self.assertNotIn("QA Design Synthesis Gate", mock_spawn.call_args.kwargs["prompt"])
-
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    def test_design_gate_ignores_substring_keyword_matches(
-        self, mock_spawn: MagicMock
-    ) -> None:
-        prior_workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="prior-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_PROMPT_SPAWNED,
-        )
-        prior_instance = _instance(
-            thread_id="prior-qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=prior_workflow.pk,
-        )
-        SystemAgentRun.objects.create(
-            workflow=prior_workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="prior-qa-thread",
-            instance=prior_instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-            output={
-                "feedback": (
-                    "Manual QA for hitch/main/views.py: interactive test suite passed."
-                ),
-                "lgtm": False,
-            },
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            iteration=1,
-            state={"next_user_message_index": 2},
-        )
-        events_path = _events_file(
-            self,
-            {
-                "feedback": (
+                expect_gate=False,
+                iteration=0,
+            ),
+            _DesignGateCase(
+                name="substring keyword match",
+                prior_feedback="Manual QA for hitch/main/views.py: interactive test suite passed.",
+                current_feedback=(
                     "[P2] hitch/main/views.py:120 has an interactive test suite "
                     "coverage gap."
                 ),
-                "lgtm": False,
-            },
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=events_path,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        self.assertNotIn(system_agents._QA_DESIGN_SYNTHESIS_STATE_KEY, workflow.state)
-        self.assertNotIn("QA Design Synthesis Gate", mock_spawn.call_args.kwargs["prompt"])
-
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    def test_design_gate_ignores_prior_lgtm_feedback(
-        self, mock_spawn: MagicMock
-    ) -> None:
-        prior_workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="prior-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_PROMPT_SPAWNED,
-        )
-        prior_instance = _instance(
-            thread_id="prior-qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=prior_workflow.pk,
-        )
-        SystemAgentRun.objects.create(
-            workflow=prior_workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="prior-qa-thread",
-            instance=prior_instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-            output={
-                "feedback": (
-                    "No findings. Browser UI status rendered for hitch/main/views.py."
-                ),
-                "lgtm": True,
-            },
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            state={"next_user_message_index": 2},
-        )
-        events_path = _events_file(
-            self,
-            {
-                "feedback": (
-                    "[P2] hitch/main/views.py:120 leaves browser UI status stale."
-                ),
-                "lgtm": False,
-            },
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=events_path,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        self.assertNotIn(system_agents._QA_DESIGN_SYNTHESIS_STATE_KEY, workflow.state)
-        self.assertNotIn("QA Design Synthesis Gate", mock_spawn.call_args.kwargs["prompt"])
-
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    def test_design_gate_ignores_category_words_in_file_paths(
-        self, mock_spawn: MagicMock
-    ) -> None:
-        prior_workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="prior-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_PROMPT_SPAWNED,
-        )
-        prior_instance = _instance(
-            thread_id="prior-qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=prior_workflow.pk,
-        )
-        SystemAgentRun.objects.create(
-            workflow=prior_workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="prior-qa-thread",
-            instance=prior_instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-            output={
-                "feedback": (
+                expect_gate=False,
+            ),
+            _DesignGateCase(
+                name="prior lgtm feedback",
+                prior_feedback="No findings. Browser UI status rendered for hitch/main/views.py.",
+                prior_lgtm=True,
+                current_feedback="[P2] hitch/main/views.py:120 leaves browser UI status stale.",
+                expect_gate=False,
+            ),
+            _DesignGateCase(
+                name="category words in file paths",
+                prior_feedback=(
                     "[P2] frontend/state_guard.tsx:14 and config/schema.json "
                     "return the wrong value."
                 ),
-                "lgtm": False,
-            },
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            iteration=1,
-            state={"next_user_message_index": 2},
-        )
-        events_path = _events_file(
-            self,
-            {
-                "feedback": (
+                current_feedback=(
                     "[P2] frontend/state_guard.tsx:20 and config/schema.json "
                     "miss a test assertion."
                 ),
-                "lgtm": False,
-            },
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=events_path,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        self.assertNotIn(system_agents._QA_DESIGN_SYNTHESIS_STATE_KEY, workflow.state)
-        self.assertNotIn("QA Design Synthesis Gate", mock_spawn.call_args.kwargs["prompt"])
-
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    def test_design_gate_ignores_dotted_prose_as_file_overlap(
-        self, mock_spawn: MagicMock
-    ) -> None:
-        prior_workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="prior-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_PROMPT_SPAWNED,
-        )
-        prior_instance = _instance(
-            thread_id="prior-qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=prior_workflow.pk,
-        )
-        SystemAgentRun.objects.create(
-            workflow=prior_workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="prior-qa-thread",
-            instance=prior_instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-            output={
-                "feedback": "State validation is unclear, e.g. around v1.2.3.",
-                "lgtm": False,
-            },
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            iteration=1,
-            state={"next_user_message_index": 2},
-        )
-        events_path = _events_file(
-            self,
-            {
-                "feedback": "State validation still fails, e.g. in v1.2.3.",
-                "lgtm": False,
-            },
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=events_path,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        self.assertNotIn(system_agents._QA_DESIGN_SYNTHESIS_STATE_KEY, workflow.state)
-        self.assertNotIn("QA Design Synthesis Gate", mock_spawn.call_args.kwargs["prompt"])
-
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    def test_design_gate_ignores_urls_as_file_overlap(
-        self, mock_spawn: MagicMock
-    ) -> None:
-        prior_workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="prior-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_PROMPT_SPAWNED,
-        )
-        prior_instance = _instance(
-            thread_id="prior-qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=prior_workflow.pk,
-        )
-        SystemAgentRun.objects.create(
-            workflow=prior_workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="prior-qa-thread",
-            instance=prior_instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-            output={
-                "feedback": (
-                    "Browser status is unclear; see https://docs.example.com/spec.v1."
-                ),
-                "lgtm": False,
-            },
-        )
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            iteration=1,
-            state={"next_user_message_index": 2},
-        )
-        events_path = _events_file(
-            self,
-            {
-                "feedback": (
-                    "Browser status still fails; see https://docs.example.com/spec.v1."
-                ),
-                "lgtm": False,
-            },
-        )
-        instance = _instance(
-            thread_id="qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=events_path,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
-            instance=instance,
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        workflow.refresh_from_db()
-        self.assertNotIn(system_agents._QA_DESIGN_SYNTHESIS_STATE_KEY, workflow.state)
-        self.assertNotIn("QA Design Synthesis Gate", mock_spawn.call_args.kwargs["prompt"])
-
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    def test_design_gate_strips_extensionless_paths_before_categorizing(
-        self, mock_spawn: MagicMock
-    ) -> None:
-        prior_workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="prior-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_COMPLETED,
-            step=system_agents.STEP_PR_PROMPT_SPAWNED,
-        )
-        prior_instance = _instance(
-            thread_id="prior-qa-thread",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=prior_workflow.pk,
-        )
-        SystemAgentRun.objects.create(
-            workflow=prior_workflow,
-            agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="prior-qa-thread",
-            instance=prior_instance,
-            status=SystemAgentRun.STATUS_COMPLETED,
-            output={
-                "feedback": (
+                expect_gate=False,
+            ),
+            _DesignGateCase(
+                name="dotted prose as file overlap",
+                prior_feedback="State validation is unclear, e.g. around v1.2.3.",
+                current_feedback="State validation still fails, e.g. in v1.2.3.",
+                expect_gate=False,
+            ),
+            _DesignGateCase(
+                name="urls as file overlap",
+                prior_feedback="Browser status is unclear; see https://docs.example.com/spec.v1.",
+                current_feedback="Browser status still fails; see https://docs.example.com/spec.v1.",
+                expect_gate=False,
+            ),
+            _DesignGateCase(
+                name="extensionless paths before categorizing",
+                prior_feedback=(
                     "[P2] services/state/ and hitch/main/migrations/ return "
                     "the wrong value."
                 ),
-                "lgtm": False,
-            },
+                current_feedback=(
+                    "[P2] services/state/ and hitch/main/migrations/ miss "
+                    "a test assertion."
+                ),
+                expect_gate=False,
+                iteration=0,
+            ),
         )
+
+        for index, case in enumerate(cases):
+            with self.subTest(case=case.name):
+                mock_spawn.reset_mock()
+                workflow = self._finish_design_gate_case(case, index)
+
+                mock_spawn.assert_called_once()
+                prompt = mock_spawn.call_args.kwargs["prompt"]
+                gate = workflow.state.get(system_agents._QA_DESIGN_SYNTHESIS_STATE_KEY)
+                if case.expect_gate:
+                    self.assertIsNotNone(gate)
+                    self.assertEqual(gate["triggered_at_iteration"], case.iteration + 1)
+                    for category in case.expected_categories:
+                        self.assertIn(category, gate["recurring_categories"])
+                    for file_path in case.expected_files:
+                        self.assertIn(file_path, gate["recurring_files"])
+                    for expected_text in case.prompt_includes:
+                        self.assertIn(expected_text, prompt)
+                else:
+                    self.assertIsNone(gate)
+                    self.assertIn("Feedback from Hitch QA agent", prompt)
+                    self.assertNotIn("QA Design Synthesis Gate", prompt)
+
+    def _finish_design_gate_case(self, case: _DesignGateCase, index: int) -> SystemWorkflow:
+        slug = f"design-gate-{index}"
+        cwd = f"/repo/{slug}"
+        if case.prior_feedback is not None:
+            self._record_prior_design_feedback(
+                cwd=cwd,
+                feedback=case.prior_feedback,
+                lgtm=case.prior_lgtm,
+                slug=slug,
+            )
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
+            main_thread_id=f"{slug}-main-thread",
+            cwd=cwd,
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_QA_RUNNING,
+            iteration=case.iteration,
             state={"next_user_message_index": 2},
         )
         events_path = _events_file(
             self,
-            {
-                "feedback": (
-                    "[P2] services/state/ and hitch/main/migrations/ miss "
-                    "a test assertion."
-                ),
-                "lgtm": False,
-            },
+            {"feedback": case.current_feedback, "lgtm": False},
         )
         instance = _instance(
-            thread_id="qa-thread",
+            thread_id=f"{slug}-qa-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
             events_path=events_path,
@@ -954,15 +605,39 @@ class PrQaWorkflowTests(TestCase):
         SystemAgentRun.objects.create(
             workflow=workflow,
             agent_kind=system_agents.PR_QA_AGENT_KIND,
-            thread_id="qa-thread",
+            thread_id=f"{slug}-qa-thread",
             instance=instance,
         )
 
         system_agents.on_codex_instance_finished(instance)
 
         workflow.refresh_from_db()
-        self.assertNotIn(system_agents._QA_DESIGN_SYNTHESIS_STATE_KEY, workflow.state)
-        self.assertNotIn("QA Design Synthesis Gate", mock_spawn.call_args.kwargs["prompt"])
+        return workflow
+
+    def _record_prior_design_feedback(
+        self, *, cwd: str, feedback: str, lgtm: bool, slug: str
+    ) -> None:
+        prior_workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id=f"{slug}-prior-thread",
+            cwd=cwd,
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_PROMPT_SPAWNED,
+            iteration=1,
+        )
+        prior_instance = _instance(
+            thread_id=f"{slug}-prior-qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=prior_workflow.pk,
+        )
+        SystemAgentRun.objects.create(
+            workflow=prior_workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id=f"{slug}-prior-qa-thread",
+            instance=prior_instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+            output={"feedback": feedback, "lgtm": lgtm},
+        )
 
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
     def test_qa_lgtm_spawns_pr_prompt(self, mock_spawn: MagicMock) -> None:
