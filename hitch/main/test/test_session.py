@@ -3021,6 +3021,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "window.visualViewport")
         self.assertContains(response, 'window.matchMedia("(max-width: 640px)")')
         self.assertContains(response, "viewport.scale")
+        self.assertContains(response, "font-size: 16px;")
         self.assertContains(response, "document.documentElement.style.setProperty")
         self.assertContains(response, "scheduleComposerKeyboardOffset")
 
