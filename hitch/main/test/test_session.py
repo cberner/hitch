@@ -17,8 +17,6 @@ from hitch.main import codex_events, demo, system_agents
 from hitch.main.diffs import DiffFile, DiffLine, DiffView
 from hitch.main.models import (
     CodexInstance,
-    KeyResult,
-    Objective,
     Project,
     SessionDemo,
     SessionMetadata,
@@ -406,8 +404,6 @@ class SessionViewTests(TestCase):
         nav_html = body[nav_start:nav_end]
         self.assertIn(f'href="{reverse("standing_orders")}"', nav_html)
         self.assertIn(">standing orders</a>", nav_html)
-        self.assertIn(f'href="{reverse("okrs")}"', nav_html)
-        self.assertIn(">OKRs</a>", nav_html)
         self.assertContains(response, "@media (max-width: 900px)")
 
     @patch("hitch.main.views.Codex")
@@ -2855,100 +2851,6 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "QA agent approved the diff.")
         self.assertContains(response, "No qualifying findings.")
         self.assertLess(body.index("Done"), body.index("QA agent approved the diff."))
-
-    @patch("hitch.main.views.Codex")
-    def test_okr_task_generation_log_is_read_only_session_view(
-        self, mock_codex: MagicMock
-    ) -> None:
-        _patch_thread(
-            self,
-            mock_codex,
-            _thread([], id="task-thread", name="Task thread", cwd="/repo"),
-        )
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
-        objective = Objective.objects.create(project=project, title="Improve planning")
-        key_result = KeyResult.objects.create(objective=objective, title="Draft plan")
-        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        workflow = SystemWorkflow.objects.create(
-            kind=system_agents.OKR_TASK_AGENT_KIND,
-            main_thread_id=system_agents._okr_task_main_thread_id(key_result.pk),
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_OKR_TASKS_RUNNING,
-            state={"key_result_id": key_result.pk},
-        )
-        instance = _make_codex_instance(
-            thread_id="task-thread",
-            status=CodexInstance.STATUS_RUNNING,
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            agent_kind=system_agents.OKR_TASK_AGENT_KIND,
-            prompt="generate tasks",
-            pid=_LIVE_PID,
-        )
-        SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.OKR_TASK_AGENT_KIND,
-            thread_id="task-thread",
-            instance=instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-
-        response = self.client.get(
-            reverse("okr_task_generation_log", kwargs={"workflow_id": workflow.pk})
-        )
-        stream_path = reverse("session_stream", kwargs={"session_id": "task-thread"})
-        stop_url = reverse("stop_session", kwargs={"session_id": "task-thread"})
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, '<body class="read-only">')
-        self.assertContains(response, "Task generation log")
-        self.assertContains(response, "data-live-root")
-        self.assertContains(response, 'data-read-only="true"')
-        self.assertContains(
-            response,
-            f'data-stream-url="{stream_path}?baseline={instance.pk}&amp;active={instance.pk}&amp;workflow=&amp;demo="',
-        )
-        html = response.content.decode()
-        self.assertIn(
-            "approvals.set(id, { node: wrap, box, actions: null, resolved: false });",
-            html,
-        )
-        self.assertIn("actions: null,\n                        answers: {},", html)
-        self.assertIn("resolved: false,\n                    });", html)
-        self.assertEqual(
-            html.count(
-                "if (entry.actions && entry.actions.parentNode) entry.actions.remove();"
-            ),
-            2,
-        )
-        self.assertNotContains(response, 'aria-label="Session actions"')
-        self.assertNotContains(response, 'class="composer"')
-        self.assertNotContains(response, f'formaction="{stop_url}"')
-
-    @patch("hitch.main.views.Codex")
-    def test_okr_task_generation_log_requires_selected_project(
-        self, mock_codex: MagicMock
-    ) -> None:
-        _patch_thread(self, mock_codex, _thread([], id="task-thread"))
-        project = Project.objects.create(name="Hitch", repo_path="/repo")
-        other = Project.objects.create(name="Other", repo_path="/other")
-        objective = Objective.objects.create(project=project, title="Improve planning")
-        key_result = KeyResult.objects.create(objective=objective, title="Draft plan")
-        _seed_cookies(self.client, hitch_selected_project_id=str(other.pk))
-        workflow = SystemWorkflow.objects.create(
-            kind=system_agents.OKR_TASK_AGENT_KIND,
-            main_thread_id=system_agents._okr_task_main_thread_id(key_result.pk),
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            state={"key_result_id": key_result.pk},
-        )
-
-        response = self.client.get(
-            reverse("okr_task_generation_log", kwargs={"workflow_id": workflow.pk})
-        )
-
-        self.assertEqual(response.status_code, 404)
 
     @patch("hitch.main.views.Codex")
     def test_system_session_detail_is_read_only_and_shows_system_prompt(

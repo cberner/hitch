@@ -53,120 +53,6 @@ class Project(models.Model):
         return self.name
 
 
-class Objective(models.Model):
-    """A project-level outcome that groups key results."""
-
-    project = models.ForeignKey(
-        Project,
-        on_delete=models.CASCADE,
-        related_name="objectives",
-    )
-    title = models.CharField(max_length=200)
-    description = models.TextField(blank=True, default="")
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ["created_at", "id"]
-        indexes = [
-            models.Index(fields=["project", "created_at"]),
-        ]
-
-    @override
-    def __str__(self) -> str:
-        return self.title
-
-
-class KeyResult(models.Model):
-    """A measurable result nested under an objective."""
-
-    objective = models.ForeignKey(
-        Objective,
-        on_delete=models.CASCADE,
-        related_name="key_results",
-    )
-    title = models.CharField(max_length=200)
-    description = models.TextField(blank=True, default="")
-    work_instructions = models.TextField(blank=True, default="")
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ["created_at", "id"]
-        indexes = [
-            models.Index(fields=["objective", "created_at"]),
-        ]
-
-    @override
-    def __str__(self) -> str:
-        return self.title
-
-
-class ProposedTask(models.Model):
-    """A generated task proposal for accomplishing a key result."""
-
-    OUTCOME_UNSET = ""
-    OUTCOME_ACCEPTED = "accepted"
-    OUTCOME_REJECTED = "rejected"
-    OUTCOME_PR_OPENED = "pr_opened"
-    OUTCOME_COMPLETED = "completed"
-    OUTCOME_SUPERSEDED = "superseded"
-
-    OUTCOME_CHOICES = (
-        (OUTCOME_UNSET, "Not set"),
-        (OUTCOME_ACCEPTED, "Accepted"),
-        (OUTCOME_REJECTED, "Rejected"),
-        (OUTCOME_PR_OPENED, "PR opened"),
-        (OUTCOME_COMPLETED, "Completed"),
-        (OUTCOME_SUPERSEDED, "Superseded"),
-    )
-
-    key_result = models.ForeignKey(
-        KeyResult,
-        on_delete=models.CASCADE,
-        related_name="proposed_tasks",
-    )
-    source_workflow = models.ForeignKey(
-        "SystemWorkflow",
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="proposed_tasks",
-    )
-    title = models.CharField(max_length=200)
-    description = models.TextField(blank=True, default="")
-    success_criteria = models.TextField(blank=True, default="")
-    rationale = models.TextField(blank=True, default="")
-    outcome_status = models.CharField(
-        max_length=32,
-        choices=OUTCOME_CHOICES,
-        blank=True,
-        default=OUTCOME_UNSET,
-    )
-    outcome_notes = models.TextField(blank=True, default="")
-    session = models.ForeignKey(
-        "SessionMetadata",
-        null=True,
-        blank=True,
-        on_delete=models.SET_NULL,
-        related_name="proposed_tasks",
-    )
-    pr_url = models.URLField(max_length=512, blank=True, default="")
-    sort_order = models.PositiveIntegerField(default=0)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ["created_at", "sort_order", "id"]
-        indexes = [
-            models.Index(fields=["key_result", "created_at"]),
-        ]
-
-    @override
-    def __str__(self) -> str:
-        return self.title
-
-
 class StandingOrder(models.Model):
     """A project-scoped recurring goal that can propose Codex sessions."""
 
@@ -472,7 +358,6 @@ class SystemWorkflow(models.Model):
     """Durable state for Hitch-managed system-agent workflows."""
 
     KIND_PR_QA = "pr_qa"
-    KIND_OKR_TASK_GENERATION = "okr_task_generation"
     KIND_STANDING_ORDER_RUN = "standing_order_run"
 
     STATUS_RUNNING = "running"
