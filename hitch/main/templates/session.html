@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
     <meta name="theme-color" content="#f7f2e8" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#161c1a" media="(prefers-color-scheme: dark)">
     <title>HITCH — {{ display_title }}</title>
@@ -2488,10 +2488,12 @@
                     : [];
                 const composerKeyboardOffsetProperty = "--composer-keyboard-offset";
                 const mobileComposerQuery = window.matchMedia("(max-width: 640px)");
+                const composerKeyboardSettleDelays = [50, 150, 300, 500];
                 const prPrompt = "{{ pr_slash_prompt|escapejs }}";
                 const qaPrompt = "{{ qa_slash_prompt|escapejs }}";
                 const workflowLocked = composer.dataset.workflowLocked === "true";
                 let composerKeyboardFrame = 0;
+                let composerKeyboardSettleTimers = [];
                 const sync = () => {
                     input.style.height = "auto";
                     input.style.height = input.scrollHeight + "px";
@@ -2499,6 +2501,12 @@
                 };
                 const clearComposerKeyboardOffset = () => {
                     document.documentElement.style.removeProperty(composerKeyboardOffsetProperty);
+                };
+                const clearComposerKeyboardSettleTimers = () => {
+                    for (const timer of composerKeyboardSettleTimers) {
+                        window.clearTimeout(timer);
+                    }
+                    composerKeyboardSettleTimers = [];
                 };
                 const updateComposerKeyboardOffset = () => {
                     composerKeyboardFrame = 0;
@@ -2512,7 +2520,10 @@
                         clearComposerKeyboardOffset();
                         return;
                     }
-                    const layoutHeight = document.documentElement.clientHeight || window.innerHeight;
+                    const layoutHeight = Math.max(
+                        document.documentElement.clientHeight || 0,
+                        window.innerHeight || 0,
+                    );
                     const offset = Math.max(
                         0,
                         Math.ceil(layoutHeight - viewport.height - viewport.offsetTop),
@@ -2529,6 +2540,14 @@
                 const scheduleComposerKeyboardOffset = () => {
                     if (composerKeyboardFrame) return;
                     composerKeyboardFrame = window.requestAnimationFrame(updateComposerKeyboardOffset);
+                };
+                const scheduleSettledComposerKeyboardOffset = () => {
+                    scheduleComposerKeyboardOffset();
+                    clearComposerKeyboardSettleTimers();
+                    if (!composer.contains(document.activeElement)) return;
+                    composerKeyboardSettleTimers = composerKeyboardSettleDelays.map(
+                        (delay) => window.setTimeout(scheduleComposerKeyboardOffset, delay),
+                    );
                 };
                 const parsePlanCommand = () => {
                     const text = input.value.trim();
@@ -2661,15 +2680,16 @@
                     event.preventDefault();
                     requestSubmit(composer, submit);
                 });
-                composer.addEventListener("focusin", scheduleComposerKeyboardOffset);
+                composer.addEventListener("focusin", scheduleSettledComposerKeyboardOffset);
                 composer.addEventListener("focusout", () => {
+                    clearComposerKeyboardSettleTimers();
                     window.setTimeout(scheduleComposerKeyboardOffset, 0);
                 });
                 if (window.visualViewport) {
-                    window.visualViewport.addEventListener("resize", scheduleComposerKeyboardOffset);
-                    window.visualViewport.addEventListener("scroll", scheduleComposerKeyboardOffset);
+                    window.visualViewport.addEventListener("resize", scheduleSettledComposerKeyboardOffset);
+                    window.visualViewport.addEventListener("scroll", scheduleSettledComposerKeyboardOffset);
                 }
-                window.addEventListener("resize", scheduleComposerKeyboardOffset);
+                window.addEventListener("resize", scheduleSettledComposerKeyboardOffset);
                 composer.addEventListener("submit", (event) => {
                     const submitter = event.submitter || document.activeElement;
                     if (workflowLocked && submitter !== stop) {
