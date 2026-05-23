@@ -20,6 +20,7 @@ from hitch.main.models import (
     ProposedSession,
     SessionMetadata,
     StandingOrder,
+    StandingOrderMemory,
     SystemAgentRun,
     SystemWorkflow,
 )
@@ -126,6 +127,12 @@ _QA_DESIGN_KEYWORDS_BY_CATEGORY: dict[str, tuple[str, ...]] = {
     ),
 }
 _STANDING_ORDER_INLINE_HISTORY_CHARS = 10_000
+_STANDING_ORDER_MEMORY_CONTEXT_CHARS = 10_000
+_STANDING_ORDER_MEMORY_MAX_ROWS = 200
+_STANDING_ORDER_MEMORY_COMPACT_RECENT_COUNT = 8
+_STANDING_ORDER_MEMORY_FULL_SUMMARY_CHARS = 700
+_STANDING_ORDER_MEMORY_COMPACT_SUMMARY_CHARS = 180
+_STANDING_ORDER_MEMORY_FILE_LIMIT = 80
 _STANDING_ORDER_TITLE_MAX_LEN = 200
 _CONFIDENCE_RANK = {
     StandingOrder.CONFIDENCE_MEDIUM: 1,
@@ -146,7 +153,12 @@ _QA_OUTPUT_SCHEMA: dict[str, Any] = {
 _STANDING_ORDER_CANDIDATE_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["proposal", "message"],
+    "required": [
+        "proposal",
+        "message",
+        "next_steps_summary",
+        "memory_relevant_files",
+    ],
     "properties": {
         "proposal": {
             "type": ["object", "null"],
@@ -167,6 +179,8 @@ _STANDING_ORDER_CANDIDATE_OUTPUT_SCHEMA: dict[str, Any] = {
             },
         },
         "message": {"type": "string"},
+        "next_steps_summary": {"type": "string"},
+        "memory_relevant_files": {"type": "array", "items": {"type": "string"}},
     },
 }
 
@@ -558,6 +572,7 @@ def _handle_standing_order_agent_finished(
         run.output = candidate_output
         run.raw_output = raw_output
         run.save(update_fields=["status", "output", "raw_output", "updated_at"])
+        _store_standing_order_memory(standing_order, workflow, candidate_output)
         if candidate_output["proposal"] is None:
             message = str(candidate_output["message"])
             ProposedSession.objects.create(
@@ -671,7 +686,7 @@ def _spawn_pr_qa_run(workflow: SystemWorkflow) -> SystemAgentRun:
 def _spawn_standing_order_candidate_run(
     workflow: SystemWorkflow, standing_order: StandingOrder
 ) -> SystemAgentRun:
-    prompt = _standing_order_candidate_prompt(workflow, standing_order)
+    prompt, memory_context = _standing_order_candidate_prompt(workflow, standing_order)
     instance = codex_pool.spawn_new_session(
         cwd=workflow.cwd,
         prompt=prompt,
@@ -704,6 +719,8 @@ def _spawn_standing_order_candidate_run(
             "input": {
                 "cwd": workflow.cwd,
                 "standing_order_id": standing_order.pk,
+                "memory_count": memory_context.count,
+                "memory_compacted": memory_context.compacted,
             },
         },
     )
@@ -1015,30 +1032,50 @@ def _qa_design_synthesis_feedback_prompt(
 
 def _standing_order_candidate_prompt(
     workflow: SystemWorkflow, standing_order: StandingOrder
-) -> str:
+) -> tuple[str, _StandingOrderMemoryPromptContext]:
     ambition = _standing_order_ambition_guidance(standing_order)
-    return (
+    memory_context = _standing_order_memory_context(standing_order)
+    prompt = (
         "You are Hitch's standing order agent.\n\n"
         "Thoroughly analyze the codebase and find one way to make "
         f"{ambition.candidate_progress} toward the standing order goal. "
         "Do not make code changes. "
-        "Focus on a concrete session that a user could accept and continue from.\n\n"
+        "Focus on a concrete session that a user could accept and continue from. "
+        "Use standing-order memory to avoid repeating recently proposed, skipped, "
+        "or processed files unless repeating one is clearly the best next step.\n\n"
         f"Repository cwd: {workflow.cwd}\n"
         f"Standing order title: {standing_order.title}\n\n"
         "Standing order goal:\n"
         f"{standing_order.goal}\n\n"
+        "Standing order memory from previous candidate runs:\n"
+        f"{memory_context.text}\n\n"
         "Return only JSON matching this shape: "
         '{"proposal": {"title": string, "summary": string, "impact": string, '
         '"implementation_direction": string, "relevant_files": [string]} | null, '
-        '"message": string}. If you find a concrete proposal, put it in '
-        '"proposal" and leave "message" empty. If you find nothing worth '
-        'proposing, set "proposal" to null and put a concise user-facing '
+        '"message": string, "next_steps_summary": string, '
+        '"memory_relevant_files": [string]}. If you find a concrete proposal, '
+        'put it in "proposal" and leave "message" empty. If you find nothing '
+        'worth proposing, set "proposal" to null and put a concise user-facing '
         'explanation in "message". The title should be concise. The summary '
         "should explain the proposed session. Impact should describe the likely "
         "user-visible or engineering benefit. Implementation direction should "
         "be specific enough for the user to continue the work in this session. "
+        "The next_steps_summary is durable memory for future standing-order runs: "
+        "mention what you inspected or selected, specific files or areas involved, "
+        "what you proposed or skipped, and what a future run should try next. "
+        "memory_relevant_files should list repo-relative files this run selected, "
+        "inspected, or intentionally skipped so future runs can avoid accidental "
+        "repetition. "
         f"{ambition.candidate_instruction}"
     )
+    return prompt, memory_context
+
+
+@dataclass(frozen=True)
+class _StandingOrderMemoryPromptContext:
+    text: str
+    count: int
+    compacted: bool
 
 
 @dataclass(frozen=True)
@@ -1123,6 +1160,231 @@ def _standing_order_judge_prompt(
         '"summary": string, "rationale": string}. Summary is shown to the user '
         "in the inbox and should explain the expected impact."
     ), history_files
+
+def _store_standing_order_memory(
+    standing_order: StandingOrder,
+    workflow: SystemWorkflow,
+    candidate_output: dict[str, Any],
+) -> StandingOrderMemory:
+    proposal = candidate_output.get("proposal")
+    title = ""
+    proposal_files: list[str] = []
+    if isinstance(proposal, dict):
+        title = str(proposal.get("title") or "").strip()
+        proposal_files = _string_list(proposal.get("relevant_files"))
+    if not title:
+        title = f"No proposal from {standing_order.title}"
+    summary = str(candidate_output.get("next_steps_summary") or "").strip()
+    if not summary:
+        summary = str(candidate_output.get("message") or "").strip()
+    memory_files = _merge_string_lists(
+        _string_list(candidate_output.get("memory_relevant_files")),
+        proposal_files,
+    )
+    memory, _created = StandingOrderMemory.objects.update_or_create(
+        source_workflow=workflow,
+        defaults={
+            "standing_order": standing_order,
+            "candidate_session": _session_metadata_from_state(
+                workflow, "candidate_session_id"
+            ),
+            "title": title[:_STANDING_ORDER_TITLE_MAX_LEN],
+            "summary": summary,
+            "relevant_files": memory_files,
+        },
+    )
+    return memory
+
+
+def _standing_order_memory_context(
+    standing_order: StandingOrder,
+) -> _StandingOrderMemoryPromptContext:
+    memory_queryset = standing_order.memories.select_related(
+        "candidate_session"
+    ).order_by("-created_at", "-id")
+    total_count = memory_queryset.count()
+    if total_count == 0:
+        return _StandingOrderMemoryPromptContext("(none)", 0, False)
+
+    memories = list(memory_queryset[:_STANDING_ORDER_MEMORY_MAX_ROWS])
+    omitted_count = max(total_count - len(memories), 0)
+    full_parts: list[str] = []
+    used_chars = 0
+    full_context_fits = omitted_count == 0
+    for memory in memories:
+        section = _format_standing_order_memory(
+            memory, summary_chars=_STANDING_ORDER_MEMORY_FULL_SUMMARY_CHARS
+        )
+        section_chars = len(section) + (2 if full_parts else 0)
+        if used_chars + section_chars > _STANDING_ORDER_MEMORY_CONTEXT_CHARS:
+            full_context_fits = False
+            break
+        full_parts.append(section)
+        used_chars += section_chars
+
+    if full_context_fits:
+        return _StandingOrderMemoryPromptContext(
+            "\n\n".join(full_parts), total_count, False
+        )
+    return _StandingOrderMemoryPromptContext(
+        _compact_standing_order_memories(memories, omitted_count=omitted_count),
+        total_count,
+        True,
+    )
+
+
+def _format_standing_order_memory(
+    memory: StandingOrderMemory, *, summary_chars: int
+) -> str:
+    candidate_id = (
+        memory.candidate_session.thread_id if memory.candidate_session else "(none)"
+    )
+    files = _string_list(memory.relevant_files)
+    return (
+        f"Memory ID: {memory.pk}\n"
+        f"Created: {_memory_created_date(memory)}\n"
+        f"Candidate session ID: {candidate_id}\n"
+        f"Title: {memory.title or '(none)'}\n"
+        f"Relevant files: {', '.join(files) if files else '(none)'}\n"
+        f"Next steps summary: {_truncate_for_prompt(memory.summary, summary_chars)}"
+    )
+
+
+def _compact_standing_order_memories(
+    memories: list[StandingOrderMemory], *, omitted_count: int = 0
+) -> str:
+    total_count = len(memories) + omitted_count
+    recent = memories[:_STANDING_ORDER_MEMORY_COMPACT_RECENT_COUNT]
+    older = memories[_STANDING_ORDER_MEMORY_COMPACT_RECENT_COUNT:]
+    files = _format_limited_strings(
+        _standing_order_memory_files(memories),
+        limit=_STANDING_ORDER_MEMORY_FILE_LIMIT,
+        max_chars=max(80, _STANDING_ORDER_MEMORY_CONTEXT_CHARS // 4),
+    )
+    sections = [
+        (
+            f"Compacted from {total_count} prior candidate summaries because "
+            "the full standing-order memory would consume too much context."
+        ),
+        f"Files seen across prior runs: {files or '(none)'}",
+        "Recent detailed summaries:",
+        "\n\n".join(
+            _format_standing_order_memory(
+                memory, summary_chars=_STANDING_ORDER_MEMORY_COMPACT_SUMMARY_CHARS
+            )
+            for memory in recent
+        ),
+    ]
+    if older:
+        sections.extend(
+            [
+                "Older compacted summaries:",
+                "\n".join(
+                    _format_standing_order_memory_line(
+                        memory,
+                        summary_chars=_STANDING_ORDER_MEMORY_COMPACT_SUMMARY_CHARS,
+                    )
+                    for memory in older
+                ),
+            ]
+        )
+    if omitted_count:
+        sections.append(
+            f"{omitted_count} older memory rows are outside this prompt cap."
+        )
+    compacted = "\n\n".join(section for section in sections if section)
+    if len(compacted) <= _STANDING_ORDER_MEMORY_CONTEXT_CHARS:
+        return _cap_standing_order_memory_context(compacted)
+    return _fit_standing_order_memory_context(
+        memories, files, omitted_count=omitted_count
+    )
+
+
+def _fit_standing_order_memory_context(
+    memories: list[StandingOrderMemory], file_summary: str, *, omitted_count: int = 0
+) -> str:
+    header = (
+        f"Compacted from {len(memories) + omitted_count} prior candidate summaries.\n"
+        f"Files seen across prior runs: {file_summary or '(none)'}\n"
+        "Summaries:"
+    )
+    budget = max(_STANDING_ORDER_MEMORY_CONTEXT_CHARS - len(header) - 1, 0)
+    lines = [
+        _format_standing_order_memory_line(memory, summary_chars=80)
+        for memory in memories
+    ]
+    selected: list[str] = []
+    used = 0
+    for line in lines:
+        line_chars = len(line) + 1
+        if selected and used + line_chars > budget:
+            break
+        if not selected and line_chars > budget:
+            selected.append(_truncate_for_prompt(line, max(budget, 40)))
+            used = budget
+            break
+        selected.append(line)
+        used += line_chars
+    omitted = len(lines) - len(selected) + omitted_count
+    if omitted > 0:
+        selected.append(f"- {omitted} older summaries omitted after compaction.")
+    return _cap_standing_order_memory_context(f"{header}\n" + "\n".join(selected))
+
+
+def _format_standing_order_memory_line(
+    memory: StandingOrderMemory, *, summary_chars: int
+) -> str:
+    files = _format_limited_strings(_string_list(memory.relevant_files), limit=8)
+    return (
+        f"- {_memory_created_date(memory)}: {memory.title or '(none)'}; "
+        f"files: {files or '(none)'}; "
+        f"next: {_truncate_for_prompt(memory.summary, summary_chars)}"
+    )
+
+
+def _standing_order_memory_files(memories: list[StandingOrderMemory]) -> list[str]:
+    files: list[str] = []
+    for memory in memories:
+        files = _merge_string_lists(files, _string_list(memory.relevant_files))
+    return files
+
+
+def _memory_created_date(memory: StandingOrderMemory) -> str:
+    return timezone.localtime(memory.created_at).date().isoformat()
+
+
+def _format_limited_strings(
+    values: list[str], *, limit: int, max_chars: int | None = None
+) -> str:
+    if len(values) <= limit:
+        formatted = ", ".join(values)
+    else:
+        shown = ", ".join(values[:limit])
+        formatted = f"{shown}, ... ({len(values) - limit} more)"
+    if max_chars is None:
+        return formatted
+    return _truncate_for_prompt(formatted, max_chars)
+
+
+def _cap_standing_order_memory_context(text: str) -> str:
+    if len(text) <= _STANDING_ORDER_MEMORY_CONTEXT_CHARS:
+        return text
+    marker = "\n... (standing-order memory truncated to fit context budget)"
+    if len(marker) >= _STANDING_ORDER_MEMORY_CONTEXT_CHARS:
+        return _truncate_for_prompt(text, _STANDING_ORDER_MEMORY_CONTEXT_CHARS)
+    return (
+        text[: _STANDING_ORDER_MEMORY_CONTEXT_CHARS - len(marker)].rstrip()
+        + marker
+    )
+
+
+def _truncate_for_prompt(text: str, max_chars: int) -> str:
+    normalized = " ".join(text.split())
+    if len(normalized) <= max_chars:
+        return normalized
+    if max_chars <= 3:
+        return normalized[:max_chars]
+    return f"{normalized[: max_chars - 3].rstrip()}..."
 
 
 def _standing_order_history_sections(standing_order: StandingOrder) -> list[str]:
@@ -1221,17 +1483,56 @@ def _parse_standing_order_candidate_output(raw_output: str) -> dict[str, Any] | 
         if proposal is None:
             if not isinstance(message, str) or not message.strip():
                 return None
-            return {"proposal": None, "message": message.strip()}
+            memory_summary = _candidate_memory_summary(parsed, None, message)
+            return {
+                "proposal": None,
+                "message": message.strip(),
+                "next_steps_summary": memory_summary,
+                "memory_relevant_files": _string_list(
+                    parsed.get("memory_relevant_files")
+                ),
+            }
         if not isinstance(proposal, dict):
             return None
         normalized = _parse_standing_order_candidate_proposal(proposal)
         if normalized is None:
             return None
-        return {"proposal": normalized, "message": ""}
+        return {
+            "proposal": normalized,
+            "message": "",
+            "next_steps_summary": _candidate_memory_summary(
+                parsed, normalized, message if isinstance(message, str) else ""
+            ),
+            "memory_relevant_files": _merge_string_lists(
+                _string_list(parsed.get("memory_relevant_files")),
+                _string_list(normalized.get("relevant_files")),
+            ),
+        }
     normalized = _parse_standing_order_candidate_proposal(parsed)
     if normalized is None:
         return None
-    return {"proposal": normalized, "message": ""}
+    return {
+        "proposal": normalized,
+        "message": "",
+        "next_steps_summary": _candidate_memory_summary(parsed, normalized, ""),
+        "memory_relevant_files": _merge_string_lists(
+            _string_list(parsed.get("memory_relevant_files")),
+            _string_list(normalized.get("relevant_files")),
+        ),
+    }
+
+
+def _candidate_memory_summary(
+    parsed: dict[str, Any], proposal: dict[str, Any] | None, message: str
+) -> str:
+    summary = parsed.get("next_steps_summary")
+    if isinstance(summary, str) and summary.strip():
+        return summary.strip()
+    if proposal is not None:
+        proposal_summary = proposal.get("summary")
+        if isinstance(proposal_summary, str) and proposal_summary.strip():
+            return proposal_summary.strip()
+    return message.strip()
 
 
 def _parse_standing_order_candidate_proposal(
@@ -1395,6 +1696,16 @@ def _string_list(value: Any) -> list[str]:
         if item and item not in normalized:
             normalized.append(item)
     return normalized
+
+
+def _merge_string_lists(*values: list[str]) -> list[str]:
+    merged: list[str] = []
+    for value in values:
+        for item in value:
+            item = item.strip()
+            if item and item not in merged:
+                merged.append(item)
+    return merged
 
 
 def _session_metadata_from_state(

@@ -14,6 +14,7 @@ from hitch.main.models import (
     ProposedSession,
     SessionMetadata,
     StandingOrder,
+    StandingOrderMemory,
     SystemAgentRun,
     SystemWorkflow,
 )
@@ -1307,6 +1308,10 @@ class StandingOrderWorkflowTests(TestCase):
                         "relevant_files": ["hitch/main/rollout.py"],
                     },
                     "message": "",
+                    "next_steps_summary": (
+                        "Proposed hitch/main/rollout.py; try parser edges next."
+                    ),
+                    "memory_relevant_files": ["hitch/main/rollout.py"],
                 }
             )
         )
@@ -1315,6 +1320,11 @@ class StandingOrderWorkflowTests(TestCase):
         assert parsed is not None
         self.assertEqual(parsed["proposal"]["title"], "Add parser coverage")
         self.assertEqual(parsed["message"], "")
+        self.assertEqual(
+            parsed["next_steps_summary"],
+            "Proposed hitch/main/rollout.py; try parser edges next.",
+        )
+        self.assertEqual(parsed["memory_relevant_files"], ["hitch/main/rollout.py"])
 
     def test_standing_order_candidate_parser_rejects_invalid_wrapped_output(
         self,
@@ -1369,12 +1379,28 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertEqual(kwargs["agent_kind"], system_agents.STANDING_ORDER_AGENT_KIND)
         self.assertEqual(kwargs["display_author"], system_agents.STANDING_ORDER_DISPLAY_AUTHOR)
         schema = kwargs["output_schema"]
-        self.assertEqual(schema["required"], ["proposal", "message"])
+        self.assertEqual(
+            schema["required"],
+            [
+                "proposal",
+                "message",
+                "next_steps_summary",
+                "memory_relevant_files",
+            ],
+        )
         self.assertEqual(schema["properties"]["proposal"]["type"], ["object", "null"])
         self.assertEqual(schema["properties"]["message"]["type"], "string")
+        self.assertEqual(
+            schema["properties"]["next_steps_summary"]["type"], "string"
+        )
+        self.assertEqual(
+            schema["properties"]["memory_relevant_files"]["type"], "array"
+        )
         self.assertIn("Keep docs current", kwargs["prompt"])
         self.assertIn("make high progress", kwargs["prompt"])
         self.assertIn('"proposal" to null', kwargs["prompt"])
+        self.assertIn("Standing order memory from previous candidate runs", kwargs["prompt"])
+        self.assertIn("next_steps_summary", kwargs["prompt"])
         self.assertTrue(
             SessionMetadata.objects.filter(thread_id="candidate-thread").exists()
         )
@@ -1402,6 +1428,148 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertIn("bold, high-leverage progress", prompt)
         self.assertIn("substantial session", prompt)
         self.assertNotIn("incremental", prompt.lower())
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_candidate_prompt_includes_prior_memory(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Process one test file",
+            goal="Pick one test file and improve it.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread-old",
+            cwd="/repo",
+            project=project,
+        )
+        StandingOrderMemory.objects.create(
+            standing_order=standing_order,
+            candidate_session=candidate,
+            title="Processed rollout tests",
+            summary=(
+                "Selected hitch/main/test/test_rollout.py; next try a different "
+                "test file."
+            ),
+            relevant_files=["hitch/main/test/test_rollout.py"],
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+
+        workflow = system_agents.start_standing_order_workflow(
+            standing_order=standing_order
+        )
+
+        prompt = mock_spawn.call_args.kwargs["prompt"]
+        self.assertIn("Standing order memory from previous candidate runs", prompt)
+        self.assertIn("Processed rollout tests", prompt)
+        self.assertIn("hitch/main/test/test_rollout.py", prompt)
+        run = SystemAgentRun.objects.get(workflow=workflow)
+        self.assertEqual(run.input["memory_count"], 1)
+        self.assertFalse(run.input["memory_compacted"])
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch.object(system_agents, "_STANDING_ORDER_MEMORY_CONTEXT_CHARS", 350)
+    def test_candidate_prompt_compacts_large_prior_memory(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Process one test file",
+            goal="Pick one test file and improve it.",
+        )
+        for idx in range(4):
+            StandingOrderMemory.objects.create(
+                standing_order=standing_order,
+                title=f"Processed test file {idx}",
+                summary=(
+                    (
+                        f"Selected hitch/main/test/test_{idx}.py and completed a "
+                        "focused pass. Future runs should choose a different file. "
+                    )
+                    * 6
+                ),
+                relevant_files=[f"hitch/main/test/test_{idx}.py"],
+            )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+
+        workflow = system_agents.start_standing_order_workflow(
+            standing_order=standing_order
+        )
+
+        prompt = mock_spawn.call_args.kwargs["prompt"]
+        self.assertIn("Compacted from 4 prior candidate summaries", prompt)
+        self.assertIn("Files seen across prior runs", prompt)
+        self.assertIn("hitch/main/test/test_3.py", prompt)
+        memory_context = system_agents._standing_order_memory_context(standing_order)
+        self.assertLessEqual(
+            len(memory_context.text), system_agents._STANDING_ORDER_MEMORY_CONTEXT_CHARS
+        )
+        run = SystemAgentRun.objects.get(workflow=workflow)
+        self.assertEqual(run.input["memory_count"], 4)
+        self.assertTrue(run.input["memory_compacted"])
+
+    @patch.object(system_agents, "_STANDING_ORDER_MEMORY_CONTEXT_CHARS", 240)
+    def test_compacted_memory_context_enforces_budget_with_long_files(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Process one test file",
+            goal="Pick one test file and improve it.",
+        )
+        for idx in range(5):
+            StandingOrderMemory.objects.create(
+                standing_order=standing_order,
+                title=f"Processed file {idx}",
+                summary="Chose one file and left a long next-step summary. " * 12,
+                relevant_files=[
+                    "hitch/main/test/"
+                    + ("very_long_path_segment_" * 8)
+                    + f"{idx}.py"
+                ],
+            )
+
+        memory_context = system_agents._standing_order_memory_context(standing_order)
+
+        self.assertTrue(memory_context.compacted)
+        self.assertIn("Compacted from 5 prior candidate summaries", memory_context.text)
+        self.assertLessEqual(
+            len(memory_context.text), system_agents._STANDING_ORDER_MEMORY_CONTEXT_CHARS
+        )
+
+    @patch.object(system_agents, "_STANDING_ORDER_MEMORY_MAX_ROWS", 2)
+    def test_memory_context_caps_recent_rows_before_compaction(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Process one test file",
+            goal="Pick one test file and improve it.",
+        )
+        for idx in range(4):
+            StandingOrderMemory.objects.create(
+                standing_order=standing_order,
+                title=f"Processed file {idx}",
+                summary=f"Summary for file {idx}.",
+                relevant_files=[f"hitch/main/test/test_{idx}.py"],
+            )
+
+        memory_context = system_agents._standing_order_memory_context(standing_order)
+
+        self.assertTrue(memory_context.compacted)
+        self.assertEqual(memory_context.count, 4)
+        self.assertIn("Compacted from 4 prior candidate summaries", memory_context.text)
+        self.assertIn("2 older memory rows are outside this prompt cap", memory_context.text)
+        self.assertIn("Processed file 3", memory_context.text)
+        self.assertNotIn("Processed file 0", memory_context.text)
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_candidate_completion_starts_judge_thread(
@@ -1445,6 +1613,14 @@ class StandingOrderWorkflowTests(TestCase):
                     "impact": "Fewer regressions.",
                     "implementation_direction": "Add focused tests.",
                     "relevant_files": ["hitch/main/rollout.py"],
+                    "next_steps_summary": (
+                        "Selected hitch/main/rollout.py for parser coverage; "
+                        "try adjacent rollout tests after this."
+                    ),
+                    "memory_relevant_files": [
+                        "hitch/main/rollout.py",
+                        "hitch/main/test/test_rollout.py",
+                    ],
                 },
             ),
             agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
@@ -1466,6 +1642,18 @@ class StandingOrderWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertEqual(workflow.step, system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING)
         self.assertEqual(workflow.state["candidate"]["title"], "Add parser coverage")
+        memory = StandingOrderMemory.objects.get()
+        self.assertEqual(memory.standing_order, standing_order)
+        self.assertEqual(memory.candidate_session, candidate_metadata)
+        self.assertEqual(memory.title, "Add parser coverage")
+        self.assertEqual(
+            memory.summary,
+            "Selected hitch/main/rollout.py for parser coverage; try adjacent rollout tests after this.",
+        )
+        self.assertEqual(
+            memory.relevant_files,
+            ["hitch/main/rollout.py", "hitch/main/test/test_rollout.py"],
+        )
         kwargs = mock_spawn.call_args.kwargs
         self.assertEqual(kwargs["agent_kind"], system_agents.STANDING_ORDER_JUDGE_AGENT_KIND)
         self.assertIn("Add parser coverage", kwargs["prompt"])
@@ -1508,6 +1696,11 @@ class StandingOrderWorkflowTests(TestCase):
                 {
                     "proposal": None,
                     "message": "No concrete test increment was worth proposing.",
+                    "next_steps_summary": (
+                        "Inspected rollout tests and found no clear increment; "
+                        "try settings tests next."
+                    ),
+                    "memory_relevant_files": ["hitch/main/test/test_rollout.py"],
                 },
             ),
             agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
@@ -1531,6 +1724,13 @@ class StandingOrderWorkflowTests(TestCase):
             notice.summary, "No concrete test increment was worth proposing."
         )
         self.assertEqual(notice.candidate_session, candidate_metadata)
+        memory = StandingOrderMemory.objects.get()
+        self.assertEqual(memory.title, "No proposal from Improve tests")
+        self.assertEqual(
+            memory.summary,
+            "Inspected rollout tests and found no clear increment; try settings tests next.",
+        )
+        self.assertEqual(memory.relevant_files, ["hitch/main/test/test_rollout.py"])
         mock_spawn.assert_not_called()
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
