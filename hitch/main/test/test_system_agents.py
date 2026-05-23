@@ -1831,6 +1831,10 @@ class StandingOrderWorkflowTests(TestCase):
                 "judge_session_id": judge_metadata.pk,
                 "candidate": {
                     "title": "Add parser coverage",
+                    "implementation_direction": (
+                        "Add focused rollout parser regression tests before "
+                        "touching parser behavior."
+                    ),
                     "relevant_files": ["hitch/main/rollout.py"],
                 },
             },
@@ -1864,6 +1868,11 @@ class StandingOrderWorkflowTests(TestCase):
         proposal = ProposedSession.objects.get()
         self.assertEqual(proposal.title, "Add parser coverage")
         self.assertEqual(proposal.confidence, StandingOrder.CONFIDENCE_HIGH)
+        self.assertIn("Implementation guidance:", proposal.prompt)
+        self.assertIn(
+            "Add focused rollout parser regression tests before touching parser behavior.",
+            proposal.prompt,
+        )
         self.assertEqual(proposal.candidate_session, candidate_metadata)
         self.assertEqual(proposal.judge_session, judge_metadata)
 

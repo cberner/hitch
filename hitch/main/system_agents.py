@@ -637,6 +637,9 @@ def _handle_standing_order_agent_finished(
                 :_STANDING_ORDER_TITLE_MAX_LEN
             ],
             summary=judgment["summary"],
+            prompt=_standing_order_proposed_session_prompt(
+                standing_order, candidate, judgment
+            ),
             confidence=judgment["confidence"],
             relevant_files=_string_list(candidate.get("relevant_files")),
             candidate_session=_session_metadata_from_state(
@@ -1080,6 +1083,36 @@ class _StandingOrderMemoryPromptContext:
     compacted: bool
 
 
+def _standing_order_proposed_session_prompt(
+    standing_order: StandingOrder, candidate: dict[str, Any], judgment: dict[str, str]
+) -> str:
+    parts = [
+        "Go ahead and implement this proposed session.",
+        "",
+        f"Standing order: {standing_order.title}",
+    ]
+    if standing_order.goal:
+        parts.extend(["", f"Standing order goal:\n{standing_order.goal}"])
+    title = str(candidate.get("title", standing_order.title)).strip()
+    if title:
+        parts.extend(["", f"Proposed session: {title}"])
+    summary = judgment.get("summary", "").strip()
+    if summary:
+        parts.extend(["", f"Summary:\n{summary}"])
+    implementation_direction = candidate.get("implementation_direction")
+    if isinstance(implementation_direction, str) and implementation_direction.strip():
+        parts.extend(
+            [
+                "",
+                f"Implementation guidance:\n{implementation_direction.strip()}",
+            ]
+        )
+    files = _string_list(candidate.get("relevant_files"))
+    if files:
+        parts.extend(["", "Relevant files:", *[f"- {file}" for file in files]])
+    return "\n".join(parts)
+
+
 @dataclass(frozen=True)
 class _StandingOrderAmbitionGuidance:
     candidate_progress: str
@@ -1417,6 +1450,7 @@ def _format_proposed_session_context(proposal: ProposedSession) -> str:
         f"Title: {proposal.title}\n"
         f"Confidence: {proposal.confidence}\n"
         f"Summary: {proposal.summary or '(none)'}\n"
+        f"Prompt: {proposal.prompt or '(none)'}\n"
         f"Relevant files: {', '.join(files) if files else '(none)'}\n"
         f"Outcome status: {proposal.outcome_status}\n"
         f"{notes_label}: {proposal.outcome_notes or '(none)'}"
