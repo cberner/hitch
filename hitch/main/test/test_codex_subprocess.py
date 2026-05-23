@@ -7,9 +7,12 @@ import dataclasses
 import json
 import os
 import signal
+import subprocess
+import sys
 import tempfile
 import threading
 import time
+import unittest
 from collections.abc import Callable, Iterator
 from io import StringIO
 from pathlib import Path
@@ -96,6 +99,26 @@ def _stub_thread_resume(events: list[SimpleNamespace], turn_id: str = "turn-1") 
     return SimpleNamespace(
         turn=lambda _input: SimpleNamespace(id=turn_id, stream=lambda: iter(events)),
     )
+
+
+def _wait_for_linux_proc_state(pid: int, state: str, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if codex_pool._linux_proc_state(pid) == state:
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"pid {pid} did not reach Linux process state {state!r}")
+
+
+def _wait_for_process_exit(
+    proc: subprocess.Popen[bytes], timeout: float = 5.0
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if proc.returncode is not None:
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"pid {proc.pid} was not reaped")
 
 
 class SpawnNewSessionTests(TestCase):
@@ -541,6 +564,48 @@ class SpawnTurnTests(TestCase):
         self.assertEqual(instance.developer_instructions, "Fresh instructions.")
         self.assertEqual(instance.user_message_index, 7)
 
+    @unittest.skipUnless(Path("/proc").exists(), "requires Linux /proc")
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    def test_tracks_real_popen_handles_for_reaping(
+        self, mock_launch: MagicMock
+    ) -> None:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        mock_launch.return_value = proc
+        try:
+            with (
+                _events_dir() as events_dir,
+                override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+            ):
+                instance = codex_pool.spawn_turn(
+                    thread_id="thread-xyz", cwd="/repo", prompt="follow-up"
+                )
+
+            self.assertEqual(instance.pid, proc.pid)
+            with codex_pool._TRACKED_WORKER_PROCS_LOCK:
+                self.assertEqual(
+                    codex_pool._TRACKED_WORKER_PROCS[proc.pid],
+                    (instance.pk, proc),
+                )
+        finally:
+            if proc.returncode is None:
+                proc.kill()
+                proc.wait(timeout=5)
+            with codex_pool._TRACKED_WORKER_PROCS_LOCK:
+                codex_pool._TRACKED_WORKER_PROCS.pop(proc.pid, None)
+                codex_pool._REAPED_WORKERS.difference_update(
+                    {
+                        worker
+                        for worker in codex_pool._REAPED_WORKERS
+                        if worker[0] == proc.pid
+                    }
+                )
+
 
 class LaunchWorkerProcessTests(TestCase):
     @patch("hitch.main.codex_pool.subprocess.Popen")
@@ -617,6 +682,23 @@ class IsAliveTests(TestCase):
         self.assertFalse(codex_pool.is_alive(-1))
         # 2**22 is well above the default pid_max on Linux/macOS.
         self.assertFalse(codex_pool.is_alive(2**22))
+
+    @unittest.skipUnless(Path("/proc").exists(), "requires Linux /proc")
+    def test_zombie_pid_is_not_alive(self) -> None:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import os; os._exit(0)"],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            _wait_for_linux_proc_state(proc.pid, "Z")
+
+            self.assertFalse(codex_pool.is_alive(proc.pid))
+        finally:
+            if proc.returncode is None:
+                proc.wait(timeout=5)
 
     @patch("hitch.main.codex_pool.os.kill")
     def test_permission_error_means_alive(self, mock_kill: MagicMock) -> None:
@@ -730,6 +812,39 @@ class ReconcileAndLookupTests(TestCase):
         notified = mock_notify.call_args.args[0]
         self.assertEqual(notified.pk, system_agent.pk)
         self.assertEqual(notified.status, CodexInstance.STATUS_FAILED)
+
+    @unittest.skipUnless(Path("/proc").exists(), "requires Linux /proc")
+    def test_tracked_exited_workers_are_reaped_and_reconciled(self) -> None:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", "import os; os._exit(0)"],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        instance: CodexInstance | None = None
+        try:
+            instance = self._make(pid=proc.pid, status=CodexInstance.STATUS_RUNNING)
+            codex_pool._track_worker_process(instance.pk, proc)
+            _wait_for_process_exit(proc)
+
+            n = codex_pool.reconcile_dead()
+
+            self.assertEqual(n, 1)
+            self.assertEqual(proc.returncode, 0)
+            with codex_pool._TRACKED_WORKER_PROCS_LOCK:
+                self.assertNotIn(proc.pid, codex_pool._TRACKED_WORKER_PROCS)
+                self.assertNotIn((proc.pid, instance.pk), codex_pool._REAPED_WORKERS)
+            instance.refresh_from_db()
+            self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+            self.assertIn("exited", instance.error)
+        finally:
+            if proc.returncode is None:
+                proc.wait(timeout=5)
+            with codex_pool._TRACKED_WORKER_PROCS_LOCK:
+                codex_pool._TRACKED_WORKER_PROCS.pop(proc.pid, None)
+                if instance is not None:
+                    codex_pool._REAPED_WORKERS.discard((proc.pid, instance.pk))
 
     def test_list_and_latest_for_thread(self) -> None:
         first = self._make(thread_id="t1")
