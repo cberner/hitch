@@ -2807,6 +2807,76 @@ class SessionViewActiveWorkerTests(TestCase):
         )
 
     @patch("hitch.main.views.Codex")
+    def test_monitored_pr_qa_approval_keeps_original_prompt_order(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _patch_thread(
+            self,
+            mock_codex,
+            _thread(
+                [
+                    _turn([_user_message("Change it"), _agent_message("Done")]),
+                    _turn(
+                        [
+                            _user_message(system_agents.PR_SLASH_PROMPT),
+                            _agent_message("Opened PR"),
+                        ],
+                        started_at=1700000010,
+                    ),
+                    _turn(
+                        [
+                            _user_message("Address monitor feedback"),
+                            _agent_message("Pushed fix"),
+                        ],
+                        started_at=1700000020,
+                    ),
+                ]
+            ),
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-1",
+            cwd="/tmp/demo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_READY,
+            state={
+                "next_user_message_index": 4,
+                system_agents.QA_APPROVAL_INSERT_INDEX_STATE_KEY: 1,
+                "last_feedback": "No qualifying findings.",
+            },
+        )
+        instance = _make_codex_instance(
+            thread_id="hidden-thread",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="hidden-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+            output={"feedback": "No qualifying findings.", "lgtm": True},
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "QA agent approved the diff.")
+        self.assertLess(
+            body.index("QA agent approved the diff."),
+            body.index(system_agents.PR_SLASH_PROMPT),
+        )
+        self.assertLess(
+            body.index("QA agent approved the diff."),
+            body.index("Address monitor feedback"),
+        )
+
+    @patch("hitch.main.views.Codex")
     def test_completed_qa_only_approval_is_appended_to_transcript(
         self, mock_codex: MagicMock
     ) -> None:

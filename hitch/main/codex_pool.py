@@ -758,6 +758,9 @@ def _notify_system_agents_if_needed(instance: CodexInstance) -> None:
     if instance.purpose in (
         CodexInstance.PURPOSE_SYSTEM_AGENT,
         CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+    ) or (
+        instance.purpose == CodexInstance.PURPOSE_USER
+        and instance.workflow_id is not None
     ):
         try:
             from hitch.main import system_agents
