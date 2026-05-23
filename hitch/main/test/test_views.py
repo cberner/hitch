@@ -1914,12 +1914,18 @@ class NewSessionViewTests(TestCase):
                     task = cast(ProposedTask, proposed)
                     self.assertEqual(task.outcome_status, ProposedTask.OUTCOME_ACCEPTED)
                     self.assertEqual(task.session, metadata)
+                    self._assert_new_session_spawn(mock_spawn, prompt=prompt)
                 else:
                     proposal = cast(ProposedSession, proposed)
                     self.assertEqual(
                         proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED
                     )
                     self.assertEqual(proposal.accepted_session, metadata)
+                    self._assert_new_session_spawn(
+                        mock_spawn,
+                        prompt=prompt,
+                        thread_name="Add parser coverage",
+                    )
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
