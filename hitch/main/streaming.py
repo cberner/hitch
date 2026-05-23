@@ -25,7 +25,13 @@ from collections.abc import Generator, Iterator
 from pathlib import Path
 
 from hitch.main import codex_events, codex_pool
-from hitch.main.models import CodexInstance, SessionDemo, SystemAgentRun, SystemWorkflow
+from hitch.main.models import (
+    CodexInstance,
+    SessionDemo,
+    SystemAgentRun,
+    SystemWorkflow,
+    UserInputRequest,
+)
 
 # Cadence at which we re-poll the events file when it has no new bytes. Short
 # enough that streamed deltas surface in near-real-time; long enough not to
@@ -69,8 +75,12 @@ _STEP_FEEDBACK_RUNNING = "feedback_running"
 _STEP_PR_PROMPT_RUNNING = "pr_prompt_running"
 _STEP_PR_MONITORING = "pr_monitoring"
 _STEP_PR_FEEDBACK_RUNNING = "pr_feedback_running"
+_STEP_SPEC_CRITIC_ANALYZING = "spec_critic_analyzing"
+_STEP_SPEC_CRITIC_CLARIFYING = "spec_critic_clarifying"
+_STEP_SPEC_CRITIC_SYNTHESIZING = "spec_critic_synthesizing"
 _QA_PANEL_SYNTHESIZER_AGENT_KIND = "pr_qa_panel_synthesizer"
 _QA_PANEL_AGENT_KIND_PREFIX = "pr_qa_"
+_SPEC_CRITIC_WORKFLOW_KIND = "spec_critic"
 _COMPACT_TOKEN_UNITS = (
     (1_000_000_000, "B"),
     (1_000_000, "M"),
@@ -213,6 +223,9 @@ def system_workflow_stream(
     )
     deadline = time.monotonic() + _IDLE_MAX_STREAM_SECONDS
     last_heartbeat = time.monotonic()
+    seen_inputs: dict[int, str] = {}
+    if workflow is not None:
+        yield from _workflow_input_request_frames(workflow.pk, seen_inputs)
     while True:
         if codex_pool.latest_id_for_thread(session_id) != baseline_id:
             yield _end_frame("active")
@@ -221,6 +234,7 @@ def system_workflow_stream(
         if workflow is None:
             yield _end_frame("workflow")
             return
+        yield from _workflow_input_request_frames(workflow.pk, seen_inputs)
         if time.monotonic() > deadline:
             return
         if time.monotonic() - last_heartbeat >= _HEARTBEAT_INTERVAL:
@@ -280,6 +294,47 @@ def _end_frame(status: str) -> bytes:
     return b"event: end\ndata: " + json.dumps({"status": status}).encode("utf-8") + b"\n\n"
 
 
+def _message_frame(method: str, payload: dict[str, object]) -> bytes:
+    event = {"method": method, "payload": payload}
+    return b"data: " + json.dumps(event).encode("utf-8") + b"\n\n"
+
+
+def _workflow_input_request_frames(
+    workflow_id: int, seen: dict[int, str]
+) -> Iterator[bytes]:
+    requests = (
+        UserInputRequest.objects.filter(
+            instance__system_agent_runs__workflow_id=workflow_id
+        )
+        .order_by("created_at", "id")
+        .values("id", "method", "params", "response")
+    )
+    for row in requests:
+        request_id = row["id"]
+        if not isinstance(request_id, int):
+            continue
+        method = row.get("method") if isinstance(row.get("method"), str) else ""
+        params = row.get("params") if isinstance(row.get("params"), dict) else {}
+        response = row.get("response")
+        prior = seen.get(request_id)
+        if prior is None:
+            yield _message_frame(
+                "input/requested",
+                {"id": request_id, "method": method, "params": params},
+            )
+        marker = json.dumps(response, sort_keys=True) if response is not None else ""
+        if marker and prior != marker:
+            yield _message_frame(
+                "input/resolved",
+                {
+                    "id": request_id,
+                    "method": method,
+                    "response": response if isinstance(response, dict) else {},
+                },
+            )
+        seen[request_id] = marker
+
+
 def _heartbeat_frame(*, working: bool, status_text: str = "") -> bytes:
     payload_data: dict[str, bool | str] = {"working": working}
     if status_text:
@@ -310,6 +365,14 @@ def qa_agent_status_text_for_instance(instance: CodexInstance | None) -> str:
 def system_workflow_status_text(workflow: SystemWorkflow | None) -> str:
     if workflow is None:
         return ""
+    if workflow.kind == _SPEC_CRITIC_WORKFLOW_KIND:
+        if workflow.step == _STEP_SPEC_CRITIC_CLARIFYING:
+            return "Spec Critic is waiting for clarification..."
+        if workflow.step == _STEP_SPEC_CRITIC_SYNTHESIZING:
+            return "Spec Critic is synthesizing the brief..."
+        if workflow.step == _STEP_SPEC_CRITIC_ANALYZING:
+            return "Spec Critic is reviewing the request..."
+        return "Spec Critic is preparing the implementation..."
     if workflow.kind != SystemWorkflow.KIND_PR_QA:
         return "Hitch system agent is working..."
     if workflow.step == _STEP_FEEDBACK_RUNNING:

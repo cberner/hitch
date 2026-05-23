@@ -23,6 +23,7 @@ from hitch.main.models import (
     StandingOrderMemory,
     SystemAgentRun,
     SystemWorkflow,
+    UserInputRequest,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,11 +33,17 @@ PR_FOLLOWUP_MONITOR_AGENT_KIND = "pr_followup_monitor"
 PR_QA_PANEL_SYNTHESIZER_AGENT_KIND = "pr_qa_panel_synthesizer"
 STANDING_ORDER_AGENT_KIND = SystemWorkflow.KIND_STANDING_ORDER_RUN
 STANDING_ORDER_JUDGE_AGENT_KIND = "standing_order_judge"
+SPEC_CRITIC_WORKFLOW_KIND = "spec_critic"
+SPEC_REQUIREMENTS_AGENT_KIND = "spec_critic_requirements"
+SPEC_RISK_AGENT_KIND = "spec_critic_risks"
+SPEC_TEST_AGENT_KIND = "spec_critic_tests"
+SPEC_SYNTHESIZER_AGENT_KIND = "spec_critic_synthesizer"
 QA_DISPLAY_AUTHOR = "QA agent"
 PR_MONITOR_DISPLAY_AUTHOR = "PR monitor"
 QA_PANEL_DISPLAY_AUTHOR = "QA panel"
 STANDING_ORDER_DISPLAY_AUTHOR = "Standing order agent"
 STANDING_ORDER_JUDGE_DISPLAY_AUTHOR = "Standing order judge"
+SPEC_CRITIC_DISPLAY_AUTHOR = "Spec Critic"
 PR_SLASH_DISPLAY_PROMPT = (
     "Rebase on master, clean it up, and then open a PR"
 )
@@ -73,6 +80,11 @@ STEP_STANDING_ORDER_JUDGE_RUNNING = "standing_order_judge_running"
 STEP_STANDING_ORDER_PROPOSED = "standing_order_proposed"
 STEP_STANDING_ORDER_DRAFT_STARTED = "standing_order_draft_started"
 STEP_STANDING_ORDER_SKIPPED = "standing_order_skipped"
+STEP_SPEC_CRITIC_ANALYZING = "spec_critic_analyzing"
+STEP_SPEC_CRITIC_CLARIFYING = "spec_critic_clarifying"
+STEP_SPEC_CRITIC_SYNTHESIZING = "spec_critic_synthesizing"
+STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED = "spec_critic_implementation_spawned"
+SPEC_CRITIC_CLARIFICATION_METHOD = "hitch/spec_critic/clarification"
 
 _QA_DESIGN_SYNTHESIS_STATE_KEY = "qa_design_synthesis_gate"
 _QA_DESIGN_SYNTHESIS_MIN_CATEGORY_OVERLAP = 2
@@ -201,6 +213,73 @@ _CONFIDENCE_RANK = {
     StandingOrder.CONFIDENCE_HIGH: 2,
     StandingOrder.CONFIDENCE_VERY_HIGH: 3,
 }
+_SPEC_CRITIC_ANALYSIS_AGENT_KINDS = (
+    SPEC_REQUIREMENTS_AGENT_KIND,
+    SPEC_RISK_AGENT_KIND,
+    SPEC_TEST_AGENT_KIND,
+)
+_SPEC_CRITIC_PROMPT_WORD_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+_SPEC_CRITIC_IMPLEMENTATION_VERB_RE = re.compile(
+    r"\b(add|build|change|clean up|create|fix|implement|improve|integrate|"
+    r"launch|make|migrate|overhaul|redesign|refactor|remove|replace|rewrite|"
+    r"ship|support|update)\b",
+    re.IGNORECASE,
+)
+_SPEC_CRITIC_CONCRETE_ANCHOR_RE = re.compile(
+    r"(`[^`]+`|['\"][^'\"]+['\"]|/[A-Za-z0-9_.?=&/-]+|"
+    r"\b[A-Za-z0-9_.-]+\.(?:py|pyi|js|jsx|ts|tsx|css|html|md|toml|yaml|yml|json|rs|go)\b|"
+    r"\b(tests?|assert|error|traceback|exception|fails?|passes?|button|label|copy)\b)",
+    re.IGNORECASE,
+)
+_SPEC_CRITIC_VAGUE_PHRASES = (
+    "clean it up",
+    "do the thing",
+    "fix it",
+    "handle this",
+    "improve the app",
+    "make it better",
+    "make it work",
+    "polish this",
+)
+_SPEC_CRITIC_BROAD_TERMS = (
+    "all",
+    "complete",
+    "comprehensive",
+    "dashboard",
+    "end-to-end",
+    "everything",
+    "framework",
+    "full",
+    "major",
+    "overhaul",
+    "redesign",
+    "refactor",
+    "rewrite",
+    "system",
+    "workflow",
+)
+_SPEC_CRITIC_HIGH_IMPACT_PATTERNS = (
+    r"auth(?:entication)?",
+    r"authorization",
+    r"billing",
+    r"credentials?",
+    r"database\s+migrations?",
+    r"deletes?",
+    r"destructive",
+    r"migrations?",
+    r"multi-tenant",
+    r"payments?",
+    r"permissions?",
+    r"privacy",
+    r"production",
+    r"schemas?",
+    r"security",
+    r"tokens?",
+)
+_SPEC_CRITIC_HIGH_IMPACT_RE = re.compile(
+    r"\b(?:" + "|".join(_SPEC_CRITIC_HIGH_IMPACT_PATTERNS) + r")\b",
+    re.IGNORECASE,
+)
 
 
 def _nullable_schema(schema_type: str) -> dict[str, Any]:
@@ -313,6 +392,91 @@ _STANDING_ORDER_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
         },
         "summary": {"type": "string"},
         "rationale": {"type": "string"},
+    },
+}
+
+_SPEC_REQUIREMENTS_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["summary", "requirements", "assumptions", "repo_signals"],
+    "properties": {
+        "summary": {"type": "string"},
+        "requirements": {"type": "array", "items": {"type": "string"}},
+        "assumptions": {"type": "array", "items": {"type": "string"}},
+        "repo_signals": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+_SPEC_RISK_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["summary", "ambiguities", "risks", "questions"],
+    "properties": {
+        "summary": {"type": "string"},
+        "ambiguities": {"type": "array", "items": {"type": "string"}},
+        "risks": {"type": "array", "items": {"type": "string"}},
+        "questions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": [
+                    "id",
+                    "header",
+                    "question",
+                    "required",
+                    "allow_safe_default",
+                    "safe_default",
+                    "options",
+                ],
+                "properties": {
+                    "id": {"type": "string"},
+                    "header": {"type": "string"},
+                    "question": {"type": "string"},
+                    "required": {"type": "boolean"},
+                    "allow_safe_default": {"type": "boolean"},
+                    "safe_default": {"type": ["string", "null"]},
+                    "options": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "required": ["label", "description"],
+                            "properties": {
+                                "label": {"type": "string"},
+                                "description": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
+
+_SPEC_TEST_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": [
+        "summary",
+        "acceptance_criteria",
+        "test_strategy",
+        "manual_checks",
+    ],
+    "properties": {
+        "summary": {"type": "string"},
+        "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+        "test_strategy": {"type": "array", "items": {"type": "string"}},
+        "manual_checks": {"type": "array", "items": {"type": "string"}},
+    },
+}
+
+_SPEC_SYNTHESIS_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["brief"],
+    "properties": {
+        "brief": {"type": "string"},
     },
 }
 
@@ -520,6 +684,86 @@ def start_standing_order_workflow(*, standing_order: StandingOrder) -> SystemWor
     return workflow
 
 
+def spec_critic_should_run(prompt: str) -> bool:
+    """Return whether an ordinary implementation prompt needs preflight critique."""
+    text = " ".join(prompt.strip().split())
+    if not text:
+        return False
+    lowered = text.lower()
+    has_implementation_verb = _SPEC_CRITIC_IMPLEMENTATION_VERB_RE.search(text) is not None
+    if not has_implementation_verb:
+        return False
+    if _SPEC_CRITIC_HIGH_IMPACT_RE.search(text) is not None:
+        return True
+    if any(phrase in lowered for phrase in _SPEC_CRITIC_VAGUE_PHRASES):
+        return True
+    words = _SPEC_CRITIC_PROMPT_WORD_RE.findall(text)
+    has_concrete_anchor = _SPEC_CRITIC_CONCRETE_ANCHOR_RE.search(text) is not None
+    broad = any(term in lowered for term in _SPEC_CRITIC_BROAD_TERMS)
+    if broad and not has_concrete_anchor:
+        return True
+    return len(words) <= 10 and not has_concrete_anchor
+
+
+def start_spec_critic_workflow(
+    *,
+    main_thread_id: str,
+    cwd: str,
+    prompt: str,
+    sandbox_policy: str | None,
+    approval_mode: str | None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    base_instructions: str | None = None,
+    developer_instructions: str | None = None,
+    enable_memories: bool = False,
+    initial_user_message_index: int = 0,
+    auto_pr_enabled: bool = False,
+    qa_panel_enabled: bool = False,
+) -> SystemWorkflow:
+    """Start hidden Spec Critic agents before the visible implementation turn."""
+    try:
+        with transaction.atomic():
+            workflow = SystemWorkflow.objects.create(
+                kind=SPEC_CRITIC_WORKFLOW_KIND,
+                main_thread_id=main_thread_id,
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_RUNNING,
+                step=STEP_SPEC_CRITIC_ANALYZING,
+                max_iterations=1,
+                state={
+                    "original_prompt": prompt,
+                    "sandbox_policy": sandbox_policy or "",
+                    "approval_mode": approval_mode or "",
+                    "model": model or "",
+                    "reasoning_effort": reasoning_effort or "",
+                    "base_instructions": base_instructions or "",
+                    "developer_instructions": developer_instructions or "",
+                    "enable_memories": enable_memories,
+                    "next_user_message_index": max(initial_user_message_index, 0),
+                    "auto_pr_enabled": auto_pr_enabled,
+                    "qa_panel_enabled": qa_panel_enabled,
+                },
+            )
+    except IntegrityError:
+        existing_workflow = SystemWorkflow.objects.filter(
+            kind=SPEC_CRITIC_WORKFLOW_KIND,
+            main_thread_id=main_thread_id,
+            status=SystemWorkflow.STATUS_RUNNING,
+        ).first()
+        if existing_workflow is None:
+            raise
+        return existing_workflow
+
+    try:
+        _spawn_spec_critic_analysis_runs(workflow)
+    except Exception as exc:
+        _block_spec_critic_workflow(
+            workflow, f"failed to start Spec Critic agents: {exc!r}"
+        )
+    return workflow
+
+
 def hidden_thread_ids() -> set[str]:
     hidden_ids = set(
         SystemAgentRun.objects.exclude(thread_id="")
@@ -540,7 +784,7 @@ def hidden_thread_ids() -> set[str]:
 def active_workflow_for_thread(main_thread_id: str) -> SystemWorkflow | None:
     return (
         SystemWorkflow.objects.filter(
-            kind=SystemWorkflow.KIND_PR_QA,
+            kind__in=(SystemWorkflow.KIND_PR_QA, SPEC_CRITIC_WORKFLOW_KIND),
             main_thread_id=main_thread_id,
             status=SystemWorkflow.STATUS_RUNNING,
         )
@@ -559,12 +803,23 @@ def stop_active_workflow(main_thread_id: str) -> bool:
         .order_by("-created_at")
     )
     if not runs:
+        if workflow.kind == SPEC_CRITIC_WORKFLOW_KIND:
+            error = "Spec Critic workflow stopped by user"
+            _cancel_pending_spec_critic_input_requests(workflow, error)
+            _block_spec_critic_workflow(workflow, error)
+            return True
         return False
     interrupted_runs = _interrupt_system_agent_runs(runs)
     if not interrupted_runs:
         return False
-    _mark_system_agent_runs_failed(interrupted_runs, "QA workflow stopped by user")
-    _block_workflow(workflow, "QA workflow stopped by user")
+    if workflow.kind == SPEC_CRITIC_WORKFLOW_KIND:
+        error = "Spec Critic workflow stopped by user"
+        _cancel_pending_spec_critic_input_requests(workflow, error)
+        _mark_system_agent_runs_failed(interrupted_runs, error)
+        _block_spec_critic_workflow(workflow, error)
+    else:
+        _mark_system_agent_runs_failed(interrupted_runs, "QA workflow stopped by user")
+        _block_workflow(workflow, "QA workflow stopped by user")
     return True
 
 
@@ -656,6 +911,9 @@ def _handle_system_agent_finished(instance: CodexInstance) -> bool:
         and instance.agent_kind == demo.DEMO_AGENT_KIND
     ):
         _handle_demo_agent_finished(instance, run, workflow)
+        return True
+    if workflow.kind == SPEC_CRITIC_WORKFLOW_KIND:
+        _handle_spec_critic_agent_finished(instance, run, workflow)
         return True
     if workflow.kind == SystemWorkflow.KIND_PR_QA and run.agent_kind == (
         PR_FOLLOWUP_MONITOR_AGENT_KIND
@@ -899,6 +1157,236 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
         _spawn_pr_followup_monitor_run(workflow)
     except Exception as exc:
         _block_workflow(workflow, f"failed to start PR follow-up monitor: {exc!r}")
+
+
+def _handle_spec_critic_agent_finished(
+    instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
+) -> None:
+    if workflow.status != SystemWorkflow.STATUS_RUNNING:
+        _finish_spec_critic_run(instance, run, block_workflow=False)
+        return
+    if instance.status != CodexInstance.STATUS_COMPLETED:
+        _fail_run(
+            run,
+            f"Spec Critic agent {run.agent_kind} failed: {instance.error}",
+            block_workflow=False,
+        )
+        _block_spec_critic_workflow(
+            workflow, f"Spec Critic agent {run.agent_kind} failed: {instance.error}"
+        )
+        return
+    if not _finish_spec_critic_run(instance, run, block_workflow=True):
+        return
+    if run.agent_kind in _SPEC_CRITIC_ANALYSIS_AGENT_KINDS:
+        _maybe_advance_spec_critic_after_analysis(workflow)
+        return
+    if run.agent_kind == SPEC_SYNTHESIZER_AGENT_KIND:
+        _complete_spec_critic_workflow(workflow, run)
+        return
+    _block_spec_critic_workflow(
+        workflow, f"unsupported Spec Critic agent kind {run.agent_kind!r}"
+    )
+
+
+def _finish_spec_critic_run(
+    instance: CodexInstance, run: SystemAgentRun, *, block_workflow: bool
+) -> bool:
+    if run.status in (SystemAgentRun.STATUS_COMPLETED, SystemAgentRun.STATUS_FAILED):
+        return run.status == SystemAgentRun.STATUS_COMPLETED
+    raw_output = _final_agent_text(instance.events_path)
+    parsed = _parse_spec_critic_output(run.agent_kind, raw_output)
+    if parsed is None:
+        error = f"Spec Critic agent {run.agent_kind} output was not valid JSON"
+        _fail_run(
+            run,
+            error,
+            raw_output=raw_output,
+            block_workflow=False,
+        )
+        if block_workflow:
+            _block_spec_critic_workflow(run.workflow, error)
+        return False
+    run.status = SystemAgentRun.STATUS_COMPLETED
+    run.output = parsed
+    run.raw_output = raw_output
+    run.save(update_fields=["status", "output", "raw_output", "updated_at"])
+    return True
+
+
+def _maybe_advance_spec_critic_after_analysis(workflow: SystemWorkflow) -> None:
+    action, error = _claim_spec_critic_analysis_advance(workflow)
+    if action == "block":
+        _block_spec_critic_workflow(workflow, error)
+        return
+    if action != "synthesize":
+        return
+    try:
+        _spawn_spec_critic_synthesizer_run(workflow)
+    except Exception as exc:
+        _block_spec_critic_workflow(
+            workflow, f"failed to start Spec Critic synthesizer: {exc!r}"
+        )
+
+
+def _claim_spec_critic_analysis_advance(workflow: SystemWorkflow) -> tuple[str, str]:
+    with transaction.atomic():
+        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        if (
+            locked.status != SystemWorkflow.STATUS_RUNNING
+            or locked.step != STEP_SPEC_CRITIC_ANALYZING
+        ):
+            return "", ""
+        completed_kinds = set(
+            locked.agent_runs.filter(
+                agent_kind__in=_SPEC_CRITIC_ANALYSIS_AGENT_KINDS,
+                status=SystemAgentRun.STATUS_COMPLETED,
+            ).values_list("agent_kind", flat=True)
+        )
+        if completed_kinds != set(_SPEC_CRITIC_ANALYSIS_AGENT_KINDS):
+            return "", ""
+        required, safe_defaults = _spec_critic_clarification_plan(locked)
+        if required:
+            run = (
+                locked.agent_runs.filter(
+                    agent_kind=SPEC_RISK_AGENT_KIND,
+                    status=SystemAgentRun.STATUS_COMPLETED,
+                )
+                .select_related("instance")
+                .order_by("-created_at")
+                .first()
+            )
+            if run is None:
+                return "block", "Spec Critic could not create a clarification request"
+            _create_spec_critic_clarification_request(
+                locked, run, required, safe_defaults
+            )
+            workflow.step = locked.step
+            workflow.state = locked.state
+            return "clarify", ""
+        locked.state = {
+            **locked.state,
+            "clarification_answers": safe_defaults,
+            "clarification_source": "safe_defaults" if safe_defaults else "not_needed",
+        }
+        locked.step = STEP_SPEC_CRITIC_SYNTHESIZING
+        locked.save(update_fields=["step", "state", "updated_at"])
+        workflow.step = locked.step
+        workflow.state = locked.state
+        return "synthesize", ""
+
+
+def on_user_input_resolved(input_request: UserInputRequest) -> None:
+    """Resume workflows that created their own durable clarification prompt."""
+    if input_request.method != SPEC_CRITIC_CLARIFICATION_METHOD:
+        return
+    run = (
+        SystemAgentRun.objects.select_related("workflow")
+        .filter(instance=input_request.instance)
+        .first()
+    )
+    if run is None or run.workflow.kind != SPEC_CRITIC_WORKFLOW_KIND:
+        return
+    workflow = run.workflow
+    if (
+        workflow.status != SystemWorkflow.STATUS_RUNNING
+        or workflow.step != STEP_SPEC_CRITIC_CLARIFYING
+    ):
+        return
+    _handle_spec_critic_clarification_response(workflow, input_request)
+
+
+def _handle_spec_critic_clarification_response(
+    workflow: SystemWorkflow, input_request: UserInputRequest
+) -> None:
+    action, error = _claim_spec_critic_clarification_response(
+        workflow, input_request
+    )
+    if action == "block":
+        _block_spec_critic_workflow(workflow, error)
+        return
+    if action != "synthesize":
+        return
+    try:
+        _spawn_spec_critic_synthesizer_run(workflow)
+    except Exception as exc:
+        _block_spec_critic_workflow(
+            workflow, f"failed to start Spec Critic synthesizer: {exc!r}"
+        )
+
+
+def _claim_spec_critic_clarification_response(
+    workflow: SystemWorkflow, input_request: UserInputRequest
+) -> tuple[str, str]:
+    answers = _answers_from_input_request(input_request)
+    with transaction.atomic():
+        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        if (
+            locked.status != SystemWorkflow.STATUS_RUNNING
+            or locked.step != STEP_SPEC_CRITIC_CLARIFYING
+        ):
+            return "", ""
+        questions = _spec_questions_from_state(locked, only_pending=True)
+        safe_defaults = _spec_safe_defaults_from_state(locked)
+        recorded_answers = {
+            **safe_defaults,
+            **_state_dict(locked, "clarification_answers"),
+        }
+        merged_answers: dict[str, Any] = {}
+        missing: list[dict[str, Any]] = []
+        for question in questions:
+            qid = question["id"]
+            answer = answers.get(qid)
+            if _answer_is_present(answer):
+                merged_answers[qid] = answer
+                continue
+            if qid in safe_defaults:
+                merged_answers[qid] = safe_defaults[qid]
+                continue
+            missing.append(question)
+        recorded_answers = {**recorded_answers, **merged_answers}
+        locked.state = {
+            **locked.state,
+            "clarification_answers": recorded_answers,
+            "clarification_source": "user",
+        }
+        if missing:
+            run = _spec_critic_clarification_run(locked)
+            if run is None:
+                locked.save(update_fields=["state", "updated_at"])
+                workflow.state = locked.state
+                return "block", "Spec Critic could not create a clarification request"
+            _create_spec_critic_clarification_request(
+                locked, run, missing, safe_defaults
+            )
+            workflow.step = locked.step
+            workflow.state = locked.state
+            return "clarify", ""
+        locked.step = STEP_SPEC_CRITIC_SYNTHESIZING
+        locked.save(update_fields=["step", "state", "updated_at"])
+        workflow.step = locked.step
+        workflow.state = locked.state
+        return "synthesize", ""
+
+
+def _complete_spec_critic_workflow(
+    workflow: SystemWorkflow, run: SystemAgentRun
+) -> None:
+    output = run.output if isinstance(run.output, dict) else {}
+    brief = output.get("brief")
+    if not isinstance(brief, str) or not brief.strip():
+        _block_spec_critic_workflow(workflow, "Spec Critic synthesizer returned no brief")
+        return
+    try:
+        _spawn_spec_critic_implementation_turn(workflow, brief.strip())
+    except Exception as exc:
+        _block_spec_critic_workflow(
+            workflow, f"failed to start implementation from Spec Critic brief: {exc!r}"
+        )
+        return
+    workflow.status = SystemWorkflow.STATUS_COMPLETED
+    workflow.step = STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED
+    workflow.state = {**workflow.state, "synthesized_brief": brief.strip()}
+    workflow.save(update_fields=["status", "step", "state", "updated_at"])
 
 
 def _handle_pr_followup_monitor_finished(
@@ -1366,6 +1854,125 @@ def _spawn_standing_order_judge_run(
     return run
 
 
+def _spawn_spec_critic_analysis_runs(workflow: SystemWorkflow) -> list[SystemAgentRun]:
+    prompts_and_schemas = (
+        (
+            SPEC_REQUIREMENTS_AGENT_KIND,
+            _spec_requirements_prompt(workflow),
+            _SPEC_REQUIREMENTS_OUTPUT_SCHEMA,
+            {"focus": "requirements"},
+        ),
+        (
+            SPEC_RISK_AGENT_KIND,
+            _spec_risk_prompt(workflow),
+            _SPEC_RISK_OUTPUT_SCHEMA,
+            {"focus": "ambiguity_risk"},
+        ),
+        (
+            SPEC_TEST_AGENT_KIND,
+            _spec_test_prompt(workflow),
+            _SPEC_TEST_OUTPUT_SCHEMA,
+            {"focus": "acceptance_tests"},
+        ),
+    )
+    runs: list[SystemAgentRun] = []
+    for agent_kind, prompt, schema, run_input in prompts_and_schemas:
+        instance = codex_pool.spawn_new_session(
+            cwd=workflow.cwd,
+            prompt=prompt,
+            base_instructions=_state_string(workflow, "base_instructions") or None,
+            developer_instructions=_state_string(workflow, "developer_instructions")
+            or None,
+            model=_state_string(workflow, "model") or None,
+            reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
+            approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
+            sandbox_policy="readOnly",
+            enable_memories=_state_bool(workflow, "enable_memories"),
+            thread_source=ThreadSource.subagent,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=agent_kind,
+            display_author=SPEC_CRITIC_DISPLAY_AUTHOR,
+            output_schema=schema,
+        )
+        run, _created = SystemAgentRun.objects.get_or_create(
+            instance=instance,
+            defaults={
+                "workflow": workflow,
+                "agent_kind": agent_kind,
+                "thread_id": instance.thread_id,
+                "status": SystemAgentRun.STATUS_RUNNING,
+                "input": {
+                    "cwd": workflow.cwd,
+                    "prompt": _state_string(workflow, "original_prompt"),
+                    **run_input,
+                },
+            },
+        )
+        runs.append(run)
+    return runs
+
+
+def _spawn_spec_critic_synthesizer_run(workflow: SystemWorkflow) -> SystemAgentRun:
+    prompt = _spec_synthesis_prompt(workflow)
+    instance = codex_pool.spawn_new_session(
+        cwd=workflow.cwd,
+        prompt=prompt,
+        base_instructions=_state_string(workflow, "base_instructions") or None,
+        developer_instructions=_state_string(workflow, "developer_instructions") or None,
+        model=_state_string(workflow, "model") or None,
+        reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
+        approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
+        sandbox_policy="readOnly",
+        enable_memories=_state_bool(workflow, "enable_memories"),
+        thread_source=ThreadSource.subagent,
+        purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        workflow_id=workflow.pk,
+        agent_kind=SPEC_SYNTHESIZER_AGENT_KIND,
+        display_author=SPEC_CRITIC_DISPLAY_AUTHOR,
+        output_schema=_SPEC_SYNTHESIS_OUTPUT_SCHEMA,
+    )
+    run, _created = SystemAgentRun.objects.get_or_create(
+        instance=instance,
+        defaults={
+            "workflow": workflow,
+            "agent_kind": SPEC_SYNTHESIZER_AGENT_KIND,
+            "thread_id": instance.thread_id,
+            "status": SystemAgentRun.STATUS_RUNNING,
+            "input": {
+                "cwd": workflow.cwd,
+                "prompt": _state_string(workflow, "original_prompt"),
+                "clarification_answers": _state_dict(
+                    workflow, "clarification_answers"
+                ),
+            },
+        },
+    )
+    return run
+
+
+def _spawn_spec_critic_implementation_turn(
+    workflow: SystemWorkflow, brief: str
+) -> CodexInstance:
+    return codex_pool.spawn_turn(
+        thread_id=workflow.main_thread_id,
+        cwd=workflow.cwd,
+        prompt=_spec_implementation_prompt(workflow, brief),
+        model=_state_string(workflow, "model") or None,
+        stored_model=_state_string(workflow, "model") or None,
+        reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
+        stored_reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
+        base_instructions=_state_string(workflow, "base_instructions") or None,
+        developer_instructions=_state_string(workflow, "developer_instructions") or None,
+        sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
+        approval_mode=_state_string(workflow, "approval_mode") or None,
+        enable_memories=_state_bool(workflow, "enable_memories"),
+        user_message_index=_state_int(workflow, "next_user_message_index"),
+        auto_pr_enabled=_state_bool(workflow, "auto_pr_enabled"),
+        qa_panel_enabled=_state_bool(workflow, "qa_panel_enabled"),
+    )
+
+
 def _start_standing_order_implementation_session(
     standing_order: StandingOrder, proposal: ProposedSession
 ) -> SessionMetadata:
@@ -1602,6 +2209,119 @@ def _spawn_workflow_turn(
     }
     workflow.save(update_fields=["state", "updated_at"])
     return instance
+
+
+def _spec_requirements_prompt(workflow: SystemWorkflow) -> str:
+    return (
+        "You are Hitch's hidden Spec Critic requirements extractor.\n\n"
+        "Inspect the repository as needed, but do not edit files. Extract the "
+        "implementation requirements that are directly supported by the user's "
+        "prompt and repository context. Separate confirmed requirements from "
+        "assumptions, and note concrete repo signals such as relevant modules, "
+        "tests, existing patterns, or missing context. Do not ask the user "
+        "directly; Hitch has a separate structured clarification gate.\n\n"
+        f"Repository cwd: {workflow.cwd}\n\n"
+        "User prompt:\n"
+        f"{_state_string(workflow, 'original_prompt')}\n\n"
+        "Return only JSON matching this shape: "
+        '{"summary": string, "requirements": [string], "assumptions": [string], '
+        '"repo_signals": [string]}.'
+    )
+
+
+def _spec_risk_prompt(workflow: SystemWorkflow) -> str:
+    return (
+        "You are Hitch's hidden Spec Critic ambiguity and risk agent.\n\n"
+        "Inspect the repository as needed, but do not edit files. Identify "
+        "important ambiguity, product-intent gaps, scope uncertainty, success "
+        "criteria gaps, and tradeoffs that would make implementation unsafe to "
+        "start. Only ask for clarification when the answer cannot be safely "
+        "inferred from the prompt or repository. Prefer at most three concise "
+        "structured questions. Each question must have a short header, stable "
+        "snake_case id, and 2-3 meaningful choices; put the recommended choice "
+        "first when a safe default exists and suffix its label with "
+        '"(Recommended)". If a required decision has a safe default, set '
+        "allow_safe_default true and safe_default to the exact default label. "
+        "If no safe default is defensible, set safe_default to null. Do not call "
+        "request_user_input; return the questions in JSON so Hitch can gate the "
+        "visible implementation session.\n\n"
+        f"Repository cwd: {workflow.cwd}\n\n"
+        "User prompt:\n"
+        f"{_state_string(workflow, 'original_prompt')}\n\n"
+        "Return only JSON matching this shape: "
+        '{"summary": string, "ambiguities": [string], "risks": [string], '
+        '"questions": [{"id": string, "header": string, "question": string, '
+        '"required": boolean, "allow_safe_default": boolean, '
+        '"safe_default": string | null, "options": [{"label": string, '
+        '"description": string}]}]}.'
+    )
+
+
+def _spec_test_prompt(workflow: SystemWorkflow) -> str:
+    return (
+        "You are Hitch's hidden Spec Critic acceptance and test strategist.\n\n"
+        "Inspect the repository as needed, but do not edit files. Propose a "
+        "focused acceptance strategy for the eventual implementation: concrete "
+        "acceptance criteria, automated tests to add or update, and any manual "
+        "checks that are appropriate. Keep the strategy scoped to the likely "
+        "implementation surface and existing repo test conventions.\n\n"
+        f"Repository cwd: {workflow.cwd}\n\n"
+        "User prompt:\n"
+        f"{_state_string(workflow, 'original_prompt')}\n\n"
+        "Return only JSON matching this shape: "
+        '{"summary": string, "acceptance_criteria": [string], '
+        '"test_strategy": [string], "manual_checks": [string]}.'
+    )
+
+
+def _spec_synthesis_prompt(workflow: SystemWorkflow) -> str:
+    outputs = _spec_critic_outputs(workflow)
+    clarification_answers = _state_dict(workflow, "clarification_answers")
+    return (
+        "You are Hitch's hidden Spec Critic synthesizer.\n\n"
+        "Synthesize the hidden analysis outputs and clarification decisions into "
+        "one concise, decision-complete implementation brief for the visible "
+        "coding agent. Resolve ambiguity using explicit user answers first, then "
+        "recorded safe defaults. Include requirements, non-goals or scope limits, "
+        "risks/tradeoffs, and a concrete test/acceptance strategy. Do not invent "
+        "product intent beyond the prompt, repository evidence, user answers, or "
+        "safe defaults.\n\n"
+        f"Repository cwd: {workflow.cwd}\n\n"
+        "Original user prompt:\n"
+        f"{_state_string(workflow, 'original_prompt')}\n\n"
+        "Clarification decisions:\n"
+        f"{json.dumps(clarification_answers, indent=2, sort_keys=True)}\n\n"
+        "Hidden analysis outputs:\n"
+        f"{json.dumps(outputs, indent=2, sort_keys=True)}\n\n"
+        "Return only JSON matching this shape: "
+        '{"brief": string}.'
+    )
+
+
+def _spec_implementation_prompt(workflow: SystemWorkflow, brief: str) -> str:
+    clarification_answers = _state_dict(workflow, "clarification_answers")
+    parts = [
+        "Hitch Spec Critic synthesized this pre-implementation brief.",
+        "Use it as the authoritative task brief for this implementation turn.",
+        "",
+        "Original user request:",
+        _state_string(workflow, "original_prompt"),
+        "",
+        "Spec Critic brief:",
+        brief,
+    ]
+    if clarification_answers:
+        parts.extend(
+            [
+                "",
+                "Clarification decisions:",
+                *[
+                    f"- {key}: {value}"
+                    for key, value in sorted(clarification_answers.items())
+                ],
+            ]
+        )
+    return "\n".join(parts)
 
 
 def _qa_prompt(cwd: str, diff_text: str) -> str:
@@ -2452,6 +3172,82 @@ def _write_standing_order_history_files(
     return [str(path)]
 
 
+def _parse_spec_critic_output(agent_kind: str, raw_output: str) -> dict[str, Any] | None:
+    if agent_kind == SPEC_REQUIREMENTS_AGENT_KIND:
+        return _parse_spec_requirements_output(raw_output)
+    if agent_kind == SPEC_RISK_AGENT_KIND:
+        return _parse_spec_risk_output(raw_output)
+    if agent_kind == SPEC_TEST_AGENT_KIND:
+        return _parse_spec_test_output(raw_output)
+    if agent_kind == SPEC_SYNTHESIZER_AGENT_KIND:
+        return _parse_spec_synthesis_output(raw_output)
+    return None
+
+
+def _parse_spec_requirements_output(raw_output: str) -> dict[str, Any] | None:
+    parsed = _parse_json_object(raw_output)
+    if parsed is None:
+        return None
+    summary = parsed.get("summary")
+    if not isinstance(summary, str):
+        return None
+    return {
+        "summary": summary.strip(),
+        "requirements": _string_list(parsed.get("requirements")),
+        "assumptions": _string_list(parsed.get("assumptions")),
+        "repo_signals": _string_list(parsed.get("repo_signals")),
+    }
+
+
+def _parse_spec_risk_output(raw_output: str) -> dict[str, Any] | None:
+    parsed = _parse_json_object(raw_output)
+    if parsed is None:
+        return None
+    summary = parsed.get("summary")
+    if not isinstance(summary, str):
+        return None
+    return {
+        "summary": summary.strip(),
+        "ambiguities": _string_list(parsed.get("ambiguities")),
+        "risks": _string_list(parsed.get("risks")),
+        "questions": _normalize_spec_questions(parsed.get("questions")),
+    }
+
+
+def _parse_spec_test_output(raw_output: str) -> dict[str, Any] | None:
+    parsed = _parse_json_object(raw_output)
+    if parsed is None:
+        return None
+    summary = parsed.get("summary")
+    if not isinstance(summary, str):
+        return None
+    return {
+        "summary": summary.strip(),
+        "acceptance_criteria": _string_list(parsed.get("acceptance_criteria")),
+        "test_strategy": _string_list(parsed.get("test_strategy")),
+        "manual_checks": _string_list(parsed.get("manual_checks")),
+    }
+
+
+def _parse_spec_synthesis_output(raw_output: str) -> dict[str, str] | None:
+    parsed = _parse_json_object(raw_output)
+    if parsed is None:
+        return None
+    brief = parsed.get("brief")
+    if not isinstance(brief, str) or not brief.strip():
+        return None
+    return {"brief": brief.strip()}
+
+
+def _parse_json_object(raw_output: str) -> dict[str, Any] | None:
+    text = _strip_json_markdown_fence(raw_output)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def _parse_qa_output(raw_output: str) -> dict[str, Any] | None:
     text = raw_output.strip()
     if text.startswith("```"):
@@ -2926,6 +3722,287 @@ def _surface_workflow_failure(workflow: SystemWorkflow, error: str) -> None:
         logger.exception(
             "failed to surface system workflow failure for workflow %s", workflow.pk
         )
+
+
+def _block_spec_critic_workflow(workflow: SystemWorkflow, error: str) -> None:
+    with transaction.atomic():
+        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        locked.status = SystemWorkflow.STATUS_BLOCKED
+        locked.step = STEP_BLOCKED
+        locked.state = {**locked.state, "error": error}
+        locked.save(update_fields=["status", "step", "state", "updated_at"])
+        workflow.status = locked.status
+        workflow.step = locked.step
+        workflow.state = locked.state
+    _surface_spec_critic_failure(workflow, error)
+
+
+def _surface_spec_critic_failure(workflow: SystemWorkflow, error: str) -> None:
+    with transaction.atomic():
+        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        if locked.state.get("failure_surfaced") is True:
+            return
+        locked.state = {**locked.state, "failure_surfaced": True}
+        locked.save(update_fields=["state", "updated_at"])
+        workflow.state = locked.state
+    try:
+        _spawn_spec_critic_failure_turn(workflow, error)
+    except Exception:
+        logger.exception(
+            "failed to surface Spec Critic workflow failure for workflow %s",
+            workflow.pk,
+        )
+
+
+def _spawn_spec_critic_failure_turn(
+    workflow: SystemWorkflow, error: str
+) -> CodexInstance:
+    original_prompt = _state_string(workflow, "original_prompt") or "(unknown request)"
+    return _spawn_workflow_turn(
+        workflow,
+        prompt=(
+            "Hitch Spec Critic could not complete pre-implementation analysis.\n\n"
+            f"Original user request:\n{original_prompt}\n\n"
+            f"Status: {error}\n\n"
+            "Tell the user the implementation was not started because the "
+            "Spec Critic preflight failed. Keep the explanation concise."
+        ),
+        purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+        display_author=SPEC_CRITIC_DISPLAY_AUTHOR,
+        agent_kind=SPEC_CRITIC_WORKFLOW_KIND,
+    )
+
+
+def _normalize_spec_questions(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    questions: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            continue
+        qid = _spec_question_id(str(item.get("id") or ""), index)
+        if qid in seen_ids:
+            qid = f"{qid}_{index + 1}"
+        header = str(item.get("header") or qid.replace("_", " ").title()).strip()[:24]
+        question = str(item.get("question") or "").strip()
+        options = _normalize_spec_question_options(item.get("options"))
+        if not qid or not question or len(options) < 2:
+            continue
+        safe_default = item.get("safe_default")
+        if not isinstance(safe_default, str) or not safe_default.strip():
+            safe_default = ""
+        else:
+            safe_default = safe_default.strip()
+        questions.append(
+            {
+                "id": qid,
+                "header": header or qid,
+                "question": question,
+                "required": item.get("required") is not False,
+                "allow_safe_default": item.get("allow_safe_default") is True,
+                "safe_default": safe_default,
+                "options": options[:3],
+            }
+        )
+        seen_ids.add(qid)
+    return questions[:3]
+
+
+def _normalize_spec_question_options(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    options: list[dict[str, str]] = []
+    seen_labels: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        label = str(item.get("label") or "").strip()
+        description = str(item.get("description") or "").strip()
+        if not label or label in seen_labels:
+            continue
+        options.append({"label": label[:80], "description": description[:180]})
+        seen_labels.add(label)
+    return options
+
+
+def _spec_question_id(raw: str, index: int) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", raw.lower()).strip("_")
+    return slug[:48] or f"decision_{index + 1}"
+
+
+def _spec_critic_clarification_plan(
+    workflow: SystemWorkflow,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    questions = _spec_questions_from_outputs(workflow)
+    required: list[dict[str, Any]] = []
+    safe_defaults: dict[str, str] = {}
+    for question in questions:
+        safe_default = question.get("safe_default")
+        if (
+            question.get("allow_safe_default") is True
+            and isinstance(safe_default, str)
+            and safe_default.strip()
+        ):
+            safe_defaults[question["id"]] = safe_default.strip()
+            continue
+        if question.get("required") is True:
+            required.append(_question_for_user_input(question))
+    return required, safe_defaults
+
+
+def _request_spec_critic_clarification(
+    workflow: SystemWorkflow,
+    questions: list[dict[str, Any]],
+    safe_defaults: dict[str, str],
+) -> UserInputRequest | None:
+    run = _spec_critic_clarification_run(workflow)
+    if run is None:
+        _block_spec_critic_workflow(
+            workflow, "Spec Critic could not create a clarification request"
+        )
+        return None
+    return _create_spec_critic_clarification_request(
+        workflow, run, questions, safe_defaults
+    )
+
+
+def _spec_critic_clarification_run(
+    workflow: SystemWorkflow,
+) -> SystemAgentRun | None:
+    return (
+        workflow.agent_runs.filter(agent_kind=SPEC_RISK_AGENT_KIND)
+        .select_related("instance")
+        .order_by("-created_at")
+        .first()
+    )
+
+
+def _create_spec_critic_clarification_request(
+    workflow: SystemWorkflow,
+    run: SystemAgentRun,
+    questions: list[dict[str, Any]],
+    safe_defaults: dict[str, str],
+) -> UserInputRequest:
+    recorded_answers = {
+        **safe_defaults,
+        **_state_dict(workflow, "clarification_answers"),
+    }
+    input_request = UserInputRequest.objects.create(
+        instance=run.instance,
+        method=SPEC_CRITIC_CLARIFICATION_METHOD,
+        params={"questions": questions},
+    )
+    workflow.step = STEP_SPEC_CRITIC_CLARIFYING
+    workflow.state = {
+        **workflow.state,
+        "clarification_request_id": input_request.pk,
+        "clarification_questions": questions,
+        "clarification_safe_defaults": safe_defaults,
+        "clarification_answers": recorded_answers,
+    }
+    workflow.save(update_fields=["step", "state", "updated_at"])
+    return input_request
+
+
+def _cancel_pending_spec_critic_input_requests(
+    workflow: SystemWorkflow, reason: str
+) -> None:
+    instance_ids = list(workflow.agent_runs.values_list("instance_id", flat=True))
+    if not instance_ids:
+        return
+    UserInputRequest.objects.filter(
+        instance_id__in=instance_ids,
+        method=SPEC_CRITIC_CLARIFICATION_METHOD,
+        response__isnull=True,
+    ).update(
+        response={"cancelled": True, "reason": reason},
+        responded_at=timezone.now(),
+    )
+
+
+def _spec_questions_from_outputs(workflow: SystemWorkflow) -> list[dict[str, Any]]:
+    risk_run = (
+        workflow.agent_runs.filter(
+            agent_kind=SPEC_RISK_AGENT_KIND,
+            status=SystemAgentRun.STATUS_COMPLETED,
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    if risk_run is None or not isinstance(risk_run.output, dict):
+        return []
+    questions = risk_run.output.get("questions")
+    return questions if isinstance(questions, list) else []
+
+
+def _spec_questions_from_state(
+    workflow: SystemWorkflow, *, only_pending: bool
+) -> list[dict[str, Any]]:
+    questions = workflow.state.get("clarification_questions")
+    if not isinstance(questions, list):
+        return []
+    normalized = [q for q in questions if isinstance(q, dict) and isinstance(q.get("id"), str)]
+    if not only_pending:
+        return normalized
+    existing = _state_dict(workflow, "clarification_answers")
+    return [q for q in normalized if q["id"] not in existing]
+
+
+def _spec_safe_defaults_from_state(workflow: SystemWorkflow) -> dict[str, str]:
+    raw = workflow.state.get("clarification_safe_defaults")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): str(value) for key, value in raw.items() if str(value).strip()}
+
+
+def _question_for_user_input(question: dict[str, Any]) -> dict[str, Any]:
+    required = question.get("required") is True
+    safe_default = question.get("safe_default")
+    has_safe_default = (
+        question.get("allow_safe_default") is True
+        and isinstance(safe_default, str)
+        and bool(safe_default.strip())
+    )
+    return {
+        "id": question["id"],
+        "header": question.get("header") or question["id"],
+        "question": question.get("question") or question["id"],
+        "required": required,
+        "requires_explicit_choice": required and not has_safe_default,
+        "options": question.get("options") or [],
+    }
+
+
+def _answers_from_input_request(input_request: UserInputRequest) -> dict[str, Any]:
+    response = input_request.response if isinstance(input_request.response, dict) else {}
+    answers = response.get("answers")
+    return answers if isinstance(answers, dict) else {}
+
+
+def _answer_is_present(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list | tuple | dict):
+        return bool(value)
+    return True
+
+
+def _spec_critic_outputs(workflow: SystemWorkflow) -> dict[str, Any]:
+    outputs: dict[str, Any] = {}
+    for run in workflow.agent_runs.filter(
+        agent_kind__in=(*_SPEC_CRITIC_ANALYSIS_AGENT_KINDS, SPEC_SYNTHESIZER_AGENT_KIND),
+        status=SystemAgentRun.STATUS_COMPLETED,
+    ).order_by("created_at", "id"):
+        outputs[run.agent_kind] = run.output
+    return outputs
+
+
+def _state_dict(workflow: SystemWorkflow, key: str) -> dict[str, Any]:
+    value = workflow.state.get(key)
+    return dict(value) if isinstance(value, dict) else {}
 
 
 def _state_string(workflow: SystemWorkflow, key: str) -> str:

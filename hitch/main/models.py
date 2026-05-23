@@ -689,6 +689,7 @@ class UserSettings(models.Model):
     use_worktrees = models.BooleanField(default=False)
     auto_pr_enabled = models.BooleanField(default=False)
     qa_panel_enabled = models.BooleanField(default=False)
+    spec_critic_enabled = models.BooleanField(default=False)
     show_archived_sessions = models.BooleanField(default=False)
     last_selected_repo = models.CharField(max_length=4096, blank=True, default="")
     selected_project = models.ForeignKey(
