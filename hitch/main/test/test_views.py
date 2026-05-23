@@ -4813,6 +4813,7 @@ class StandingOrderViewTests(TestCase):
             title="Improve tests",
             goal="Find useful test coverage increments.",
             ambition=StandingOrder.AMBITION_HIGH,
+            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
         )
         StandingOrder.objects.create(
             project=other_project,
@@ -4850,9 +4851,14 @@ class StandingOrderViewTests(TestCase):
         self.assertContains(response, "Improve tests")
         self.assertContains(response, "Ambition")
         self.assertContains(response, "Ambition: High")
+        self.assertContains(response, "Autonomy")
+        self.assertContains(response, "Autonomy: Draft patch")
         self.assertContains(
             response,
             f'data-edit-url="{reverse("edit_standing_order", args=[order.pk])}"',
+        )
+        self.assertContains(
+            response, f'data-autonomy="{StandingOrder.AUTONOMY_DRAFT_PATCH}"'
         )
         self.assertContains(response, 'data-standing-order-edit')
         self.assertNotContains(response, "Add parser coverage")
@@ -5054,6 +5060,7 @@ class StandingOrderViewTests(TestCase):
                 "title": "Improve tests",
                 "goal": "Find useful test coverage increments.",
                 "ambition": StandingOrder.AMBITION_YOLO,
+                "autonomy": StandingOrder.AUTONOMY_DRAFT_PR,
                 "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
             },
         )
@@ -5063,6 +5070,7 @@ class StandingOrderViewTests(TestCase):
         self.assertEqual(order.project, project)
         self.assertEqual(order.title, "Improve tests")
         self.assertEqual(order.ambition, StandingOrder.AMBITION_YOLO)
+        self.assertEqual(order.autonomy, StandingOrder.AUTONOMY_DRAFT_PR)
         self.assertEqual(
             order.confidence_threshold,
             StandingOrder.CONFIDENCE_VERY_HIGH,
@@ -5076,6 +5084,41 @@ class StandingOrderViewTests(TestCase):
             title="Improve tests",
             goal="Find useful test coverage increments.",
             ambition=StandingOrder.AMBITION_INCREMENTAL,
+            autonomy=StandingOrder.AUTONOMY_PROPOSE_ONLY,
+            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+        )
+
+        response = self.client.post(
+            reverse("edit_standing_order", args=[order.pk]),
+            {
+                "title": "Improve docs",
+                "goal": "Find useful docs increments.",
+                "ambition": StandingOrder.AMBITION_HIGH,
+                "autonomy": StandingOrder.AUTONOMY_DRAFT_PATCH,
+                "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.title, "Improve docs")
+        self.assertEqual(order.goal, "Find useful docs increments.")
+        self.assertEqual(order.ambition, StandingOrder.AMBITION_HIGH)
+        self.assertEqual(order.autonomy, StandingOrder.AUTONOMY_DRAFT_PATCH)
+        self.assertEqual(
+            order.confidence_threshold,
+            StandingOrder.CONFIDENCE_VERY_HIGH,
+        )
+
+    def test_edit_standing_order_preserves_autonomy_when_omitted(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            ambition=StandingOrder.AMBITION_INCREMENTAL,
+            autonomy=StandingOrder.AUTONOMY_DRAFT_PR,
             confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
         )
 
@@ -5091,13 +5134,7 @@ class StandingOrderViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         order.refresh_from_db()
-        self.assertEqual(order.title, "Improve docs")
-        self.assertEqual(order.goal, "Find useful docs increments.")
-        self.assertEqual(order.ambition, StandingOrder.AMBITION_HIGH)
-        self.assertEqual(
-            order.confidence_threshold,
-            StandingOrder.CONFIDENCE_VERY_HIGH,
-        )
+        self.assertEqual(order.autonomy, StandingOrder.AUTONOMY_DRAFT_PR)
 
     def test_edit_standing_order_is_scoped_to_selected_project(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -5139,6 +5176,7 @@ class StandingOrderViewTests(TestCase):
                     "title": "",
                     "goal": "Find useful docs increments.",
                     "ambition": StandingOrder.AMBITION_HIGH,
+                    "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
                     "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
                 },
                 "title is required",
@@ -5148,6 +5186,7 @@ class StandingOrderViewTests(TestCase):
                     "title": "Improve docs",
                     "goal": "",
                     "ambition": StandingOrder.AMBITION_HIGH,
+                    "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
                     "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
                 },
                 "goal is required",
@@ -5157,6 +5196,7 @@ class StandingOrderViewTests(TestCase):
                     "title": "Improve docs",
                     "goal": "Find useful docs increments.",
                     "ambition": "huge",
+                    "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
                     "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
                 },
                 "ambition is invalid",
@@ -5166,6 +5206,17 @@ class StandingOrderViewTests(TestCase):
                     "title": "Improve docs",
                     "goal": "Find useful docs increments.",
                     "ambition": StandingOrder.AMBITION_HIGH,
+                    "autonomy": "self_driving",
+                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                },
+                "autonomy is invalid",
+            ),
+            (
+                {
+                    "title": "Improve docs",
+                    "goal": "Find useful docs increments.",
+                    "ambition": StandingOrder.AMBITION_HIGH,
+                    "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
                     "confidence_threshold": "absolute",
                 },
                 "confidence threshold is invalid",

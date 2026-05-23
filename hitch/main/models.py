@@ -76,6 +76,15 @@ class StandingOrder(models.Model):
         (CONFIDENCE_VERY_HIGH, "Very high"),
     )
 
+    AUTONOMY_PROPOSE_ONLY = "propose_only"
+    AUTONOMY_DRAFT_PATCH = "draft_patch"
+    AUTONOMY_DRAFT_PR = "draft_pr"
+    AUTONOMY_CHOICES: ClassVar[tuple[tuple[str, str], ...]] = (
+        (AUTONOMY_PROPOSE_ONLY, "Propose only"),
+        (AUTONOMY_DRAFT_PATCH, "Draft patch"),
+        (AUTONOMY_DRAFT_PR, "Draft PR"),
+    )
+
     project = models.ForeignKey(
         Project,
         on_delete=models.CASCADE,
@@ -92,6 +101,11 @@ class StandingOrder(models.Model):
         max_length=32,
         choices=CONFIDENCE_CHOICES,
         default=CONFIDENCE_HIGH,
+    )
+    autonomy = models.CharField(
+        max_length=32,
+        choices=AUTONOMY_CHOICES,
+        default=AUTONOMY_PROPOSE_ONLY,
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -200,6 +214,7 @@ class ProposedSession(models.Model):
         default=OUTCOME_UNSET,
     )
     outcome_notes = models.TextField(blank=True, default="")
+    outcome_metadata = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
