@@ -40,6 +40,7 @@ def spawn_new_session(
     *,
     cwd: str,
     prompt: str,
+    thread_name: str | None = None,
     base_instructions: str | None = None,
     developer_instructions: str | None = None,
     model: str | None = None,
@@ -89,8 +90,15 @@ def spawn_new_session(
         # ``live_thread_for_persistence``, so it blocks until the rollout
         # file exists on disk. The first line of the prompt mirrors the
         # title the session list would otherwise compute from ``preview``
-        # once the first turn streams in, so this is invisible in the UI.
-        codex._client.thread_set_name(thread_id, _initial_thread_name(prompt))
+        # once the first turn streams in, so this is usually invisible in
+        # the UI. Callers can pass ``thread_name`` when the prompt starts
+        # with generic instructions and a better task title is known.
+        name_source = (
+            thread_name
+            if thread_name is not None and thread_name.strip()
+            else prompt
+        )
+        codex._client.thread_set_name(thread_id, _initial_thread_name(name_source))
     return _spawn_worker(
         thread_id=thread_id,
         cwd=cwd,

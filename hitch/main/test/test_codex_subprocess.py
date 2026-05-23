@@ -179,6 +179,29 @@ class SpawnNewSessionTests(TestCase):
 
     @patch("hitch.main.codex_pool._launch_worker_process")
     @patch("hitch.main.codex_pool.Codex")
+    def test_initial_thread_name_can_use_explicit_task_title(
+        self, mock_codex: MagicMock, mock_launch: MagicMock
+    ) -> None:
+        codex = _stub_codex_thread_start(mock_codex, "thread-abc")
+        mock_launch.return_value = SimpleNamespace(pid=1)
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_new_session(
+                cwd="/repo",
+                prompt="Go ahead and implement this proposed session.",
+                thread_name="Add parser coverage",
+            )
+
+        self.assertEqual(instance.prompt, "Go ahead and implement this proposed session.")
+        codex._client.thread_set_name.assert_called_once_with(
+            "thread-abc", "Add parser coverage"
+        )
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.codex_pool.Codex")
     def test_forwards_base_instructions_to_thread_start(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:

@@ -4098,7 +4098,10 @@ def new_session(request: HttpRequest) -> HttpResponse:
     # QA workflows review the selected repo's current diff; a fresh managed
     # worktree would be clean and miss uncommitted changes.
     if qa_workflow_activation:
-        thread_name = _PR_SLASH_PROMPT if pr_activation else _QA_SLASH_PROMPT
+        if proposed_session is not None:
+            thread_name = proposed_session.title
+        else:
+            thread_name = _PR_SLASH_PROMPT if pr_activation else _QA_SLASH_PROMPT
         base_instructions = _base_instructions_for_settings(settings)
         create_thread_kwargs: dict[str, Any] = {
             "cwd": session_cwd,
@@ -4173,6 +4176,8 @@ def new_session(request: HttpRequest) -> HttpResponse:
         "sandbox_policy": settings.sandbox_policy or None,
         "approval_mode": settings.approval_mode,
     }
+    if proposed_session is not None:
+        spawn_kwargs["thread_name"] = proposed_session.title
     base_instructions = _base_instructions_for_settings(settings)
     if base_instructions:
         spawn_kwargs["base_instructions"] = base_instructions
