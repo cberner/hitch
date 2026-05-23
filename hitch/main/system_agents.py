@@ -125,6 +125,9 @@ _PR_HANDOFF_INTEGER_FIELDS = frozenset(
         "reaction_count",
     }
 )
+_PR_HANDOFF_LIST_FIELDS = frozenset(
+    {"unresolved_threads", "latest_comments", "failing_jobs", "pending_jobs"}
+)
 _QA_DESIGN_URL_RE = re.compile(r"\b(?:https?://|www\.)[^\s`<>()\[\]]+", re.IGNORECASE)
 _QA_DESIGN_FILE_RE = re.compile(
     r"(?<![\w.:/-])(?:[\w.-]+/)+[\w.-]+\.[A-Za-z0-9]+(?=$|[^\w/.-])"
@@ -195,6 +198,34 @@ _CONFIDENCE_RANK = {
     StandingOrder.CONFIDENCE_MEDIUM: 1,
     StandingOrder.CONFIDENCE_HIGH: 2,
     StandingOrder.CONFIDENCE_VERY_HIGH: 3,
+}
+
+
+def _nullable_schema(schema_type: str) -> dict[str, Any]:
+    return {"type": [schema_type, "null"]}
+
+
+def _pr_handoff_output_property_schema(field: str) -> dict[str, Any]:
+    if field in _PR_HANDOFF_BOOLEAN_FIELDS:
+        return _nullable_schema("boolean")
+    if field in _PR_HANDOFF_INTEGER_FIELDS:
+        return _nullable_schema("integer")
+    if field in _PR_HANDOFF_LIST_FIELDS:
+        return {
+            "type": ["array", "null"],
+            "items": {"type": "string"},
+        }
+    return _nullable_schema("string")
+
+
+_PR_HANDOFF_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": list(_PR_HANDOFF_FIELDS),
+    "properties": {
+        field: _pr_handoff_output_property_schema(field)
+        for field in _PR_HANDOFF_FIELDS
+    },
 }
 
 _QA_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -294,7 +325,7 @@ _PR_MONITOR_OUTPUT_SCHEMA: dict[str, Any] = {
         },
         "summary": {"type": "string"},
         "feedback": {"type": "string"},
-        "pr": {"type": "object"},
+        "pr": _PR_HANDOFF_OUTPUT_SCHEMA,
         "blockers": {"type": "array", "items": {"type": "string"}},
     },
 }
@@ -1428,7 +1459,9 @@ def _pr_followup_monitor_prompt(
         "Return only JSON matching this shape: "
         '{"status": "blocked" | "ready" | "terminal", '
         '"summary": string, "feedback": string, "pr": object, '
-        '"blockers": [string]}. Put any updated PR fields you observed in '
+        '"blockers": [string]}. Include every PR handoff schema field in '
+        '"pr"; use null for fields you did not observe and arrays of concise '
+        'strings for list fields. Put any updated PR fields you observed in '
         '"pr", including url, repository_full_name, pr_number, state, merged, '
         "mergeable, head, head_sha, review_signal, unresolved_thread_count, and "
         "ci_status when available."

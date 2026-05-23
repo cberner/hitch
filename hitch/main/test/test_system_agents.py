@@ -1,7 +1,7 @@
 import json
 import tempfile
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 from unittest.mock import MagicMock, patch
 
 from django.db import IntegrityError, transaction
@@ -85,6 +85,31 @@ def _events_file(test: TestCase, payload: dict[str, object]) -> str:
         events_path = fh.name
     test.addCleanup(Path(events_path).unlink, missing_ok=True)
     return events_path
+
+
+def _assert_response_schema_objects_are_strict(
+    test: TestCase, schema: dict[str, Any], *, path: str = "$"
+) -> None:
+    schema_type = schema.get("type")
+    is_object = schema_type == "object" or (
+        isinstance(schema_type, list) and "object" in schema_type
+    )
+    if is_object:
+        test.assertIs(schema.get("additionalProperties"), False, path)
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            required = schema.get("required")
+            if not isinstance(required, list):
+                test.fail(path)
+            test.assertEqual(set(required), set(properties), path)
+            for name, child in properties.items():
+                if isinstance(child, dict):
+                    _assert_response_schema_objects_are_strict(
+                        test, child, path=f"{path}.{name}"
+                    )
+    items = schema.get("items")
+    if isinstance(items, dict):
+        _assert_response_schema_objects_are_strict(test, items, path=f"{path}[]")
 
 
 def _raw_events_file(test: TestCase, events: list[dict[str, object]]) -> str:
@@ -182,6 +207,26 @@ class PrQaWorkflowTests(TestCase):
 
         run = SystemAgentRun.objects.get(workflow=workflow)
         self.assertEqual(run.thread_id, "qa-thread")
+
+    def test_pr_monitor_output_schema_is_strict_for_response_format(self) -> None:
+        schema = system_agents._PR_MONITOR_OUTPUT_SCHEMA
+
+        _assert_response_schema_objects_are_strict(self, schema)
+        pr_schema = schema["properties"]["pr"]
+        self.assertEqual(pr_schema["required"], list(system_agents._PR_HANDOFF_FIELDS))
+        self.assertEqual(pr_schema["properties"]["url"]["type"], ["string", "null"])
+        self.assertEqual(
+            pr_schema["properties"]["pr_number"]["type"], ["integer", "null"]
+        )
+        self.assertEqual(
+            pr_schema["properties"]["merged"]["type"], ["boolean", "null"]
+        )
+        self.assertEqual(
+            pr_schema["properties"]["latest_comments"]["type"], ["array", "null"]
+        )
+        self.assertEqual(
+            pr_schema["properties"]["latest_comments"]["items"]["type"], "string"
+        )
 
     @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
