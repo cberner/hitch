@@ -752,6 +752,27 @@ class IndexViewTests(TestCase):
             '<span class="lifetime-chart-label">01-05</span>',
             count=2,
         )
+        self.assertContains(
+            response,
+            '<div class="lifetime-chart-axis" aria-hidden="true">',
+            count=2,
+        )
+        self.assertContains(
+            response,
+            '<span class="lifetime-chart-axis-value">3.5K</span>',
+        )
+        self.assertContains(
+            response,
+            '<span class="lifetime-chart-axis-value">1.8K</span>',
+        )
+        self.assertContains(
+            response,
+            '<span class="lifetime-chart-axis-value">1K</span>',
+        )
+        self.assertContains(
+            response,
+            '<span class="lifetime-chart-axis-value">500</span>',
+        )
         self.assertContains(response, "1.2K")
         self.assertContains(response, "2.1K")
         self.assertContains(response, "250")
@@ -777,6 +798,7 @@ class IndexViewTests(TestCase):
 
     def test_lifetime_token_chart_formats_segments(self) -> None:
         self.assertEqual(views._format_lifetime_token_chart({}), [])
+        self.assertEqual(views._format_lifetime_token_chart_axis({}), [])
         self.assertEqual(views._chart_segment_percent(0, 100), 0)
         self.assertEqual(views._chart_segment_percent(5, 0), 0)
         self.assertEqual(views._chart_segment_percent(1, 1_000), 0)
@@ -809,6 +831,15 @@ class IndexViewTests(TestCase):
                     "cached_percent": 0,
                 },
             ],
+        )
+        self.assertEqual(
+            views._format_lifetime_token_chart_axis(
+                {
+                    "2025-01-06": {"input": 50, "output": 50, "cached": 0},
+                    "2025-01-05": {"input": 100, "output": 50, "cached": 50},
+                }
+            ),
+            ["200", "100", "0"],
         )
 
     @patch("hitch.main.views.Codex")

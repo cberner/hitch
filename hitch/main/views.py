@@ -1857,10 +1857,12 @@ def _lifetime_token_usage_for(threads: list[Any]) -> dict[str, Any]:
         "sessions": {
             **_format_lifetime_token_usage(session_usage),
             "chart": _format_lifetime_token_chart(session_by_date),
+            "chart_axis": _format_lifetime_token_chart_axis(session_by_date),
         },
         "system": {
             **_format_lifetime_token_usage(system_usage),
             "chart": _format_lifetime_token_chart(system_by_date),
+            "chart_axis": _format_lifetime_token_chart_axis(system_by_date),
         },
     }
 
@@ -1932,13 +1934,7 @@ def _empty_raw_token_usage() -> dict[str, int]:
 def _format_lifetime_token_chart(
     usage_by_date: Mapping[str, Mapping[str, int]],
 ) -> list[dict[str, str | int]]:
-    max_total = max(
-        (
-            values["input"] + values["output"] + values["cached"]
-            for values in usage_by_date.values()
-        ),
-        default=0,
-    )
+    max_total = _lifetime_token_chart_max_total(usage_by_date)
     chart: list[dict[str, str | int]] = []
     for date_key in sorted(usage_by_date):
         values = usage_by_date[date_key]
@@ -1956,6 +1952,34 @@ def _format_lifetime_token_chart(
             }
         )
     return chart
+
+
+def _format_lifetime_token_chart_axis(
+    usage_by_date: Mapping[str, Mapping[str, int]],
+) -> list[str]:
+    if not usage_by_date:
+        return []
+    max_total = _lifetime_token_chart_max_total(usage_by_date)
+    if max_total <= 0:
+        return ["0"]
+    midpoint = (max_total + 1) // 2
+    ticks = [max_total]
+    if 0 < midpoint < max_total:
+        ticks.append(midpoint)
+    ticks.append(0)
+    return [_format_human_token_count(value) for value in ticks]
+
+
+def _lifetime_token_chart_max_total(
+    usage_by_date: Mapping[str, Mapping[str, int]],
+) -> int:
+    return max(
+        (
+            values["input"] + values["output"] + values["cached"]
+            for values in usage_by_date.values()
+        ),
+        default=0,
+    )
 
 
 def _chart_segment_percent(value: int, max_total: int) -> int:
