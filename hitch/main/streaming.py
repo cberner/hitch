@@ -363,7 +363,7 @@ def _is_done(instance_id: int) -> bool:
         return True
     if instance.status in (CodexInstance.STATUS_COMPLETED, CodexInstance.STATUS_FAILED):
         return True
-    return bool(instance.pid) and not codex_pool.is_alive(instance.pid)
+    return bool(instance.pid) and not codex_pool.worker_is_alive(instance)
 
 
 def _current_status(instance_id: int) -> str:

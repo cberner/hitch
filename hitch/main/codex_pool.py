@@ -22,6 +22,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,10 @@ from openai_codex.generated.v2_all import ThreadSource
 from hitch.main.models import CodexInstance
 
 logger = logging.getLogger(__name__)
+
+_TRACKED_WORKER_PROCS: dict[int, tuple[int, subprocess.Popen[bytes]]] = {}
+_REAPED_WORKERS: set[tuple[int, int]] = set()
+_TRACKED_WORKER_PROCS_LOCK = threading.Lock()
 
 
 def spawn_new_session(
@@ -231,6 +236,13 @@ def is_alive(pid: int) -> bool:
     """
     if pid <= 0:
         return False
+    with _TRACKED_WORKER_PROCS_LOCK:
+        has_tracked_proc = pid in _TRACKED_WORKER_PROCS
+        has_reaped_worker = any(reaped_pid == pid for reaped_pid, _ in _REAPED_WORKERS)
+        if has_reaped_worker and not has_tracked_proc:
+            return False
+    if _reap_tracked_worker(pid):
+        return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -240,7 +252,110 @@ def is_alive(pid: int) -> bool:
         return True
     except OSError:
         return False
+    state = _linux_proc_state(pid)
+    return state not in ("", "X", "Z", "x")
+
+
+def worker_is_alive(instance: CodexInstance) -> bool:
+    """Return whether ``instance`` still has a live worker process."""
+    if instance.pid <= 0:
+        return False
+    with _TRACKED_WORKER_PROCS_LOCK:
+        if (instance.pid, instance.pk) in _REAPED_WORKERS:
+            return False
+        tracked = _TRACKED_WORKER_PROCS.get(instance.pid)
+    if tracked is not None:
+        tracked_instance_id, proc = tracked
+        if tracked_instance_id == instance.pk:
+            return not _reap_tracked_worker_process(
+                instance.pid, tracked_instance_id, proc
+            )
+    return is_alive(instance.pid)
+
+
+def _track_worker_process(instance_id: int, proc: subprocess.Popen[bytes]) -> None:
+    """Keep a child handle so exited detached workers can be reaped.
+
+    ``start_new_session=True`` detaches the worker from the terminal, not
+    from this parent process. While the Django process that spawned it stays
+    alive, an exited worker remains our child until we wait on it.
+    """
+    with _TRACKED_WORKER_PROCS_LOCK:
+        _REAPED_WORKERS.discard((proc.pid, instance_id))
+        _TRACKED_WORKER_PROCS[proc.pid] = (instance_id, proc)
+    threading.Thread(
+        target=_wait_for_tracked_worker,
+        args=(proc.pid, instance_id, proc),
+        name=f"codex-worker-reaper-{proc.pid}",
+        daemon=True,
+    ).start()
+
+
+def _wait_for_tracked_worker(
+    pid: int, instance_id: int, proc: subprocess.Popen[bytes]
+) -> None:
+    try:
+        proc.wait()
+    except OSError:
+        logger.debug("dropping unreapable worker process handle for pid %s", pid)
+    finally:
+        with _TRACKED_WORKER_PROCS_LOCK:
+            if _TRACKED_WORKER_PROCS.get(pid) == (instance_id, proc):
+                del _TRACKED_WORKER_PROCS[pid]
+                _REAPED_WORKERS.add((pid, instance_id))
+
+
+def _reap_tracked_worker(pid: int) -> bool:
+    with _TRACKED_WORKER_PROCS_LOCK:
+        tracked = _TRACKED_WORKER_PROCS.get(pid)
+    if tracked is None:
+        return False
+    instance_id, proc = tracked
+    return _reap_tracked_worker_process(pid, instance_id, proc)
+
+
+def _reap_finished_workers() -> None:
+    with _TRACKED_WORKER_PROCS_LOCK:
+        tracked = list(_TRACKED_WORKER_PROCS.items())
+    for pid, (instance_id, proc) in tracked:
+        _reap_tracked_worker_process(pid, instance_id, proc)
+
+
+def _reap_tracked_worker_process(
+    pid: int, instance_id: int, proc: subprocess.Popen[bytes]
+) -> bool:
+    try:
+        proc.wait(timeout=0)
+    except subprocess.TimeoutExpired:
+        return False
+    except OSError:
+        logger.debug("dropping unreapable worker process handle for pid %s", pid)
+    with _TRACKED_WORKER_PROCS_LOCK:
+        if _TRACKED_WORKER_PROCS.get(pid) == (instance_id, proc):
+            del _TRACKED_WORKER_PROCS[pid]
+            _REAPED_WORKERS.add((pid, instance_id))
     return True
+
+
+def _linux_proc_state(pid: int) -> str | None:
+    """Return Linux's one-letter process state, or None when unavailable.
+
+    ``""`` means /proc exists but the specific pid disappeared between
+    ``kill(pid, 0)`` and the stat read.
+    """
+    proc_root = Path("/proc")
+    if not proc_root.exists():
+        return None
+    try:
+        stat = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+    except OSError:
+        return None
+    end = stat.rfind(")")
+    if end < 0 or end + 2 >= len(stat):
+        return None
+    return stat[end + 2]
 
 
 def list_for_thread(thread_id: str) -> list[CodexInstance]:
@@ -601,13 +716,14 @@ def reconcile_dead() -> int:
     stuck in ``starting``/``running``. We sweep those rows and mark them
     failed so the UI doesn't show a permanently-pending turn.
     """
+    _reap_finished_workers()
     pending = CodexInstance.objects.filter(
         status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING)
     )
     updated = 0
     now = timezone.now()
     for instance in pending:
-        if is_alive(instance.pid):
+        if worker_is_alive(instance):
             continue
         instance.status = CodexInstance.STATUS_FAILED
         if not instance.error:
@@ -616,7 +732,23 @@ def reconcile_dead() -> int:
         instance.save(update_fields=["status", "error", "ended_at"])
         _notify_system_agents_if_needed(instance)
         updated += 1
+    _prune_reaped_workers()
     return updated
+
+
+def _prune_reaped_workers() -> None:
+    with _TRACKED_WORKER_PROCS_LOCK:
+        reaped_workers = set(_REAPED_WORKERS)
+    if not reaped_workers:
+        return
+    active_workers = set(
+        CodexInstance.objects.filter(
+            pk__in=[instance_id for _, instance_id in reaped_workers],
+            status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+        ).values_list("pid", "pk")
+    )
+    with _TRACKED_WORKER_PROCS_LOCK:
+        _REAPED_WORKERS.intersection_update(active_workers)
 
 
 def _notify_system_agents_if_needed(instance: CodexInstance) -> None:
@@ -753,6 +885,8 @@ def _spawn_worker(
         raise
     instance.pid = proc.pid
     instance.save(update_fields=["pid"])
+    if isinstance(proc, subprocess.Popen):
+        _track_worker_process(instance.pk, proc)
     return instance
 
 
