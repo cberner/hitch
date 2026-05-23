@@ -4802,6 +4802,11 @@ class StandingOrderViewTests(TestCase):
             cwd="/repo",
             project=project,
         )
+        judge = SessionMetadata.objects.create(
+            thread_id="judge-thread",
+            cwd="/repo",
+            project=project,
+        )
         ProposedSession.objects.create(
             standing_order=order,
             title="Add parser coverage",
@@ -4809,6 +4814,7 @@ class StandingOrderViewTests(TestCase):
             confidence=StandingOrder.CONFIDENCE_HIGH,
             relevant_files=["hitch/main/rollout.py"],
             candidate_session=candidate,
+            judge_session=judge,
         )
 
         response = self.client.get(reverse("standing_orders"))
@@ -4836,6 +4842,7 @@ class StandingOrderViewTests(TestCase):
         self.assertContains(response, "Go ahead and implement this proposed session.")
         self.assertContains(response, "Standing order goal:")
         self.assertContains(response, "Find useful test coverage increments.")
+        self.assertContains(response, "Judge log")
         self.assertContains(response, 'name="proposed_session"')
         self.assertContains(
             response,
@@ -4875,6 +4882,30 @@ class StandingOrderViewTests(TestCase):
         self.assertContains(response, "Dismiss")
         self.assertNotContains(response, 'data-proposed-session-id="')
         self.assertNotContains(response, 'data-reject-url="')
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_page_lists_agent_created_proposal(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        ProposedSession.objects.create(
+            project=project,
+            title="Add CLI proposal tests",
+            summary="Cover the proposed session CLI.",
+            prompt="Implement tests for the proposed session CLI.",
+            relevant_files=["hitch/main/management/commands/propose_session.py"],
+        )
+
+        response = self.client.get(reverse("standing_orders"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Add CLI proposal tests")
+        self.assertContains(response, "From coding agent")
+        self.assertContains(response, "Implement tests for the proposed session CLI.")
+        self.assertContains(response, f'data-proposed-session-project="{project.pk}"')
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")

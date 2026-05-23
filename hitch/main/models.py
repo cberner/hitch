@@ -16,7 +16,7 @@ losing the answer.
 
 from __future__ import annotations
 
-from typing import ClassVar, override
+from typing import Any, ClassVar, override
 
 from django.conf import settings
 from django.db import models
@@ -108,7 +108,7 @@ class StandingOrder(models.Model):
 
 
 class ProposedSession(models.Model):
-    """A standing-order session proposal awaiting user acceptance."""
+    """A project-scoped session proposal awaiting user acceptance."""
 
     INBOX_KIND_PROPOSAL = "proposal"
     INBOX_KIND_NOTICE = "notice"
@@ -130,8 +130,17 @@ class ProposedSession(models.Model):
         (OUTCOME_DISMISSED, "Dismissed"),
     )
 
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.CASCADE,
+        related_name="proposed_sessions",
+        null=True,
+        blank=True,
+    )
     standing_order = models.ForeignKey(
         StandingOrder,
+        null=True,
+        blank=True,
         on_delete=models.CASCADE,
         related_name="proposed_sessions",
     )
@@ -149,6 +158,7 @@ class ProposedSession(models.Model):
         default=INBOX_KIND_PROPOSAL,
     )
     summary = models.TextField(blank=True, default="")
+    prompt = models.TextField(blank=True, default="")
     confidence = models.CharField(
         max_length=32,
         choices=StandingOrder.CONFIDENCE_CHOICES,
@@ -168,6 +178,13 @@ class ProposedSession(models.Model):
         blank=True,
         on_delete=models.SET_NULL,
         related_name="standing_order_judge_proposals",
+    )
+    source_session = models.ForeignKey(
+        "SessionMetadata",
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="created_proposals",
     )
     accepted_session = models.ForeignKey(
         "SessionMetadata",
@@ -189,6 +206,7 @@ class ProposedSession(models.Model):
     class Meta:
         ordering = ["created_at", "id"]
         indexes = [
+            models.Index(fields=["project", "created_at"]),
             models.Index(fields=["standing_order", "created_at"]),
             models.Index(fields=["outcome_status", "created_at"]),
         ]
@@ -196,6 +214,14 @@ class ProposedSession(models.Model):
     @override
     def __str__(self) -> str:
         return self.title
+
+    @override
+    def save(self, *args: Any, **kwargs: Any) -> None:
+        if self.project_id is None and self.standing_order_id is not None:
+            self.project_id = StandingOrder.objects.values_list(
+                "project_id", flat=True
+            ).get(pk=self.standing_order_id)
+        super().save(*args, **kwargs)
 
 
 class SessionMetadata(models.Model):

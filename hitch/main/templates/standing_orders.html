@@ -423,8 +423,10 @@
                     <p class="meta">
                         {% if proposed_session.inbox_kind == "notice" %}
                         From standing order: {{ proposed_session.standing_order.title }}
-                        {% else %}
+                        {% elif proposed_session.standing_order %}
                         {{ proposed_session.standing_order.title }} - {{ proposed_session.standing_order.get_ambition_display }} ambition - {{ proposed_session.get_confidence_display }} confidence
+                        {% else %}
+                        From coding agent - {{ proposed_session.get_confidence_display }} confidence
                         {% endif %}
                     </p>
                     {% if proposed_session.summary %}
@@ -453,7 +455,7 @@
                                 class="button"
                                 data-proposed-session-do
                                 data-proposed-session-id="{{ proposed_session.pk }}"
-                                data-proposed-session-project="{{ proposed_session.standing_order.project.pk }}"
+                                data-proposed-session-project="{{ proposed_session.project.pk }}"
                                 data-proposed-session-prompt="{{ proposed_session.session_prompt }}"
                             >Do it</button>
                         </form>

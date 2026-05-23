@@ -609,10 +609,11 @@ def standing_orders(request: HttpRequest) -> HttpResponse:
     inbox = (
         list(
             ProposedSession.objects.filter(
-                standing_order__project=current_project,
+                project=current_project,
                 outcome_status=ProposedSession.OUTCOME_UNSET,
             )
             .select_related(
+                "project",
                 "standing_order",
                 "candidate_session",
                 "judge_session",
@@ -736,10 +737,11 @@ def update_proposed_session_outcome(
         return HttpResponseBadRequest("proposed session is required")
     proposed_session = (
         ProposedSession.objects.select_related(
+            "project",
             "standing_order__project",
             "candidate_session",
         )
-        .filter(pk=proposed_session_id, standing_order__project=project)
+        .filter(pk=proposed_session_id, project=project)
         .first()
     )
     if proposed_session is None:
@@ -875,12 +877,19 @@ def _attach_proposed_session_display_state(
 
 
 def _proposed_session_prompt(proposed_session: ProposedSession) -> str:
+    if proposed_session.prompt.strip():
+        return proposed_session.prompt.strip()
     parts = [
         "Go ahead and implement this proposed session.",
         "",
-        f"Standing order: {proposed_session.standing_order.title}",
+        f"Standing order: {proposed_session.standing_order.title}"
+        if proposed_session.standing_order is not None
+        else "Source: Coding agent proposal",
     ]
-    if proposed_session.standing_order.goal:
+    if (
+        proposed_session.standing_order is not None
+        and proposed_session.standing_order.goal
+    ):
         parts.extend(["", f"Standing order goal:\n{proposed_session.standing_order.goal}"])
     parts.extend(["", f"Proposed session: {proposed_session.title}"])
     if proposed_session.summary:
@@ -2918,7 +2927,7 @@ def _posted_proposed_session_for_new_session(
     if session_id < 1 or session_id > _MAX_BIGAUTOFIELD:
         return None, "proposed session is required"
     proposed_session = (
-        ProposedSession.objects.select_related("standing_order__project")
+        ProposedSession.objects.select_related("project", "standing_order__project")
         .filter(
             pk=session_id,
             inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL,
@@ -2928,7 +2937,11 @@ def _posted_proposed_session_for_new_session(
     )
     if proposed_session is None:
         return None, "proposed session is required"
-    session_project = proposed_session.standing_order.project
+    session_project = proposed_session.project
+    if session_project is None and proposed_session.standing_order is not None:
+        session_project = proposed_session.standing_order.project
+    if session_project is None:
+        return None, "proposed session is required"
     if target.project is not None and target.project != session_project:
         return None, "proposed session does not match project"
     if target.project is None and target.cwd != session_project.repo_path:

@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from typing import Any, cast, override
 from unittest.mock import MagicMock, patch
 
+from django.conf import settings
 from django.core.management import call_command
 from django.test import TestCase, override_settings
 from django.utils import timezone
@@ -35,6 +36,7 @@ from openai_codex.generated.v2_all import (
     ThreadGoalClearedNotification,
     ThreadGoalStatus,
     ThreadGoalUpdatedNotification,
+    ThreadSource,
     Turn,
     TurnCompletedNotification,
     TurnError,
@@ -45,7 +47,7 @@ from openai_codex.generated.v2_all import (
 from openai_codex.models import Notification
 from pydantic import BaseModel
 
-from hitch.main import codex_events, codex_pool, streaming
+from hitch.main import codex_events, codex_pool, coding_agents, streaming
 from hitch.main.management.commands import codex_worker as codex_worker_module
 from hitch.main.management.commands.codex_worker import (
     _DEFAULT_COLLABORATION_INSTRUCTIONS,
@@ -72,7 +74,17 @@ def _events_dir() -> tempfile.TemporaryDirectory[str]:
 def _stub_codex_thread_start(mock_codex: MagicMock, thread_id: str = "t") -> MagicMock:
     codex: MagicMock = mock_codex.return_value.__enter__.return_value
     codex.thread_start.return_value = SimpleNamespace(id=thread_id)
+    codex._client.thread_start.return_value = SimpleNamespace(
+        thread=SimpleNamespace(id=thread_id)
+    )
     return codex
+
+
+def _thread_start_payload(codex: MagicMock) -> dict[str, Any]:
+    codex._client.thread_start.assert_called_once()
+    payload = codex._client.thread_start.call_args.args[0]
+    assert isinstance(payload, dict)
+    return payload
 
 
 def _completed_event(turn_id: str, status: TurnStatus, error_message: str | None = None) -> SimpleNamespace:
@@ -130,6 +142,18 @@ def _forget_worker_pid(pid: int) -> None:
 
 
 class SpawnNewSessionTests(TestCase):
+    def test_hitch_instructions_expand_proposal_env_values_at_call_site(self) -> None:
+        self.assertIn(
+            '$HITCH_PROPOSE_SESSION_COMMAND run --project "$HITCH_PROJECT_DIR" '
+            '"$HITCH_MANAGE_PY" propose_session --cwd "$HITCH_CWD" '
+            '--source-thread-id "$HITCH_THREAD_ID"',
+            coding_agents.HITCH_BASE_INSTRUCTIONS,
+        )
+        self.assertNotIn(
+            'HITCH_PROPOSE_SESSION_COMMAND` with `--title',
+            coding_agents.HITCH_BASE_INSTRUCTIONS,
+        )
+
     def test_memories_are_explicitly_disabled_by_default(self) -> None:
         config = codex_pool.app_server_config()
 
@@ -158,11 +182,12 @@ class SpawnNewSessionTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_STARTING)
         self.assertTrue(instance.events_path.endswith(f"{instance.pk}.jsonl"))
         # ``model=None`` means "fall back to whatever Codex's config picks".
-        codex.thread_start.assert_called_once_with(
-            cwd="/repo",
-            developer_instructions=None,
-            model=None,
-        )
+        payload = _thread_start_payload(codex)
+        self.assertEqual(payload["cwd"], "/repo")
+        self.assertIsNone(payload["developerInstructions"])
+        self.assertIsNone(payload["model"])
+        self.assertEqual(payload["dynamicTools"][0]["namespace"], "hitch")
+        self.assertEqual(payload["dynamicTools"][0]["name"], "propose_session")
         # ``thread/start`` defers writing the rollout file to disk, so the
         # cross-process ``thread/resume`` the worker and the session view both
         # rely on would fail with "no rollout found" without an explicit
@@ -249,13 +274,35 @@ class SpawnNewSessionTests(TestCase):
                 base_instructions="Base override.",
             )
 
-        codex.thread_start.assert_called_once_with(
-            cwd="/repo",
-            developer_instructions=None,
-            model=None,
-            base_instructions="Base override.",
-        )
+        payload = _thread_start_payload(codex)
+        self.assertEqual(payload["cwd"], "/repo")
+        self.assertIsNone(payload["developerInstructions"])
+        self.assertIsNone(payload["model"])
+        self.assertEqual(payload["baseInstructions"], "Base override.")
         self.assertEqual(instance.base_instructions, "Base override.")
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.codex_pool.Codex")
+    def test_system_agent_thread_start_forwards_source_without_hitch_tools(
+        self, mock_codex: MagicMock, mock_launch: MagicMock
+    ) -> None:
+        codex = _stub_codex_thread_start(mock_codex)
+        mock_launch.return_value = SimpleNamespace(pid=1)
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            codex_pool.spawn_new_session(
+                cwd="/repo",
+                prompt="hi",
+                thread_source=ThreadSource.subagent,
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            )
+
+        payload = _thread_start_payload(codex)
+        self.assertEqual(payload["threadSource"], ThreadSource.subagent.value)
+        self.assertNotIn("dynamicTools", payload)
 
     @patch("hitch.main.codex_pool.Codex")
     def test_create_session_thread_forwards_base_instructions(
@@ -305,11 +352,12 @@ class SpawnNewSessionTests(TestCase):
                 approval_mode="deny_all",
             )
 
-        codex.thread_start.assert_called_once_with(
-            cwd="/repo",
-            developer_instructions="Prefer small, typed changes.",
-            model="gpt-5",
+        payload = _thread_start_payload(codex)
+        self.assertEqual(payload["cwd"], "/repo")
+        self.assertEqual(
+            payload["developerInstructions"], "Prefer small, typed changes."
         )
+        self.assertEqual(payload["model"], "gpt-5")
         self.assertEqual(instance.developer_instructions, "Prefer small, typed changes.")
         mock_launch.assert_called_once_with(
             instance_id=instance.pk,
@@ -367,11 +415,10 @@ class SpawnNewSessionTests(TestCase):
                 plan_mode=True,
             )
 
-        codex.thread_start.assert_called_once_with(
-            cwd="/repo",
-            developer_instructions=None,
-            model="gpt-5.4",
-        )
+        payload = _thread_start_payload(codex)
+        self.assertEqual(payload["cwd"], "/repo")
+        self.assertIsNone(payload["developerInstructions"])
+        self.assertEqual(payload["model"], "gpt-5.4")
         mock_launch.assert_called_once_with(
             instance_id=instance.pk,
             model="gpt-5.4",
@@ -2134,6 +2181,14 @@ class CodexWorkerCommandTests(TestCase):
                 lines = [json.loads(line) for line in fh]
 
         codex_ctx.thread_resume.assert_called_once_with("thread-1")
+        self.assertEqual(os.environ["HITCH_THREAD_ID"], "thread-1")
+        self.assertEqual(os.environ["HITCH_CWD"], "/repo")
+        self.assertEqual(os.environ["HITCH_PROJECT_DIR"], str(Path(settings.BASE_DIR)))
+        self.assertEqual(
+            os.environ["HITCH_MANAGE_PY"],
+            str(Path(settings.BASE_DIR) / "manage.py"),
+        )
+        self.assertEqual(os.environ["HITCH_PROPOSE_SESSION_COMMAND"], "uv")
         self.assertEqual(len(lines), 2)
         self.assertEqual(lines[0]["method"], "item/agentMessage/delta")
         self.assertEqual(lines[0]["payload"]["detail"], "chunk-1")
