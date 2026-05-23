@@ -13,6 +13,7 @@ from django.contrib.auth import login as auth_login
 from django.contrib.auth import logout as auth_logout
 from django.contrib.auth.forms import AuthenticationForm, UserCreationForm
 from django.db import IntegrityError, transaction
+from django.db.models import QuerySet
 from django.http import (
     Http404,
     HttpRequest,
@@ -323,7 +324,23 @@ def _settings_dialog_context(
         "project_auto_pr_follow_global": Project.AUTO_PR_FOLLOW_GLOBAL,
         "project_auto_pr_on": Project.AUTO_PR_ON,
         "project_auto_pr_off": Project.AUTO_PR_OFF,
+        "inbox_count": _proposed_session_inbox_count(current_project),
     }
+
+
+def _proposed_session_inbox_queryset(
+    current_project: Project | None,
+) -> QuerySet[ProposedSession]:
+    inbox = ProposedSession.objects.filter(
+        outcome_status=ProposedSession.OUTCOME_UNSET,
+    )
+    if current_project is not None:
+        inbox = inbox.filter(project=current_project)
+    return inbox
+
+
+def _proposed_session_inbox_count(current_project: Project | None) -> int:
+    return _proposed_session_inbox_queryset(current_project).count()
 
 
 def _new_session_dialog_context(
@@ -588,6 +605,55 @@ def usage(request: HttpRequest) -> HttpResponse:
 
 
 @require_http_methods(["GET"])
+def inbox(request: HttpRequest) -> HttpResponse:
+    codex_pool.reconcile_dead()
+    initial_settings = _stored_settings(request)
+    config = codex_pool.app_server_config(
+        enable_memories=initial_settings.enable_memories
+    )
+    with Codex(config=config) as codex:
+        models_data = list(codex.models().data)
+        resolved_settings = _resolved_settings(request, models_data)
+        current_settings = resolved_settings.values
+        cookie_updates = resolved_settings.cookie_updates
+    projects = list(Project.objects.all())
+    current_project = _selected_project_for_settings(current_settings, projects)
+    proposed_sessions = list(
+        _proposed_session_inbox_queryset(current_project)
+        .select_related(
+            "project",
+            "standing_order",
+            "candidate_session",
+            "judge_session",
+            "source_workflow",
+        )
+        .order_by("created_at", "id")
+    )
+    _attach_proposed_session_display_state(proposed_sessions)
+    settings_dialog_context = _settings_dialog_context(current_settings, models_data)
+    new_session_dialog_context = _new_session_dialog_context(
+        current_settings, current_project, settings_dialog_context["projects"]
+    )
+    response = render(
+        request,
+        "inbox.html",
+        {
+            "login_url": reverse("login"),
+            "register_url": reverse("register"),
+            "current_project": current_project,
+            "proposed_sessions": proposed_sessions,
+            "show_inbox_project_names": current_project is None,
+            "proposed_session_rejected_status": ProposedSession.OUTCOME_REJECTED,
+            "proposed_session_dismissed_status": ProposedSession.OUTCOME_DISMISSED,
+            **settings_dialog_context,
+            **new_session_dialog_context,
+        },
+    )
+    _apply_cookie_updates(response, cookie_updates)
+    return response
+
+
+@require_http_methods(["GET"])
 def standing_orders(request: HttpRequest) -> HttpResponse:
     codex_pool.reconcile_dead()
     initial_settings = _stored_settings(request)
@@ -606,30 +672,8 @@ def standing_orders(request: HttpRequest) -> HttpResponse:
         if current_project is not None
         else []
     )
-    inbox = (
-        list(
-            ProposedSession.objects.filter(
-                project=current_project,
-                outcome_status=ProposedSession.OUTCOME_UNSET,
-            )
-            .select_related(
-                "project",
-                "standing_order",
-                "candidate_session",
-                "judge_session",
-                "source_workflow",
-            )
-            .order_by("created_at", "id")
-        )
-        if current_project is not None
-        else []
-    )
     _attach_standing_order_run_state(orders)
-    _attach_proposed_session_display_state(inbox)
     settings_dialog_context = _settings_dialog_context(current_settings, models_data)
-    new_session_dialog_context = _new_session_dialog_context(
-        current_settings, current_project, settings_dialog_context["projects"]
-    )
     response = render(
         request,
         "standing_orders.html",
@@ -638,18 +682,14 @@ def standing_orders(request: HttpRequest) -> HttpResponse:
             "register_url": reverse("register"),
             "current_project": current_project,
             "standing_orders": orders,
-            "proposed_sessions": inbox,
             "standing_order_create_url": reverse("create_standing_order"),
             "standing_order_run_all_url": reverse("run_standing_orders"),
             "ambition_choices": StandingOrder.AMBITION_CHOICES,
             "default_ambition": StandingOrder.AMBITION_INCREMENTAL,
             "confidence_choices": StandingOrder.CONFIDENCE_CHOICES,
             "default_confidence": StandingOrder.CONFIDENCE_HIGH,
-            "proposed_session_rejected_status": ProposedSession.OUTCOME_REJECTED,
-            "proposed_session_dismissed_status": ProposedSession.OUTCOME_DISMISSED,
             "title_max_len": _STANDING_ORDER_TITLE_MAX_LEN,
             **settings_dialog_context,
-            **new_session_dialog_context,
         },
     )
     _apply_cookie_updates(response, cookie_updates)
@@ -731,19 +771,16 @@ def update_proposed_session_outcome(
     request: HttpRequest, proposed_session_id: int
 ) -> HttpResponse:
     project = _active_project_from_request(request)
-    if project is None:
-        return HttpResponseBadRequest("active project is required")
     if proposed_session_id < 1 or proposed_session_id > _MAX_BIGAUTOFIELD:
         return HttpResponseBadRequest("proposed session is required")
-    proposed_session = (
-        ProposedSession.objects.select_related(
-            "project",
-            "standing_order__project",
-            "candidate_session",
-        )
-        .filter(pk=proposed_session_id, project=project)
-        .first()
-    )
+    proposed_session_query = ProposedSession.objects.select_related(
+        "project",
+        "standing_order__project",
+        "candidate_session",
+    ).filter(pk=proposed_session_id)
+    if project is not None:
+        proposed_session_query = proposed_session_query.filter(project=project)
+    proposed_session = proposed_session_query.first()
     if proposed_session is None:
         return HttpResponseBadRequest("proposed session is required")
     outcome_status = request.POST.get("outcome_status", "")
@@ -776,7 +813,7 @@ def update_proposed_session_outcome(
         proposed_session.accepted_session = proposed_session.candidate_session
         update_fields.append("accepted_session")
     proposed_session.save(update_fields=update_fields)
-    return redirect("standing_orders")
+    return redirect("inbox")
 
 
 def _validated_standing_order_title(raw_title: str) -> tuple[str, str | None]:

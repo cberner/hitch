@@ -1,0 +1,546 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#f7f2e8" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#161c1a" media="(prefers-color-scheme: dark)">
+    <title>Inbox - HITCH</title>
+    <style>
+        :root {
+            color-scheme: light dark;
+            --bg: #f7f2e8;
+            --surface: #ffffff;
+            --surface-2: #efe7da;
+            --border: #d8cdbd;
+            --border-strong: #c4b69f;
+            --text: #1c252e;
+            --text-muted: #545d58;
+            --text-faint: #6f6b62;
+            --accent: #4f8f66;
+            --accent-hover: #3f7b56;
+            --accent-soft: rgba(79, 143, 102, 0.10);
+            --accent-fg: #ffffff;
+            --danger: #b94f42;
+            --shadow: 0 1px 2px rgba(28, 37, 46, 0.05);
+            --shadow-lg: 0 8px 24px rgba(28, 37, 46, 0.10);
+            --radius: 12px;
+            --radius-sm: 8px;
+            --safe-top: env(safe-area-inset-top, 0px);
+            --safe-bottom: env(safe-area-inset-bottom, 0px);
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #161c1a;
+                --surface: #1f2624;
+                --surface-2: #2a322f;
+                --border: #2f3835;
+                --border-strong: #3d4744;
+                --text: #e8e4d8;
+                --text-muted: #a0a29a;
+                --text-faint: #8a8b82;
+                --accent: #6fb286;
+                --accent-hover: #84c49a;
+                --accent-soft: rgba(111, 178, 134, 0.14);
+                --accent-fg: #0c1814;
+                --danger: #d97062;
+                --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+                --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
+            }
+        }
+        * { box-sizing: border-box; }
+        html, body { margin: 0; padding: 0; }
+        html.modal-scroll-locked,
+        body.modal-scroll-locked { overflow: hidden; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            color: var(--text);
+            background: var(--bg);
+            line-height: 1.5;
+            min-height: 100vh;
+            padding-bottom: calc(4rem + var(--safe-bottom));
+        }
+        .topbar {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            background: color-mix(in srgb, var(--bg) 88%, transparent);
+            backdrop-filter: saturate(180%) blur(14px);
+            border-bottom: 1px solid var(--border);
+            padding-top: var(--safe-top);
+        }
+        .topbar-inner {
+            max-width: 900px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+            padding: 0.75rem 1rem;
+        }
+        .topbar-leading,
+        .topbar-actions,
+        .page-header,
+        .proposal-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        .topbar-leading { min-width: 0; }
+        .topbar-actions { flex: 0 0 auto; }
+        .brand {
+            font-size: 1rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            margin: 0;
+        }
+        .account-label {
+            max-width: 12rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-size: 0.82rem;
+            color: var(--text-muted);
+        }
+        {% include "_primary_nav_styles.html" %}
+        {% include "_settings_dialog_styles.html" %}
+        main {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 1.25rem 1rem 2rem;
+        }
+        .section { margin-bottom: 1.25rem; }
+        .section-label {
+            font-size: 0.72rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            margin: 0 0 0.75rem;
+        }
+        .page-header {
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 1rem;
+        }
+        .page-header h2 {
+            margin: 0;
+            font-size: clamp(1.5rem, 3vw, 2.1rem);
+            line-height: 1.12;
+        }
+        .project-name {
+            margin: 0;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+        }
+        .button {
+            appearance: none;
+            border: 1px solid var(--accent);
+            border-radius: var(--radius-sm);
+            background: var(--accent);
+            color: var(--accent-fg);
+            font: inherit;
+            font-weight: 600;
+            padding: 0.58rem 0.85rem;
+            cursor: pointer;
+            text-decoration: none;
+            line-height: 1.2;
+        }
+        .button:hover,
+        .button:focus { background: var(--accent-hover); border-color: var(--accent-hover); }
+        .button.secondary {
+            background: transparent;
+            color: var(--text);
+            border-color: var(--border-strong);
+        }
+        .button.danger {
+            background: transparent;
+            color: var(--danger);
+            border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+        }
+        .button[disabled] {
+            opacity: 0.55;
+            cursor: default;
+        }
+        .proposal,
+        .empty {
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--surface);
+            box-shadow: var(--shadow);
+            padding: 1rem;
+        }
+        .proposal-list {
+            list-style: none;
+            display: grid;
+            gap: 0.85rem;
+            margin: 0;
+            padding: 0;
+        }
+        .proposal h3 { margin: 0; font-size: 1.05rem; }
+        .proposal p,
+        .empty p {
+            margin: 0.35rem 0 0;
+            color: var(--text-muted);
+        }
+        .proposal-actions {
+            flex-wrap: wrap;
+            margin-top: 0.85rem;
+        }
+        .meta {
+            color: var(--text-muted);
+            font-size: 0.86rem;
+        }
+        .file-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.35rem;
+            margin-top: 0.75rem;
+        }
+        .file-list code {
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            padding: 0.18rem 0.45rem;
+            font-size: 0.78rem;
+            color: var(--text);
+            background: var(--surface-2);
+        }
+        dialog.new-session {
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--surface);
+            color: var(--text);
+            width: min(92vw, 32rem);
+            padding: 0;
+        }
+        dialog.new-session::backdrop { background: rgba(0, 0, 0, 0.35); }
+        dialog.new-session form {
+            display: grid;
+            gap: 1rem;
+            padding: 1rem;
+        }
+        dialog.new-session h2 { margin: 0; font-size: 1.2rem; }
+        label {
+            display: grid;
+            gap: 0.35rem;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+        input,
+        textarea,
+        select {
+            width: 100%;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--surface);
+            color: var(--text);
+            font: inherit;
+            padding: 0.65rem 0.75rem;
+        }
+        textarea { min-height: 7rem; resize: vertical; }
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+        }
+        .checkbox-label input[type="checkbox"] {
+            width: auto;
+            accent-color: var(--accent);
+        }
+        .actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 0.6rem;
+        }
+        @media (max-width: 640px) {
+            .page-header,
+            .proposal-actions {
+                align-items: stretch;
+                flex-direction: column;
+            }
+            .button { width: 100%; }
+        }
+    </style>
+    <script>document.documentElement.classList.add("js");</script>
+</head>
+<body>
+    <header class="topbar">
+        <div class="topbar-inner">
+            <div class="topbar-leading">
+                {% include "_primary_nav.html" %}
+                <h1 class="brand">HITCH</h1>
+            </div>
+            <div class="topbar-actions">
+                {% if user.is_authenticated %}
+                <span class="account-label" title="{{ user.get_username }}">{{ user.get_username }}</span>
+                {% else %}
+                <a class="button secondary account-action" href="{{ login_url }}">Log in</a>
+                <a class="button account-action" href="{{ register_url }}">Register</a>
+                {% endif %}
+            </div>
+        </div>
+    </header>
+    <main>
+        <section class="section" aria-labelledby="inbox-title">
+            <p class="section-label">Inbox</p>
+            <div class="page-header">
+                <div>
+                    <h2 id="inbox-title">Inbox</h2>
+                    {% if current_project %}
+                    <p class="project-name">{{ current_project.name }}</p>
+                    {% else %}
+                    <p class="project-name">All projects</p>
+                    {% endif %}
+                </div>
+            </div>
+            {% if proposed_sessions %}
+            <ul class="proposal-list">
+                {% for proposed_session in proposed_sessions %}
+                <li class="proposal">
+                    <h3>{{ proposed_session.title }}</h3>
+                    <p class="meta">
+                        {% if show_inbox_project_names and proposed_session.project %}
+                        {{ proposed_session.project.name }} -
+                        {% endif %}
+                        {% if proposed_session.inbox_kind == "notice" %}
+                            {% if proposed_session.standing_order %}
+                            From standing order: {{ proposed_session.standing_order.title }}
+                            {% else %}
+                            Notice
+                            {% endif %}
+                        {% elif proposed_session.standing_order %}
+                        {{ proposed_session.standing_order.title }} - {{ proposed_session.standing_order.get_ambition_display }} ambition - {{ proposed_session.get_confidence_display }} confidence
+                        {% else %}
+                        From coding agent - {{ proposed_session.get_confidence_display }} confidence
+                        {% endif %}
+                    </p>
+                    {% if proposed_session.summary %}
+                    <p>{{ proposed_session.summary }}</p>
+                    {% endif %}
+                    {% if proposed_session.display_files %}
+                    <div class="file-list" aria-label="Relevant files">
+                        {% for file in proposed_session.display_files %}
+                        <code>{{ file }}</code>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                    <div class="proposal-actions">
+                        {% if proposed_session.inbox_kind == "notice" %}
+                        <form method="post" action="{% url 'update_proposed_session_outcome' proposed_session.pk %}">
+                            {% csrf_token %}
+                            <input type="hidden" name="outcome_status" value="{{ proposed_session_dismissed_status }}">
+                            <button type="submit" class="button secondary">Dismiss</button>
+                        </form>
+                        {% else %}
+                        <form method="post" action="{% url 'update_proposed_session_outcome' proposed_session.pk %}">
+                            {% csrf_token %}
+                            <input type="hidden" name="outcome_status" value="accepted">
+                            <button
+                                type="button"
+                                class="button"
+                                data-proposed-session-do
+                                data-proposed-session-id="{{ proposed_session.pk }}"
+                                data-proposed-session-project="{{ proposed_session.project.pk }}"
+                                data-proposed-session-prompt="{{ proposed_session.session_prompt }}"
+                            >Do it</button>
+                        </form>
+                        <button
+                            type="button"
+                            class="button danger"
+                            data-proposed-session-reject
+                            data-reject-url="{% url 'update_proposed_session_outcome' proposed_session.pk %}"
+                            data-session-title="{{ proposed_session.title }}"
+                        >Reject</button>
+                        {% if proposed_session.candidate_log_url %}
+                        <a class="button secondary" href="{{ proposed_session.candidate_log_url }}">Candidate log</a>
+                        {% endif %}
+                        {% if proposed_session.judge_log_url %}
+                        <a class="button secondary" href="{{ proposed_session.judge_log_url }}">Judge log</a>
+                        {% endif %}
+                        {% endif %}
+                    </div>
+                </li>
+                {% endfor %}
+            </ul>
+            {% else %}
+            <div class="empty">
+                <p>No inbox messages.</p>
+            </div>
+            {% endif %}
+        </section>
+    </main>
+    {% include "_settings_dialog.html" %}
+    <dialog class="new-session" data-new-session-dialog aria-labelledby="new-session-title">
+        <form method="post" action="{{ new_session_url }}">
+            {% csrf_token %}
+            <input type="hidden" name="plan_mode" value="">
+            <input type="hidden" name="proposed_session" value="" data-proposed-session-input>
+            <h2 id="new-session-title">Start a new session</h2>
+            <label>
+                Prompt
+                <textarea id="new-session-prompt" name="prompt" required autocomplete="off" placeholder="Describe what you want the agent to do..."></textarea>
+            </label>
+            <label>
+                Project
+                <select name="project" required data-new-session-project>
+                    {% for project in new_session_projects %}
+                    <option
+                        value="{{ project.pk }}"{% if project.pk == current_new_session_project_id %} selected{% endif %}
+                        data-auto-pr-default="{% if project.auto_pr_mode == project_auto_pr_on %}true{% elif project.auto_pr_mode == project_auto_pr_off %}false{% elif current_auto_pr %}true{% else %}false{% endif %}"
+                    >{{ project.name }}</option>
+                    {% endfor %}
+                    <option
+                        value="{{ bare_repo_project_value }}"{% if not current_new_session_project_id %} selected{% endif %}
+                        data-auto-pr-default="{% if current_auto_pr %}true{% else %}false{% endif %}"
+                    >&lt;bare repo&gt;</option>
+                </select>
+            </label>
+            <label>
+                Coding agent
+                <select name="coding_agent" data-new-session-coding-agent>
+                    <option value="" selected>Use settings ({{ new_session_default_coding_agent_label }})</option>
+                    {% for option in new_session_coding_agent_options %}
+                    <option value="{{ option.id }}">{{ option.display_name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <div data-new-session-repo-field {% if current_new_session_project_id %}hidden{% endif %}>
+                <label for="new-session-cwd">Repository</label>
+                {% if repos %}
+                <select id="new-session-cwd" name="cwd" required data-new-session-repo>
+                    {% for repo in repos %}
+                    <option value="{{ repo }}"{% if repo == current_repo %} selected{% endif %}>{{ repo }}</option>
+                    {% endfor %}
+                </select>
+                {% else %}
+                <select id="new-session-cwd" name="cwd" required disabled data-new-session-repo></select>
+                <p class="meta">No git repositories found within two levels of your home directory.</p>
+                {% endif %}
+            </div>
+            <label class="checkbox-label">
+                <span>Auto-PR</span>
+                <input type="hidden" name="auto_pr" value="false">
+                <input type="checkbox" name="auto_pr" value="true" data-new-session-auto-pr {% if current_new_session_auto_pr %}checked{% endif %}>
+            </label>
+            <div class="actions">
+                <button type="button" class="button secondary" data-new-session-cancel>Cancel</button>
+                <button type="submit" class="button" {% if not repos %}disabled{% endif %}>Start session</button>
+            </div>
+        </form>
+    </dialog>
+    <dialog class="new-session" data-reject-session-dialog aria-labelledby="reject-session-title">
+        <form method="post" data-reject-session-form>
+            {% csrf_token %}
+            <input type="hidden" name="outcome_status" value="{{ proposed_session_rejected_status }}">
+            <h2 id="reject-session-title">Reject proposed session</h2>
+            <p class="meta" data-reject-session-title></p>
+            <label>
+                Reason
+                <textarea name="reason" required autocomplete="off"></textarea>
+            </label>
+            <div class="actions">
+                <button type="button" class="button secondary" data-reject-session-cancel>Cancel</button>
+                <button type="submit" class="button danger">Reject</button>
+            </div>
+        </form>
+    </dialog>
+    <script>
+        (function () {
+            const modalScrollLockClass = "modal-scroll-locked";
+            function syncModalScrollLock() {
+                const hasOpenDialog = Boolean(document.querySelector("dialog[open]"));
+                document.documentElement.classList.toggle(modalScrollLockClass, hasOpenDialog);
+                document.body.classList.toggle(modalScrollLockClass, hasOpenDialog);
+            }
+            function showDialog(dialog) {
+                if (!dialog) return;
+                if (typeof dialog.showModal === "function") {
+                    dialog.showModal();
+                } else {
+                    dialog.setAttribute("open", "");
+                }
+                syncModalScrollLock();
+            }
+            function hideDialog(dialog) {
+                if (!dialog) return;
+                if (typeof dialog.close === "function") {
+                    dialog.close();
+                } else {
+                    dialog.removeAttribute("open");
+                }
+                syncModalScrollLock();
+            }
+            for (const dialog of document.querySelectorAll("dialog")) {
+                dialog.addEventListener("close", syncModalScrollLock);
+            }
+            const rejectDialog = document.querySelector("[data-reject-session-dialog]");
+            const rejectForm = rejectDialog && rejectDialog.querySelector("[data-reject-session-form]");
+            const rejectTitle = rejectDialog && rejectDialog.querySelector("[data-reject-session-title]");
+            const rejectReason = rejectDialog && rejectDialog.querySelector("textarea[name='reason']");
+            const rejectCancel = rejectDialog && rejectDialog.querySelector("[data-reject-session-cancel]");
+            const newSessionDialog = document.querySelector("[data-new-session-dialog]");
+            const newSessionForm = newSessionDialog && newSessionDialog.querySelector("form");
+            const newSessionInput = newSessionForm && newSessionForm.querySelector("textarea[name='prompt']");
+            const proposedSessionInput = newSessionForm && newSessionForm.querySelector("[data-proposed-session-input]");
+            const newSessionProjectSelect = newSessionForm && newSessionForm.querySelector("[data-new-session-project]");
+            const newSessionRepoField = newSessionForm && newSessionForm.querySelector("[data-new-session-repo-field]");
+            const newSessionRepoSelect = newSessionForm && newSessionForm.querySelector("[data-new-session-repo]");
+            const newSessionAutoPr = newSessionForm && newSessionForm.querySelector("[data-new-session-auto-pr]");
+            const newSessionCancel = newSessionDialog && newSessionDialog.querySelector("[data-new-session-cancel]");
+            const bareRepoProjectValue = "{{ bare_repo_project_value|escapejs }}";
+            function syncNewSessionProjectFields() {
+                if (!newSessionProjectSelect) return;
+                const bareRepoSelected = newSessionProjectSelect.value === bareRepoProjectValue;
+                if (newSessionRepoField) newSessionRepoField.hidden = !bareRepoSelected;
+                if (newSessionRepoSelect) newSessionRepoSelect.required = bareRepoSelected;
+                if (newSessionAutoPr) {
+                    const option = newSessionProjectSelect.selectedOptions && newSessionProjectSelect.selectedOptions[0];
+                    newSessionAutoPr.checked = option && option.dataset.autoPrDefault === "true";
+                }
+            }
+            function openNewSessionDialog(prompt, proposedSessionId, proposedSessionProjectId) {
+                if (newSessionProjectSelect && proposedSessionProjectId) {
+                    for (const option of newSessionProjectSelect.options) {
+                        if (option.value === proposedSessionProjectId) {
+                            newSessionProjectSelect.value = proposedSessionProjectId;
+                            break;
+                        }
+                    }
+                }
+                syncNewSessionProjectFields();
+                if (newSessionInput && typeof prompt === "string") newSessionInput.value = prompt;
+                if (proposedSessionInput) proposedSessionInput.value = proposedSessionId || "";
+                showDialog(newSessionDialog);
+                if (newSessionInput) newSessionInput.focus();
+            }
+            syncNewSessionProjectFields();
+            if (newSessionProjectSelect) {
+                newSessionProjectSelect.addEventListener("change", syncNewSessionProjectFields);
+            }
+            if (newSessionCancel) newSessionCancel.addEventListener("click", () => hideDialog(newSessionDialog));
+            for (const button of document.querySelectorAll("[data-proposed-session-do]")) {
+                button.addEventListener("click", () => {
+                    openNewSessionDialog(
+                        button.dataset.proposedSessionPrompt || "",
+                        button.dataset.proposedSessionId || "",
+                        button.dataset.proposedSessionProject || "",
+                    );
+                });
+            }
+            for (const button of document.querySelectorAll("[data-proposed-session-reject]")) {
+                button.addEventListener("click", () => {
+                    if (!rejectForm) return;
+                    rejectForm.action = button.dataset.rejectUrl || "";
+                    if (rejectTitle) rejectTitle.textContent = button.dataset.sessionTitle || "";
+                    if (rejectReason) rejectReason.value = "";
+                    showDialog(rejectDialog);
+                    if (rejectReason) rejectReason.focus();
+                });
+            }
+            if (rejectCancel) rejectCancel.addEventListener("click", () => hideDialog(rejectDialog));
+            {% include "_primary_nav_script.html" %}
+        })();
+    </script>
+</body>
+</html>

@@ -4779,7 +4779,7 @@ class SessionViewApprovalContextTests(TestCase):
 class StandingOrderViewTests(TestCase):
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
-    def test_page_lists_inbox_and_orders_for_selected_project(
+    def test_page_lists_orders_and_inbox_count_for_selected_project(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -4796,6 +4796,61 @@ class StandingOrderViewTests(TestCase):
             project=other_project,
             title="Other order",
             goal="Should not render.",
+        )
+        ProposedSession.objects.create(
+            standing_order=order,
+            title="Add parser coverage",
+        )
+        ProposedSession.objects.create(
+            project=other_project,
+            title="Other proposal",
+            summary="Should not count for selected project.",
+        )
+
+        response = self.client.get(reverse("standing_orders"))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode()
+        nav_start = body.index('<nav class="primary-nav"')
+        nav_end = body.index("</nav>", nav_start)
+        nav_html = body[nav_start:nav_end]
+        self.assertIn(
+            f'href="{reverse("standing_orders")}" aria-current="page"', nav_html
+        )
+        self.assertIn(f'href="{reverse("inbox")}"', nav_html)
+        self.assertIn(
+            'class="primary-nav-badge" aria-label="1 inbox message">1</span>',
+            nav_html,
+        )
+        self.assertIn(">standing orders</a>", nav_html)
+        self.assertContains(response, "--accent-soft")
+        self.assertContains(response, "--shadow-lg")
+        self.assertContains(response, "Improve tests")
+        self.assertContains(response, "Ambition")
+        self.assertContains(response, "Ambition: High")
+        self.assertContains(
+            response,
+            f'data-edit-url="{reverse("edit_standing_order", args=[order.pk])}"',
+        )
+        self.assertContains(response, 'data-standing-order-edit')
+        self.assertNotContains(response, "Add parser coverage")
+        self.assertNotContains(response, 'name="proposed_session"')
+        self.assertNotContains(response, "Other order")
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_inbox_page_lists_proposals_for_selected_project(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other_project = Project.objects.create(name="Other", repo_path="/other")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            ambition=StandingOrder.AMBITION_HIGH,
         )
         candidate = SessionMetadata.objects.create(
             thread_id="candidate-thread",
@@ -4823,23 +4878,24 @@ class StandingOrderViewTests(TestCase):
             candidate_session=candidate,
             judge_session=judge,
         )
+        ProposedSession.objects.create(
+            project=other_project,
+            title="Other proposal",
+            summary="Should not render.",
+        )
 
-        response = self.client.get(reverse("standing_orders"))
+        response = self.client.get(reverse("inbox"))
 
         self.assertEqual(response.status_code, 200)
         body = response.content.decode()
         nav_start = body.index('<nav class="primary-nav"')
         nav_end = body.index("</nav>", nav_start)
         nav_html = body[nav_start:nav_end]
+        self.assertIn(f'href="{reverse("inbox")}" aria-current="page"', nav_html)
         self.assertIn(
-            f'href="{reverse("standing_orders")}" aria-current="page"', nav_html
+            'class="primary-nav-badge" aria-label="1 inbox message">1</span>',
+            nav_html,
         )
-        self.assertIn(">standing orders</a>", nav_html)
-        self.assertContains(response, "--accent-soft")
-        self.assertContains(response, "--shadow-lg")
-        self.assertContains(response, "Improve tests")
-        self.assertContains(response, "Ambition")
-        self.assertContains(response, "High ambition")
         self.assertContains(response, "Add parser coverage")
         self.assertContains(response, "This adds focused parser coverage.")
         self.assertContains(response, "Implementation guidance:")
@@ -4855,12 +4911,7 @@ class StandingOrderViewTests(TestCase):
         self.assertContains(response, "Find useful test coverage increments.")
         self.assertContains(response, "Judge log")
         self.assertContains(response, 'name="proposed_session"')
-        self.assertContains(
-            response,
-            f'data-edit-url="{reverse("edit_standing_order", args=[order.pk])}"',
-        )
-        self.assertContains(response, 'data-standing-order-edit')
-        self.assertNotContains(response, "Other order")
+        self.assertNotContains(response, "Other proposal")
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
@@ -4882,7 +4933,7 @@ class StandingOrderViewTests(TestCase):
             summary="No concrete test increment was worth proposing.",
         )
 
-        response = self.client.get(reverse("standing_orders"))
+        response = self.client.get(reverse("inbox"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "No proposal from Improve tests")
@@ -4910,7 +4961,7 @@ class StandingOrderViewTests(TestCase):
             relevant_files=["hitch/main/management/commands/propose_session.py"],
         )
 
-        response = self.client.get(reverse("standing_orders"))
+        response = self.client.get(reverse("inbox"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Add CLI proposal tests")
