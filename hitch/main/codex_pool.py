@@ -63,6 +63,7 @@ def spawn_new_session(
     output_schema: dict[str, Any] | None = None,
     user_message_index: int | None = 0,
     auto_pr_enabled: bool = False,
+    qa_panel_enabled: bool = False,
 ) -> CodexInstance:
     """Create a fresh Codex thread and detach a worker to run the initial prompt.
 
@@ -127,6 +128,7 @@ def spawn_new_session(
         output_schema=output_schema,
         user_message_index=user_message_index,
         auto_pr_enabled=auto_pr_enabled,
+        qa_panel_enabled=qa_panel_enabled,
     )
 
 
@@ -195,6 +197,7 @@ def spawn_turn(
     output_schema: dict[str, Any] | None = None,
     user_message_index: int | None = None,
     auto_pr_enabled: bool = False,
+    qa_panel_enabled: bool = False,
 ) -> CodexInstance:
     """Detach a worker that resumes an existing thread to run one prompt."""
     if base_instructions is None:
@@ -227,6 +230,7 @@ def spawn_turn(
         output_schema=output_schema,
         user_message_index=user_message_index,
         auto_pr_enabled=auto_pr_enabled,
+        qa_panel_enabled=qa_panel_enabled,
     )
 
 
@@ -829,6 +833,7 @@ def _spawn_worker(
     output_schema: dict[str, Any] | None = None,
     user_message_index: int | None = None,
     auto_pr_enabled: bool = False,
+    qa_panel_enabled: bool = False,
 ) -> CodexInstance:
     target_dir = events_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
@@ -852,6 +857,7 @@ def _spawn_worker(
             approval_mode=approval_mode or "",
             plan_mode=plan_mode,
             auto_pr_enabled=auto_pr_enabled,
+            qa_panel_enabled=qa_panel_enabled,
             events_path="",
             status=CodexInstance.STATUS_STARTING,
             pid=0,

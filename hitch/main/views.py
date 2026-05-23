@@ -78,6 +78,7 @@ class SettingsValues(NamedTuple):
     extra_system_prompt: str
     use_worktrees: bool
     auto_pr_enabled: bool
+    qa_panel_enabled: bool
     show_archived_sessions: bool
     last_selected_repo: str
     selected_project_id: int | None
@@ -155,6 +156,7 @@ _CODING_AGENT_COOKIE = "hitch_coding_agent"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
+_QA_PANEL_COOKIE = "hitch_qa_panel"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
 _SELECTED_PROJECT_COOKIE = "hitch_selected_project_id"
@@ -311,6 +313,7 @@ def _settings_dialog_context(
         "extra_system_prompt_max_len": _EXTRA_SYSTEM_PROMPT_MAX_LEN,
         "current_use_worktrees": current_settings.use_worktrees,
         "current_auto_pr": current_settings.auto_pr_enabled,
+        "current_qa_panel": current_settings.qa_panel_enabled,
         "current_enable_memories": current_settings.enable_memories,
         "projects": projects,
         "current_project": current_project,
@@ -2345,6 +2348,7 @@ def _stored_settings(request: HttpRequest) -> SettingsValues:
         extra_system_prompt=_read_extra_system_prompt_cookie(request),
         use_worktrees=_read_cookie(request, _USE_WORKTREES_COOKIE) == "true",
         auto_pr_enabled=_read_cookie(request, _AUTO_PR_COOKIE) == "true",
+        qa_panel_enabled=_read_cookie(request, _QA_PANEL_COOKIE) == "true",
         show_archived_sessions=_read_cookie(request, _SHOW_ARCHIVED_COOKIE) == "true",
         last_selected_repo=_read_cookie(request, _LAST_SELECTED_REPO_COOKIE),
         selected_project_id=_read_selected_project_cookie(request),
@@ -2367,6 +2371,7 @@ def _settings_values_for_user(settings: UserSettings) -> SettingsValues:
         extra_system_prompt=settings.extra_system_prompt,
         use_worktrees=settings.use_worktrees,
         auto_pr_enabled=settings.auto_pr_enabled,
+        qa_panel_enabled=settings.qa_panel_enabled,
         show_archived_sessions=settings.show_archived_sessions,
         last_selected_repo=settings.last_selected_repo,
         selected_project_id=settings.selected_project_id,
@@ -2386,6 +2391,7 @@ def _save_user_settings(user: Any, values: SettingsValues) -> UserSettings:
         ("extra_system_prompt", values.extra_system_prompt),
         ("use_worktrees", values.use_worktrees),
         ("auto_pr_enabled", values.auto_pr_enabled),
+        ("qa_panel_enabled", values.qa_panel_enabled),
         ("show_archived_sessions", values.show_archived_sessions),
         ("last_selected_repo", values.last_selected_repo),
         ("selected_project_id", values.selected_project_id),
@@ -2411,6 +2417,7 @@ def _settings_cookie_updates(values: SettingsValues) -> dict[str, str]:
         ),
         _USE_WORKTREES_COOKIE: "true" if values.use_worktrees else "false",
         _AUTO_PR_COOKIE: "true" if values.auto_pr_enabled else "false",
+        _QA_PANEL_COOKIE: "true" if values.qa_panel_enabled else "false",
         _SHOW_ARCHIVED_COOKIE: "true" if values.show_archived_sessions else "false",
         _LAST_SELECTED_REPO_COOKIE: values.last_selected_repo,
         _SELECTED_PROJECT_COOKIE: (
@@ -2469,6 +2476,9 @@ def _valid_cookie_setting_updates(request: HttpRequest) -> dict[str, str | bool 
     auto_pr = _read_signed_cookie_if_present(request, _AUTO_PR_COOKIE)
     if auto_pr in {"true", "false"}:
         updates["auto_pr_enabled"] = auto_pr == "true"
+    qa_panel = _read_signed_cookie_if_present(request, _QA_PANEL_COOKIE)
+    if qa_panel in {"true", "false"}:
+        updates["qa_panel_enabled"] = qa_panel == "true"
     last_selected_repo = _read_signed_cookie_if_present(
         request, _LAST_SELECTED_REPO_COOKIE
     )
@@ -2665,6 +2675,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     extra_system_prompt = request.POST.get("extra_system_prompt", "").strip()
     use_worktrees = request.POST.get("use_worktrees", "").strip()
     auto_pr = request.POST.get("auto_pr", "").strip()
+    qa_panel = request.POST.get("qa_panel", "").strip()
     posted_show_archived = request.POST.get("show_archived_sessions")
     show_archived = (
         posted_show_archived.strip() if posted_show_archived is not None else None
@@ -2699,6 +2710,9 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     if auto_pr not in {"", "true"}:
         return HttpResponseBadRequest("invalid auto-PR setting")
     auto_pr = "true" if auto_pr == "true" else "false"
+    if qa_panel not in {"", "true"}:
+        return HttpResponseBadRequest("invalid QA panel setting")
+    qa_panel = "true" if qa_panel == "true" else "false"
     if show_archived is not None and show_archived not in {"", "true"}:
         return HttpResponseBadRequest("invalid archived sessions visibility")
     if enable_memories not in {"", "true"}:
@@ -2725,6 +2739,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         extra_system_prompt=extra_system_prompt,
         use_worktrees=use_worktrees == "true",
         auto_pr_enabled=auto_pr == "true",
+        qa_panel_enabled=qa_panel == "true",
         show_archived_sessions=(
             stored.show_archived_sessions
             if show_archived is None
@@ -3300,6 +3315,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         }
         if base_instructions:
             workflow_kwargs["base_instructions"] = base_instructions
+        if settings.qa_panel_enabled:
+            workflow_kwargs["qa_panel_enabled"] = True
         if qa_activation:
             workflow_kwargs["open_pr_on_lgtm"] = False
         system_agents.start_pr_qa_workflow(**workflow_kwargs)
@@ -3325,6 +3342,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         spawn_kwargs["user_message_index"] = _count_user_entries(thread_entries)
         spawn_kwargs["stored_model"] = auto_pr_model or None
         spawn_kwargs["stored_reasoning_effort"] = auto_pr_reasoning_effort or None
+        if settings.qa_panel_enabled:
+            spawn_kwargs["qa_panel_enabled"] = True
     if plan_mode:
         if not collaboration_model:
             return HttpResponseBadRequest("plan mode requires a model")
@@ -3762,6 +3781,8 @@ def new_session(request: HttpRequest) -> HttpResponse:
         }
         if base_instructions:
             workflow_kwargs["base_instructions"] = base_instructions
+        if settings.qa_panel_enabled:
+            workflow_kwargs["qa_panel_enabled"] = True
         if qa_activation:
             workflow_kwargs["open_pr_on_lgtm"] = False
         system_agents.start_pr_qa_workflow(**workflow_kwargs)
@@ -3822,6 +3843,8 @@ def new_session(request: HttpRequest) -> HttpResponse:
         spawn_kwargs["plan_mode"] = True
     if auto_pr_enabled:
         spawn_kwargs["auto_pr_enabled"] = True
+        if settings.qa_panel_enabled:
+            spawn_kwargs["qa_panel_enabled"] = True
     try:
         instance = codex_pool.spawn_new_session(**spawn_kwargs)
     except Exception:

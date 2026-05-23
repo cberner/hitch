@@ -3765,6 +3765,21 @@ class StreamForInstanceTests(TestCase):
             "Hitch system agent is working...",
         )
 
+    def test_system_workflow_status_text_handles_panel_feedback_step(self) -> None:
+        workflow = cast(
+            SystemWorkflow,
+            SimpleNamespace(
+                kind=SystemWorkflow.KIND_PR_QA,
+                step="feedback_running",
+                state={"qa_panel_enabled": True},
+            ),
+        )
+
+        self.assertEqual(
+            streaming.system_workflow_status_text(workflow),
+            "QA feedback agent is fixing feedback...",
+        )
+
     def test_terminates_when_status_flips_to_failed(self) -> None:
         # A worker that ended with a failure status still flushes its events
         # file, but the end frame should carry the actual terminal status so

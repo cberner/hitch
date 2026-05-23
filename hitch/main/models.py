@@ -395,6 +395,7 @@ class CodexInstance(models.Model):
     approval_mode = models.CharField(max_length=32, blank=True, default="")
     plan_mode = models.BooleanField(default=False)
     auto_pr_enabled = models.BooleanField(default=False)
+    qa_panel_enabled = models.BooleanField(default=False)
     auto_pr_triggered_at = models.DateTimeField(null=True, blank=True)
     events_path = models.CharField(max_length=4096)
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_STARTING)
@@ -672,6 +673,7 @@ class UserSettings(models.Model):
     extra_system_prompt = models.TextField(blank=True, default="")
     use_worktrees = models.BooleanField(default=False)
     auto_pr_enabled = models.BooleanField(default=False)
+    qa_panel_enabled = models.BooleanField(default=False)
     show_archived_sessions = models.BooleanField(default=False)
     last_selected_repo = models.CharField(max_length=4096, blank=True, default="")
     selected_project = models.ForeignKey(

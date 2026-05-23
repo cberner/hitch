@@ -29,10 +29,12 @@ logger = logging.getLogger(__name__)
 
 PR_QA_AGENT_KIND = "pr_qa"
 PR_FOLLOWUP_MONITOR_AGENT_KIND = "pr_followup_monitor"
+PR_QA_PANEL_SYNTHESIZER_AGENT_KIND = "pr_qa_panel_synthesizer"
 STANDING_ORDER_AGENT_KIND = SystemWorkflow.KIND_STANDING_ORDER_RUN
 STANDING_ORDER_JUDGE_AGENT_KIND = "standing_order_judge"
 QA_DISPLAY_AUTHOR = "QA agent"
 PR_MONITOR_DISPLAY_AUTHOR = "PR monitor"
+QA_PANEL_DISPLAY_AUTHOR = "QA panel"
 STANDING_ORDER_DISPLAY_AUTHOR = "Standing order agent"
 STANDING_ORDER_JUDGE_DISPLAY_AUTHOR = "Standing order judge"
 PR_SLASH_DISPLAY_PROMPT = (
@@ -205,6 +207,30 @@ _QA_OUTPUT_SCHEMA: dict[str, Any] = {
     },
 }
 
+_QA_PANEL_LANE_OUTPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["summary", "findings", "lgtm"],
+    "properties": {
+        "summary": {"type": "string"},
+        "lgtm": {"type": "boolean"},
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["severity", "location", "title", "description"],
+                "properties": {
+                    "severity": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
+                    "location": {"type": "string"},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
 _STANDING_ORDER_CANDIDATE_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -294,6 +320,72 @@ _CODEX_REVIEW_GUIDANCE = (
 )
 
 
+@dataclass(frozen=True)
+class _QaPanelLane:
+    agent_kind: str
+    label: str
+    focus: str
+    brief: str
+
+
+_QA_PANEL_LANES: tuple[_QaPanelLane, ...] = (
+    _QaPanelLane(
+        agent_kind="pr_qa_correctness",
+        label="Correctness",
+        focus="correctness, data flow, state lifecycle, and concurrency",
+        brief=(
+            "Look for behavioral regressions, broken invariants, race conditions, "
+            "bad error handling, data-loss paths, and edge cases introduced by the diff."
+        ),
+    ),
+    _QaPanelLane(
+        agent_kind="pr_qa_tests",
+        label="Tests",
+        focus="test coverage, regression protection, and verification strategy",
+        brief=(
+            "Look for missing or weak tests, assertions that do not cover the changed "
+            "behavior, brittle fixtures, and important integration paths that should be "
+            "covered before this ships."
+        ),
+    ),
+    _QaPanelLane(
+        agent_kind="pr_qa_ux_manual",
+        label="UX/manual QA",
+        focus="user experience, browser/manual QA, and visible workflow behavior",
+        brief=(
+            "If the diff affects UI or an interactive workflow, manually exercise it. "
+            "For browser QA, run `just qa-browser-setup` if Playwright or Chromium is "
+            "missing, then use Playwright/Chromium to test the affected UI. If setup "
+            "fails, report the concrete setup failure. If no manual QA is relevant, "
+            "say why."
+        ),
+    ),
+    _QaPanelLane(
+        agent_kind="pr_qa_security",
+        label="Security",
+        focus="security, permissions, sandboxing, injection, secrets, and data exposure",
+        brief=(
+            "Look for authorization bypasses, unsafe path or shell handling, secret "
+            "exposure, injection risks, unsafe approval/sandbox behavior, and trust "
+            "boundary mistakes."
+        ),
+    ),
+    _QaPanelLane(
+        agent_kind="pr_qa_maintainability",
+        label="Maintainability",
+        focus="maintainability, architecture, migrations, and long-term clarity",
+        brief=(
+            "Look for confusing ownership boundaries, duplicated logic, migration or "
+            "persistence contract problems, hard-to-debug state transitions, and code "
+            "that will be risky to extend."
+        ),
+    ),
+)
+_QA_PANEL_LANE_KINDS = tuple(lane.agent_kind for lane in _QA_PANEL_LANES)
+_QA_VERDICT_AGENT_KINDS = (PR_QA_AGENT_KIND, PR_QA_PANEL_SYNTHESIZER_AGENT_KIND)
+_QA_PANEL_SYNTHESIZER_STARTED_KEY = "qa_panel_synthesizer_started_iteration"
+
+
 def start_pr_qa_workflow(
     *,
     main_thread_id: str,
@@ -307,6 +399,7 @@ def start_pr_qa_workflow(
     enable_memories: bool = False,
     initial_user_message_index: int = 0,
     open_pr_on_lgtm: bool = True,
+    qa_panel_enabled: bool = False,
 ) -> SystemWorkflow:
     """Start a QA workflow before optionally running the work-agent PR prompt."""
     try:
@@ -333,6 +426,7 @@ def start_pr_qa_workflow(
                     "enable_memories": enable_memories,
                     "next_user_message_index": max(initial_user_message_index, 0),
                     "open_pr_on_lgtm": open_pr_on_lgtm,
+                    "qa_panel_enabled": qa_panel_enabled,
                 },
             )
     except IntegrityError:
@@ -346,7 +440,10 @@ def start_pr_qa_workflow(
         return existing_workflow
 
     try:
-        _spawn_pr_qa_run(workflow)
+        if qa_panel_enabled:
+            _spawn_pr_qa_panel_runs(workflow)
+        else:
+            _spawn_pr_qa_run(workflow)
     except Exception as exc:
         _block_workflow(workflow, f"failed to start QA agent: {exc!r}")
     return workflow
@@ -423,22 +520,17 @@ def stop_active_workflow(main_thread_id: str) -> bool:
     workflow = active_workflow_for_thread(main_thread_id)
     if workflow is None:
         return False
-    run = (
+    runs = list(
         workflow.agent_runs.filter(status=SystemAgentRun.STATUS_RUNNING)
         .select_related("instance")
         .order_by("-created_at")
-        .first()
     )
-    if run is None:
+    if not runs:
         return False
-    interrupted = codex_pool.interrupt_instance(
-        run.instance_id, expected_thread_id=run.thread_id
-    )
-    if interrupted is None:
+    interrupted_runs = _interrupt_system_agent_runs(runs)
+    if not interrupted_runs:
         return False
-    run.status = SystemAgentRun.STATUS_FAILED
-    run.error = "QA workflow stopped by user"
-    run.save(update_fields=["status", "error", "updated_at"])
+    _mark_system_agent_runs_failed(interrupted_runs, "QA workflow stopped by user")
     _block_workflow(workflow, "QA workflow stopped by user")
     return True
 
@@ -476,18 +568,21 @@ def _maybe_start_auto_pr_workflow(instance: CodexInstance) -> None:
     if not claimed:
         return
     try:
-        start_pr_qa_workflow(
-            main_thread_id=instance.thread_id,
-            cwd=instance.cwd,
-            sandbox_policy=instance.sandbox_policy or None,
-            approval_mode=instance.approval_mode or SYSTEM_AGENT_APPROVAL_MODE,
-            model=instance.model or None,
-            reasoning_effort=instance.reasoning_effort or None,
-            base_instructions=instance.base_instructions or None,
-            developer_instructions=instance.developer_instructions or None,
-            enable_memories=instance.enable_memories,
-            initial_user_message_index=(instance.user_message_index or 0) + 1,
-        )
+        workflow_kwargs: dict[str, Any] = {
+            "main_thread_id": instance.thread_id,
+            "cwd": instance.cwd,
+            "sandbox_policy": instance.sandbox_policy or None,
+            "approval_mode": instance.approval_mode or SYSTEM_AGENT_APPROVAL_MODE,
+            "model": instance.model or None,
+            "reasoning_effort": instance.reasoning_effort or None,
+            "base_instructions": instance.base_instructions or None,
+            "developer_instructions": instance.developer_instructions or None,
+            "enable_memories": instance.enable_memories,
+            "initial_user_message_index": (instance.user_message_index or 0) + 1,
+        }
+        if instance.qa_panel_enabled:
+            workflow_kwargs["qa_panel_enabled"] = True
+        start_pr_qa_workflow(**workflow_kwargs)
     except Exception:
         CodexInstance.objects.filter(pk=instance.pk).update(auto_pr_triggered_at=None)
         raise
@@ -511,11 +606,111 @@ def _handle_system_agent_finished(instance: CodexInstance) -> None:
     if workflow.kind != SystemWorkflow.KIND_PR_QA:
         _fail_unsupported_system_agent_run(run, workflow)
         return
+    _handle_pr_qa_agent_finished(instance, run, workflow)
+
+
+def _handle_system_feedback_finished(instance: CodexInstance) -> None:
+    workflow = _workflow_for_instance(instance)
+    if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
+        return
+    if instance.status != CodexInstance.STATUS_COMPLETED:
+        if workflow.step == STEP_PR_FEEDBACK_RUNNING:
+            _block_workflow(workflow, f"PR feedback worker failed: {instance.error}")
+        else:
+            _block_workflow(workflow, f"QA feedback worker failed: {instance.error}")
+        return
+    if (
+        workflow.status != SystemWorkflow.STATUS_RUNNING
+        or workflow.step != STEP_FEEDBACK_RUNNING
+    ):
+        if (
+            workflow.status == SystemWorkflow.STATUS_RUNNING
+            and workflow.step == STEP_PR_FEEDBACK_RUNNING
+        ):
+            _handle_pr_feedback_finished(instance, workflow)
+        return
+    workflow.step = STEP_QA_RUNNING
+    workflow.save(update_fields=["step", "updated_at"])
+    try:
+        if _state_bool(workflow, "qa_panel_enabled"):
+            _spawn_pr_qa_panel_runs(workflow)
+        else:
+            _spawn_pr_qa_run(workflow)
+    except Exception as exc:
+        _block_workflow(workflow, f"failed to restart QA agent: {exc!r}")
+
+
+def _handle_pr_qa_agent_finished(
+    instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
+) -> None:
     if (
         workflow.status != SystemWorkflow.STATUS_RUNNING
         or workflow.step != STEP_QA_RUNNING
     ):
+        if run.agent_kind in _QA_PANEL_LANE_KINDS:
+            _finish_qa_panel_lane_run(instance, run, block_workflow=False)
         return
+    if run.agent_kind in _QA_PANEL_LANE_KINDS:
+        _handle_qa_panel_lane_finished(instance, run, workflow)
+        return
+    if run.agent_kind not in _QA_VERDICT_AGENT_KINDS:
+        _fail_run_and_block_workflow(
+            run,
+            f"unsupported PR QA agent kind {run.agent_kind!r}",
+        )
+        return
+    _handle_qa_verdict_finished(instance, run, workflow)
+
+
+def _handle_qa_panel_lane_finished(
+    instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
+) -> None:
+    if not _finish_qa_panel_lane_run(instance, run, block_workflow=True):
+        return
+
+    if not _claim_qa_panel_synthesizer(workflow):
+        return
+    try:
+        _spawn_qa_panel_synthesizer_run(workflow)
+    except Exception as exc:
+        _block_workflow(workflow, f"failed to start QA panel synthesizer: {exc!r}")
+
+
+def _finish_qa_panel_lane_run(
+    instance: CodexInstance, run: SystemAgentRun, *, block_workflow: bool
+) -> bool:
+    lane = _qa_panel_lane_for_kind(run.agent_kind)
+    lane_label = lane.label if lane is not None else run.agent_kind
+    if instance.status != CodexInstance.STATUS_COMPLETED:
+        _fail_run(
+            run,
+            f"QA panel lane {lane_label} failed: {instance.error}",
+            block_workflow=block_workflow,
+        )
+        return False
+
+    raw_output = _final_agent_text(instance.events_path)
+    parsed = _parse_qa_panel_lane_output(raw_output)
+    if parsed is None:
+        _fail_run(
+            run,
+            f"QA panel lane {lane_label} output was not valid JSON",
+            raw_output=raw_output,
+            block_workflow=block_workflow,
+        )
+        return False
+
+    run_input = run.input if isinstance(run.input, dict) else {}
+    run.status = SystemAgentRun.STATUS_COMPLETED
+    run.output = {**parsed, "lane": run_input.get("lane") or lane_label}
+    run.raw_output = raw_output
+    run.save(update_fields=["status", "output", "raw_output", "updated_at"])
+    return True
+
+
+def _handle_qa_verdict_finished(
+    instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
+) -> None:
     if instance.status != CodexInstance.STATUS_COMPLETED:
         _fail_run_and_block_workflow(run, f"QA worker failed: {instance.error}")
         return
@@ -523,9 +718,23 @@ def _handle_system_agent_finished(instance: CodexInstance) -> None:
     raw_output = _final_agent_text(instance.events_path)
     parsed = _parse_qa_output(raw_output)
     if parsed is None:
-        _fail_run_and_block_workflow(run, "QA output was not valid JSON", raw_output)
+        label = (
+            "QA panel synthesizer"
+            if run.agent_kind == PR_QA_PANEL_SYNTHESIZER_AGENT_KIND
+            else "QA"
+        )
+        _fail_run_and_block_workflow(run, f"{label} output was not valid JSON", raw_output)
         return
 
+    _complete_pr_qa_verdict(workflow, run, parsed, raw_output)
+
+
+def _complete_pr_qa_verdict(
+    workflow: SystemWorkflow,
+    run: SystemAgentRun,
+    parsed: dict[str, Any],
+    raw_output: str,
+) -> None:
     run.status = SystemAgentRun.STATUS_COMPLETED
     run.output = parsed
     run.raw_output = raw_output
@@ -574,39 +783,9 @@ def _handle_system_agent_finished(instance: CodexInstance) -> None:
     workflow.step = STEP_FEEDBACK_RUNNING
     workflow.save(update_fields=["iteration", "step", "state", "updated_at"])
     try:
-        _spawn_qa_feedback_turn(
-            workflow, feedback, synthesis_gate=synthesis_gate
-        )
+        _spawn_qa_feedback_turn(workflow, feedback, synthesis_gate=synthesis_gate)
     except Exception as exc:
         _block_workflow(workflow, f"failed to start QA feedback turn: {exc!r}")
-
-
-def _handle_system_feedback_finished(instance: CodexInstance) -> None:
-    workflow = _workflow_for_instance(instance)
-    if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
-        return
-    if instance.status != CodexInstance.STATUS_COMPLETED:
-        if workflow.step == STEP_PR_FEEDBACK_RUNNING:
-            _block_workflow(workflow, f"PR feedback worker failed: {instance.error}")
-        else:
-            _block_workflow(workflow, f"QA feedback worker failed: {instance.error}")
-        return
-    if (
-        workflow.status != SystemWorkflow.STATUS_RUNNING
-        or workflow.step != STEP_FEEDBACK_RUNNING
-    ):
-        if (
-            workflow.status == SystemWorkflow.STATUS_RUNNING
-            and workflow.step == STEP_PR_FEEDBACK_RUNNING
-        ):
-            _handle_pr_feedback_finished(instance, workflow)
-        return
-    workflow.step = STEP_QA_RUNNING
-    workflow.save(update_fields=["step", "updated_at"])
-    try:
-        _spawn_pr_qa_run(workflow)
-    except Exception as exc:
-        _block_workflow(workflow, f"failed to restart QA agent: {exc!r}")
 
 
 def _handle_workflow_user_turn_finished(instance: CodexInstance) -> None:
@@ -890,6 +1069,91 @@ def _spawn_pr_qa_run(workflow: SystemWorkflow) -> SystemAgentRun:
             "thread_id": instance.thread_id,
             "status": SystemAgentRun.STATUS_RUNNING,
             "input": {"cwd": workflow.cwd, "diff_chars": len(diff_text)},
+        },
+    )
+    return run
+
+
+def _spawn_pr_qa_panel_runs(workflow: SystemWorkflow) -> list[SystemAgentRun]:
+    diff_text = build_worktree_diff_text(workflow.cwd)
+    runs: list[SystemAgentRun] = []
+    try:
+        for lane in _QA_PANEL_LANES:
+            instance = codex_pool.spawn_new_session(
+                cwd=workflow.cwd,
+                prompt=_qa_panel_lane_prompt(workflow.cwd, diff_text, lane),
+                base_instructions=_state_string(workflow, "base_instructions") or None,
+                developer_instructions=(
+                    _state_string(workflow, "developer_instructions") or None
+                ),
+                model=_state_string(workflow, "model") or None,
+                reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
+                approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
+                sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
+                enable_memories=_state_bool(workflow, "enable_memories"),
+                thread_source=ThreadSource.subagent,
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                workflow_id=workflow.pk,
+                agent_kind=lane.agent_kind,
+                display_author=QA_PANEL_DISPLAY_AUTHOR,
+                output_schema=_QA_PANEL_LANE_OUTPUT_SCHEMA,
+            )
+            run, _created = SystemAgentRun.objects.get_or_create(
+                instance=instance,
+                defaults={
+                    "workflow": workflow,
+                    "agent_kind": lane.agent_kind,
+                    "thread_id": instance.thread_id,
+                    "status": SystemAgentRun.STATUS_RUNNING,
+                    "input": {
+                        "cwd": workflow.cwd,
+                        "diff_chars": len(diff_text),
+                        "iteration": workflow.iteration,
+                        "lane": lane.label,
+                        "focus": lane.focus,
+                    },
+                },
+            )
+            runs.append(run)
+    except Exception:
+        _mark_running_panel_runs_failed(workflow, "QA panel failed to start")
+        raise
+    return runs
+
+
+def _spawn_qa_panel_synthesizer_run(workflow: SystemWorkflow) -> SystemAgentRun:
+    diff_text = build_worktree_diff_text(workflow.cwd)
+    prompt = _qa_panel_synthesizer_prompt(workflow, diff_text)
+    instance = codex_pool.spawn_new_session(
+        cwd=workflow.cwd,
+        prompt=prompt,
+        base_instructions=_state_string(workflow, "base_instructions") or None,
+        developer_instructions=_state_string(workflow, "developer_instructions") or None,
+        model=_state_string(workflow, "model") or None,
+        reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
+        approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
+        sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
+        enable_memories=_state_bool(workflow, "enable_memories"),
+        thread_source=ThreadSource.subagent,
+        purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        workflow_id=workflow.pk,
+        agent_kind=PR_QA_PANEL_SYNTHESIZER_AGENT_KIND,
+        display_author=QA_PANEL_DISPLAY_AUTHOR,
+        output_schema=_QA_OUTPUT_SCHEMA,
+    )
+    run, _created = SystemAgentRun.objects.get_or_create(
+        instance=instance,
+        defaults={
+            "workflow": workflow,
+            "agent_kind": PR_QA_PANEL_SYNTHESIZER_AGENT_KIND,
+            "thread_id": instance.thread_id,
+            "status": SystemAgentRun.STATUS_RUNNING,
+            "input": {
+                "cwd": workflow.cwd,
+                "diff_chars": len(diff_text),
+                "iteration": workflow.iteration,
+                "lane_count": len(_QA_PANEL_LANES),
+            },
         },
     )
     return run
@@ -1189,6 +1453,166 @@ def _pr_followup_feedback_prompt(workflow: SystemWorkflow, feedback: str) -> str
     )
 
 
+def _qa_panel_lane_prompt(cwd: str, diff_text: str, lane: _QaPanelLane) -> str:
+    diff = diff_text or "(No current worktree diff was detected.)"
+    return (
+        "You are one hidden lane in Hitch's Parallel QA Panel for a PR workflow.\n\n"
+        f"Lane: {lane.label}\n"
+        f"Focus: {lane.focus}\n\n"
+        f"{lane.brief}\n\n"
+        f"{_CODEX_REVIEW_GUIDANCE}\n"
+        "Stay within this lane's focus. Do not duplicate broad review boilerplate; "
+        "produce only findings that this lane is best suited to catch. If another "
+        "lane may also catch the issue, still report it when it is substantive.\n\n"
+        "Set lgtm to false when this lane finds substantive findings, missing "
+        "tests, manual-QA failures, or lane-specific verification gaps. Set lgtm "
+        "to true only when this lane has no substantive findings.\n\n"
+        f"Repository cwd: {cwd}\n\n"
+        "Current diff:\n"
+        "```diff\n"
+        f"{diff}\n"
+        "```\n\n"
+        "Return only JSON matching this shape: "
+        '{"summary": string, "findings": [{"severity": "P0" | "P1" | "P2" | '
+        '"P3", "location": string, "title": string, "description": string}], '
+        '"lgtm": boolean}. Use repo-relative file/line locations where possible. '
+        "Use an empty findings array and a concise no-findings summary when clean."
+    )
+
+
+def _qa_panel_synthesizer_prompt(workflow: SystemWorkflow, diff_text: str) -> str:
+    diff = diff_text or "(No current worktree diff was detected.)"
+    lane_outputs = _qa_panel_lane_outputs(workflow)
+    lane_json = json.dumps(lane_outputs, indent=2, sort_keys=True)
+    return (
+        "You are Hitch's final Parallel QA Panel synthesizer and judge.\n\n"
+        "Merge the hidden QA lane reports into one verdict for the existing Hitch "
+        "QA feedback loop. Deduplicate overlapping findings, preserve the highest "
+        "severity reported for each issue, and do not invent new issues that are "
+        "not supported by a lane report or the diff. If a lane reports a setup "
+        "failure that blocks required testing or manual QA, keep it as actionable "
+        "feedback.\n\n"
+        f"{_CODEX_REVIEW_GUIDANCE}\n"
+        "The final feedback must be concise but complete: group duplicate lane "
+        "reports into a single prioritized finding, include the useful file/line "
+        "reference, and mention which lane evidence supports it when helpful. "
+        "Set lgtm to false when any substantive finding, missing test, manual-QA "
+        "failure, or unresolved setup failure remains. Set lgtm to true only when "
+        "the consolidated panel verdict is clean.\n\n"
+        f"Repository cwd: {workflow.cwd}\n\n"
+        "Current diff:\n"
+        "```diff\n"
+        f"{diff}\n"
+        "```\n\n"
+        "Hidden lane reports:\n"
+        "```json\n"
+        f"{lane_json}\n"
+        "```\n\n"
+        "Return only JSON compatible with the existing QA loop: "
+        '{"feedback": string, "lgtm": boolean}.'
+    )
+
+
+def _qa_panel_lane_outputs(workflow: SystemWorkflow) -> list[dict[str, Any]]:
+    runs = (
+        workflow.agent_runs.filter(
+            agent_kind__in=_QA_PANEL_LANE_KINDS,
+            status=SystemAgentRun.STATUS_COMPLETED,
+        )
+        .order_by("created_at", "id")
+    )
+    outputs: list[dict[str, Any]] = []
+    for run in runs:
+        if _qa_panel_run_iteration(run) != workflow.iteration:
+            continue
+        output = run.output if isinstance(run.output, dict) else {}
+        lane = run.input.get("lane") if isinstance(run.input, dict) else ""
+        if not isinstance(lane, str) or not lane:
+            lane_definition = _qa_panel_lane_for_kind(run.agent_kind)
+            lane = lane_definition.label if lane_definition is not None else run.agent_kind
+        outputs.append(
+            {
+                "lane": lane,
+                "agent_kind": run.agent_kind,
+                "summary": output.get("summary", ""),
+                "lgtm": output.get("lgtm"),
+                "findings": output.get("findings", []),
+            }
+        )
+    return outputs
+
+
+def _qa_panel_lane_for_kind(agent_kind: str) -> _QaPanelLane | None:
+    for lane in _QA_PANEL_LANES:
+        if lane.agent_kind == agent_kind:
+            return lane
+    return None
+
+
+def _claim_qa_panel_synthesizer(workflow: SystemWorkflow) -> bool:
+    with transaction.atomic():
+        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        if (
+            locked.status != SystemWorkflow.STATUS_RUNNING
+            or locked.step != STEP_QA_RUNNING
+            or locked.state.get(_QA_PANEL_SYNTHESIZER_STARTED_KEY) == locked.iteration
+            or not _qa_panel_lanes_complete(locked)
+        ):
+            return False
+        locked.state = {
+            **locked.state,
+            _QA_PANEL_SYNTHESIZER_STARTED_KEY: locked.iteration,
+        }
+        locked.save(update_fields=["state", "updated_at"])
+        workflow.state = locked.state
+    return True
+
+
+def _qa_panel_lanes_complete(workflow: SystemWorkflow) -> bool:
+    completed_kinds = {
+        run.agent_kind
+        for run in workflow.agent_runs.filter(
+            agent_kind__in=_QA_PANEL_LANE_KINDS,
+            status=SystemAgentRun.STATUS_COMPLETED,
+        )
+        if _qa_panel_run_iteration(run) == workflow.iteration
+    }
+    return completed_kinds == set(_QA_PANEL_LANE_KINDS)
+
+
+def _qa_panel_run_iteration(run: SystemAgentRun) -> int:
+    value = run.input.get("iteration") if isinstance(run.input, dict) else 0
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _mark_running_panel_runs_failed(workflow: SystemWorkflow, error: str) -> None:
+    runs = list(
+        workflow.agent_runs.filter(
+            agent_kind__in=_QA_PANEL_LANE_KINDS,
+            status=SystemAgentRun.STATUS_RUNNING,
+        ).select_related("instance")
+    )
+    _mark_system_agent_runs_failed(_interrupt_system_agent_runs(runs), error)
+
+
+def _interrupt_system_agent_runs(runs: list[SystemAgentRun]) -> list[SystemAgentRun]:
+    interrupted_runs: list[SystemAgentRun] = []
+    for run in runs:
+        interrupted = codex_pool.interrupt_instance(
+            run.instance_id, expected_thread_id=run.thread_id
+        )
+        if interrupted is not None:
+            interrupted_runs.append(run)
+    return interrupted_runs
+
+
+def _mark_system_agent_runs_failed(runs: list[SystemAgentRun], error: str) -> None:
+    for run in runs:
+        run.status = SystemAgentRun.STATUS_FAILED
+        run.error = error
+        run.save(update_fields=["status", "error", "updated_at"])
+
+
 def _maybe_build_qa_design_synthesis_gate(
     workflow: SystemWorkflow, feedback: str, *, current_run_id: int
 ) -> dict[str, Any] | None:
@@ -1205,7 +1629,7 @@ def _maybe_build_qa_design_synthesis_gate(
         SystemAgentRun.objects.filter(
             workflow__kind=SystemWorkflow.KIND_PR_QA,
             workflow__cwd=workflow.cwd,
-            agent_kind=PR_QA_AGENT_KIND,
+            agent_kind__in=_QA_VERDICT_AGENT_KINDS,
             status=SystemAgentRun.STATUS_COMPLETED,
         )
         .exclude(pk=current_run_id)
@@ -1813,6 +2237,56 @@ def _parse_qa_output(raw_output: str) -> dict[str, Any] | None:
     return {"feedback": feedback, "lgtm": lgtm}
 
 
+def _parse_qa_panel_lane_output(raw_output: str) -> dict[str, Any] | None:
+    text = _strip_json_markdown_fence(raw_output)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    summary = parsed.get("summary")
+    findings = parsed.get("findings")
+    lgtm = parsed.get("lgtm")
+    if (
+        not isinstance(summary, str)
+        or not isinstance(findings, list)
+        or not isinstance(lgtm, bool)
+    ):
+        return None
+    normalized_findings: list[dict[str, str]] = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            return None
+        severity = finding.get("severity")
+        location = finding.get("location")
+        title = finding.get("title")
+        description = finding.get("description")
+        if not isinstance(severity, str) or severity not in {"P0", "P1", "P2", "P3"}:
+            return None
+        if (
+            not isinstance(location, str)
+            or not isinstance(title, str)
+            or not isinstance(description, str)
+        ):
+            return None
+        if not title.strip() or not description.strip():
+            return None
+        normalized_findings.append(
+            {
+                "severity": severity,
+                "location": location.strip(),
+                "title": title.strip(),
+                "description": description.strip(),
+            }
+        )
+    return {
+        "summary": summary.strip(),
+        "findings": normalized_findings,
+        "lgtm": lgtm,
+    }
+
+
 def _parse_standing_order_candidate_output(raw_output: str) -> dict[str, Any] | None:
     text = _strip_json_markdown_fence(raw_output)
     try:
@@ -2124,10 +2598,29 @@ def _fail_run_and_block_workflow(
     *,
     surface_to_thread: bool = True,
 ) -> None:
+    _fail_run(
+        run,
+        error,
+        raw_output=raw_output,
+        block_workflow=True,
+        surface_to_thread=surface_to_thread,
+    )
+
+
+def _fail_run(
+    run: SystemAgentRun,
+    error: str,
+    *,
+    raw_output: str = "",
+    block_workflow: bool,
+    surface_to_thread: bool = True,
+) -> None:
     run.status = SystemAgentRun.STATUS_FAILED
     run.error = error
     run.raw_output = raw_output
     run.save(update_fields=["status", "error", "raw_output", "updated_at"])
+    if not block_workflow:
+        return
     workflow = run.workflow
     _block_workflow(workflow, error, surface_to_thread=surface_to_thread)
 
