@@ -800,7 +800,7 @@ class SessionViewTests(TestCase):
         self.assertIn("Demo setup command approval requested.", html)
         self.assertIn(
             "detail.textContent = HIDE_LIVE_TRANSCRIPT || SANITIZE_LIVE_DETAILS\n"
-            "                    ? hiddenTranscriptApprovalDetail(payload.method)",
+            "                    ? sanitizedApprovalDetail(payload.method, payload.params)",
             html,
         )
         self.assertNotIn(
@@ -872,9 +872,20 @@ class SessionViewTests(TestCase):
                     """
                     () => {
                         const tokenCommand = [
-                            "curl -H 'Registration token: token-secret'",
+                            "$HITCH_MANAGE_COMMAND run --project $HITCH_PROJECT_DIR " +
+                                "$HITCH_MANAGE_PY register_demo --session-id thread-1 " +
+                                "--token=token-secret --status preparing",
+                            "$HITCH_MANAGE_COMMAND run --project $HITCH_PROJECT_DIR " +
+                                "$HITCH_MANAGE_PY register_demo --session-id thread-1 " +
+                                "--token token-secret --status active",
+                            "curl -H 'Authorization: Bearer token-secret' https://token-secret.example/start",
                             "podman run --label io.hitch.demo_token=token-secret",
                         ].join(" && ");
+                        const unknownCommand = "AWS_SECRET_ACCESS_KEY=token-secret ./run-demo --password token-secret";
+                        const sensitiveChanges = [
+                            { path: "/tmp/token-secret.txt" },
+                            { path: "/home/user/.ssh/id_rsa" },
+                        ];
                         window.__eventSource.emit("message", {
                             method: "approval/requested",
                             payload: {
@@ -893,6 +904,67 @@ class SessionViewTests(TestCase):
                                 },
                             },
                         });
+                        window.__eventSource.emit("message", {
+                            method: "item/started",
+                            payload: {
+                                item: {
+                                    id: "cmd-2",
+                                    type: "commandExecution",
+                                    command: unknownCommand,
+                                },
+                            },
+                        });
+                        window.__eventSource.emit("message", {
+                            method: "approval/requested",
+                            payload: {
+                                id: 78,
+                                method: "item/fileChange/requestApproval",
+                                params: { item: { changes: sensitiveChanges } },
+                            },
+                        });
+                        window.__eventSource.emit("message", {
+                            method: "item/started",
+                            payload: {
+                                item: {
+                                    id: "file-1",
+                                    type: "fileChange",
+                                    changes: sensitiveChanges,
+                                },
+                            },
+                        });
+                        window.__eventSource.emit("message", {
+                            method: "item/completed",
+                            payload: {
+                                item: {
+                                    id: "cmd-1",
+                                    type: "commandExecution",
+                                    command: tokenCommand,
+                                    status: "completed",
+                                },
+                            },
+                        });
+                        window.__eventSource.emit("message", {
+                            method: "item/completed",
+                            payload: {
+                                item: {
+                                    id: "cmd-2",
+                                    type: "commandExecution",
+                                    command: unknownCommand,
+                                    status: "completed",
+                                },
+                            },
+                        });
+                        window.__eventSource.emit("message", {
+                            method: "item/completed",
+                            payload: {
+                                item: {
+                                    id: "file-1",
+                                    type: "fileChange",
+                                    changes: sensitiveChanges,
+                                    status: "completed",
+                                },
+                            },
+                        });
                     }
                     """
                 )
@@ -901,8 +973,22 @@ class SessionViewTests(TestCase):
                 browser.close()
 
         self.assertNotIn("token-secret", body)
+        self.assertNotIn("--token", body)
+        self.assertNotIn("Authorization", body)
+        self.assertNotIn("https://token-secret.example", body)
+        self.assertNotIn("io.hitch.demo_token", body)
+        self.assertNotIn("AWS_SECRET_ACCESS_KEY", body)
+        self.assertNotIn("run-demo", body)
+        self.assertNotIn("--password", body)
+        self.assertNotIn("register_demo --status", body)
+        self.assertNotIn("podman run", body)
+        self.assertNotIn("curl request", body)
+        self.assertNotIn("/tmp/token-secret.txt", body)
+        self.assertNotIn("/home/user/.ssh/id_rsa", body)
         self.assertIn("Demo setup command approval requested.", body)
-        self.assertIn("Demo setup command", body)
+        self.assertIn("Command details hidden in demo panel.", body)
+        self.assertIn("Demo setup file change approval requested. 2 files", body)
+        self.assertIn("Demo setup file change", body)
 
     @patch("hitch.main.views.Codex")
     def test_registered_demo_status_renders_logs(
