@@ -1634,6 +1634,21 @@ def edit_standing_order(request: HttpRequest, standing_order_id: int) -> HttpRes
 
 
 @require_http_methods(["POST"])
+def run_standing_order(request: HttpRequest, standing_order_id: int) -> HttpResponse:
+    project = _active_project_from_request(request)
+    if project is None:
+        return HttpResponseBadRequest("active project is required")
+    standing_order = StandingOrder.objects.filter(
+        pk=standing_order_id,
+        project=project,
+    ).first()
+    if standing_order is None:
+        raise Http404("standing order not found")
+    system_agents.start_standing_order_workflow(standing_order=standing_order)
+    return redirect("standing_orders")
+
+
+@require_http_methods(["POST"])
 def run_standing_orders(request: HttpRequest) -> HttpResponse:
     project = _active_project_from_request(request)
     if project is None:

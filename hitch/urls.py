@@ -25,6 +25,11 @@ urlpatterns = [
         name="edit_standing_order",
     ),
     path(
+        "standing-orders/<int:standing_order_id>/run/",
+        hitch.main.views.run_standing_order,
+        name="run_standing_order",
+    ),
+    path(
         "standing-orders/run-all/",
         hitch.main.views.run_standing_orders,
         name="run_standing_orders",
