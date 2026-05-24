@@ -1048,8 +1048,16 @@ def start_spec_critic_workflow(
     auto_pr_enabled: bool = False,
     auto_qa_enabled: bool = False,
     qa_panel_enabled: bool = False,
+    auto_merge_to_local_branch: bool = False,
+    auto_merge_branch: str = "",
 ) -> SystemWorkflow:
     """Start hidden Spec Critic agents before the visible implementation turn."""
+    auto_merge_branch = (
+        auto_merge_branch.strip() if auto_merge_to_local_branch else ""
+    )
+    auto_merge_to_local_branch = bool(auto_qa_enabled and auto_merge_branch)
+    if not auto_merge_to_local_branch:
+        auto_merge_branch = ""
     try:
         with transaction.atomic():
             workflow = SystemWorkflow.objects.create(
@@ -1073,6 +1081,8 @@ def start_spec_critic_workflow(
                     "auto_pr_enabled": auto_pr_enabled,
                     "auto_qa_enabled": auto_qa_enabled,
                     "qa_panel_enabled": qa_panel_enabled,
+                    "auto_merge_to_local_branch": auto_merge_to_local_branch,
+                    "auto_merge_branch": auto_merge_branch,
                 },
             )
     except IntegrityError:
@@ -2503,6 +2513,13 @@ def _spawn_spec_critic_synthesizer_run(workflow: SystemWorkflow) -> SystemAgentR
 def _spawn_spec_critic_implementation_turn(
     workflow: SystemWorkflow, brief: str
 ) -> CodexInstance:
+    auto_qa_enabled = _state_bool(workflow, "auto_qa_enabled")
+    auto_merge_branch = _state_string(workflow, "auto_merge_branch")
+    auto_merge_to_local_branch = bool(
+        auto_qa_enabled
+        and _state_bool(workflow, "auto_merge_to_local_branch")
+        and auto_merge_branch
+    )
     return codex_pool.spawn_turn(
         thread_id=workflow.main_thread_id,
         cwd=workflow.cwd,
@@ -2519,8 +2536,10 @@ def _spawn_spec_critic_implementation_turn(
         web_search_mode=_workflow_web_search_mode(workflow),
         user_message_index=_state_int(workflow, "next_user_message_index"),
         auto_pr_enabled=_state_bool(workflow, "auto_pr_enabled"),
-        auto_qa_enabled=_state_bool(workflow, "auto_qa_enabled"),
+        auto_qa_enabled=auto_qa_enabled,
         qa_panel_enabled=_state_bool(workflow, "qa_panel_enabled"),
+        auto_merge_to_local_branch=auto_merge_to_local_branch,
+        auto_merge_branch=auto_merge_branch if auto_merge_to_local_branch else "",
     )
 
 

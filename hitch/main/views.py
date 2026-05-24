@@ -4793,6 +4793,9 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 "auto_pr_enabled": auto_pr_enabled,
                 "auto_qa_enabled": auto_qa_enabled,
             }
+            if auto_merge_to_local_branch:
+                spec_workflow_kwargs["auto_merge_to_local_branch"] = True
+                spec_workflow_kwargs["auto_merge_branch"] = auto_merge_branch
             if base_instructions:
                 spec_workflow_kwargs["base_instructions"] = base_instructions
             if should_forward_web_search_mode:

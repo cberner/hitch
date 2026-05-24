@@ -434,21 +434,40 @@ def _submodule_head(path: Path, *, hooks_path: Path | None) -> str:
 def _validated_reviewed_patch(reviewed_patch: str) -> str:
     if not reviewed_patch.strip():
         return ""
-    for line in reviewed_patch.splitlines():
-        if (
-            line in _INCOMPLETE_REVIEWED_DIFF_LINES
-            or line.startswith(_INCOMPLETE_REVIEWED_DIFF_PREFIXES)
-            or (
-                line.startswith("+")
-                and line.endswith(_INCOMPLETE_REVIEWED_DIFF_SUFFIXES)
-            )
-        ):
-            raise LocalBranchMergeError(
-                "reviewed diff is incomplete; auto merge requires a complete text diff"
-            )
+    if _contains_incomplete_preview_marker(reviewed_patch):
+        raise LocalBranchMergeError(
+            "reviewed diff is incomplete; auto merge requires a complete text diff"
+        )
     patch = _normalize_patch_text(reviewed_patch)
     _validate_reviewable_patch(patch)
     return patch
+
+
+def _contains_incomplete_preview_marker(reviewed_patch: str) -> bool:
+    diff_has_index = False
+    in_hunk = False
+    for line in reviewed_patch.splitlines():
+        if line.startswith("diff --git "):
+            diff_has_index = False
+            in_hunk = False
+            continue
+        if line.startswith("index "):
+            diff_has_index = True
+            continue
+        if line.startswith("@@ "):
+            in_hunk = True
+            continue
+        if line.startswith(_INCOMPLETE_REVIEWED_DIFF_PREFIXES):
+            return True
+        if line in _INCOMPLETE_REVIEWED_DIFF_LINES:
+            if in_hunk and diff_has_index:
+                continue
+            return True
+        if line.startswith("+") and line.endswith(_INCOMPLETE_REVIEWED_DIFF_SUFFIXES):
+            if in_hunk and diff_has_index:
+                continue
+            return True
+    return False
 
 
 def _validate_reviewable_patch(patch: str) -> None:

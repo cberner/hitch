@@ -274,13 +274,17 @@ class SpecCriticWorkflowTests(TestCase):
             enable_memories=True,
             web_search_mode="cached",
             initial_user_message_index=2,
-            auto_pr_enabled=True,
+            auto_qa_enabled=True,
             qa_panel_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="release",
         )
 
         self.assertEqual(workflow.kind, system_agents.SPEC_CRITIC_WORKFLOW_KIND)
         self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_ANALYZING)
         self.assertEqual(workflow.state["web_search_mode"], "cached")
+        self.assertTrue(workflow.state["auto_merge_to_local_branch"])
+        self.assertEqual(workflow.state["auto_merge_branch"], "release")
         self.assertEqual(mock_spawn.call_count, 3)
         agent_kinds = {call.kwargs["agent_kind"] for call in mock_spawn.call_args_list}
         self.assertEqual(
@@ -726,6 +730,47 @@ class SpecCriticWorkflowTests(TestCase):
             "Implement a focused onboarding pass for new sessions.", kwargs["prompt"]
         )
         self.assertIn("scope: New session flow", kwargs["prompt"])
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_spec_critic_synthesis_preserves_auto_merge_settings(
+        self, mock_spawn_turn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.SPEC_CRITIC_WORKFLOW_KIND,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_SPEC_CRITIC_SYNTHESIZING,
+            state={
+                "original_prompt": "Improve onboarding",
+                "next_user_message_index": 4,
+                "auto_qa_enabled": True,
+                "auto_merge_to_local_branch": True,
+                "auto_merge_branch": "release",
+            },
+        )
+        instance = _instance(
+            thread_id="synth-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_COMPLETED,
+            agent_kind=system_agents.SPEC_SYNTHESIZER_AGENT_KIND,
+            events_path=_events_file(self, {"brief": "Implement a focused pass."}),
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.SPEC_SYNTHESIZER_AGENT_KIND,
+            thread_id=instance.thread_id,
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        kwargs = mock_spawn_turn.call_args.kwargs
+        self.assertTrue(kwargs["auto_qa_enabled"])
+        self.assertTrue(kwargs["auto_merge_to_local_branch"])
+        self.assertEqual(kwargs["auto_merge_branch"], "release")
 
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
     def test_stop_active_workflow_cancels_spec_critic_clarification_without_running_agent(
