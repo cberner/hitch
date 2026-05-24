@@ -27,6 +27,11 @@
     <input type="hidden" name="auto_qa" value="false">
     <input type="checkbox" name="auto_qa" value="true" data-standing-order-auto-qa {% if default_auto_qa %}checked{% endif %}{% if default_autonomy in auto_qa_supported_autonomies %}{% else %} disabled{% endif %}>
 </label>
+<label class="checkbox-label">
+    Auto-proposal
+    <input type="hidden" name="auto_proposal" value="false">
+    <input type="checkbox" name="auto_proposal" value="true" {% if default_auto_proposal %}checked{% endif %}>
+</label>
 <label>
     Confidence threshold
     <select name="confidence_threshold" required>

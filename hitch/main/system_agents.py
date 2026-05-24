@@ -11,12 +11,14 @@ from typing import Any
 
 from django.db import IntegrityError, models, transaction
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from openai_codex.generated.v2_all import ThreadSource
 
 from hitch.main import codex_events, codex_pool, demo
 from hitch.main.diffs import build_worktree_diff_text
 from hitch.main.models import (
     CodexInstance,
+    Project,
     ProposedSession,
     SessionMetadata,
     StandingOrder,
@@ -25,6 +27,7 @@ from hitch.main.models import (
     SystemWorkflow,
     UserInputRequest,
 )
+from hitch.main.repos import default_branch_checkout_commit_hash
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +85,7 @@ STEP_SPEC_CRITIC_SYNTHESIZING = "spec_critic_synthesizing"
 STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED = "spec_critic_implementation_spawned"
 SPEC_CRITIC_CLARIFICATION_METHOD = "hitch/spec_critic/clarification"
 
+_AUTO_PROPOSAL_UNKNOWN_DEFAULT_BRANCH_SHA = "__unknown__"
 _QA_DESIGN_SYNTHESIS_STATE_KEY = "qa_design_synthesis_gate"
 _QA_DESIGN_SYNTHESIS_MIN_CATEGORY_OVERLAP = 2
 _QA_DESIGN_SYNTHESIS_RECENT_RUN_LIMIT = 50
@@ -723,13 +727,136 @@ def start_pr_qa_workflow(
     return workflow
 
 
-def start_standing_order_workflow(*, standing_order: StandingOrder) -> SystemWorkflow:
+def maybe_start_auto_proposal_workflows(*, project: Project | None = None) -> int:
+    orders = StandingOrder.objects.select_related("project").filter(
+        auto_proposal_enabled=True
+    )
+    if project is not None:
+        orders = orders.filter(project=project)
+
+    started = 0
+    for standing_order in orders.order_by("created_at", "id"):
+        default_branch_sha = _standing_order_auto_proposal_start_sha(standing_order)
+        if default_branch_sha is None:
+            continue
+        workflow = start_standing_order_workflow(
+            standing_order=standing_order,
+            auto_proposal=True,
+            default_branch_sha=default_branch_sha,
+        )
+        if workflow.status == SystemWorkflow.STATUS_RUNNING:
+            started += 1
+    return started
+
+
+def _standing_order_auto_proposal_start_sha(
+    standing_order: StandingOrder,
+) -> str | None:
+    if _standing_order_pending_proposal_exists(standing_order):
+        return None
+    if _standing_order_unresolved_failure_notice_exists(standing_order):
+        return None
+    if _standing_order_in_flight_automation_exists(standing_order):
+        return None
+    if _project_running_auto_proposal_workflow_exists(standing_order):
+        return None
+    if _standing_order_running_workflow_exists(standing_order):
+        return None
+
+    current_sha = default_branch_checkout_commit_hash(standing_order.project.repo_path)
+    if not current_sha:
+        return None
+    last_no_proposal_sha = standing_order.auto_proposal_last_no_proposal_sha.strip()
+    if not last_no_proposal_sha:
+        return current_sha
+    if current_sha == last_no_proposal_sha:
+        return None
+    return current_sha
+
+
+def _standing_order_pending_proposal_exists(standing_order: StandingOrder) -> bool:
+    return standing_order.proposed_sessions.filter(
+        inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL,
+        outcome_status=ProposedSession.OUTCOME_UNSET,
+    ).exists()
+
+
+def _standing_order_unresolved_failure_notice_exists(
+    standing_order: StandingOrder,
+) -> bool:
+    return standing_order.proposed_sessions.filter(
+        inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
+        outcome_status=ProposedSession.OUTCOME_UNSET,
+        outcome_metadata__automation_status="failed",
+    ).exists()
+
+
+def _standing_order_in_flight_automation_exists(standing_order: StandingOrder) -> bool:
+    accepted_thread_ids = (
+        ProposedSession.objects.filter(
+            project=standing_order.project,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            outcome_metadata__accepted_by="standing_order_autonomy",
+            accepted_session__isnull=False,
+        )
+        .exclude(accepted_session__thread_id="")
+        .values_list("accepted_session__thread_id", flat=True)
+    )
+    if CodexInstance.objects.filter(
+        thread_id__in=accepted_thread_ids,
+        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+    ).exists():
+        return True
+    return SystemWorkflow.objects.filter(
+        kind=SystemWorkflow.KIND_PR_QA,
+        main_thread_id__in=accepted_thread_ids,
+        status=SystemWorkflow.STATUS_RUNNING,
+    ).exists()
+
+
+def _project_running_auto_proposal_workflow_exists(
+    standing_order: StandingOrder,
+) -> bool:
+    return SystemWorkflow.objects.filter(
+        kind=STANDING_ORDER_AGENT_KIND,
+        cwd=standing_order.project.repo_path,
+        status=SystemWorkflow.STATUS_RUNNING,
+        state__auto_proposal=True,
+    ).exists()
+
+
+def _standing_order_running_workflow_exists(standing_order: StandingOrder) -> bool:
+    return SystemWorkflow.objects.filter(
+        kind=STANDING_ORDER_AGENT_KIND,
+        main_thread_id=_standing_order_main_thread_id(standing_order.pk),
+        status=SystemWorkflow.STATUS_RUNNING,
+    ).exists()
+
+
+def start_standing_order_workflow(
+    *,
+    standing_order: StandingOrder,
+    auto_proposal: bool = False,
+    default_branch_sha: str | None = None,
+) -> SystemWorkflow:
     standing_order = (
         StandingOrder.objects.select_related("project")
         .filter(pk=standing_order.pk)
         .get()
     )
     main_thread_id = _standing_order_main_thread_id(standing_order.pk)
+    state: dict[str, Any] = {
+        "standing_order_id": standing_order.pk,
+        "auto_proposal": auto_proposal,
+        "standing_order_updated_at": standing_order.updated_at.isoformat(),
+        "web_search_mode": standing_order.web_search_mode,
+    }
+    if auto_proposal:
+        default_branch_sha = default_branch_sha or (
+            default_branch_checkout_commit_hash(standing_order.project.repo_path)
+            or _AUTO_PROPOSAL_UNKNOWN_DEFAULT_BRANCH_SHA
+        )
+        state["default_branch_sha"] = default_branch_sha
     try:
         with transaction.atomic():
             workflow = SystemWorkflow.objects.create(
@@ -738,10 +865,7 @@ def start_standing_order_workflow(*, standing_order: StandingOrder) -> SystemWor
                 cwd=standing_order.project.repo_path,
                 status=SystemWorkflow.STATUS_RUNNING,
                 step=STEP_STANDING_ORDER_CANDIDATE_RUNNING,
-                state={
-                    "standing_order_id": standing_order.pk,
-                    "web_search_mode": standing_order.web_search_mode,
-                },
+                state=state,
             )
     except IntegrityError:
         existing_workflow = SystemWorkflow.objects.filter(
@@ -1687,6 +1811,7 @@ def _handle_standing_order_agent_finished(
                     workflow, "candidate_session_id"
                 ),
             )
+            _record_standing_order_no_proposal(standing_order, workflow)
             workflow.step = STEP_STANDING_ORDER_SKIPPED
             workflow.status = SystemWorkflow.STATUS_COMPLETED
             workflow.state = {**workflow.state, "candidate": candidate_output}
@@ -1750,6 +1875,7 @@ def _handle_standing_order_agent_finished(
                 "automation_status": "proposed",
             },
         )
+        _record_standing_order_proposal_created(standing_order)
         workflow.state = {
             **workflow.state,
             "judgment": judgment,
@@ -1757,6 +1883,21 @@ def _handle_standing_order_agent_finished(
             "autonomy": standing_order.autonomy,
         }
         if standing_order.autonomy != StandingOrder.AUTONOMY_PROPOSE_ONLY:
+            automation_error = _standing_order_implementation_automation_error(
+                workflow, standing_order
+            )
+            if automation_error:
+                _record_proposal_automation_failure(
+                    proposal,
+                    standing_order.autonomy,
+                    automation_error,
+                )
+                _block_workflow(
+                    workflow,
+                    automation_error,
+                    surface_to_thread=False,
+                )
+                return
             try:
                 implementation = _start_standing_order_implementation_session(
                     workflow, standing_order, proposal
@@ -1784,6 +1925,7 @@ def _handle_standing_order_agent_finished(
             return
         workflow.step = STEP_STANDING_ORDER_PROPOSED
     else:
+        _record_standing_order_no_proposal(standing_order, workflow)
         workflow.step = STEP_STANDING_ORDER_SKIPPED
     workflow.status = SystemWorkflow.STATUS_COMPLETED
     workflow.state = {**workflow.state, "judgment": judgment}
@@ -2131,6 +2273,22 @@ def _spawn_spec_critic_implementation_turn(
     )
 
 
+def _standing_order_implementation_automation_error(
+    workflow: SystemWorkflow, standing_order: StandingOrder
+) -> str:
+    if workflow.state.get("auto_proposal") is not True:
+        return ""
+    if _standing_order_in_flight_automation_exists(standing_order):
+        return "another automated standing order implementation is already running for this project"
+    expected_sha = _state_string(workflow, "default_branch_sha")
+    if not expected_sha:
+        return "auto-proposal workflow is missing its default branch snapshot"
+    current_sha = default_branch_checkout_commit_hash(workflow.cwd)
+    if current_sha != expected_sha:
+        return "checkout no longer matches the auto-proposal default branch snapshot"
+    return ""
+
+
 def _start_standing_order_implementation_session(
     workflow: SystemWorkflow, standing_order: StandingOrder, proposal: ProposedSession
 ) -> SessionMetadata:
@@ -2248,6 +2406,36 @@ def _proposal_outcome_metadata(
         else:
             metadata[key] = value
     return metadata
+
+
+def _record_standing_order_no_proposal(
+    standing_order: StandingOrder, workflow: SystemWorkflow
+) -> None:
+    if workflow.state.get("auto_proposal") is not True:
+        return
+    sha = _state_string(workflow, "default_branch_sha")
+    if not sha:
+        return
+    filters: dict[str, Any] = {"pk": standing_order.pk}
+    snapshot = _state_string(workflow, "standing_order_updated_at")
+    if snapshot:
+        snapshot_datetime = parse_datetime(snapshot)
+        if snapshot_datetime is None:
+            return
+        filters["updated_at"] = snapshot_datetime
+    StandingOrder.objects.filter(**filters).update(
+        auto_proposal_last_no_proposal_sha=sha,
+        updated_at=timezone.now(),
+    )
+
+
+def _record_standing_order_proposal_created(standing_order: StandingOrder) -> None:
+    if not standing_order.auto_proposal_last_no_proposal_sha:
+        return
+    StandingOrder.objects.filter(pk=standing_order.pk).update(
+        auto_proposal_last_no_proposal_sha="",
+        updated_at=timezone.now(),
+    )
 
 
 def _spawn_pr_followup_monitor_run(workflow: SystemWorkflow) -> SystemAgentRun:

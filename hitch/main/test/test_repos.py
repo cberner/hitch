@@ -1,10 +1,18 @@
 import subprocess
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from django.test import TestCase
 
-from hitch.main.repos import discover_repos, git_common_dir, same_repo_or_worktree
+from hitch.main import repos
+from hitch.main.repos import (
+    default_branch_checkout_commit_hash,
+    default_branch_commit_hash,
+    discover_repos,
+    git_common_dir,
+    same_repo_or_worktree,
+)
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -91,3 +99,129 @@ class DiscoverReposTests(TestCase):
             self.assertEqual(git_common_dir(repo), git_common_dir(worktree))
             self.assertTrue(same_repo_or_worktree(worktree, repo, str(git_common_dir(repo))))
             self.assertTrue(same_repo_or_worktree(repo, repo, str(git_common_dir(repo))))
+
+    def test_default_branch_commit_hash_prefers_origin_head(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            repo = Path(raw_root) / "repo"
+            repo.mkdir()
+            _git(repo, "init", "--initial-branch=master")
+            _git(repo, "config", "user.email", "dev@example.com")
+            _git(repo, "config", "user.name", "Dev")
+            (repo / "README.md").write_text("master\n")
+            _git(repo, "add", "README.md")
+            _git(repo, "commit", "-m", "master")
+            _git(repo, "checkout", "-b", "main")
+            (repo / "README.md").write_text("main\n")
+            _git(repo, "commit", "-am", "main")
+            main_sha = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "update-ref", "refs/remotes/origin/main", main_sha)
+            _git(
+                repo,
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            )
+            _git(repo, "checkout", "master")
+
+            self.assertEqual(default_branch_commit_hash(repo), main_sha)
+            self.assertIsNone(default_branch_checkout_commit_hash(repo))
+            _git(repo, "checkout", "main")
+            self.assertEqual(default_branch_checkout_commit_hash(repo), main_sha)
+
+    def test_default_branch_commit_hash_falls_back_to_local_main(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            repo = Path(raw_root) / "repo"
+            repo.mkdir()
+            _git(repo, "init", "--initial-branch=main")
+            _git(repo, "config", "user.email", "dev@example.com")
+            _git(repo, "config", "user.name", "Dev")
+            (repo / "README.md").write_text("hello\n")
+            _git(repo, "add", "README.md")
+            _git(repo, "commit", "-m", "initial")
+            main_sha = _git(repo, "rev-parse", "HEAD")
+
+            self.assertEqual(default_branch_commit_hash(repo), main_sha)
+
+    def test_default_branch_checkout_rejects_feature_branch_at_same_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            repo = Path(raw_root) / "repo"
+            repo.mkdir()
+            _git(repo, "init", "--initial-branch=main")
+            _git(repo, "config", "user.email", "dev@example.com")
+            _git(repo, "config", "user.name", "Dev")
+            (repo / "README.md").write_text("hello\n")
+            _git(repo, "add", "README.md")
+            _git(repo, "commit", "-m", "initial")
+            _git(repo, "checkout", "-b", "feature")
+
+            self.assertIsNone(default_branch_checkout_commit_hash(repo))
+
+    def test_default_branch_checkout_commit_hash_requires_clean_worktree(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            repo = Path(raw_root) / "repo"
+            repo.mkdir()
+            _git(repo, "init", "--initial-branch=main")
+            _git(repo, "config", "user.email", "dev@example.com")
+            _git(repo, "config", "user.name", "Dev")
+            (repo / "README.md").write_text("hello\n")
+            _git(repo, "add", "README.md")
+            _git(repo, "commit", "-m", "initial")
+            main_sha = _git(repo, "rev-parse", "HEAD")
+
+            self.assertEqual(default_branch_checkout_commit_hash(repo), main_sha)
+
+            (repo / "README.md").write_text("local change\n")
+
+            self.assertIsNone(default_branch_checkout_commit_hash(repo))
+
+    def test_default_branch_checkout_commit_hash_disables_fsmonitor(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_git_output(_cwd: Path, args: list[str]) -> str | None:
+            calls.append(args)
+            if args == ["rev-parse", "--show-toplevel"]:
+                return "/repo\n"
+            if args == ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]:
+                return "refs/remotes/origin/main\n"
+            if args == [
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                "refs/remotes/origin/main^{commit}",
+            ]:
+                return f"{'a' * 40}\n"
+            if args == ["symbolic-ref", "--quiet", "--short", "HEAD"]:
+                return "main\n"
+            if args == ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]:
+                return f"{'a' * 40}\n"
+            if args == ["-c", "core.fsmonitor=false", "status", "--porcelain"]:
+                return ""
+            return None
+
+        with patch.object(repos, "_git_output", side_effect=fake_git_output):
+            self.assertEqual(
+                default_branch_checkout_commit_hash(Path("/repo")),
+                "a" * 40,
+            )
+
+        self.assertIn(
+            ["-c", "core.fsmonitor=false", "status", "--porcelain"],
+            calls,
+        )
+
+    def test_default_branch_commit_hash_falls_back_to_head_for_custom_branch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            repo = Path(raw_root) / "repo"
+            repo.mkdir()
+            _git(repo, "init", "--initial-branch=stable")
+            _git(repo, "config", "user.email", "dev@example.com")
+            _git(repo, "config", "user.name", "Dev")
+            (repo / "README.md").write_text("hello\n")
+            _git(repo, "add", "README.md")
+            _git(repo, "commit", "-m", "initial")
+            head_sha = _git(repo, "rev-parse", "HEAD")
+
+            self.assertEqual(default_branch_commit_hash(repo), head_sha)
+            self.assertEqual(default_branch_checkout_commit_hash(repo), head_sha)

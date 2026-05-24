@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 from unittest.mock import MagicMock, patch
 
+from django.core.management import call_command
 from django.db import IntegrityError, transaction
 from django.test import TestCase
 from openai_codex.generated.v2_all import ThreadSource
@@ -3283,6 +3284,566 @@ class StandingOrderWorkflowTests(TestCase):
             SessionMetadata.objects.filter(thread_id="candidate-thread").exists()
         )
 
+    @patch(
+        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_starts_enabled_order_without_pending_proposal(
+        self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+            auto_proposal_enabled=True,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 1)
+        workflow = SystemWorkflow.objects.get()
+        self.assertEqual(
+            workflow.main_thread_id,
+            system_agents._standing_order_main_thread_id(standing_order.pk),
+        )
+        self.assertTrue(workflow.state["auto_proposal"])
+        mock_spawn.assert_called_once()
+
+    @patch(
+        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_skips_pending_proposal_but_not_notice(
+        self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        pending_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        notice_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve docs",
+            goal="Find useful documentation increments.",
+            auto_proposal_enabled=True,
+        )
+        ProposedSession.objects.create(
+            standing_order=pending_order,
+            title="Add parser coverage",
+        )
+        ProposedSession.objects.create(
+            standing_order=notice_order,
+            title="No proposal from Improve docs",
+            inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 1)
+        workflow = SystemWorkflow.objects.get()
+        self.assertEqual(
+            workflow.main_thread_id,
+            system_agents._standing_order_main_thread_id(notice_order.pk),
+        )
+
+    @patch(
+        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_does_not_block_on_resolved_proposals(
+        self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other_project = Project.objects.create(name="Other", repo_path="/other")
+        accepted_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        rejected_order = StandingOrder.objects.create(
+            project=other_project,
+            title="Improve docs",
+            goal="Find useful documentation increments.",
+            auto_proposal_enabled=True,
+        )
+        ProposedSession.objects.create(
+            standing_order=accepted_order,
+            title="Accepted proposal",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        )
+        ProposedSession.objects.create(
+            standing_order=rejected_order,
+            title="Rejected proposal",
+            outcome_status=ProposedSession.OUTCOME_REJECTED,
+        )
+        mock_spawn.side_effect = [
+            _instance(
+                thread_id="candidate-thread-1",
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            ),
+            _instance(
+                thread_id="candidate-thread-2",
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            ),
+        ]
+
+        started = system_agents.maybe_start_auto_proposal_workflows()
+
+        self.assertEqual(started, 2)
+        self.assertEqual(SystemWorkflow.objects.count(), 2)
+
+    @patch(
+        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_serializes_running_workflows_per_project(
+        self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        first_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        StandingOrder.objects.create(
+            project=project,
+            title="Improve docs",
+            goal="Find useful documentation increments.",
+            auto_proposal_enabled=True,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 1)
+        workflow = SystemWorkflow.objects.get()
+        self.assertEqual(
+            workflow.main_thread_id,
+            system_agents._standing_order_main_thread_id(first_order.pk),
+        )
+
+    @patch(
+        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_blocks_in_flight_standing_order_automation(
+        self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        blocker_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve docs",
+            goal="Find useful documentation increments.",
+            auto_proposal_enabled=True,
+        )
+        implementation = SessionMetadata.objects.create(
+            thread_id="implementation-thread",
+            cwd="/repo",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            standing_order=blocker_order,
+            title="Automated proposal",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            accepted_session=implementation,
+            outcome_metadata={"accepted_by": "standing_order_autonomy"},
+        )
+        _instance(
+            thread_id="implementation-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+            status=CodexInstance.STATUS_RUNNING,
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 0)
+        mock_spawn.assert_not_called()
+
+    @patch(
+        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_blocks_in_flight_pr_qa_for_automation(
+        self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        blocker_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve docs",
+            goal="Find useful documentation increments.",
+            auto_proposal_enabled=True,
+        )
+        implementation = SessionMetadata.objects.create(
+            thread_id="implementation-thread",
+            cwd="/repo",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            standing_order=blocker_order,
+            title="Automated proposal",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            accepted_session=implementation,
+            outcome_metadata={"accepted_by": "standing_order_autonomy"},
+        )
+        SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="implementation-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+        )
+        for index in range(25):
+            session = SessionMetadata.objects.create(
+                thread_id=f"completed-implementation-{index}",
+                cwd="/repo",
+                project=project,
+            )
+            ProposedSession.objects.create(
+                project=project,
+                standing_order=standing_order,
+                title=f"Completed automated proposal {index}",
+                outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+                accepted_session=session,
+                outcome_metadata={"accepted_by": "standing_order_autonomy"},
+            )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 0)
+        mock_spawn.assert_not_called()
+
+    @patch(
+        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_blocks_unresolved_failure_notice(
+        self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            standing_order=standing_order,
+            title="Standing order failed: Improve tests",
+            inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
+            outcome_metadata={"automation_status": "failed"},
+        )
+        for index in range(25):
+            ProposedSession.objects.create(
+                project=project,
+                standing_order=standing_order,
+                title=f"No proposal from Improve tests {index}",
+                inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
+            )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 0)
+        mock_spawn.assert_not_called()
+
+    @patch(
+        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_does_not_block_resolved_failure_notice(
+        self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            standing_order=standing_order,
+            title="Standing order failed: Improve tests",
+            inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
+            outcome_status=ProposedSession.OUTCOME_REJECTED,
+            outcome_metadata={"automation_status": "failed"},
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 1)
+        mock_spawn.assert_called_once()
+
+    @patch(
+        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        return_value=None,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_waits_for_checkout_at_default_branch(
+        self, mock_spawn: MagicMock, mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 0)
+        mock_spawn.assert_not_called()
+        mock_default_sha.assert_called_once_with("/repo")
+
+    @patch(
+        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch(
+        "hitch.main.management.commands.run_auto_proposals.codex_pool.reconcile_dead",
+        return_value=0,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_run_auto_proposals_command_starts_eligible_orders(
+        self,
+        mock_spawn: MagicMock,
+        mock_reconcile_dead: MagicMock,
+        _mock_default_sha: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other_project = Project.objects.create(name="Other", repo_path="/other")
+        eligible_order = StandingOrder.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+            auto_proposal_enabled=True,
+        )
+        StandingOrder.objects.create(
+            project=project,
+            title="Disabled order",
+            goal="This order should require manual runs.",
+            auto_proposal_enabled=False,
+        )
+        StandingOrder.objects.create(
+            project=other_project,
+            title="Other project order",
+            goal="This belongs to a different project.",
+            auto_proposal_enabled=True,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+
+        output = call_command("run_auto_proposals", project_id=project.pk)
+
+        self.assertEqual(output, "Started 1 auto-proposal workflow(s).")
+        workflow = SystemWorkflow.objects.get()
+        self.assertEqual(
+            workflow.main_thread_id,
+            system_agents._standing_order_main_thread_id(eligible_order.pk),
+        )
+        mock_reconcile_dead.assert_called_once_with()
+        mock_spawn.assert_called_once()
+
+    @patch(
+        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch(
+        "hitch.main.management.commands.run_auto_proposals.codex_pool.reconcile_dead",
+        return_value=0,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_run_auto_proposals_command_without_project_starts_across_projects(
+        self,
+        mock_spawn: MagicMock,
+        mock_reconcile_dead: MagicMock,
+        _mock_default_sha: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other_project = Project.objects.create(name="Other", repo_path="/other")
+        first_order = StandingOrder.objects.create(
+            project=project,
+            title="Keep tests current",
+            goal="Find small test improvements.",
+            auto_proposal_enabled=True,
+        )
+        second_order = StandingOrder.objects.create(
+            project=other_project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+            auto_proposal_enabled=True,
+        )
+        StandingOrder.objects.create(
+            project=other_project,
+            title="Disabled order",
+            goal="This order should require manual runs.",
+            auto_proposal_enabled=False,
+        )
+        mock_spawn.side_effect = [
+            _instance(
+                thread_id="candidate-thread-1",
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            ),
+            _instance(
+                thread_id="candidate-thread-2",
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            ),
+        ]
+
+        output = call_command("run_auto_proposals")
+
+        self.assertEqual(output, "Started 2 auto-proposal workflow(s).")
+        self.assertEqual(
+            set(SystemWorkflow.objects.values_list("main_thread_id", flat=True)),
+            {
+                system_agents._standing_order_main_thread_id(first_order.pk),
+                system_agents._standing_order_main_thread_id(second_order.pk),
+            },
+        )
+        mock_reconcile_dead.assert_called_once_with()
+        self.assertEqual(mock_spawn.call_count, 2)
+
+    @patch("hitch.main.system_agents.default_branch_checkout_commit_hash")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_waits_for_default_branch_change_after_no_proposal(
+        self, mock_spawn: MagicMock, mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+            auto_proposal_last_no_proposal_sha="a" * 40,
+        )
+        mock_default_sha.return_value = "a" * 40
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 0)
+        mock_spawn.assert_not_called()
+
+        mock_default_sha.return_value = "b" * 40
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 1)
+        mock_spawn.assert_called_once()
+
+    @patch("hitch.main.system_agents.default_branch_checkout_commit_hash")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_no_proposal_records_and_suppresses_until_branch_changes(
+        self, mock_spawn: MagicMock, mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        mock_default_sha.return_value = "a" * 40
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 1)
+        instance = CodexInstance.objects.get(thread_id="candidate-thread")
+        instance.events_path = _events_file(
+            self,
+            {
+                "proposal": None,
+                "message": "No concrete test increment was worth proposing.",
+                "next_steps_summary": "Try a different area next.",
+                "memory_relevant_files": [],
+            },
+        )
+        instance.save(update_fields=["events_path"])
+
+        system_agents.on_codex_instance_finished(instance)
+
+        standing_order.refresh_from_db()
+        self.assertEqual(standing_order.auto_proposal_last_no_proposal_sha, "a" * 40)
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 0)
+        self.assertEqual(mock_spawn.call_count, 1)
+
+        mock_default_sha.return_value = "b" * 40
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread-2",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 1)
+        self.assertEqual(mock_spawn.call_count, 2)
+
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_yolo_workflow_starts_candidate_thread_with_yolo_guidance(
         self, mock_spawn: MagicMock
@@ -3459,6 +4020,7 @@ class StandingOrderWorkflowTests(TestCase):
             title="Improve tests",
             goal="Find useful test coverage increments.",
             web_search_mode=StandingOrder.WEB_SEARCH_LIVE,
+            auto_proposal_last_no_proposal_sha="a" * 40,
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.STANDING_ORDER_AGENT_KIND,
@@ -3567,6 +4129,8 @@ class StandingOrderWorkflowTests(TestCase):
             step=system_agents.STEP_STANDING_ORDER_CANDIDATE_RUNNING,
             state={
                 "standing_order_id": standing_order.pk,
+                "auto_proposal": True,
+                "default_branch_sha": "a" * 40,
                 "candidate_session_id": candidate_metadata.pk,
             },
         )
@@ -3614,7 +4178,132 @@ class StandingOrderWorkflowTests(TestCase):
             "Inspected rollout tests and found no clear increment; try settings tests next.",
         )
         self.assertEqual(memory.relevant_files, ["hitch/main/test/test_rollout.py"])
+        standing_order.refresh_from_db()
+        self.assertEqual(standing_order.auto_proposal_last_no_proposal_sha, "a" * 40)
         mock_spawn.assert_not_called()
+
+    @patch("hitch.main.system_agents.default_branch_checkout_commit_hash")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_no_proposal_records_workflow_start_sha_snapshot(
+        self, mock_spawn: MagicMock, mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        mock_default_sha.return_value = "a" * 40
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+        workflow = system_agents.start_standing_order_workflow(
+            standing_order=standing_order,
+            auto_proposal=True,
+        )
+        instance = CodexInstance.objects.get(thread_id="candidate-thread")
+        instance.events_path = _events_file(
+            self,
+            {
+                "proposal": None,
+                "message": "No concrete test increment was worth proposing.",
+                "next_steps_summary": "Try a different area next.",
+                "memory_relevant_files": [],
+            },
+        )
+        instance.save(update_fields=["events_path"])
+        mock_default_sha.return_value = "b" * 40
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        standing_order.refresh_from_db()
+        self.assertEqual(workflow.state["default_branch_sha"], "a" * 40)
+        self.assertEqual(standing_order.auto_proposal_last_no_proposal_sha, "a" * 40)
+        mock_default_sha.assert_called_once_with("/repo")
+
+    @patch(
+        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_manual_no_proposal_does_not_record_auto_checkpoint(
+        self, mock_spawn: MagicMock, mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+        system_agents.start_standing_order_workflow(standing_order=standing_order)
+        instance = CodexInstance.objects.get(thread_id="candidate-thread")
+        instance.events_path = _events_file(
+            self,
+            {
+                "proposal": None,
+                "message": "No concrete test increment was worth proposing.",
+                "next_steps_summary": "Try a different area next.",
+                "memory_relevant_files": [],
+            },
+        )
+        instance.save(update_fields=["events_path"])
+
+        system_agents.on_codex_instance_finished(instance)
+
+        standing_order.refresh_from_db()
+        self.assertEqual(standing_order.auto_proposal_last_no_proposal_sha, "")
+        mock_default_sha.assert_not_called()
+
+    @patch(
+        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_stale_no_proposal_workflow_does_not_restore_cleared_sha(
+        self, mock_spawn: MagicMock, mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+        system_agents.start_standing_order_workflow(
+            standing_order=standing_order,
+            auto_proposal=True,
+        )
+        standing_order.goal = "Find useful coverage for edited order contents."
+        standing_order.save()
+        instance = CodexInstance.objects.get(thread_id="candidate-thread")
+        instance.events_path = _events_file(
+            self,
+            {
+                "proposal": None,
+                "message": "No concrete test increment was worth proposing.",
+                "next_steps_summary": "Try a different area next.",
+                "memory_relevant_files": [],
+            },
+        )
+        instance.save(update_fields=["events_path"])
+
+        system_agents.on_codex_instance_finished(instance)
+
+        standing_order.refresh_from_db()
+        self.assertEqual(standing_order.auto_proposal_last_no_proposal_sha, "")
+        mock_default_sha.assert_called_once_with("/repo")
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_yolo_candidate_completion_starts_judge_thread_with_yolo_guidance(
@@ -3689,6 +4378,7 @@ class StandingOrderWorkflowTests(TestCase):
             title="Improve tests",
             goal="Find useful test coverage increments.",
             confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+            auto_proposal_last_no_proposal_sha="a" * 40,
         )
         candidate_metadata = SessionMetadata.objects.create(
             thread_id="candidate-thread",
@@ -3758,6 +4448,8 @@ class StandingOrderWorkflowTests(TestCase):
         )
         self.assertEqual(proposal.candidate_session, candidate_metadata)
         self.assertEqual(proposal.judge_session, judge_metadata)
+        standing_order.refresh_from_db()
+        self.assertEqual(standing_order.auto_proposal_last_no_proposal_sha, "")
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_draft_patch_autonomy_starts_implementation_session(
@@ -3865,6 +4557,76 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertFalse(kwargs["auto_pr_enabled"])
         self.assertFalse(kwargs["auto_qa_enabled"])
         self.assertIn("Implementation guidance:\nAdd focused tests.", kwargs["prompt"])
+
+    @patch(
+        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        return_value=None,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_draft_patch_revalidates_checkout_before_implementation(
+        self, mock_spawn: MagicMock, mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            state={
+                "standing_order_id": standing_order.pk,
+                "auto_proposal": True,
+                "default_branch_sha": "a" * 40,
+                "candidate": {
+                    "title": "Add parser coverage",
+                    "implementation_direction": "Add focused tests.",
+                    "relevant_files": [],
+                },
+            },
+        )
+        instance = _instance(
+            thread_id="judge-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {
+                    "confidence": "high",
+                    "summary": "This adds focused parser coverage.",
+                    "rationale": "The files are well-scoped.",
+                },
+            ),
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            thread_id="judge-thread",
+            instance=instance,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        proposal = ProposedSession.objects.get()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertIn("checkout no longer matches", proposal.outcome_notes)
+        self.assertEqual(
+            proposal.outcome_metadata["automation_status"],
+            "implementation_start_failed",
+        )
+        mock_default_sha.assert_called_once_with("/repo")
+        mock_spawn.assert_not_called()
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_draft_patch_auto_qa_setting_enables_auto_qa_for_implementation(
@@ -4156,6 +4918,7 @@ class StandingOrderWorkflowTests(TestCase):
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
+            auto_proposal_last_no_proposal_sha="a" * 40,
         )
         candidate_metadata = SessionMetadata.objects.create(
             thread_id="candidate-thread",
@@ -4212,6 +4975,8 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertEqual(notice.candidate_session, candidate_metadata)
         self.assertIn("Standing order failed: Improve tests", notice.title)
         self.assertIn("candidate output was not valid JSON", notice.summary)
+        standing_order.refresh_from_db()
+        self.assertEqual(standing_order.auto_proposal_last_no_proposal_sha, "a" * 40)
 
     def test_judge_skips_proposal_below_threshold(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -4231,6 +4996,8 @@ class StandingOrderWorkflowTests(TestCase):
             step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
             state={
                 "standing_order_id": standing_order.pk,
+                "auto_proposal": True,
+                "default_branch_sha": "a" * 40,
                 "candidate": {"title": "Maybe add tests", "relevant_files": []},
             },
         )
@@ -4261,6 +5028,8 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
         self.assertEqual(workflow.step, system_agents.STEP_STANDING_ORDER_SKIPPED)
         self.assertFalse(ProposedSession.objects.exists())
+        standing_order.refresh_from_db()
+        self.assertEqual(standing_order.auto_proposal_last_no_proposal_sha, "a" * 40)
 
     def test_accepted_proposed_session_unhides_candidate_thread(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")

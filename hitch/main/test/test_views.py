@@ -5466,6 +5466,32 @@ class SessionViewApprovalContextTests(TestCase):
 
 
 class StandingOrderViewTests(TestCase):
+    @patch("hitch.main.views.system_agents.maybe_start_auto_proposal_workflows")
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_get_pages_do_not_start_auto_proposals(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_scheduler: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+
+        for route in ("index", "inbox", "standing_orders"):
+            with self.subTest(route=route):
+                response = self.client.get(reverse(route))
+                self.assertEqual(response.status_code, 200)
+
+        mock_scheduler.assert_not_called()
+
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_page_lists_orders_and_inbox_count_for_selected_project(
@@ -5530,6 +5556,7 @@ class StandingOrderViewTests(TestCase):
             response, 'value="draft_pr" data-auto-qa-supported="false"'
         )
         self.assertContains(response, "Web search: Live")
+        self.assertContains(response, "Auto-proposal: Off")
         self.assertContains(
             response,
             f'data-edit-url="{reverse("edit_standing_order", args=[order.pk])}"',
@@ -5541,6 +5568,7 @@ class StandingOrderViewTests(TestCase):
         self.assertContains(
             response, f'data-web-search-mode="{StandingOrder.WEB_SEARCH_LIVE}"'
         )
+        self.assertContains(response, 'data-auto-proposal-enabled="false"')
         self.assertContains(response, 'data-standing-order-edit')
         self.assertNotContains(response, "Add parser coverage")
         self.assertNotContains(response, 'name="proposed_session"')
@@ -5777,6 +5805,7 @@ class StandingOrderViewTests(TestCase):
                 "ambition": StandingOrder.AMBITION_YOLO,
                 "autonomy": StandingOrder.AUTONOMY_DRAFT_PR,
                 "auto_qa": "true",
+                "auto_proposal": "true",
                 "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
                 "web_search_mode": StandingOrder.WEB_SEARCH_LIVE,
             },
@@ -5790,6 +5819,7 @@ class StandingOrderViewTests(TestCase):
         self.assertEqual(order.autonomy, StandingOrder.AUTONOMY_DRAFT_PR)
         self.assertFalse(order.auto_qa_enabled)
         self.assertEqual(order.web_search_mode, StandingOrder.WEB_SEARCH_LIVE)
+        self.assertTrue(order.auto_proposal_enabled)
         self.assertEqual(
             order.confidence_threshold,
             StandingOrder.CONFIDENCE_VERY_HIGH,
@@ -5804,6 +5834,7 @@ class StandingOrderViewTests(TestCase):
             goal="Find useful test coverage increments.",
             ambition=StandingOrder.AMBITION_INCREMENTAL,
             autonomy=StandingOrder.AUTONOMY_PROPOSE_ONLY,
+            auto_proposal_enabled=True,
             confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
             web_search_mode=StandingOrder.WEB_SEARCH_CACHED,
         )
@@ -5816,6 +5847,7 @@ class StandingOrderViewTests(TestCase):
                 "ambition": StandingOrder.AMBITION_HIGH,
                 "autonomy": StandingOrder.AUTONOMY_DRAFT_PATCH,
                 "auto_qa": "true",
+                "auto_proposal": "false",
                 "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
                 "web_search_mode": StandingOrder.WEB_SEARCH_DISABLED,
             },
@@ -5829,6 +5861,7 @@ class StandingOrderViewTests(TestCase):
         self.assertEqual(order.autonomy, StandingOrder.AUTONOMY_DRAFT_PATCH)
         self.assertTrue(order.auto_qa_enabled)
         self.assertEqual(order.web_search_mode, StandingOrder.WEB_SEARCH_DISABLED)
+        self.assertFalse(order.auto_proposal_enabled)
         self.assertEqual(
             order.confidence_threshold,
             StandingOrder.CONFIDENCE_VERY_HIGH,
@@ -5872,6 +5905,7 @@ class StandingOrderViewTests(TestCase):
             goal="Find useful test coverage increments.",
             ambition=StandingOrder.AMBITION_INCREMENTAL,
             autonomy=StandingOrder.AUTONOMY_DRAFT_PR,
+            auto_proposal_enabled=True,
             confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
             web_search_mode=StandingOrder.WEB_SEARCH_CACHED,
         )
@@ -5890,6 +5924,37 @@ class StandingOrderViewTests(TestCase):
         order.refresh_from_db()
         self.assertEqual(order.autonomy, StandingOrder.AUTONOMY_DRAFT_PR)
         self.assertEqual(order.web_search_mode, StandingOrder.WEB_SEARCH_CACHED)
+        self.assertTrue(order.auto_proposal_enabled)
+
+    def test_edit_standing_order_clears_auto_proposal_no_proposal_sha(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            ambition=StandingOrder.AMBITION_INCREMENTAL,
+            autonomy=StandingOrder.AUTONOMY_PROPOSE_ONLY,
+            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+            auto_proposal_last_no_proposal_sha="a" * 40,
+        )
+
+        response = self.client.post(
+            reverse("edit_standing_order", args=[order.pk]),
+            {
+                "title": "Improve tests",
+                "goal": "Find useful test coverage increments.",
+                "ambition": StandingOrder.AMBITION_INCREMENTAL,
+                "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
+                "auto_proposal": "true",
+                "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        order.refresh_from_db()
+        self.assertTrue(order.auto_proposal_enabled)
+        self.assertEqual(order.auto_proposal_last_no_proposal_sha, "")
 
     def test_edit_standing_order_preserves_auto_qa_when_omitted(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -5989,6 +6054,7 @@ class StandingOrderViewTests(TestCase):
                     "goal": "Find useful docs increments.",
                     "ambition": StandingOrder.AMBITION_HIGH,
                     "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
+                    "auto_proposal": "false",
                     "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
                 },
                 "title is required",
@@ -5999,6 +6065,7 @@ class StandingOrderViewTests(TestCase):
                     "goal": "",
                     "ambition": StandingOrder.AMBITION_HIGH,
                     "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
+                    "auto_proposal": "false",
                     "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
                 },
                 "goal is required",
@@ -6009,6 +6076,7 @@ class StandingOrderViewTests(TestCase):
                     "goal": "Find useful docs increments.",
                     "ambition": "huge",
                     "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
+                    "auto_proposal": "false",
                     "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
                 },
                 "ambition is invalid",
@@ -6019,6 +6087,7 @@ class StandingOrderViewTests(TestCase):
                     "goal": "Find useful docs increments.",
                     "ambition": StandingOrder.AMBITION_HIGH,
                     "autonomy": "self_driving",
+                    "auto_proposal": "false",
                     "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
                 },
                 "autonomy is invalid",
@@ -6040,6 +6109,18 @@ class StandingOrderViewTests(TestCase):
                     "goal": "Find useful docs increments.",
                     "ambition": StandingOrder.AMBITION_HIGH,
                     "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
+                    "auto_proposal": "maybe",
+                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                },
+                "auto-proposal is invalid",
+            ),
+            (
+                {
+                    "title": "Improve docs",
+                    "goal": "Find useful docs increments.",
+                    "ambition": StandingOrder.AMBITION_HIGH,
+                    "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
+                    "auto_proposal": "false",
                     "confidence_threshold": "absolute",
                 },
                 "confidence threshold is invalid",
