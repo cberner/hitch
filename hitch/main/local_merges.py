@@ -498,15 +498,15 @@ def _submodule_index_entry(
 ) -> tuple[str, str]:
     if skip_worktree:
         return "160000", cached_sha
+    path = source_repo / relpath
+    if path.exists() and not path.is_dir():
+        raise LocalBranchMergeError("auto merge does not support submodule changes")
     status = _git(
         source_repo,
         ["status", "--porcelain", "--ignore-submodules=none", "--", relpath],
         hooks_path=hooks_path,
     ).strip()
     if status:
-        raise LocalBranchMergeError("auto merge does not support submodule changes")
-    path = source_repo / relpath
-    if path.exists() and not path.is_dir():
         raise LocalBranchMergeError("auto merge does not support submodule changes")
     if (path / ".git").exists():
         current_sha = _submodule_head(path, hooks_path=hooks_path)
