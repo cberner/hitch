@@ -3803,6 +3803,7 @@ class StandingOrderWorkflowTests(TestCase):
         kwargs = mock_spawn.call_args.kwargs
         self.assertEqual(kwargs["cwd"], "/repo")
         self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
+        self.assertIsNone(kwargs["sandbox_policy"])
         self.assertEqual(kwargs["web_search_mode"], StandingOrder.WEB_SEARCH_LIVE)
         self.assertEqual(kwargs["agent_kind"], system_agents.STANDING_ORDER_AGENT_KIND)
         self.assertEqual(kwargs["display_author"], system_agents.STANDING_ORDER_DISPLAY_AUTHOR)
@@ -3826,12 +3827,81 @@ class StandingOrderWorkflowTests(TestCase):
         )
         self.assertIn("Keep docs current", kwargs["prompt"])
         self.assertIn("make high progress", kwargs["prompt"])
+        self.assertIn("Do not make code changes", kwargs["prompt"])
         self.assertIn('"proposal" to null', kwargs["prompt"])
         self.assertIn("Standing order memory from previous candidate runs", kwargs["prompt"])
         self.assertIn("next_steps_summary", kwargs["prompt"])
         self.assertTrue(
             SessionMetadata.objects.filter(thread_id="candidate-thread").exists()
         )
+
+    @patch("hitch.main.system_agents.create_worktree_for_session")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_workflow_starts_candidate_thread_in_worktree_when_requested(
+        self, mock_spawn: MagicMock, mock_worktree: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+        mock_worktree.return_value = MagicMock(path=Path("/repo-worktree"))
+
+        workflow = system_agents.start_standing_order_workflow(
+            standing_order=standing_order,
+            use_worktrees=True,
+        )
+
+        mock_worktree.assert_called_once_with("/repo")
+        self.assertEqual(workflow.cwd, "/repo")
+        self.assertTrue(workflow.state["use_worktrees"])
+        self.assertEqual(workflow.state["session_cwd"], "/repo-worktree")
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(kwargs["cwd"], "/repo-worktree")
+        self.assertEqual(
+            kwargs["sandbox_policy"],
+            system_agents.STANDING_ORDER_IMPLEMENTATION_SANDBOX_POLICY,
+        )
+        self.assertIn("Repository cwd: /repo-worktree", kwargs["prompt"])
+        self.assertIn("Make code changes", kwargs["prompt"])
+        metadata = SessionMetadata.objects.get(thread_id="candidate-thread")
+        self.assertEqual(metadata.cwd, "/repo-worktree")
+        run = SystemAgentRun.objects.get(thread_id="candidate-thread")
+        self.assertEqual(run.input["cwd"], "/repo-worktree")
+
+    @patch("hitch.main.system_agents.cleanup_worktree")
+    @patch("hitch.main.system_agents.create_worktree_for_session")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_workflow_cleans_up_candidate_worktree_when_spawn_fails(
+        self,
+        mock_spawn: MagicMock,
+        mock_worktree: MagicMock,
+        mock_cleanup: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+        )
+        managed_worktree = MagicMock(path=Path("/repo-worktree"))
+        mock_worktree.return_value = managed_worktree
+        mock_spawn.side_effect = RuntimeError("boom")
+
+        workflow = system_agents.start_standing_order_workflow(
+            standing_order=standing_order,
+            use_worktrees=True,
+        )
+
+        mock_cleanup.assert_called_once_with(managed_worktree)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
 
     @patch(
         "hitch.main.system_agents.default_branch_checkout_commit_hash",
@@ -5147,6 +5217,168 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertFalse(kwargs["auto_pr_enabled"])
         self.assertFalse(kwargs["auto_qa_enabled"])
         self.assertIn("Implementation guidance:\nAdd focused tests.", kwargs["prompt"])
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_draft_patch_autonomy_starts_implementation_in_candidate_worktree(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+        )
+        candidate_metadata = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+        )
+        judge_metadata = SessionMetadata.objects.create(
+            thread_id="judge-thread",
+            cwd="/repo-worktree",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            state={
+                "standing_order_id": standing_order.pk,
+                "candidate_session_id": candidate_metadata.pk,
+                "judge_session_id": judge_metadata.pk,
+                "candidate": {
+                    "title": "Add parser coverage",
+                    "implementation_direction": "Finish the candidate changes.",
+                    "relevant_files": ["hitch/main/rollout.py"],
+                },
+            },
+        )
+        instance = _instance(
+            thread_id="judge-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {
+                    "confidence": "high",
+                    "summary": "The candidate worktree already has useful edits.",
+                    "rationale": "The files are well-scoped.",
+                },
+            ),
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            thread_id="judge-thread",
+            instance=instance,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="implementation-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(kwargs["cwd"], "/repo-worktree")
+        implementation = SessionMetadata.objects.get(thread_id="implementation-thread")
+        self.assertEqual(implementation.cwd, "/repo-worktree")
+        proposal = ProposedSession.objects.get()
+        self.assertEqual(proposal.accepted_session, implementation)
+
+    @patch("hitch.main.system_agents.create_worktree_for_session")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_merge_worktree_candidate_starts_from_target_branch(
+        self, mock_spawn: MagicMock, mock_worktree: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            auto_qa_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="release",
+        )
+        mock_worktree.return_value = MagicMock(path=Path("/repo-worktree"))
+        candidate_instance = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+        judge_instance = _instance(
+            thread_id="judge-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            events_path=_events_file(
+                self,
+                {
+                    "confidence": "high",
+                    "summary": "The target-branch candidate is well-scoped.",
+                    "rationale": "The files are focused.",
+                },
+            ),
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+        )
+        implementation_instance = _instance(
+            thread_id="implementation-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+        )
+        mock_spawn.side_effect = [
+            candidate_instance,
+            judge_instance,
+            implementation_instance,
+        ]
+
+        workflow = system_agents.start_standing_order_workflow(
+            standing_order=standing_order,
+            use_worktrees=True,
+        )
+        candidate_instance.events_path = _events_file(
+            self,
+            {
+                "proposal": {
+                    "title": "Add parser coverage",
+                    "summary": "Cover parser edge cases.",
+                    "impact": "Fewer regressions.",
+                    "implementation_direction": "Finish the candidate changes.",
+                    "relevant_files": ["hitch/main/rollout.py"],
+                },
+                "message": "",
+                "next_steps_summary": "Selected parser coverage.",
+                "memory_relevant_files": [],
+            },
+        )
+        candidate_instance.save(update_fields=["events_path"])
+
+        system_agents.on_codex_instance_finished(candidate_instance)
+        system_agents.on_codex_instance_finished(judge_instance)
+
+        mock_worktree.assert_called_once_with(
+            "/repo",
+            base_ref="refs/heads/release",
+            disable_hooks=True,
+        )
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.state["session_cwd"], "/repo-worktree")
+        implementation_kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(implementation_kwargs["cwd"], "/repo-worktree")
+        self.assertTrue(implementation_kwargs["auto_qa_enabled"])
+        self.assertTrue(implementation_kwargs["auto_merge_to_local_branch"])
+        self.assertEqual(implementation_kwargs["auto_merge_branch"], "release")
+        implementation = SessionMetadata.objects.get(thread_id="implementation-thread")
+        self.assertEqual(implementation.cwd, "/repo-worktree")
+        self.assertTrue(implementation.auto_qa_enabled)
+        self.assertTrue(implementation.auto_merge_to_local_branch)
+        self.assertEqual(implementation.auto_merge_branch, "release")
 
     @patch(
         "hitch.main.system_agents.default_branch_checkout_commit_hash",

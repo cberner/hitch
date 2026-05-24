@@ -38,6 +38,7 @@ from hitch.main.models import (
 )
 from hitch.main.repos import default_branch_checkout_commit_hash
 from hitch.main.worktrees import (
+    ManagedWorktree,
     WorktreeCleanupError,
     WorktreeCreationError,
     cleanup_worktree,
@@ -102,6 +103,8 @@ STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED = "spec_critic_implementation_spawned"
 SPEC_CRITIC_CLARIFICATION_METHOD = "hitch/spec_critic/clarification"
 
 _AUTO_PROPOSAL_UNKNOWN_DEFAULT_BRANCH_SHA = "__unknown__"
+_STANDING_ORDER_USE_WORKTREES_STATE_KEY = "use_worktrees"
+_STANDING_ORDER_SESSION_CWD_STATE_KEY = "session_cwd"
 _QA_DESIGN_SYNTHESIS_STATE_KEY = "qa_design_synthesis_gate"
 _QA_DESIGN_SYNTHESIS_MIN_CATEGORY_OVERLAP = 2
 _QA_DESIGN_SYNTHESIS_RECENT_RUN_LIMIT = 50
@@ -845,6 +848,7 @@ def _maybe_start_auto_proposal_workflow(standing_order_id: int) -> bool:
             standing_order=standing_order,
             auto_proposal=True,
             default_branch_sha=default_branch_sha,
+            use_worktrees=False,
         )
     if created:
         _spawn_standing_order_candidate_or_block(workflow, standing_order)
@@ -940,6 +944,7 @@ def start_standing_order_workflow(
     standing_order: StandingOrder,
     auto_proposal: bool = False,
     default_branch_sha: str | None = None,
+    use_worktrees: bool = False,
 ) -> SystemWorkflow:
     standing_order = (
         StandingOrder.objects.select_related("project")
@@ -950,6 +955,7 @@ def start_standing_order_workflow(
         standing_order=standing_order,
         auto_proposal=auto_proposal,
         default_branch_sha=default_branch_sha,
+        use_worktrees=use_worktrees,
     )
     if created:
         _spawn_standing_order_candidate_or_block(workflow, standing_order)
@@ -961,11 +967,13 @@ def _create_standing_order_workflow_record(
     standing_order: StandingOrder,
     auto_proposal: bool,
     default_branch_sha: str | None,
+    use_worktrees: bool,
 ) -> tuple[SystemWorkflow, bool]:
     main_thread_id = _standing_order_main_thread_id(standing_order.pk)
     state: dict[str, Any] = {
         "standing_order_id": standing_order.pk,
         "auto_proposal": auto_proposal,
+        _STANDING_ORDER_USE_WORKTREES_STATE_KEY: use_worktrees,
         "standing_order_updated_at": standing_order.updated_at.isoformat(),
         "web_search_mode": standing_order.web_search_mode,
     }
@@ -2345,28 +2353,96 @@ def _spawn_qa_panel_synthesizer_run(workflow: SystemWorkflow) -> SystemAgentRun:
     return run
 
 
+def _prepare_standing_order_candidate_cwd(
+    workflow: SystemWorkflow, standing_order: StandingOrder
+) -> tuple[str, ManagedWorktree | None]:
+    session_cwd = _standing_order_session_cwd(workflow)
+    if session_cwd != workflow.cwd:
+        return session_cwd, None
+    if not _state_bool(workflow, _STANDING_ORDER_USE_WORKTREES_STATE_KEY):
+        return workflow.cwd, None
+
+    auto_merge_branch = _standing_order_auto_merge_branch_for_implementation(
+        standing_order
+    )
+    if auto_merge_branch:
+        managed_worktree = create_worktree_for_session(
+            standing_order.project.repo_path,
+            base_ref=f"refs/heads/{auto_merge_branch}",
+            disable_hooks=True,
+        )
+    else:
+        managed_worktree = create_worktree_for_session(standing_order.project.repo_path)
+    session_cwd = str(managed_worktree.path)
+    workflow.state = {
+        **workflow.state,
+        _STANDING_ORDER_SESSION_CWD_STATE_KEY: session_cwd,
+    }
+    try:
+        workflow.save(update_fields=["state", "updated_at"])
+    except Exception:
+        _cleanup_new_standing_order_worktree(managed_worktree)
+        raise
+    return session_cwd, managed_worktree
+
+
+def _standing_order_session_cwd(workflow: SystemWorkflow) -> str:
+    return _state_string(workflow, _STANDING_ORDER_SESSION_CWD_STATE_KEY) or workflow.cwd
+
+
+def _standing_order_candidate_allows_code_changes(workflow: SystemWorkflow) -> bool:
+    return _standing_order_session_cwd(workflow) != workflow.cwd
+
+
+def _cleanup_new_standing_order_worktree(worktree: ManagedWorktree | None) -> None:
+    if worktree is None:
+        return
+    try:
+        cleanup_worktree(worktree)
+    except WorktreeCleanupError:
+        logger.exception(
+            "failed to clean up standing order candidate worktree %s",
+            worktree.path,
+        )
+
+
 def _spawn_standing_order_candidate_run(
     workflow: SystemWorkflow, standing_order: StandingOrder
 ) -> SystemAgentRun:
-    prompt, memory_context = _standing_order_candidate_prompt(workflow, standing_order)
-    instance = codex_pool.spawn_new_session(
-        cwd=workflow.cwd,
-        prompt=prompt,
-        approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
-        web_search_mode=_workflow_web_search_mode(workflow),
-        thread_source=ThreadSource.subagent,
-        purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        workflow_id=workflow.pk,
-        agent_kind=STANDING_ORDER_AGENT_KIND,
-        display_author=STANDING_ORDER_DISPLAY_AUTHOR,
-        output_schema=_STANDING_ORDER_CANDIDATE_OUTPUT_SCHEMA,
+    session_cwd, managed_worktree = _prepare_standing_order_candidate_cwd(
+        workflow, standing_order
     )
+    try:
+        prompt, memory_context = _standing_order_candidate_prompt(
+            workflow, standing_order
+        )
+        instance = codex_pool.spawn_new_session(
+            cwd=session_cwd,
+            prompt=prompt,
+            approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
+            sandbox_policy=(
+                STANDING_ORDER_IMPLEMENTATION_SANDBOX_POLICY
+                if _standing_order_candidate_allows_code_changes(workflow)
+                else None
+            ),
+            web_search_mode=_workflow_web_search_mode(workflow),
+            thread_source=ThreadSource.subagent,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=STANDING_ORDER_AGENT_KIND,
+            display_author=STANDING_ORDER_DISPLAY_AUTHOR,
+            output_schema=_STANDING_ORDER_CANDIDATE_OUTPUT_SCHEMA,
+        )
+    except Exception:
+        _cleanup_new_standing_order_worktree(managed_worktree)
+        raise
     metadata = session_index.upsert_local_session(
         thread_id=instance.thread_id,
-        cwd=workflow.cwd,
+        cwd=session_cwd,
         project=standing_order.project,
         preview=prompt,
         auto_pr_enabled=False,
+        auto_qa_enabled=False,
         auto_merge_to_local_branch=False,
         auto_merge_branch="",
     )
@@ -2380,7 +2456,7 @@ def _spawn_standing_order_candidate_run(
             "thread_id": instance.thread_id,
             "status": SystemAgentRun.STATUS_RUNNING,
             "input": {
-                "cwd": workflow.cwd,
+                "cwd": session_cwd,
                 "standing_order_id": standing_order.pk,
                 "memory_count": memory_context.count,
                 "memory_compacted": memory_context.compacted,
@@ -2393,6 +2469,7 @@ def _spawn_standing_order_candidate_run(
 def _spawn_standing_order_judge_run(
     workflow: SystemWorkflow, standing_order: StandingOrder, candidate: dict[str, Any]
 ) -> SystemAgentRun:
+    session_cwd = _standing_order_session_cwd(workflow)
     prompt, history_files = _standing_order_judge_prompt(
         workflow, standing_order, candidate
     )
@@ -2400,7 +2477,7 @@ def _spawn_standing_order_judge_run(
         workflow.state = {**workflow.state, "history_files": history_files}
         workflow.save(update_fields=["state", "updated_at"])
     instance = codex_pool.spawn_new_session(
-        cwd=workflow.cwd,
+        cwd=session_cwd,
         prompt=prompt,
         approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
         web_search_mode=_workflow_web_search_mode(workflow),
@@ -2413,10 +2490,11 @@ def _spawn_standing_order_judge_run(
     )
     metadata = session_index.upsert_local_session(
         thread_id=instance.thread_id,
-        cwd=workflow.cwd,
+        cwd=session_cwd,
         project=standing_order.project,
         preview=prompt,
         auto_pr_enabled=False,
+        auto_qa_enabled=False,
         auto_merge_to_local_branch=False,
         auto_merge_branch="",
     )
@@ -2430,7 +2508,7 @@ def _spawn_standing_order_judge_run(
             "thread_id": instance.thread_id,
             "status": SystemAgentRun.STATUS_RUNNING,
             "input": {
-                "cwd": workflow.cwd,
+                "cwd": session_cwd,
                 "standing_order_id": standing_order.pk,
                 "candidate": candidate,
                 "history_files": history_files,
@@ -2588,22 +2666,44 @@ def _standing_order_implementation_automation_error(
     return ""
 
 
+def _standing_order_candidate_checkout_cwd(
+    workflow: SystemWorkflow, standing_order: StandingOrder
+) -> str:
+    candidate_session = _session_metadata_from_state(workflow, "candidate_session_id")
+    if candidate_session is None or not candidate_session.cwd:
+        return ""
+    if candidate_session.cwd == standing_order.project.repo_path:
+        return ""
+    return candidate_session.cwd
+
+
+def _standing_order_auto_merge_branch_for_implementation(
+    standing_order: StandingOrder,
+) -> str:
+    if standing_order.autonomy == StandingOrder.AUTONOMY_DRAFT_PR:
+        return ""
+    if not standing_order.auto_qa_enabled:
+        return ""
+    if not standing_order.auto_merge_to_local_branch:
+        return ""
+    return standing_order.auto_merge_branch.strip()
+
+
 def _start_standing_order_implementation_session(
     workflow: SystemWorkflow, standing_order: StandingOrder, proposal: ProposedSession
 ) -> SessionMetadata:
     auto_pr_enabled = standing_order.autonomy == StandingOrder.AUTONOMY_DRAFT_PR
     auto_qa_enabled = standing_order.auto_qa_enabled and not auto_pr_enabled
-    auto_merge_branch = (
-        standing_order.auto_merge_branch.strip()
-        if standing_order.auto_merge_to_local_branch
-        else ""
+    auto_merge_branch = _standing_order_auto_merge_branch_for_implementation(
+        standing_order
     )
-    if not auto_qa_enabled:
-        auto_merge_branch = ""
     auto_merge_to_local_branch = bool(auto_merge_branch)
-    implementation_cwd = standing_order.project.repo_path
+    candidate_checkout_cwd = _standing_order_candidate_checkout_cwd(
+        workflow, standing_order
+    )
+    implementation_cwd = candidate_checkout_cwd or standing_order.project.repo_path
     managed_worktree = None
-    if auto_merge_to_local_branch:
+    if auto_merge_to_local_branch and not candidate_checkout_cwd:
         try:
             managed_worktree = create_worktree_for_session(
                 standing_order.project.repo_path,
@@ -3439,15 +3539,23 @@ def _standing_order_candidate_prompt(
 ) -> tuple[str, _StandingOrderMemoryPromptContext]:
     ambition = _standing_order_ambition_guidance(standing_order)
     memory_context = _standing_order_memory_context(standing_order)
+    session_cwd = _standing_order_session_cwd(workflow)
+    code_change_guidance = (
+        "Make code changes when they help turn the proposal into real, "
+        "reviewable progress; leave any changes in this session checkout so "
+        "the user can accept and continue from them. "
+        if _standing_order_candidate_allows_code_changes(workflow)
+        else "Do not make code changes. "
+    )
     prompt = (
         "You are Hitch's standing order agent.\n\n"
         "Thoroughly analyze the codebase and find one way to make "
         f"{ambition.candidate_progress} toward the standing order goal. "
-        "Do not make code changes. "
+        f"{code_change_guidance}"
         "Focus on a concrete session that a user could accept and continue from. "
         "Use standing-order memory to avoid repeating recently proposed, skipped, "
         "or processed files unless repeating one is clearly the best next step.\n\n"
-        f"Repository cwd: {workflow.cwd}\n"
+        f"Repository cwd: {session_cwd}\n"
         f"Standing order title: {standing_order.title}\n\n"
         "Standing order goal:\n"
         f"{standing_order.goal}\n\n"
@@ -3569,6 +3677,7 @@ def _standing_order_judge_prompt(
     candidate_thread_id = (
         candidate_session.thread_id if candidate_session is not None else "(unknown)"
     )
+    session_cwd = _standing_order_session_cwd(workflow)
     return (
         "You are Hitch's standing order confidence judge.\n\n"
         "Judge whether the candidate session is likely to make meaningful "
@@ -3577,7 +3686,7 @@ def _standing_order_judge_prompt(
         "accepted and rejected proposal history to calibrate your judgment. "
         "Do not reward broad or vague ideas; confidence should reflect whether "
         f"the proposal is concrete and well-scoped. {ambition.judge_instruction}\n\n"
-        f"Repository cwd: {workflow.cwd}\n"
+        f"Repository cwd: {session_cwd}\n"
         f"Standing order title: {standing_order.title}\n"
         f"Confidence threshold: {standing_order.confidence_threshold}\n\n"
         "Standing order goal:\n"
