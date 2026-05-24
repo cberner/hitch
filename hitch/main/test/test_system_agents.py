@@ -1,13 +1,15 @@
 import json
 import tempfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, NamedTuple
+from types import SimpleNamespace
+from typing import Any, NamedTuple, override
 from unittest.mock import MagicMock, patch
 
 from django.core.management import call_command
 from django.db import IntegrityError, transaction
 from django.test import TestCase
-from openai_codex.generated.v2_all import ThreadSource
+from openai_codex.generated.v2_all import GetAccountRateLimitsResponse, ThreadSource
 
 from hitch.main import demo, streaming, system_agents
 from hitch.main.models import (
@@ -3172,7 +3174,75 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertNotIn("ci_status", handoff)
 
 
+class AutoProposalQuotaPauseTests(TestCase):
+    def test_rate_limit_window_pauses_below_half_linear_remaining_threshold(
+        self,
+    ) -> None:
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        weekly_window_mins = 7 * 24 * 60
+        half_week_from_now = int((now + timedelta(days=3, hours=12)).timestamp())
+        just_below_threshold = SimpleNamespace(
+            used_percent=76,
+            resets_at=half_week_from_now,
+            window_duration_mins=weekly_window_mins,
+        )
+        at_threshold = SimpleNamespace(
+            used_percent=75,
+            resets_at=half_week_from_now,
+            window_duration_mins=weekly_window_mins,
+        )
+
+        self.assertTrue(
+            system_agents._rate_limit_window_below_auto_proposal_quota(
+                just_below_threshold, now=now
+            )
+        )
+        self.assertFalse(
+            system_agents._rate_limit_window_below_auto_proposal_quota(
+                at_threshold, now=now
+            )
+        )
+
+    @patch("hitch.main.system_agents.timezone.now")
+    @patch("hitch.main.system_agents.Codex")
+    def test_auto_proposal_quota_pause_reads_account_rate_limits(
+        self, mock_codex: MagicMock, mock_now: MagicMock
+    ) -> None:
+        now = datetime(2026, 1, 1, tzinfo=UTC)
+        mock_now.return_value = now
+        ctx = mock_codex.return_value.__enter__.return_value
+        ctx._client.request.return_value = SimpleNamespace(
+            rate_limits=SimpleNamespace(
+                primary=None,
+                secondary=SimpleNamespace(
+                    used_percent=76,
+                    resets_at=int((now + timedelta(days=3, hours=12)).timestamp()),
+                    window_duration_mins=7 * 24 * 60,
+                ),
+            )
+        )
+
+        paused = system_agents._auto_proposals_paused_by_usage_quota()
+
+        self.assertTrue(paused)
+        ctx._client.request.assert_called_once_with(
+            "account/rateLimits/read",
+            None,
+            response_model=GetAccountRateLimitsResponse,
+        )
+
+
 class StandingOrderWorkflowTests(TestCase):
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        self.quota_patcher = patch(
+            "hitch.main.system_agents._auto_proposals_paused_by_usage_quota",
+            return_value=False,
+        )
+        self.mock_auto_proposals_paused_by_quota = self.quota_patcher.start()
+        self.addCleanup(self.quota_patcher.stop)
+
     def test_standing_order_candidate_parser_accepts_wrapped_proposal(self) -> None:
         parsed = system_agents._parse_standing_order_candidate_output(
             json.dumps(
@@ -3332,6 +3402,27 @@ class StandingOrderWorkflowTests(TestCase):
         started = system_agents._maybe_start_auto_proposal_workflow(standing_order.pk)
 
         self.assertFalse(started)
+        self.assertFalse(SystemWorkflow.objects.exists())
+        mock_default_sha.assert_not_called()
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.system_agents.default_branch_checkout_commit_hash")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_pauses_when_usage_quota_is_low(
+        self, mock_spawn: MagicMock, mock_default_sha: MagicMock
+    ) -> None:
+        self.mock_auto_proposals_paused_by_quota.return_value = True
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        StandingOrder.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+            auto_proposal_enabled=True,
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 0)
         self.assertFalse(SystemWorkflow.objects.exists())
         mock_default_sha.assert_not_called()
         mock_spawn.assert_not_called()
