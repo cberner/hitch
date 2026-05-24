@@ -737,7 +737,7 @@ class IndexViewTests(TestCase):
         response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Lifetime")
+        self.assertContains(response, "All sessions")
         self.assertContains(response, "Sessions")
         self.assertContains(response, "HITCH system")
         self.assertContains(
@@ -779,7 +779,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "200")
         self.assertContains(response, "700")
         self.assertContains(response, "100")
-        self.assertNotContains(response, "All sessions")
+        self.assertNotContains(response, "Lifetime")
         self.assertNotContains(response, "4,040")
         self.assertNotContains(response, "3,250")
         self.assertNotContains(response, "1,400")
@@ -852,9 +852,9 @@ class IndexViewTests(TestCase):
         response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Lifetime")
-        self.assertContains(response, "Lifetime usage unavailable.")
-        self.assertNotContains(response, "All sessions")
+        self.assertContains(response, "All sessions")
+        self.assertContains(response, "All sessions usage unavailable.")
+        self.assertNotContains(response, "Lifetime usage unavailable.")
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")

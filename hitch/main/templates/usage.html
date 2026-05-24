@@ -441,10 +441,10 @@
         <section class="usage-section" aria-labelledby="lifetime-title">
             <p class="section-label">Token usage</p>
             <div class="usage-header">
-                <h2 id="lifetime-title">Lifetime</h2>
+                <h2 id="lifetime-title">All sessions</h2>
             </div>
             {% if lifetime_usage %}
-            <div class="lifetime-stats" aria-label="Lifetime token usage">
+            <div class="lifetime-stats" aria-label="All sessions token usage">
                 <div class="lifetime-stat" role="button" tabindex="0" aria-expanded="false">
                     <span class="lifetime-label">Sessions</span>
                     <div class="lifetime-breakdown">
@@ -538,7 +538,7 @@
             </div>
             {% else %}
             <div class="empty">
-                <p>Lifetime usage unavailable.</p>
+                <p>All sessions usage unavailable.</p>
                 <p class="hint">Session token usage is not available right now.</p>
             </div>
             {% endif %}
