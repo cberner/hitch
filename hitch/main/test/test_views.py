@@ -24,6 +24,7 @@ from django.http import HttpResponse
 from django.test import Client, RequestFactory, TestCase, override_settings
 from django.urls import reverse
 from openai_codex.errors import AppServerError, MethodNotFoundError
+from openai_codex.generated.v2_all import SortDirection, ThreadSortKey
 
 from hitch.main import codex_pool, coding_agents, demo, streaming, system_agents, views
 from hitch.main.models import (
@@ -445,6 +446,166 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    def test_session_list_limits_initial_page_and_links_next_cursor(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        first_page = [_session(f"thread-{i}", name=f"Session {i}") for i in range(50)]
+        client = _setup_codex(mock_codex)
+        client.thread_list.return_value = SimpleNamespace(
+            data=first_page, next_cursor="page-2"
+        )
+        client.thread_list.side_effect = None
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Session 0")
+        self.assertContains(response, 'href="/?cursor=page-2"')
+        client.thread_list.assert_called_once_with(
+            limit=50,
+            sort_key=ThreadSortKey.updated_at,
+            sort_direction=SortDirection.desc,
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_historical_qa_run_does_not_disable_cursor_pagination(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        first_page = [_session(f"thread-{i}", name=f"Session {i}") for i in range(50)]
+        client = _setup_codex(mock_codex)
+        client.thread_list.return_value = SimpleNamespace(
+            data=first_page, next_cursor="page-2"
+        )
+        client.thread_list.side_effect = None
+        mock_discover.return_value = []
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="old-main",
+            cwd="/repo",
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="old-qa",
+            cwd="/repo",
+            prompt="qa",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind="pr_qa",
+            thread_id="old-qa",
+            instance=instance,
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Session 0")
+        self.assertContains(response, 'href="/?cursor=page-2"')
+        client.thread_list.assert_called_once_with(
+            limit=50,
+            sort_key=ThreadSortKey.updated_at,
+            sort_direction=SortDirection.desc,
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_active_session_pagination_stops_before_refetching_seen_cursor(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+
+        def thread_list(*, cursor: str | None = None, **_: Any) -> SimpleNamespace:
+            if cursor == "b":
+                return SimpleNamespace(
+                    data=[_session("session-b", name="Session B")], next_cursor="a"
+                )
+            return SimpleNamespace(
+                data=[_session("session-a", name="Session A")], next_cursor="b"
+            )
+
+        client.thread_list.side_effect = thread_list
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"), {"cursor": "a"})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Session A")
+        self.assertContains(response, "Session B")
+        self.assertEqual(client.thread_list.call_count, 2)
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_load_more_resumes_partially_consumed_codex_page(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        page_one_visible = [
+            _session(f"p1-{i}", name=f"Page 1 visible {i}", updated_at=300 - i)
+            for i in range(30)
+        ]
+        page_one_hidden = [
+            _session(f"hidden-{i}", name=f"Hidden {i}", updated_at=200 - i)
+            for i in range(20)
+        ]
+        page_two = [
+            _session(f"p2-{i}", name=f"Page 2 visible {i}", updated_at=100 - i)
+            for i in range(50)
+        ]
+        client = _setup_codex(mock_codex)
+
+        def thread_list(*, cursor: str | None = None, **_: Any) -> SimpleNamespace:
+            if cursor == "c2":
+                return SimpleNamespace(data=page_two, next_cursor="c3")
+            if cursor == "c3":
+                return SimpleNamespace(data=[])
+            return SimpleNamespace(
+                data=[*page_one_visible, *page_one_hidden], next_cursor="c2"
+            )
+
+        client.thread_list.side_effect = thread_list
+        mock_discover.return_value = []
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_STANDING_ORDER_RUN,
+            main_thread_id="visible",
+            cwd="/repo",
+        )
+        for i in range(20):
+            instance = CodexInstance.objects.create(
+                pid=i + 1,
+                thread_id=f"hidden-{i}",
+                cwd="/repo",
+                prompt="qa",
+                events_path="/dev/null",
+                status=CodexInstance.STATUS_COMPLETED,
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                workflow_id=workflow.pk,
+            )
+            SystemAgentRun.objects.create(
+                workflow=workflow,
+                agent_kind="standing_order_run",
+                thread_id=f"hidden-{i}",
+                instance=instance,
+            )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, "Page 2 visible 19")
+        self.assertNotContains(response, "Page 2 visible 20")
+        self.assertContains(response, 'href="/?cursor=c2&amp;offset=20"')
+
+        response = self.client.get(reverse("index"), {"cursor": "c2", "offset": "20"})
+
+        self.assertContains(response, "Page 2 visible 20")
+        self.assertContains(response, "Page 2 visible 49")
+        self.assertNotContains(response, "Page 2 visible 19")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
     def test_paginates_sessions_before_hiding_system_agent_threads(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -492,6 +653,221 @@ class IndexViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Visible next page")
         self.assertNotContains(response, "Hidden QA")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_qa_activity_can_promote_main_session_from_later_codex_page(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        ordinary = [
+            _session(f"ordinary-{i}", name=f"Ordinary {i}", updated_at=1000 - i)
+            for i in range(50)
+        ]
+        hidden_qa = _session("qa-thread", name="Hidden QA", updated_at=5000)
+        main = _session("main-thread", name="Main session", updated_at=1)
+        client = _setup_codex(mock_codex)
+
+        def thread_list(*, cursor: str | None = None, **_: Any) -> SimpleNamespace:
+            if cursor == "page-2":
+                return SimpleNamespace(data=[main])
+            return SimpleNamespace(data=[*ordinary, hidden_qa], next_cursor="page-2")
+
+        client.thread_list.side_effect = thread_list
+        mock_discover.return_value = []
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="qa-thread",
+            cwd="/repo",
+            prompt="qa",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind="pr_qa",
+            thread_id="qa-thread",
+            instance=instance,
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, "Main session")
+        self.assertContains(response, "Ordinary 48")
+        self.assertNotContains(response, "Ordinary 49")
+        self.assertNotContains(response, "Hidden QA")
+        self.assertContains(response, "materialized_order=1")
+
+        response = self.client.get(
+            reverse("index"), {"materialized_order": "1", "offset": "50"}
+        )
+
+        self.assertNotContains(response, "Main session")
+        self.assertContains(response, "Ordinary 49")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_mid_pagination_qa_activity_keeps_cursor_order(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        first_page = [
+            _session(f"first-{i}", name=f"First {i}", updated_at=3000 - i)
+            for i in range(50)
+        ]
+        second_page = [
+            _session(f"second-{i}", name=f"Second {i}", updated_at=2000 - i)
+            for i in range(50)
+        ]
+        hidden_qa = _session("qa-thread", name="Hidden QA", updated_at=5000)
+        main = _session("main-thread", name="Main session", updated_at=1)
+        client = _setup_codex(mock_codex)
+
+        def thread_list(*, cursor: str | None = None, **_: Any) -> SimpleNamespace:
+            if cursor == "page-2":
+                return SimpleNamespace(data=[*second_page, hidden_qa], next_cursor="page-3")
+            if cursor == "page-3":
+                return SimpleNamespace(data=[main])
+            return SimpleNamespace(data=first_page, next_cursor="page-2")
+
+        client.thread_list.side_effect = thread_list
+        mock_discover.return_value = []
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="qa-thread",
+            cwd="/repo",
+            prompt="qa",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind="pr_qa",
+            thread_id="qa-thread",
+            instance=instance,
+        )
+
+        response = self.client.get(reverse("index"), {"cursor": "page-2"})
+
+        self.assertContains(response, "Second 0")
+        self.assertContains(response, "Second 49")
+        self.assertNotContains(response, "First 0")
+        self.assertNotContains(response, "materialized_order=1")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_qa_activity_materializes_incomplete_final_page(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        ordinary = _session("ordinary", name="Ordinary session", updated_at=1000)
+        hidden_qa = _session("qa-thread", name="Hidden QA", updated_at=5000)
+        main = _session("main-thread", name="Main session", updated_at=1)
+        client = _setup_codex(mock_codex)
+
+        def thread_list(*, cursor: str | None = None, **_: Any) -> SimpleNamespace:
+            if cursor == "page-2":
+                return SimpleNamespace(data=[main])
+            return SimpleNamespace(data=[ordinary, hidden_qa], next_cursor="page-2")
+
+        client.thread_list.side_effect = thread_list
+        mock_discover.return_value = []
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="qa-thread",
+            cwd="/repo",
+            prompt="qa",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind="pr_qa",
+            thread_id="qa-thread",
+            instance=instance,
+        )
+
+        response = self.client.get(reverse("index"))
+        body = response.content.decode()
+
+        self.assertContains(response, "Main session")
+        self.assertContains(response, "Ordinary session")
+        self.assertLess(body.index("Main session"), body.index("Ordinary session"))
+        self.assertNotContains(response, "Hidden QA")
+        self.assertNotContains(response, "Load more")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_qa_activity_promotes_main_session_when_archived_sessions_are_shown(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
+        ordinary = [
+            _session(f"ordinary-{i}", name=f"Ordinary {i}", updated_at=1000 - i)
+            for i in range(50)
+        ]
+        hidden_qa = _session("qa-thread", name="Hidden QA", updated_at=5000)
+        main = _session("main-thread", name="Main session", updated_at=1)
+        client = _setup_codex(mock_codex)
+
+        def thread_list(
+            *, archived: bool | None = None, cursor: str | None = None, **_: Any
+        ) -> SimpleNamespace:
+            if archived:
+                return SimpleNamespace(data=[])
+            if cursor == "page-2":
+                return SimpleNamespace(data=[main])
+            return SimpleNamespace(data=[*ordinary, hidden_qa], next_cursor="page-2")
+
+        client.thread_list.side_effect = thread_list
+        mock_discover.return_value = []
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="qa-thread",
+            cwd="/repo",
+            prompt="qa",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind="pr_qa",
+            thread_id="qa-thread",
+            instance=instance,
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, "Main session")
+        self.assertContains(response, "Ordinary 48")
+        self.assertNotContains(response, "Ordinary 49")
+        self.assertNotContains(response, "Hidden QA")
+        self.assertContains(response, "materialized_order=1")
 
     @patch("hitch.main.views.Codex")
     def test_system_sessions_lists_hidden_threads_as_read_only_links(
@@ -860,6 +1236,25 @@ class IndexViewTests(TestCase):
         self.assertEqual(cache.total_tokens, 999_999)
         self.assertEqual(cache.rollout_mtime_ns, 2_000_000_000)
 
+    def test_token_usage_snapshot_drops_stale_cache_when_rollout_has_no_usage(
+        self,
+    ) -> None:
+        rollout_path = _make_rollout(self, ["{}"])
+        os.utime(rollout_path, ns=(2_000_000_000, 2_000_000_000))
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="active",
+            rollout_path=str(rollout_path),
+            rollout_mtime_ns=1_000_000_000,
+            input_tokens=100,
+            cached_input_tokens=10,
+            output_tokens=20,
+            total_tokens=120,
+            daily_usage={"2025-01-05": {"input": 90, "output": 20, "cached": 10}},
+        )
+        thread = _session("active", name="Active session", path=str(rollout_path))
+
+        self.assertIsNone(views._token_usage_snapshot_for(thread))
+
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_hides_archived_sessions_by_default(
@@ -879,7 +1274,122 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Active session")
         self.assertNotContains(response, "Archived session")
         client = mock_codex.return_value.__enter__.return_value
-        client.thread_list.assert_called_once_with()
+        client.thread_list.assert_called_once_with(
+            limit=50,
+            sort_key=ThreadSortKey.updated_at,
+            sort_direction=SortDirection.desc,
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_archived_and_active_sessions_are_globally_paginated(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
+        active = [
+            _session(f"active-{i}", name=f"Active {i}", updated_at=100 - i)
+            for i in range(50)
+        ]
+        archived_page_1 = [
+            _session(
+                f"archived-1-{i}",
+                name=f"Archived page 1 {i}",
+                path=f"/tmp/archived_sessions/one-{i}.jsonl",
+                updated_at=200 - i,
+            )
+            for i in range(50)
+        ]
+        archived_page_2 = [
+            _session(
+                f"archived-2-{i}",
+                name=f"Archived page 2 {i}",
+                path=f"/tmp/archived_sessions/two-{i}.jsonl",
+                updated_at=150 - i,
+            )
+            for i in range(50)
+        ]
+        client = _setup_codex(mock_codex)
+
+        def thread_list(
+            *, archived: bool | None = None, cursor: str | None = None, **_: Any
+        ) -> SimpleNamespace:
+            if archived and cursor == "archived-2":
+                return SimpleNamespace(data=archived_page_2)
+            if archived:
+                return SimpleNamespace(data=archived_page_1, next_cursor="archived-2")
+            return SimpleNamespace(data=active)
+
+        client.thread_list.side_effect = thread_list
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, "Archived page 1 49")
+        self.assertNotContains(response, "Active 0")
+        self.assertContains(response, 'href="/?archived_cursor=archived-2"')
+
+        response = self.client.get(reverse("index"), {"archived_cursor": "archived-2"})
+
+        self.assertContains(response, "Archived page 2 49")
+        self.assertNotContains(response, "Active 0")
+        self.assertContains(response, 'href="/?archived_done=1"')
+
+        response = self.client.get(reverse("index"), {"archived_done": "1"})
+
+        self.assertContains(response, "Active 0")
+        self.assertNotContains(response, "Archived page 1 0")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_archived_session_pagination_exhausts_cursor_cycles(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
+        client = _setup_codex(mock_codex)
+
+        def thread_list(
+            *, archived: bool | None = None, cursor: str | None = None, **_: Any
+        ) -> SimpleNamespace:
+            if archived and cursor == "a":
+                return SimpleNamespace(data=[], next_cursor="b")
+            if archived and cursor == "b":
+                return SimpleNamespace(data=[], next_cursor="a")
+            if archived:
+                return SimpleNamespace(data=[], next_cursor="a")
+            return SimpleNamespace(data=[])
+
+        client.thread_list.side_effect = thread_list
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "No sessions found.")
+        self.assertEqual(client.thread_list.call_count, 4)
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_archived_session_pagination_hydrates_page_metadata_once(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
+        threads = [
+            _session(f"active-{i}", name=f"Active {i}", updated_at=100 - i)
+            for i in range(3)
+        ]
+        _setup_codex(mock_codex, threads=threads, archived_threads=[])
+        mock_discover.return_value = []
+
+        with patch(
+            "hitch.main.views._metadata_by_thread_id",
+            wraps=views._metadata_by_thread_id,
+        ) as metadata_by_thread:
+            response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Active 0")
+        self.assertContains(response, "Active 2")
+        self.assertLessEqual(metadata_by_thread.call_count, 2)
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -908,8 +1418,17 @@ class IndexViewTests(TestCase):
         self.assertContains(response, 'name="archived" value="false"')
         self.assertLess(body.index("Archived session"), body.index("Active session"))
         client = mock_codex.return_value.__enter__.return_value
-        client.thread_list.assert_any_call()
-        client.thread_list.assert_any_call(archived=True)
+        client.thread_list.assert_any_call(
+            limit=50,
+            sort_key=ThreadSortKey.updated_at,
+            sort_direction=SortDirection.desc,
+        )
+        client.thread_list.assert_any_call(
+            limit=50,
+            sort_key=ThreadSortKey.updated_at,
+            sort_direction=SortDirection.desc,
+            archived=True,
+        )
 
     @patch("hitch.main.views.Codex")
     def test_usage_page_sums_lifetime_token_usage_without_cached_double_count(
@@ -1104,6 +1623,87 @@ class IndexViewTests(TestCase):
             ),
             ["200", "100", "0"],
         )
+
+    @patch("hitch.main.views.Codex")
+    def test_usage_page_backfills_legacy_empty_daily_usage_cache(
+        self, mock_codex: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=400,
+                    cached_input_tokens=50,
+                    output_tokens=600,
+                    total_tokens=1_000,
+                )
+            ],
+            archived=True,
+        )
+        os.utime(rollout_path, ns=(1_000_000_000, 1_000_000_000))
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="archived",
+            rollout_path=str(rollout_path),
+            rollout_mtime_ns=1_000_000_000,
+            input_tokens=400,
+            cached_input_tokens=50,
+            output_tokens=600,
+            total_tokens=1_000,
+        )
+        _setup_codex(
+            mock_codex,
+            archived_threads=[
+                _session("archived", name="Archived session", path=str(rollout_path))
+            ],
+        )
+
+        response = self.client.get(reverse("usage"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '<span class="lifetime-chart-label">01-05</span>')
+        cache = ArchivedSessionTokenUsage.objects.get(thread_id="archived")
+        self.assertEqual(
+            cache.daily_usage,
+            {"2025-01-05": {"input": 350, "output": 600, "cached": 50}},
+        )
+
+    @patch("hitch.main.views.Codex")
+    def test_usage_page_reuses_cached_active_session_usage(
+        self, mock_codex: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=400,
+                    cached_input_tokens=50,
+                    output_tokens=600,
+                    total_tokens=1_000,
+                )
+            ],
+        )
+        active = _session("active", name="Active session", path=str(rollout_path))
+        _setup_codex(mock_codex, threads=[active])
+
+        response = self.client.get(reverse("usage"))
+
+        self.assertEqual(response.status_code, 200)
+        cache = ArchivedSessionTokenUsage.objects.get(thread_id="active")
+        self.assertEqual(cache.total_tokens, 1_000)
+        self.assertEqual(
+            cache.daily_usage,
+            {"2025-01-05": {"input": 350, "output": 600, "cached": 50}},
+        )
+
+        with (
+            patch("hitch.main.views.rollout.latest_token_usage") as latest_usage,
+            patch("hitch.main.views.rollout.token_usage_history") as usage_history,
+        ):
+            response = self.client.get(reverse("usage"))
+
+        self.assertEqual(response.status_code, 200)
+        latest_usage.assert_not_called()
+        usage_history.assert_not_called()
 
     @patch("hitch.main.views.Codex")
     def test_usage_page_marks_lifetime_unavailable_when_session_list_fails(

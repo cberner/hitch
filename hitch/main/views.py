@@ -7,6 +7,8 @@ import os
 import re
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from functools import wraps
 from pathlib import Path
@@ -39,6 +41,8 @@ from openai_codex.generated.v2_all import (
     GetAccountRateLimitsResponse,
     RateLimitSnapshot,
     ReasoningEffort,
+    SortDirection,
+    ThreadSortKey,
 )
 
 from hitch.main import (
@@ -110,6 +114,46 @@ class StandingOrderValues(NamedTuple):
     auto_proposal_enabled: bool
     confidence_threshold: str
     web_search_mode: str
+
+
+class ThreadListPage(NamedTuple):
+    threads: list[Any]
+    next_cursor: str
+
+
+class VisibleSessionPage(NamedTuple):
+    sessions: list[dict[str, Any]]
+    next_cursor: str
+    next_offset: int
+    needs_materialized_order: bool = False
+
+
+class SessionListPage(NamedTuple):
+    sessions: list[dict[str, Any]]
+    next_cursor: str
+    next_offset: int
+    next_done: bool
+    include_archived_source: bool
+    archived_next_cursor: str
+    archived_next_offset: int
+    archived_next_done: bool
+    materialized_order: bool = False
+
+
+@dataclass
+class SessionPageSource:
+    archived: bool
+    cursor: str
+    offset: int
+    page: ThreadListPage | None = None
+    next_page_cursor: str = ""
+    seen_cursors: set[str] = dataclass_field(default_factory=set)
+    metadata_by_thread: dict[str, SessionMetadata] | None = None
+    qa_updated_at_by_main_thread: dict[str, Any] | None = None
+    candidate: dict[str, Any] | None = None
+    candidate_offset: int = 0
+    cross_page_qa_activity_seen: bool = False
+    exhausted: bool = False
 
 
 class _MessageIntent(NamedTuple):
@@ -206,6 +250,8 @@ _EXTRA_SYSTEM_PROMPT_MAX_LEN = 2500
 # (the full first user message) is what we get; that is often paragraphs
 # long and would overflow the list rows without a clip.
 _DISPLAY_TITLE_MAX_LEN = 80
+_SESSION_PAGE_SIZE = 50
+_THREAD_LIST_FETCH_LIMIT = 50
 _ARCHIVED_SESSIONS_DIR = "archived_sessions"
 _INPUT_IMAGE_FIELD = "input_images"
 _INPUT_IMAGE_MAX_COUNT = 4
@@ -558,6 +604,623 @@ def _all_threads(codex: Codex, *, archived: bool = False) -> list[Any]:
     return threads
 
 
+def _session_list_page(
+    codex: Codex,
+    request: HttpRequest,
+    *,
+    current_settings: SettingsValues,
+    projects: list[Project],
+    current_project: Project | None,
+    system_only: bool,
+) -> SessionListPage:
+    hidden_thread_ids = system_agents.hidden_thread_ids()
+    system_thread_ids = hidden_thread_ids | _demo_system_thread_ids() if system_only else set()
+    runs_by_thread_id = (
+        _system_agent_runs_by_thread_id(system_thread_ids) if system_only else {}
+    )
+    instances_by_thread_id = (
+        _system_agent_instances_by_thread_id(system_thread_ids) if system_only else {}
+    )
+    project_cache: dict[str, Project | None] = {}
+    if not system_only and request.GET.get("materialized_order") == "1":
+        return _materialized_session_list_page_from_codex(
+            codex,
+            request,
+            projects=projects,
+            current_project=current_project,
+            hidden_thread_ids=hidden_thread_ids,
+            system_thread_ids=system_thread_ids,
+            runs_by_thread_id=runs_by_thread_id,
+            instances_by_thread_id=instances_by_thread_id,
+            project_cache=project_cache,
+            include_archived=current_settings.show_archived_sessions,
+            system_only=system_only,
+        )
+    if current_settings.show_archived_sessions:
+        return _merged_session_list_page_from_codex(
+            codex,
+            request,
+            projects=projects,
+            current_project=current_project,
+            hidden_thread_ids=hidden_thread_ids,
+            system_thread_ids=system_thread_ids,
+            runs_by_thread_id=runs_by_thread_id,
+            instances_by_thread_id=instances_by_thread_id,
+            project_cache=project_cache,
+            system_only=system_only,
+        )
+    active = _visible_session_page_from_codex(
+        codex,
+        request,
+        projects=projects,
+        current_project=current_project,
+        hidden_thread_ids=hidden_thread_ids,
+        system_thread_ids=system_thread_ids,
+        runs_by_thread_id=runs_by_thread_id,
+        instances_by_thread_id=instances_by_thread_id,
+        project_cache=project_cache,
+        archived=False,
+        cursor_param="cursor",
+        system_only=system_only,
+    )
+    if active.needs_materialized_order:
+        # QA runs are DB-owned activity that can reorder main sessions across
+        # Codex cursor pages, so use a materialized effective-order page only
+        # after the fetched page proves that ordering can be affected.
+        return _materialized_session_list_page_from_codex(
+            codex,
+            request,
+            projects=projects,
+            current_project=current_project,
+            hidden_thread_ids=hidden_thread_ids,
+            system_thread_ids=system_thread_ids,
+            runs_by_thread_id=runs_by_thread_id,
+            instances_by_thread_id=instances_by_thread_id,
+            project_cache=project_cache,
+            include_archived=False,
+            system_only=system_only,
+        )
+    return SessionListPage(
+        sessions=active.sessions,
+        next_cursor=active.next_cursor,
+        next_offset=active.next_offset,
+        next_done=not bool(active.next_cursor or active.next_offset),
+        include_archived_source=False,
+        archived_next_cursor="",
+        archived_next_offset=0,
+        archived_next_done=True,
+    )
+
+
+def _materialized_session_list_page_from_codex(
+    codex: Codex,
+    request: HttpRequest,
+    *,
+    projects: list[Project],
+    current_project: Project | None,
+    hidden_thread_ids: set[str],
+    system_thread_ids: set[str],
+    runs_by_thread_id: dict[str, SystemAgentRun],
+    instances_by_thread_id: dict[str, CodexInstance],
+    project_cache: dict[str, Project | None],
+    include_archived: bool,
+    system_only: bool,
+) -> SessionListPage:
+    threads = _all_threads(codex)
+    if include_archived:
+        threads.extend(_all_threads(codex, archived=True))
+    metadata_by_thread = _metadata_by_thread_id(threads)
+    qa_updated_at_by_main_thread = _qa_activity_updated_at_by_main_thread_id(
+        threads, hidden_thread_ids
+    )
+    sessions = [
+        session
+        for thread in threads
+        if (
+            session := _session_row_for_thread(
+                thread,
+                projects=projects,
+                current_project=current_project,
+                metadata_by_thread=metadata_by_thread,
+                qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
+                hidden_thread_ids=hidden_thread_ids,
+                system_thread_ids=system_thread_ids,
+                runs_by_thread_id=runs_by_thread_id,
+                instances_by_thread_id=instances_by_thread_id,
+                project_cache=project_cache,
+                system_only=system_only,
+            )
+        )
+        is not None
+    ]
+    offset = _non_negative_int(request.GET.get("offset", ""))
+    page = _sort_session_rows(sessions)[offset : offset + _SESSION_PAGE_SIZE]
+    next_offset = offset + len(page)
+    done = next_offset >= len(sessions)
+    return SessionListPage(
+        sessions=page,
+        next_cursor="",
+        next_offset=next_offset if not done else 0,
+        next_done=done,
+        include_archived_source=False,
+        archived_next_cursor="",
+        archived_next_offset=0,
+        archived_next_done=True,
+        materialized_order=True,
+    )
+
+
+def _merged_session_list_page_from_codex(
+    codex: Codex,
+    request: HttpRequest,
+    *,
+    projects: list[Project],
+    current_project: Project | None,
+    hidden_thread_ids: set[str],
+    system_thread_ids: set[str],
+    runs_by_thread_id: dict[str, SystemAgentRun],
+    instances_by_thread_id: dict[str, CodexInstance],
+    project_cache: dict[str, Project | None],
+    system_only: bool,
+) -> SessionListPage:
+    active = _session_page_source(request, archived=False, cursor_param="cursor")
+    archived = _session_page_source(
+        request, archived=True, cursor_param="archived_cursor"
+    )
+    materialized_fallback_allowed = (
+        not active.cursor
+        and active.offset == 0
+        and not archived.cursor
+        and archived.offset == 0
+    )
+    sources = [active, archived]
+    sessions: list[dict[str, Any]] = []
+    while len(sessions) < _SESSION_PAGE_SIZE:
+        candidates = [
+            source
+            for source in sources
+            if _peek_source_session(
+                source,
+                codex,
+                projects=projects,
+                current_project=current_project,
+                hidden_thread_ids=hidden_thread_ids,
+                system_thread_ids=system_thread_ids,
+                runs_by_thread_id=runs_by_thread_id,
+                instances_by_thread_id=instances_by_thread_id,
+                project_cache=project_cache,
+                system_only=system_only,
+            )
+            is not None
+        ]
+        if not candidates:
+            break
+        source = max(
+            candidates,
+            key=lambda item: (
+                _updated_at_sort_key(item.candidate["updated_at"])
+                if item.candidate
+                else 0
+            ),
+        )
+        session = _pop_source_session(source)
+        if session is not None:
+            sessions.append(session)
+    if materialized_fallback_allowed and active.cross_page_qa_activity_seen:
+        return _materialized_session_list_page_from_codex(
+            codex,
+            request,
+            projects=projects,
+            current_project=current_project,
+            hidden_thread_ids=hidden_thread_ids,
+            system_thread_ids=system_thread_ids,
+            runs_by_thread_id=runs_by_thread_id,
+            instances_by_thread_id=instances_by_thread_id,
+            project_cache=project_cache,
+            include_archived=True,
+            system_only=system_only,
+        )
+    active_cursor, active_offset, active_done = _source_next_cursor(active)
+    archived_cursor, archived_offset, archived_done = _source_next_cursor(archived)
+    return SessionListPage(
+        sessions=sessions,
+        next_cursor=active_cursor,
+        next_offset=active_offset,
+        next_done=active_done,
+        include_archived_source=True,
+        archived_next_cursor=archived_cursor,
+        archived_next_offset=archived_offset,
+        archived_next_done=archived_done,
+    )
+
+
+def _session_page_source(
+    request: HttpRequest, *, archived: bool, cursor_param: str
+) -> SessionPageSource:
+    done = request.GET.get(_cursor_done_param(cursor_param)) == "1"
+    return SessionPageSource(
+        archived=archived,
+        cursor=request.GET.get(cursor_param, ""),
+        offset=_non_negative_int(request.GET.get(_cursor_offset_param(cursor_param), "")),
+        exhausted=done,
+    )
+
+
+def _peek_source_session(
+    source: SessionPageSource,
+    codex: Codex,
+    *,
+    projects: list[Project],
+    current_project: Project | None,
+    hidden_thread_ids: set[str],
+    system_thread_ids: set[str],
+    runs_by_thread_id: dict[str, SystemAgentRun],
+    instances_by_thread_id: dict[str, CodexInstance],
+    project_cache: dict[str, Project | None],
+    system_only: bool,
+) -> dict[str, Any] | None:
+    if source.candidate is not None or source.exhausted:
+        return source.candidate
+    while True:
+        if source.page is None:
+            if source.cursor in source.seen_cursors:
+                source.exhausted = True
+                return None
+            source.seen_cursors.add(source.cursor)
+            source.page = _thread_list_page(
+                codex, archived=source.archived, cursor=source.cursor
+            )
+            source.next_page_cursor = source.page.next_cursor
+            if not system_only and not source.archived and source.offset == 0:
+                source.cross_page_qa_activity_seen = (
+                    source.cross_page_qa_activity_seen
+                    or _page_has_cross_page_qa_activity(
+                        source.page.threads, hidden_thread_ids
+                    )
+                )
+            source.metadata_by_thread = _metadata_by_thread_id(source.page.threads)
+            source.qa_updated_at_by_main_thread = (
+                _qa_activity_updated_at_by_main_thread_id(
+                    source.page.threads, hidden_thread_ids
+                )
+            )
+        if source.offset >= len(source.page.threads):
+            if not source.next_page_cursor:
+                source.exhausted = True
+                return None
+            source.cursor = source.next_page_cursor
+            source.offset = 0
+            source.page = None
+            source.next_page_cursor = ""
+            source.metadata_by_thread = None
+            source.qa_updated_at_by_main_thread = None
+            continue
+        metadata_by_thread = source.metadata_by_thread or {}
+        qa_updated_at_by_main_thread = source.qa_updated_at_by_main_thread or {}
+        while source.offset < len(source.page.threads):
+            index = source.offset
+            thread = source.page.threads[index]
+            session = _session_row_for_thread(
+                thread,
+                projects=projects,
+                current_project=current_project,
+                metadata_by_thread=metadata_by_thread,
+                qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
+                hidden_thread_ids=hidden_thread_ids,
+                system_thread_ids=system_thread_ids,
+                runs_by_thread_id=runs_by_thread_id,
+                instances_by_thread_id=instances_by_thread_id,
+                project_cache=project_cache,
+                system_only=system_only,
+            )
+            if session is not None:
+                source.candidate = session
+                source.candidate_offset = index + 1
+                return session
+            source.offset = index + 1
+
+
+def _pop_source_session(source: SessionPageSource) -> dict[str, Any] | None:
+    session = source.candidate
+    if session is not None:
+        source.offset = source.candidate_offset
+    source.candidate = None
+    source.candidate_offset = 0
+    return session
+
+
+def _source_next_cursor(source: SessionPageSource) -> tuple[str, int, bool]:
+    if source.exhausted:
+        return "", 0, True
+    if source.page is None:
+        return source.cursor, source.offset, False
+    if source.offset < len(source.page.threads):
+        return source.cursor, source.offset, False
+    if source.next_page_cursor:
+        return source.next_page_cursor, 0, False
+    return "", 0, True
+
+
+def _visible_session_page_from_codex(
+    codex: Codex,
+    request: HttpRequest,
+    *,
+    projects: list[Project],
+    current_project: Project | None,
+    hidden_thread_ids: set[str],
+    system_thread_ids: set[str],
+    runs_by_thread_id: dict[str, SystemAgentRun],
+    instances_by_thread_id: dict[str, CodexInstance],
+    project_cache: dict[str, Project | None],
+    archived: bool,
+    cursor_param: str,
+    system_only: bool,
+) -> VisibleSessionPage:
+    cursor = request.GET.get(cursor_param, "")
+    offset = _non_negative_int(request.GET.get(_cursor_offset_param(cursor_param), ""))
+    materialized_fallback_allowed = not cursor and offset == 0
+    sessions: list[dict[str, Any]] = []
+    seen_cursors: set[str] = set()
+    cross_page_qa_activity_seen = False
+    while len(sessions) < _SESSION_PAGE_SIZE:
+        if cursor in seen_cursors:
+            logger.warning("thread list returned duplicate cursor; stopping pagination")
+            return VisibleSessionPage(_sort_session_rows(sessions), "", 0)
+        seen_cursors.add(cursor)
+        page = _thread_list_page(codex, archived=archived, cursor=cursor)
+        if materialized_fallback_allowed and not system_only and not archived and offset == 0:
+            cross_page_qa_activity_seen = (
+                cross_page_qa_activity_seen
+                or _page_has_cross_page_qa_activity(page.threads, hidden_thread_ids)
+            )
+        if offset >= len(page.threads):
+            offset = 0
+            next_cursor = page.next_cursor
+            if not next_cursor:
+                if cross_page_qa_activity_seen:
+                    return VisibleSessionPage([], "", 0, True)
+                return VisibleSessionPage(_sort_session_rows(sessions), "", 0)
+            cursor = next_cursor
+            continue
+        metadata_by_thread = _metadata_by_thread_id(page.threads)
+        qa_updated_at_by_main_thread = _qa_activity_updated_at_by_main_thread_id(
+            page.threads, hidden_thread_ids
+        )
+        for index, thread in enumerate(page.threads[offset:], start=offset):
+            session = _session_row_for_thread(
+                thread,
+                projects=projects,
+                current_project=current_project,
+                metadata_by_thread=metadata_by_thread,
+                qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
+                hidden_thread_ids=hidden_thread_ids,
+                system_thread_ids=system_thread_ids,
+                runs_by_thread_id=runs_by_thread_id,
+                instances_by_thread_id=instances_by_thread_id,
+                project_cache=project_cache,
+                system_only=system_only,
+            )
+            if session is not None:
+                sessions.append(session)
+                if len(sessions) >= _SESSION_PAGE_SIZE:
+                    if cross_page_qa_activity_seen:
+                        return VisibleSessionPage([], "", 0, True)
+                    next_offset = index + 1
+                    if next_offset < len(page.threads):
+                        return VisibleSessionPage(
+                            _sort_session_rows(sessions), cursor, next_offset
+                        )
+                    break
+        offset = 0
+        next_cursor = page.next_cursor
+        if not next_cursor:
+            if cross_page_qa_activity_seen:
+                return VisibleSessionPage([], "", 0, True)
+            return VisibleSessionPage(_sort_session_rows(sessions), "", 0)
+        cursor = next_cursor
+    return VisibleSessionPage(_sort_session_rows(sessions), cursor, 0)
+
+
+def _page_has_cross_page_qa_activity(
+    threads: list[Any], hidden_thread_ids: set[str]
+) -> bool:
+    thread_ids = {
+        thread_id
+        for thread in threads
+        if isinstance((thread_id := getattr(thread, "id", None)), str)
+    }
+    hidden_ids = thread_ids & hidden_thread_ids
+    if not hidden_ids:
+        return False
+    return (
+        SystemAgentRun.objects.filter(
+            workflow__kind=SystemWorkflow.KIND_PR_QA,
+            thread_id__in=hidden_ids,
+        )
+        .exclude(thread_id="")
+        .exclude(workflow__main_thread_id="")
+        .exclude(workflow__main_thread_id__in=thread_ids)
+        .exists()
+    )
+
+
+def _sort_session_rows(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        sessions,
+        key=lambda session: _updated_at_sort_key(session["updated_at"]),
+        reverse=True,
+    )
+
+
+def _thread_list_page(codex: Codex, *, archived: bool, cursor: str) -> ThreadListPage:
+    kwargs: dict[str, Any] = {
+        "limit": _THREAD_LIST_FETCH_LIMIT,
+        "sort_key": ThreadSortKey.updated_at,
+        "sort_direction": SortDirection.desc,
+    }
+    if archived:
+        kwargs["archived"] = True
+    if cursor:
+        kwargs["cursor"] = cursor
+    response = codex.thread_list(**kwargs)
+    next_cursor = getattr(response, "next_cursor", "")
+    return ThreadListPage(
+        threads=sorted(
+            list(response.data),
+            key=lambda thread: getattr(thread, "updated_at", 0),
+            reverse=True,
+        ),
+        next_cursor=next_cursor if isinstance(next_cursor, str) else "",
+    )
+
+
+def _session_row_for_thread(
+    thread: Any,
+    *,
+    projects: list[Project],
+    current_project: Project | None,
+    metadata_by_thread: dict[str, SessionMetadata],
+    qa_updated_at_by_main_thread: Mapping[str, Any],
+    hidden_thread_ids: set[str],
+    system_thread_ids: set[str],
+    runs_by_thread_id: dict[str, SystemAgentRun],
+    instances_by_thread_id: dict[str, CodexInstance],
+    project_cache: dict[str, Project | None],
+    system_only: bool,
+) -> dict[str, Any] | None:
+    thread_id = getattr(thread, "id", None)
+    if not isinstance(thread_id, str) or not thread_id:
+        return None
+    if system_only:
+        if thread_id not in system_thread_ids:
+            return None
+    elif thread_id in hidden_thread_ids:
+        return None
+    session_project = _project_for_thread_cached(
+        thread, metadata_by_thread, projects, project_cache
+    )
+    if current_project is not None and session_project != current_project:
+        return None
+    row = {
+        "id": thread_id,
+        "cwd": _thread_cwd(thread) or "",
+        "updated_at": _session_updated_at(thread, qa_updated_at_by_main_thread),
+        "display_title": _display_title(thread),
+        "name_value": getattr(thread, "name", None) or "",
+        "is_archived": _thread_is_archived(thread),
+        "project": session_project,
+    }
+    if system_only:
+        run = runs_by_thread_id.get(thread_id)
+        instance = run.instance if run is not None else instances_by_thread_id.get(thread_id)
+        if instance is None:
+            return None
+        row.update(
+            {
+                "detail_url": reverse("system_session", kwargs={"session_id": thread_id}),
+                "system_kind": _system_agent_run_label(run, instance),
+                "system_status": _system_agent_status(run, instance),
+            }
+        )
+    return row
+
+
+def _project_for_thread_cached(
+    thread: Any,
+    metadata_by_thread: dict[str, SessionMetadata],
+    projects: list[Project],
+    project_cache: dict[str, Project | None],
+) -> Project | None:
+    thread_id = getattr(thread, "id", "")
+    metadata = metadata_by_thread.get(thread_id) if isinstance(thread_id, str) else None
+    if metadata is not None and (metadata.project_id is not None or metadata.project_cleared):
+        return metadata.project
+    cwd = _thread_cwd(thread)
+    if not cwd:
+        return None
+    if cwd not in project_cache:
+        project_cache[cwd] = _project_for_cwd(cwd, projects)
+    return project_cache[cwd]
+
+
+def _next_sessions_url(request: HttpRequest, page: SessionListPage) -> str:
+    if (
+        page.next_done
+        and (not page.include_archived_source or page.archived_next_done)
+    ):
+        return ""
+    params = request.GET.copy()
+    if page.materialized_order:
+        params["materialized_order"] = "1"
+    else:
+        params.pop("materialized_order", None)
+    _set_cursor_params(
+        params, "cursor", page.next_cursor, page.next_offset, page.next_done
+    )
+    if page.include_archived_source:
+        _set_cursor_params(
+            params,
+            "archived_cursor",
+            page.archived_next_cursor,
+            page.archived_next_offset,
+            page.archived_next_done,
+        )
+    else:
+        _clear_cursor_params(params, "archived_cursor")
+    return f"{request.path}?{params.urlencode()}"
+
+
+def _set_cursor_params(
+    params: Any, cursor_param: str, cursor: str, offset: int, done: bool
+) -> None:
+    offset_param = _cursor_offset_param(cursor_param)
+    done_param = _cursor_done_param(cursor_param)
+    if done:
+        params.pop(cursor_param, None)
+        params.pop(offset_param, None)
+        params[done_param] = "1"
+        return
+    params.pop(done_param, None)
+    if cursor:
+        params[cursor_param] = cursor
+        if offset > 0:
+            params[offset_param] = str(offset)
+        else:
+            params.pop(offset_param, None)
+        return
+    params.pop(cursor_param, None)
+    if offset > 0:
+        params[offset_param] = str(offset)
+    else:
+        params.pop(offset_param, None)
+
+
+def _clear_cursor_params(params: Any, cursor_param: str) -> None:
+    params.pop(cursor_param, None)
+    params.pop(_cursor_offset_param(cursor_param), None)
+    params.pop(_cursor_done_param(cursor_param), None)
+
+
+def _cursor_offset_param(cursor_param: str) -> str:
+    if cursor_param == "cursor":
+        return "offset"
+    return f"{cursor_param.removesuffix('_cursor')}_offset"
+
+
+def _cursor_done_param(cursor_param: str) -> str:
+    if cursor_param == "cursor":
+        return "done"
+    return f"{cursor_param.removesuffix('_cursor')}_done"
+
+
+def _non_negative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        return 0
+    return max(parsed, 0)
+
+
 def index(request: HttpRequest) -> HttpResponse:
     # Sweep workers whose pid is gone: a Popen that crashed before a worker
     # could record its terminal status (or a row stuck in ``starting``)
@@ -567,50 +1230,20 @@ def index(request: HttpRequest) -> HttpResponse:
     config = codex_pool.app_server_config(
         enable_memories=initial_settings.enable_memories
     )
+    projects = list(Project.objects.all())
     with Codex(config=config) as codex:
         models_data = list(codex.models().data)
         resolved_settings = _resolved_settings(request, models_data)
         current_settings = resolved_settings.values
         cookie_updates = resolved_settings.cookie_updates
-        threads = _all_threads(codex)
-        if current_settings.show_archived_sessions:
-            threads.extend(_all_threads(codex, archived=True))
-    hidden_thread_ids = system_agents.hidden_thread_ids()
-    qa_updated_at_by_main_thread = _qa_activity_updated_at_by_main_thread_id(
-        threads, hidden_thread_ids
-    )
-    threads = sorted(
-        threads,
-        key=lambda s: _updated_at_sort_key(
-            _session_updated_at(s, qa_updated_at_by_main_thread)
-        ),
-        reverse=True,
-    )
-    projects = list(Project.objects.all())
-    current_project = _selected_project_for_settings(current_settings, projects)
-    metadata_by_thread = _metadata_by_thread_id(threads)
-    sessions = []
-    for thread in threads:
-        if thread.id in hidden_thread_ids:
-            continue
-        is_archived = _thread_is_archived(thread)
-        if is_archived and not current_settings.show_archived_sessions:
-            continue
-        session_project = _project_for_thread(thread, metadata_by_thread, projects)
-        if current_project is not None and session_project != current_project:
-            continue
-        sessions.append(
-            {
-                "id": thread.id,
-                "cwd": thread.cwd,
-                "updated_at": _session_updated_at(
-                    thread, qa_updated_at_by_main_thread
-                ),
-                "display_title": _display_title(thread),
-                "name_value": getattr(thread, "name", None) or "",
-                "is_archived": is_archived,
-                "project": session_project,
-            }
+        current_project = _selected_project_for_settings(current_settings, projects)
+        session_page = _session_list_page(
+            codex,
+            request,
+            current_settings=current_settings,
+            projects=projects,
+            current_project=current_project,
+            system_only=False,
         )
     settings_dialog_context = _settings_dialog_context(current_settings, models_data)
     new_session_dialog_context = _new_session_dialog_context(
@@ -620,7 +1253,8 @@ def index(request: HttpRequest) -> HttpResponse:
         request,
         "index.html",
         {
-            "sessions": sessions,
+            "sessions": session_page.sessions,
+            "next_sessions_url": _next_sessions_url(request, session_page),
             "has_projects": bool(projects),
             "archived_visibility_url": reverse("update_archived_session_visibility"),
             "login_url": reverse("login"),
@@ -644,58 +1278,28 @@ def system_sessions(request: HttpRequest) -> HttpResponse:
     config = codex_pool.app_server_config(
         enable_memories=initial_settings.enable_memories
     )
+    projects = list(Project.objects.all())
     with Codex(config=config) as codex:
         models_data = list(codex.models().data)
         resolved_settings = _resolved_settings(request, models_data)
         current_settings = resolved_settings.values
         cookie_updates = resolved_settings.cookie_updates
-        threads = _all_threads(codex)
-        if current_settings.show_archived_sessions:
-            threads.extend(_all_threads(codex, archived=True))
-    hidden_thread_ids = system_agents.hidden_thread_ids()
-    system_thread_ids = hidden_thread_ids | _demo_system_thread_ids()
-    runs_by_thread_id = _system_agent_runs_by_thread_id(system_thread_ids)
-    instances_by_thread_id = _system_agent_instances_by_thread_id(system_thread_ids)
-    threads = sorted(threads, key=lambda s: s.updated_at, reverse=True)
-    projects = list(Project.objects.all())
-    current_project = _selected_project_for_settings(current_settings, projects)
-    metadata_by_thread = _metadata_by_thread_id(threads)
-    sessions = []
-    for thread in threads:
-        thread_id = getattr(thread, "id", None)
-        if not isinstance(thread_id, str) or thread_id not in system_thread_ids:
-            continue
-        run = runs_by_thread_id.get(thread_id)
-        instance = (
-            run.instance if run is not None else instances_by_thread_id.get(thread_id)
-        )
-        if instance is None:
-            continue
-        session_project = _project_for_thread(thread, metadata_by_thread, projects)
-        if current_project is not None and session_project != current_project:
-            continue
-        sessions.append(
-            {
-                "id": thread.id,
-                "cwd": thread.cwd,
-                "updated_at": thread.updated_at,
-                "display_title": _display_title(thread),
-                "name_value": getattr(thread, "name", None) or "",
-                "is_archived": _thread_is_archived(thread),
-                "project": session_project,
-                "detail_url": reverse(
-                    "system_session", kwargs={"session_id": thread_id}
-                ),
-                "system_kind": _system_agent_run_label(run, instance),
-                "system_status": _system_agent_status(run, instance),
-            }
+        current_project = _selected_project_for_settings(current_settings, projects)
+        session_page = _session_list_page(
+            codex,
+            request,
+            current_settings=current_settings,
+            projects=projects,
+            current_project=current_project,
+            system_only=True,
         )
     settings_dialog_context = _settings_dialog_context(current_settings, models_data)
     response = render(
         request,
         "index.html",
         {
-            "sessions": sessions,
+            "sessions": session_page.sessions,
+            "next_sessions_url": _next_sessions_url(request, session_page),
             "has_projects": bool(projects),
             "archived_visibility_url": reverse("update_archived_session_visibility"),
             "login_url": reverse("login"),
@@ -1536,9 +2140,47 @@ def _token_usage_for(thread: Any) -> dict[str, str] | None:
 
 
 def _token_usage_numbers_for(thread: Any) -> dict[str, int] | None:
-    if _thread_is_archived(thread):
-        return _archived_token_usage_numbers_for(thread)
-    return _latest_token_usage_numbers_for(thread)
+    if not _thread_is_archived(thread):
+        return _latest_token_usage_numbers_for(thread)
+    snapshot = _token_usage_snapshot_for(thread)
+    return snapshot["usage"] if snapshot is not None else None
+
+
+def _token_usage_snapshot_for(thread: Any) -> dict[str, Any] | None:
+    thread_id = getattr(thread, "id", None)
+    if not isinstance(thread_id, str) or not thread_id:
+        usage = _latest_token_usage_numbers_for(thread)
+        if usage is None:
+            return None
+        return {"usage": usage, "daily_usage": _daily_token_usage_for(thread)}
+    rollout_path = _rollout_path_for(thread)
+    cached = ArchivedSessionTokenUsage.objects.filter(thread_id=thread_id).first()
+    if (
+        cached is not None
+        and _cached_token_usage_is_current(cached, rollout_path)
+        and _cached_token_usage_has_daily_usage(cached, rollout_path)
+    ):
+        return {
+            "usage": _token_usage_from_cache(cached),
+            "daily_usage": _daily_token_usage_from_cache(cached),
+        }
+    usage = _latest_token_usage_numbers_for(thread)
+    if usage is None:
+        if cached is None or not _cached_token_usage_is_current(cached, rollout_path):
+            return None
+        return {
+            "usage": _token_usage_from_cache(cached),
+            "daily_usage": _daily_token_usage_from_cache(cached),
+        }
+    daily_usage = _daily_token_usage_for(thread)
+    cached, _created = ArchivedSessionTokenUsage.objects.update_or_create(
+        thread_id=thread_id,
+        defaults={
+            **_token_usage_cache_defaults(rollout_path, usage),
+            "daily_usage": daily_usage,
+        },
+    )
+    return {"usage": _token_usage_from_cache(cached), "daily_usage": daily_usage}
 
 
 def _latest_token_usage_numbers_for(thread: Any) -> dict[str, int] | None:
@@ -1571,21 +2213,7 @@ def _rollout_mtime_ns(rollout_path: Path | None) -> int:
 
 
 def _archived_token_usage_numbers_for(thread: Any) -> dict[str, int] | None:
-    thread_id = getattr(thread, "id", None)
-    if not isinstance(thread_id, str) or not thread_id:
-        return _latest_token_usage_numbers_for(thread)
-    rollout_path = _rollout_path_for(thread)
-    cached = ArchivedSessionTokenUsage.objects.filter(thread_id=thread_id).first()
-    if cached is not None and _cached_token_usage_is_current(cached, rollout_path):
-        return _token_usage_from_cache(cached)
-    usage = _latest_token_usage_numbers_for(thread)
-    if usage is None:
-        return _token_usage_from_cache(cached) if cached is not None else None
-    cached, _created = ArchivedSessionTokenUsage.objects.update_or_create(
-        thread_id=thread_id,
-        defaults=_token_usage_cache_defaults(rollout_path, usage),
-    )
-    return _token_usage_from_cache(cached)
+    return _token_usage_numbers_for(thread)
 
 
 def _cached_token_usage_is_current(
@@ -1597,6 +2225,12 @@ def _cached_token_usage_is_current(
         cache.rollout_path == str(rollout_path)
         and cache.rollout_mtime_ns == _rollout_mtime_ns(rollout_path)
     )
+
+
+def _cached_token_usage_has_daily_usage(
+    cache: ArchivedSessionTokenUsage, rollout_path: Path | None
+) -> bool:
+    return rollout_path is None or bool(_daily_token_usage_from_cache(cache))
 
 
 def _token_usage_cache_defaults(
@@ -1623,6 +2257,52 @@ def _token_usage_from_cache(cache: ArchivedSessionTokenUsage) -> dict[str, int]:
         "context_tokens": cache.context_tokens,
         "model_context_window": cache.model_context_window,
     }
+
+
+def _daily_token_usage_from_cache(cache: ArchivedSessionTokenUsage) -> dict[str, dict[str, int]]:
+    if not isinstance(cache.daily_usage, dict):
+        return {}
+    daily: dict[str, dict[str, int]] = {}
+    for date_key, values in cache.daily_usage.items():
+        if not isinstance(date_key, str) or not isinstance(values, dict):
+            continue
+        daily[date_key] = {
+            "input": _coerce_usage_int(values.get("input")),
+            "output": _coerce_usage_int(values.get("output")),
+            "cached": _coerce_usage_int(values.get("cached")),
+        }
+    return daily
+
+
+def _coerce_usage_int(value: Any) -> int:
+    if isinstance(value, bool):
+        return 0
+    return value if isinstance(value, int) and value > 0 else 0
+
+
+def _daily_token_usage_for(thread: Any) -> dict[str, dict[str, int]]:
+    usage_by_date: dict[str, dict[str, int]] = {}
+    rollout_path = _rollout_path_for(thread)
+    if rollout_path is None:
+        return usage_by_date
+    previous = _empty_raw_token_usage()
+    for event in rollout.token_usage_history(rollout_path):
+        date_key = datetime.fromtimestamp(event["timestamp"], UTC).date().isoformat()
+        bucket = usage_by_date.setdefault(date_key, _empty_lifetime_token_usage())
+        input_delta = max(event["input_tokens"] - previous["input_tokens"], 0)
+        cached_delta = max(
+            event["cached_input_tokens"] - previous["cached_input_tokens"], 0
+        )
+        output_delta = max(event["output_tokens"] - previous["output_tokens"], 0)
+        bucket["input"] += max(input_delta - cached_delta, 0)
+        bucket["output"] += output_delta
+        bucket["cached"] += cached_delta
+        previous = {
+            "input_tokens": event["input_tokens"],
+            "cached_input_tokens": event["cached_input_tokens"],
+            "output_tokens": event["output_tokens"],
+        }
+    return usage_by_date
 
 
 def _format_token_count(value: int) -> str:
@@ -1895,9 +2575,10 @@ def _lifetime_token_usage_for(threads: list[Any]) -> dict[str, Any]:
     session_by_date: dict[str, dict[str, int]] = {}
     system_by_date: dict[str, dict[str, int]] = {}
     for thread in threads:
-        usage = _token_usage_numbers_for(thread)
-        if usage is None:
+        snapshot = _token_usage_snapshot_for(thread)
+        if snapshot is None:
             continue
+        usage = snapshot["usage"]
         thread_id = getattr(thread, "id", None)
         is_system = isinstance(thread_id, str) and thread_id in hidden_thread_ids
         total_usage["input"] += _non_cached_input_tokens(usage)
@@ -1907,10 +2588,10 @@ def _lifetime_token_usage_for(threads: list[Any]) -> dict[str, Any]:
         bucket["input"] += _non_cached_input_tokens(usage)
         bucket["output"] += usage.get("output_tokens", 0)
         bucket["cached"] += usage.get("cached_input_tokens", 0)
-        _add_token_usage_history_by_date(total_by_date, thread)
-        _add_token_usage_history_by_date(
+        _merge_daily_token_usage(total_by_date, snapshot["daily_usage"])
+        _merge_daily_token_usage(
             system_by_date if is_system else session_by_date,
-            thread,
+            snapshot["daily_usage"],
         )
     return {
         "total": {
@@ -1966,29 +2647,21 @@ def _format_human_token_amount(value: int, scale: int) -> str:
     return f"{whole}.{fraction}"
 
 
+def _merge_daily_token_usage(
+    usage_by_date: dict[str, dict[str, int]],
+    daily_usage: Mapping[str, Mapping[str, int]],
+) -> None:
+    for date_key, values in daily_usage.items():
+        bucket = usage_by_date.setdefault(date_key, _empty_lifetime_token_usage())
+        bucket["input"] += values.get("input", 0)
+        bucket["output"] += values.get("output", 0)
+        bucket["cached"] += values.get("cached", 0)
+
+
 def _add_token_usage_history_by_date(
     usage_by_date: dict[str, dict[str, int]], thread: Any
 ) -> None:
-    rollout_path = _rollout_path_for(thread)
-    if rollout_path is None:
-        return
-    previous = _empty_raw_token_usage()
-    for event in rollout.token_usage_history(rollout_path):
-        date_key = datetime.fromtimestamp(event["timestamp"], UTC).date().isoformat()
-        bucket = usage_by_date.setdefault(date_key, _empty_lifetime_token_usage())
-        input_delta = max(event["input_tokens"] - previous["input_tokens"], 0)
-        cached_delta = max(
-            event["cached_input_tokens"] - previous["cached_input_tokens"], 0
-        )
-        output_delta = max(event["output_tokens"] - previous["output_tokens"], 0)
-        bucket["input"] += max(input_delta - cached_delta, 0)
-        bucket["output"] += output_delta
-        bucket["cached"] += cached_delta
-        previous = {
-            "input_tokens": event["input_tokens"],
-            "cached_input_tokens": event["cached_input_tokens"],
-            "output_tokens": event["output_tokens"],
-        }
+    _merge_daily_token_usage(usage_by_date, _daily_token_usage_for(thread))
 
 
 def _empty_raw_token_usage() -> dict[str, int]:
@@ -2188,7 +2861,9 @@ def _metadata_by_thread_id(threads: list[Any]) -> dict[str, SessionMetadata]:
     ]
     if not thread_ids:
         return {}
-    return SessionMetadata.objects.in_bulk(thread_ids, field_name="thread_id")
+    return SessionMetadata.objects.select_related("project").in_bulk(
+        thread_ids, field_name="thread_id"
+    )
 
 
 def _project_for_thread(
