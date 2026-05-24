@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
+from hashlib import sha1
 from os import environ, readlink
 from pathlib import Path
 
@@ -81,6 +82,43 @@ def local_branch_names(repo_path: str | Path) -> list[str]:
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
+def _auto_merge_source_base(
+    source_repo: Path, target_ref: str, hooks_path: Path
+) -> str:
+    ref = _auto_merge_source_base_ref(source_repo, target_ref)
+    result = _run_git(
+        source_repo,
+        ["rev-parse", "--verify", f"{ref}^{{commit}}"],
+        hooks_path=hooks_path,
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def _record_auto_merge_source_base(
+    source_repo: Path, target_ref: str, *, hooks_path: Path
+) -> None:
+    # The source-session tree is the authority for follow-up deltas; the target
+    # branch may also contain unrelated commits that must not become deletions.
+    tree_sha = _source_worktree_tree(source_repo, hooks_path=hooks_path)
+    commit_sha = _git(
+        source_repo,
+        ["commit-tree", tree_sha, "-m", "Record Hitch auto-merge source base"],
+        hooks_path=hooks_path,
+    ).strip()
+    _git(
+        source_repo,
+        ["update-ref", _auto_merge_source_base_ref(source_repo, target_ref), commit_sha],
+        hooks_path=hooks_path,
+    )
+
+
+def _auto_merge_source_base_ref(source_repo: Path, target_ref: str) -> str:
+    worktree_head = _git(source_repo, ["rev-parse", "--git-path", "HEAD"]).strip()
+    key = sha1(f"{target_ref}\0{worktree_head}".encode()).hexdigest()
+    return f"refs/hitch/auto-merge-source-bases/{key}"
+
+
 def build_auto_merge_review_patch(
     source_cwd: str | Path, branch: str
 ) -> AutoMergeReviewPatch:
@@ -91,13 +129,17 @@ def build_auto_merge_review_patch(
     source_repo = _repo_root(Path(source_cwd))
     target_ref = f"refs/heads/{branch}"
     target_sha = _target_branch_sha(source_repo, target_ref)
-    base_sha = _git(source_repo, ["merge-base", "HEAD", target_ref]).strip()
-    if not base_sha:
+    merge_base_sha = _git(source_repo, ["merge-base", "HEAD", target_ref]).strip()
+    if not merge_base_sha:
         raise LocalBranchMergeError(
             "source worktree and target branch have no merge base"
         )
     with tempfile.TemporaryDirectory(prefix="hitch-hooks-") as raw_hooks:
         hooks_path = Path(raw_hooks)
+        base_sha = (
+            _auto_merge_source_base(source_repo, target_ref, hooks_path)
+            or merge_base_sha
+        )
         source_tree_sha = _source_worktree_tree(source_repo, hooks_path=hooks_path)
         session_delta_patch = _normalize_patch_text(
             _git(
@@ -199,6 +241,9 @@ def merge_worktree_diff_to_branch(
                     checked_out_path=checked_out_path,
                     hooks_path=hooks,
                 )
+            _record_auto_merge_source_base(
+                source_repo, target_ref, hooks_path=hooks
+            )
             return LocalBranchMergeResult(
                 branch=branch,
                 commit_sha=commit_sha,
