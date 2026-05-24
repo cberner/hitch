@@ -735,18 +735,33 @@ def maybe_start_auto_proposal_workflows(*, project: Project | None = None) -> in
         orders = orders.filter(project=project)
 
     started = 0
-    for standing_order in orders.order_by("created_at", "id"):
+    for standing_order_id in orders.order_by("created_at", "id").values_list(
+        "id", flat=True
+    ):
+        if _maybe_start_auto_proposal_workflow(standing_order_id):
+            started += 1
+    return started
+
+
+def _maybe_start_auto_proposal_workflow(standing_order_id: int) -> bool:
+    with transaction.atomic():
+        standing_order = (
+            StandingOrder.objects.select_related("project")
+            .select_for_update()
+            .get(pk=standing_order_id)
+        )
+        Project.objects.select_for_update().get(pk=standing_order.project_id)
         default_branch_sha = _standing_order_auto_proposal_start_sha(standing_order)
         if default_branch_sha is None:
-            continue
-        workflow = start_standing_order_workflow(
+            return False
+        workflow, created = _create_standing_order_workflow_record(
             standing_order=standing_order,
             auto_proposal=True,
             default_branch_sha=default_branch_sha,
         )
-        if workflow.status == SystemWorkflow.STATUS_RUNNING:
-            started += 1
-    return started
+    if created:
+        _spawn_standing_order_candidate_or_block(workflow, standing_order)
+    return workflow.status == SystemWorkflow.STATUS_RUNNING
 
 
 def _standing_order_auto_proposal_start_sha(
@@ -844,6 +859,22 @@ def start_standing_order_workflow(
         .filter(pk=standing_order.pk)
         .get()
     )
+    workflow, created = _create_standing_order_workflow_record(
+        standing_order=standing_order,
+        auto_proposal=auto_proposal,
+        default_branch_sha=default_branch_sha,
+    )
+    if created:
+        _spawn_standing_order_candidate_or_block(workflow, standing_order)
+    return workflow
+
+
+def _create_standing_order_workflow_record(
+    *,
+    standing_order: StandingOrder,
+    auto_proposal: bool,
+    default_branch_sha: str | None,
+) -> tuple[SystemWorkflow, bool]:
     main_thread_id = _standing_order_main_thread_id(standing_order.pk)
     state: dict[str, Any] = {
         "standing_order_id": standing_order.pk,
@@ -875,8 +906,14 @@ def start_standing_order_workflow(
         ).first()
         if existing_workflow is None:
             raise
-        return existing_workflow
+        return existing_workflow, False
 
+    return workflow, True
+
+
+def _spawn_standing_order_candidate_or_block(
+    workflow: SystemWorkflow, standing_order: StandingOrder
+) -> None:
     try:
         _spawn_standing_order_candidate_run(workflow, standing_order)
     except Exception as exc:
@@ -885,7 +922,6 @@ def start_standing_order_workflow(
             standing_order,
             f"failed to start standing order agent: {exc!r}",
         )
-    return workflow
 
 
 def spec_critic_should_run(prompt: str) -> bool:
