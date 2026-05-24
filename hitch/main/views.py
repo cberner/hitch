@@ -154,6 +154,17 @@ _VALID_WEB_SEARCH_MODES = {
     value for value, _label in _WEB_SEARCH_MODE_OPTIONS if value
 }
 
+# QA-mode dialog choices. The underlying behaviour is still driven by the
+# boolean ``qa_panel_enabled`` flag on stored settings — ``simple`` runs a
+# single QA agent and ``multi_agent`` fans out the parallel QA panel.
+_QA_MODE_SIMPLE = "simple"
+_QA_MODE_MULTI_AGENT = "multi_agent"
+_QA_MODE_OPTIONS: tuple[tuple[str, str], ...] = (
+    (_QA_MODE_SIMPLE, "Simple"),
+    (_QA_MODE_MULTI_AGENT, "Multi-agent"),
+)
+_VALID_QA_MODES = {value for value, _label in _QA_MODE_OPTIONS}
+
 # Dedicated signed cookies for the settings dialog. Kept separate from
 # Django's session cookie so the (non-revocable, long-lived) settings
 # state never rides alongside an auth session — admin auth is allowed to
@@ -320,6 +331,10 @@ def _settings_dialog_context(
             {"id": value, "display_name": label}
             for value, label in _WEB_SEARCH_MODE_OPTIONS
         ],
+        "qa_mode_options": [
+            {"id": value, "display_name": label}
+            for value, label in _QA_MODE_OPTIONS
+        ],
         "current_model": current_settings.model,
         "current_effort": current_settings.reasoning_effort,
         "current_sandbox": current_settings.sandbox_policy,
@@ -329,7 +344,11 @@ def _settings_dialog_context(
         "extra_system_prompt_max_len": _EXTRA_SYSTEM_PROMPT_MAX_LEN,
         "current_use_worktrees": current_settings.use_worktrees,
         "current_auto_pr": current_settings.auto_pr_enabled,
-        "current_qa_panel": current_settings.qa_panel_enabled,
+        "current_qa_mode": (
+            _QA_MODE_MULTI_AGENT
+            if current_settings.qa_panel_enabled
+            else _QA_MODE_SIMPLE
+        ),
         "current_spec_critic": current_settings.spec_critic_enabled,
         "current_web_search": current_settings.web_search_mode,
         "current_enable_memories": current_settings.enable_memories,
@@ -2830,7 +2849,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     extra_system_prompt = request.POST.get("extra_system_prompt", "").strip()
     use_worktrees = request.POST.get("use_worktrees", "").strip()
     auto_pr = request.POST.get("auto_pr", "").strip()
-    qa_panel = request.POST.get("qa_panel", "").strip()
+    qa_mode = request.POST.get("qa_mode", "").strip()
     spec_critic = request.POST.get("spec_critic", "").strip()
     web_search_mode = request.POST.get("web_search_mode", "").strip()
     posted_show_archived = request.POST.get("show_archived_sessions")
@@ -2867,9 +2886,10 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     if auto_pr not in {"", "true"}:
         return HttpResponseBadRequest("invalid auto-PR setting")
     auto_pr = "true" if auto_pr == "true" else "false"
-    if qa_panel not in {"", "true"}:
-        return HttpResponseBadRequest("invalid QA panel setting")
-    qa_panel = "true" if qa_panel == "true" else "false"
+    if qa_mode and qa_mode not in _VALID_QA_MODES:
+        return HttpResponseBadRequest("invalid QA mode setting")
+    if not qa_mode:
+        qa_mode = _QA_MODE_SIMPLE
     if spec_critic not in {"", "true"}:
         return HttpResponseBadRequest("invalid Spec Critic setting")
     spec_critic = "true" if spec_critic == "true" else "false"
@@ -2901,7 +2921,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         extra_system_prompt=extra_system_prompt,
         use_worktrees=use_worktrees == "true",
         auto_pr_enabled=auto_pr == "true",
-        qa_panel_enabled=qa_panel == "true",
+        qa_panel_enabled=qa_mode == _QA_MODE_MULTI_AGENT,
         spec_critic_enabled=spec_critic == "true",
         web_search_mode=web_search_mode,
         show_archived_sessions=(

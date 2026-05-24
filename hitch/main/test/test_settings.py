@@ -280,8 +280,12 @@ class SettingsDialogRenderTests(TestCase):
         self.assertContains(response, "Use worktrees")
         self.assertContains(response, 'name="auto_pr"')
         self.assertContains(response, "Auto-PR")
-        self.assertContains(response, 'name="qa_panel"')
-        self.assertContains(response, "Parallel QA panel")
+        self.assertContains(response, 'name="qa_mode"')
+        self.assertContains(response, "QA mode")
+        self.assertContains(response, 'value="simple"')
+        self.assertContains(response, 'value="multi_agent"')
+        self.assertContains(response, "Simple")
+        self.assertContains(response, "Multi-agent")
         self.assertContains(response, 'name="spec_critic"')
         self.assertContains(response, "Spec Critic preflight")
         self.assertContains(response, 'name="web_search_mode"')
@@ -402,7 +406,7 @@ class SettingsDialogRenderTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_saved_qa_panel_setting_renders_checked(
+    def test_saved_qa_panel_setting_renders_multi_agent_selected(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _seed_cookies(self.client, **{_QA_PANEL_COOKIE: "true"})
@@ -414,7 +418,9 @@ class SettingsDialogRenderTests(TestCase):
 
         response = self.client.get(reverse("index"))
 
-        self.assertContains(response, 'name="qa_panel" value="true" checked')
+        self.assertContains(
+            response, '<option value="multi_agent" selected>Multi-agent</option>'
+        )
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -995,13 +1001,14 @@ class UpdateSettingsViewTests(TestCase):
             ),
             ("auto-PR disabled", {}, {}, _AUTO_PR_COOKIE, "false"),
             (
-                "QA panel enabled",
-                {"qa_panel": "true"},
+                "QA mode multi-agent",
+                {"qa_mode": "multi_agent"},
                 {},
                 _QA_PANEL_COOKIE,
                 "true",
             ),
-            ("QA panel disabled", {}, {}, _QA_PANEL_COOKIE, "false"),
+            ("QA mode simple", {"qa_mode": "simple"}, {}, _QA_PANEL_COOKIE, "false"),
+            ("QA mode default", {}, {}, _QA_PANEL_COOKIE, "false"),
             (
                 "Spec Critic enabled",
                 {"spec_critic": "true"},
@@ -1091,10 +1098,10 @@ class UpdateSettingsViewTests(TestCase):
                 {"auto_pr": "yes"},
             ),
             (
-                "QA panel setting",
+                "QA mode setting",
                 _QA_PANEL_COOKIE,
                 "true",
-                {"qa_panel": "yes"},
+                {"qa_mode": "everything"},
             ),
             (
                 "Spec Critic setting",

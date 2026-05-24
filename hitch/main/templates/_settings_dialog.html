@@ -61,9 +61,13 @@
             <span>Auto-PR</span>
             <input type="checkbox" name="auto_pr" value="true" {% if current_auto_pr %}checked{% endif %}>
         </label>
-        <label class="checkbox-label">
-            <span>Parallel QA panel</span>
-            <input type="checkbox" name="qa_panel" value="true" {% if current_qa_panel %}checked{% endif %}>
+        <label>
+            QA mode
+            <select name="qa_mode">
+                {% for option in qa_mode_options %}
+                <option value="{{ option.id }}" {% if option.id == current_qa_mode %}selected{% endif %}>{{ option.display_name }}</option>
+                {% endfor %}
+            </select>
         </label>
         <label>
             Web search
