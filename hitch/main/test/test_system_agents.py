@@ -2778,6 +2778,20 @@ class SpecCriticWorkflowTests(TestCase):
 
                 self.assertEqual(statuses["ci"], "blocked")
 
+    def test_pr_gate_evaluator_blocks_observed_failing_jobs_without_status(self) -> None:
+        gates = system_agents._evaluate_pr_gates(
+            {
+                "mergeable": True,
+                "draft": False,
+                "review_signal": "approved",
+                "unresolved_thread_count": 0,
+                "failing_jobs": [{"name": "tests", "conclusion": "failure"}],
+            }
+        )
+        statuses = {gate["key"]: gate["status"] for gate in gates}
+
+        self.assertEqual(statuses["ci"], "blocked")
+
     def test_pr_gate_evaluator_normalizes_non_failure_ci_states(self) -> None:
         for ci_status in ("neutral", "skipped", "passed"):
             with self.subTest(ci_status=ci_status):
@@ -2850,6 +2864,48 @@ class SpecCriticWorkflowTests(TestCase):
 
         self.assertEqual(statuses["review"], "pending")
         self.assertFalse(system_agents._pr_gates_all_passed(gates))
+
+    def test_pr_gate_evaluator_normalizes_review_signal_values(self) -> None:
+        for review_signal in ("approval", "approve", "lgtm"):
+            with self.subTest(review_signal=review_signal):
+                gates = system_agents._evaluate_pr_gates(
+                    {
+                        "mergeable": True,
+                        "draft": False,
+                        "review_signal": review_signal,
+                        "unresolved_thread_count": 0,
+                        "ci_status": "success",
+                    }
+                )
+                statuses = {gate["key"]: gate["status"] for gate in gates}
+
+                self.assertEqual(statuses["review"], "passed")
+
+        gates = system_agents._evaluate_pr_gates(
+            {
+                "mergeable": True,
+                "draft": False,
+                "review_signal": "changes requested",
+                "ci_status": "success",
+            }
+        )
+        statuses = {gate["key"]: gate["status"] for gate in gates}
+
+        self.assertEqual(statuses["review"], "blocked")
+
+    def test_pr_gate_evaluator_blocks_observed_unresolved_thread_items(self) -> None:
+        gates = system_agents._evaluate_pr_gates(
+            {
+                "mergeable": True,
+                "draft": False,
+                "review_signal": "commented",
+                "unresolved_threads": [{"path": "app.py", "line": 12}],
+                "ci_status": "success",
+            }
+        )
+        statuses = {gate["key"]: gate["status"] for gate in gates}
+
+        self.assertEqual(statuses["review"], "blocked")
 
     def test_pr_gate_evaluator_blocks_draft_pr(self) -> None:
         gates = system_agents._evaluate_pr_gates(
