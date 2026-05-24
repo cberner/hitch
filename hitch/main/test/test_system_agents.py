@@ -3316,6 +3316,26 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertTrue(workflow.state["auto_proposal"])
         mock_spawn.assert_called_once()
 
+    @patch("hitch.main.system_agents.default_branch_checkout_commit_hash")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_rechecks_enablement_after_lock(
+        self, mock_spawn: MagicMock, mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+            auto_proposal_enabled=False,
+        )
+
+        started = system_agents._maybe_start_auto_proposal_workflow(standing_order.pk)
+
+        self.assertFalse(started)
+        self.assertFalse(SystemWorkflow.objects.exists())
+        mock_default_sha.assert_not_called()
+        mock_spawn.assert_not_called()
+
     @patch(
         "hitch.main.system_agents.default_branch_checkout_commit_hash",
         return_value="a" * 40,

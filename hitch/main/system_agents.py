@@ -751,6 +751,8 @@ def _maybe_start_auto_proposal_workflow(standing_order_id: int) -> bool:
             .get(pk=standing_order_id)
         )
         Project.objects.select_for_update().get(pk=standing_order.project_id)
+        if not standing_order.auto_proposal_enabled:
+            return False
         default_branch_sha = _standing_order_auto_proposal_start_sha(standing_order)
         if default_branch_sha is None:
             return False
