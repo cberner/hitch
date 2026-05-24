@@ -330,17 +330,47 @@ class SessionMetadata(models.Model):
     auto_qa_enabled = models.BooleanField(default=False)
     auto_merge_to_local_branch = models.BooleanField(default=False)
     auto_merge_branch = models.CharField(max_length=255, blank=True, default="")
+    codex_display_title = models.CharField(max_length=200, blank=True, default="")
+    codex_name = models.CharField(max_length=200, blank=True, default="")
+    codex_preview = models.TextField(blank=True, default="")
+    codex_created_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    codex_updated_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    codex_archived = models.BooleanField(default=False, db_index=True)
+    codex_path = models.CharField(max_length=4096, blank=True, default="")
+    codex_thread_source = models.CharField(max_length=64, blank=True, default="")
+    codex_last_synced_at = models.DateTimeField(null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         indexes = [
             models.Index(fields=["project", "-updated_at"]),
+            models.Index(
+                fields=["project", "codex_archived", "-codex_updated_at"],
+                name="main_sessio_project_18730c_idx",
+            ),
         ]
 
     @override
     def __str__(self) -> str:
         return f"SessionMetadata(thread_id={self.thread_id}, project={self.project_id})"
+
+
+class SessionIndexSyncState(models.Model):
+    """Last successful refresh timestamps for Codex session-list sources."""
+
+    SOURCE_ACTIVE = "active"
+    SOURCE_ARCHIVED = "archived"
+
+    source = models.CharField(max_length=32, unique=True)
+    last_synced_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    is_complete = models.BooleanField(default=False)
+    next_cursor = models.CharField(max_length=256, blank=True, default="")
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @override
+    def __str__(self) -> str:
+        return f"SessionIndexSyncState(source={self.source})"
 
 
 class SessionDemo(models.Model):

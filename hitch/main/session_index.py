@@ -1,0 +1,389 @@
+"""Cached session list metadata for fast index pages."""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Iterable
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any, NamedTuple
+
+from django.db.models import QuerySet
+from django.utils import timezone
+from openai_codex import AppServerError, Codex
+from openai_codex.generated.v2_all import SortDirection, ThreadSortKey
+
+from hitch.main.models import Project, SessionIndexSyncState, SessionMetadata
+from hitch.main.repos import same_repo_or_worktree
+
+logger = logging.getLogger(__name__)
+
+DISPLAY_TITLE_MAX_LEN = 80
+THREAD_LIST_FETCH_LIMIT = 100
+ARCHIVED_SESSIONS_DIR = "archived_sessions"
+STALE_AFTER = timedelta(seconds=30)
+
+
+class RefreshResult(NamedTuple):
+    synced: int
+    failed: bool
+
+
+class _SourceRefreshResult(NamedTuple):
+    synced: int
+    complete: bool
+    next_cursor: str
+    seen_thread_ids: set[str]
+
+
+def should_refresh(*, archived: bool) -> bool:
+    source = (
+        SessionIndexSyncState.SOURCE_ARCHIVED
+        if archived
+        else SessionIndexSyncState.SOURCE_ACTIVE
+    )
+    last_synced = (
+        SessionIndexSyncState.objects.filter(source=source)
+        .values_list("last_synced_at", flat=True)
+        .first()
+    )
+    if last_synced is None:
+        return True
+    return last_synced < timezone.now() - STALE_AFTER
+
+
+def is_complete(*, archived: bool) -> bool:
+    source = _source_name(archived=archived)
+    return bool(
+        SessionIndexSyncState.objects.filter(source=source).values_list(
+            "is_complete", flat=True
+        ).first()
+    )
+
+
+def has_indexed_sessions() -> bool:
+    return SessionMetadata.objects.exclude(codex_updated_at__isnull=True).exists()
+
+
+def refresh_from_codex(
+    codex: Codex,
+    *,
+    projects: list[Project],
+    include_active: bool = True,
+    include_archived: bool = False,
+    use_state_db_only: bool = True,
+    max_pages: int | None = 1,
+) -> RefreshResult:
+    synced = 0
+    failed = False
+    sources = []
+    if include_active:
+        sources.append(False)
+    if include_archived:
+        sources.append(True)
+    for archived in sources:
+        try:
+            source_result = _refresh_source(
+                codex,
+                projects=projects,
+                archived=archived,
+                use_state_db_only=use_state_db_only,
+                max_pages=max_pages,
+            )
+            synced += source_result.synced
+            mark_synced(
+                archived=archived,
+                complete=source_result.complete,
+                next_cursor=source_result.next_cursor,
+            )
+            if source_result.complete and not use_state_db_only:
+                _invalidate_absent_source_rows(
+                    archived=archived,
+                    seen_thread_ids=source_result.seen_thread_ids,
+                )
+        except AppServerError:
+            failed = True
+            logger.warning("failed to refresh %s session index", "archived" if archived else "active")
+    return RefreshResult(synced=synced, failed=failed)
+
+
+def mark_synced(*, archived: bool, complete: bool, next_cursor: str = "") -> None:
+    source = _source_name(archived=archived)
+    previous_complete = is_complete(archived=archived)
+    SessionIndexSyncState.objects.update_or_create(
+        source=source,
+        defaults={
+            "last_synced_at": timezone.now(),
+            "is_complete": previous_complete or complete,
+            "next_cursor": "" if previous_complete or complete else next_cursor,
+        },
+    )
+
+
+def upsert_thread(thread: Any, *, projects: list[Project]) -> SessionMetadata | None:
+    thread_id = getattr(thread, "id", None)
+    if not isinstance(thread_id, str) or not thread_id:
+        return None
+    cwd = _thread_cwd(thread) or ""
+    defaults = _codex_defaults(
+        thread_id=thread_id,
+        cwd=cwd,
+        name=getattr(thread, "name", None),
+        preview=getattr(thread, "preview", None),
+        created_at=_timestamp_to_datetime(getattr(thread, "created_at", None)),
+        updated_at=_timestamp_to_datetime(getattr(thread, "updated_at", None)),
+        archived=_thread_is_archived(thread),
+        path=getattr(thread, "path", None),
+        thread_source=_metadata_value(getattr(thread, "thread_source", None)),
+    )
+    existing = SessionMetadata.objects.filter(thread_id=thread_id).first()
+    if existing is None:
+        defaults["project"] = _project_for_cwd(cwd, projects)
+        defaults["project_cleared"] = False
+    elif existing.project_id is None and not existing.project_cleared:
+        defaults["project"] = _project_for_cwd(cwd, projects)
+    metadata, _created = SessionMetadata.objects.update_or_create(
+        thread_id=thread_id,
+        defaults=defaults,
+    )
+    return metadata
+
+
+def upsert_local_session(
+    *,
+    thread_id: str,
+    cwd: str,
+    projects: list[Project] | None = None,
+    project: Project | None = None,
+    project_cleared: bool = False,
+    name: str = "",
+    preview: str = "",
+    archived: bool = False,
+    auto_pr_enabled: bool | None = None,
+    auto_qa_enabled: bool | None = None,
+    auto_merge_to_local_branch: bool | None = None,
+    auto_merge_branch: str | None = None,
+) -> SessionMetadata:
+    now = timezone.now()
+    defaults = _codex_defaults(
+        thread_id=thread_id,
+        cwd=cwd,
+        name=name,
+        preview=preview,
+        created_at=now,
+        updated_at=now,
+        archived=archived,
+        path="",
+        thread_source="",
+    )
+    defaults["project"] = None if project_cleared else project
+    if defaults["project"] is None and projects is not None and not project_cleared:
+        defaults["project"] = _project_for_cwd(cwd, projects)
+    defaults["project_cleared"] = project_cleared
+    if auto_pr_enabled is not None:
+        defaults["auto_pr_enabled"] = auto_pr_enabled
+    if auto_qa_enabled is not None:
+        defaults["auto_qa_enabled"] = auto_qa_enabled
+    if auto_merge_to_local_branch is not None:
+        defaults["auto_merge_to_local_branch"] = auto_merge_to_local_branch
+    if auto_merge_branch is not None:
+        defaults["auto_merge_branch"] = auto_merge_branch
+    metadata, _created = SessionMetadata.objects.update_or_create(
+        thread_id=thread_id,
+        defaults=defaults,
+    )
+    return metadata
+
+
+def update_cached_name(thread_id: str, name: str) -> None:
+    display_title = display_title_for(thread_id=thread_id, name=name, preview="")
+    SessionMetadata.objects.filter(thread_id=thread_id).update(
+        codex_name=name,
+        codex_display_title=display_title,
+        codex_last_synced_at=timezone.now(),
+    )
+
+
+def update_cached_archived(thread_id: str, *, archived: bool) -> None:
+    SessionMetadata.objects.filter(thread_id=thread_id).update(
+        codex_archived=archived,
+        codex_updated_at=timezone.now(),
+        codex_last_synced_at=timezone.now(),
+    )
+
+
+def indexed_sessions() -> QuerySet[SessionMetadata]:
+    return (
+        SessionMetadata.objects.exclude(codex_updated_at__isnull=True)
+        .select_related("project")
+        .order_by("-codex_updated_at", "-pk")
+    )
+
+
+def display_title_for(*, thread_id: str, name: object, preview: object) -> str:
+    candidate = name.strip() if isinstance(name, str) else ""
+    if not candidate:
+        candidate = (preview if isinstance(preview, str) else "").split("\n", 1)[
+            0
+        ].strip()
+    if not candidate:
+        return thread_id
+    if len(candidate) > DISPLAY_TITLE_MAX_LEN:
+        return candidate[:DISPLAY_TITLE_MAX_LEN].rstrip() + "..."
+    return candidate
+
+
+def updated_at_seconds(value: Any) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, datetime):
+        return value.timestamp()
+    return 0.0
+
+
+def _refresh_source(
+    codex: Codex,
+    *,
+    projects: list[Project],
+    archived: bool,
+    use_state_db_only: bool,
+    max_pages: int | None,
+) -> _SourceRefreshResult:
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    pages = 0
+    synced = 0
+    seen_thread_ids: set[str] = set()
+    while max_pages is None or pages < max_pages:
+        kwargs: dict[str, Any] = {
+            "limit": THREAD_LIST_FETCH_LIMIT,
+            "sort_key": ThreadSortKey.updated_at,
+            "sort_direction": SortDirection.desc,
+            "use_state_db_only": use_state_db_only,
+        }
+        if archived:
+            kwargs["archived"] = True
+        if cursor:
+            kwargs["cursor"] = cursor
+        response = codex.thread_list(**kwargs)
+        for thread in response.data:
+            if (metadata := upsert_thread(thread, projects=projects)) is not None:
+                seen_thread_ids.add(metadata.thread_id)
+                synced += 1
+        pages += 1
+        next_cursor = getattr(response, "next_cursor", None)
+        if not isinstance(next_cursor, str) or not next_cursor:
+            return _SourceRefreshResult(
+                synced=synced,
+                complete=True,
+                next_cursor="",
+                seen_thread_ids=seen_thread_ids,
+            )
+        if next_cursor in seen_cursors:
+            logger.warning("thread list returned duplicate cursor; stopping session index refresh")
+            return _SourceRefreshResult(
+                synced=synced,
+                complete=False,
+                next_cursor=next_cursor,
+                seen_thread_ids=seen_thread_ids,
+            )
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    return _SourceRefreshResult(
+        synced=synced,
+        complete=False,
+        next_cursor=cursor or "",
+        seen_thread_ids=seen_thread_ids,
+    )
+
+
+def _invalidate_absent_source_rows(*, archived: bool, seen_thread_ids: set[str]) -> None:
+    SessionMetadata.objects.exclude(thread_id__in=seen_thread_ids).filter(
+        codex_updated_at__isnull=False,
+        codex_archived=archived,
+    ).update(codex_updated_at=None, codex_last_synced_at=timezone.now())
+
+
+def _source_name(*, archived: bool) -> str:
+    return (
+        SessionIndexSyncState.SOURCE_ARCHIVED
+        if archived
+        else SessionIndexSyncState.SOURCE_ACTIVE
+    )
+
+
+def _codex_defaults(
+    *,
+    thread_id: str,
+    cwd: str,
+    name: object,
+    preview: object,
+    created_at: datetime | None,
+    updated_at: datetime | None,
+    archived: bool,
+    path: object,
+    thread_source: str,
+) -> dict[str, Any]:
+    now = timezone.now()
+    name_value = name.strip() if isinstance(name, str) else ""
+    preview_value = preview if isinstance(preview, str) else ""
+    return {
+        "cwd": cwd,
+        "codex_display_title": display_title_for(
+            thread_id=thread_id, name=name_value, preview=preview_value
+        ),
+        "codex_name": name_value,
+        "codex_preview": preview_value,
+        "codex_created_at": created_at or updated_at or now,
+        "codex_updated_at": updated_at or created_at or now,
+        "codex_archived": archived,
+        "codex_path": path if isinstance(path, str) else "",
+        "codex_thread_source": thread_source,
+        "codex_last_synced_at": now,
+    }
+
+
+def _timestamp_to_datetime(value: object) -> datetime | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return datetime.fromtimestamp(value, UTC)
+    if isinstance(value, datetime):
+        return value
+    return None
+
+
+def _thread_cwd(thread: Any) -> str | None:
+    raw = getattr(thread, "cwd", None)
+    if isinstance(raw, str):
+        return raw or None
+    root = getattr(raw, "root", None)
+    return root if isinstance(root, str) and root else None
+
+
+def _thread_is_archived(thread: Any) -> bool:
+    path = getattr(thread, "path", None)
+    if not isinstance(path, str) or not path:
+        return False
+    return ARCHIVED_SESSIONS_DIR in Path(path).parts
+
+
+def _metadata_value(value: Any) -> str:
+    root = getattr(value, "root", value)
+    raw = getattr(root, "value", root)
+    return raw if isinstance(raw, str) else ""
+
+
+def _project_for_cwd(cwd: str, projects: Iterable[Project]) -> Project | None:
+    if not cwd:
+        return None
+    return next(
+        (
+            project
+            for project in projects
+            if same_repo_or_worktree(cwd, project.repo_path, project.git_common_dir)
+        ),
+        None,
+    )
