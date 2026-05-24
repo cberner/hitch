@@ -197,6 +197,34 @@ class LocalMergeTests(SimpleTestCase):
             self.assertEqual(_git(repo, "show", "main:README.md"), "hello")
             self.assertFalse((repo.parent / "hook-ran").exists())
 
+    def test_auto_merge_preserves_sparse_checkout_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            session = root / "session"
+            _init_repo(repo)
+            (repo / "src").mkdir()
+            (repo / "src" / "keep.txt").write_text("keep\n")
+            (repo / "docs").mkdir()
+            (repo / "docs" / "excluded.txt").write_text("docs\n")
+            _git(repo, "add", "src/keep.txt", "docs/excluded.txt")
+            _git(repo, "commit", "-m", "add sparse paths")
+            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
+            _git(session, "sparse-checkout", "init", "--cone")
+            _git(session, "sparse-checkout", "set", "src")
+            self.assertFalse((session / "docs" / "excluded.txt").exists())
+            (session / "src" / "keep.txt").write_text("keep changed\n")
+
+            review = build_auto_merge_review_patch(session, "main")
+            result = merge_worktree_diff_to_branch(
+                session, "main", review.patch, review.target_sha
+            )
+
+            self.assertTrue(result.changed)
+            self.assertNotIn("docs/excluded.txt", review.patch)
+            self.assertEqual(_git(repo, "show", "main:src/keep.txt"), "keep changed")
+            self.assertEqual(_git(repo, "show", "main:docs/excluded.txt"), "docs")
+
     def test_merge_rejects_dirty_checked_out_target_worktree(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
