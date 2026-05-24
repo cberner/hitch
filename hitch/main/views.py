@@ -1158,6 +1158,7 @@ def _render_session_detail(
     settings_dialog_context = _settings_dialog_context(settings, models_data)
     active_worker_status_text = _active_worker_status_text(active_instance)
     workflow_status_text = _workflow_status_text(active_system_workflow)
+    pr_workflow_progress = streaming.pr_workflow_progress(active_system_workflow)
     live_status_text = active_worker_status_text or (
         workflow_status_text
         if active_system_workflow is not None and active_instance is None
@@ -1213,6 +1214,7 @@ def _render_session_detail(
                 active_system_workflow is not None or active_instance is not None
             ),
             "workflow_status_text": workflow_status_text,
+            "pr_workflow_progress": pr_workflow_progress,
             "active_worker_status_text": active_worker_status_text,
             "live_status_text": live_status_text,
             # Carried into the Stop button so the click targets the
