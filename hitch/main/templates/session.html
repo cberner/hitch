@@ -1254,6 +1254,54 @@
             text-overflow: ellipsis;
             white-space: nowrap;
         }
+        .pr-progress {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.35rem;
+            pointer-events: auto;
+        }
+        .pr-progress[hidden] { display: none; }
+        .pr-gate {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.35rem 0.6rem;
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            background: var(--surface-2);
+            color: var(--text-muted);
+            font-size: 0.74rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .pr-gate::before {
+            content: "";
+            width: 0.48rem;
+            height: 0.48rem;
+            border-radius: 50%;
+            background: var(--text-faint);
+        }
+        .pr-gate[data-status="checking"]::before,
+        .pr-gate[data-status="pending"]::before {
+            background: var(--status-warn-fg);
+            animation: live-pulse 1.6s ease-out infinite;
+        }
+        .pr-gate[data-status="passed"] {
+            background: var(--accent-soft);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+        .pr-gate[data-status="passed"]::before { background: var(--accent); }
+        .pr-gate[data-status="blocked"],
+        .pr-gate[data-status="stopped"] {
+            background: var(--status-error-bg);
+            border-color: var(--status-error-bg);
+            color: var(--status-error-fg);
+        }
+        .pr-gate[data-status="blocked"]::before,
+        .pr-gate[data-status="stopped"]::before {
+            background: var(--danger);
+        }
         @keyframes live-pulse {
             0% { box-shadow: 0 0 0 0 var(--accent-soft); }
             70% { box-shadow: 0 0 0 8px transparent; }
@@ -2090,6 +2138,15 @@
                 <span class="live-goal-label">Goal</span>
                 <span class="live-goal-text" data-live-goal-text>{{ goal_objective }}</span>
             </span>
+            <span class="pr-progress" data-pr-progress {% if not pr_workflow_progress %}hidden{% endif %}>
+                {% for gate in pr_workflow_progress %}
+                <span class="pr-gate"
+                      data-pr-gate="{{ gate.key }}"
+                      data-status="{{ gate.status }}"
+                      title="{{ gate.summary }}"
+                      aria-label="{{ gate.label }}: {{ gate.statusLabel }}">{{ gate.label }}: {{ gate.statusLabel }}</span>
+                {% endfor %}
+            </span>
         </div>
     </main>
 
@@ -2767,6 +2824,7 @@
             const liveWork = document.querySelector("[data-live-work]");
             const liveGoal = document.querySelector("[data-live-goal]");
             const liveGoalText = document.querySelector("[data-live-goal-text]");
+            const prProgress = document.querySelector("[data-pr-progress]");
             const streamUrl = streamSource && streamSource.dataset.streamUrl;
             if (!streamUrl || !indicator) return;
 
@@ -3868,7 +3926,35 @@
                 if (payload && typeof payload.statusText === "string" && payload.statusText.trim()) {
                     workingText = payload.statusText.trim();
                 }
+                if (payload && Array.isArray(payload.prWorkflowProgress)) {
+                    renderPrProgress(payload.prWorkflowProgress);
+                }
                 setState(payload && payload.working ? "working" : "idle");
+            }
+
+            function renderPrProgress(gates) {
+                if (!prProgress) return;
+                prProgress.innerHTML = "";
+                const validGates = gates.filter((gate) => {
+                    return gate
+                        && typeof gate.key === "string"
+                        && typeof gate.label === "string"
+                        && typeof gate.status === "string";
+                });
+                prProgress.hidden = validGates.length === 0;
+                for (const gate of validGates) {
+                    const item = document.createElement("span");
+                    item.className = "pr-gate";
+                    item.dataset.prGate = gate.key;
+                    item.dataset.status = gate.status;
+                    if (typeof gate.summary === "string") item.title = gate.summary;
+                    const statusLabel = typeof gate.statusLabel === "string"
+                        ? gate.statusLabel
+                        : gate.status;
+                    item.setAttribute("aria-label", `${gate.label}: ${statusLabel}`);
+                    item.textContent = `${gate.label}: ${statusLabel}`;
+                    prProgress.appendChild(item);
+                }
             }
 
             function handleMessage(event) {

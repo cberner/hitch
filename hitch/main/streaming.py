@@ -23,6 +23,7 @@ import json
 import time
 from collections.abc import Generator, Iterator
 from pathlib import Path
+from typing import Any
 
 from hitch.main import codex_events, codex_pool
 from hitch.main.models import (
@@ -100,6 +101,7 @@ def stream_for_instance(
     yield _heartbeat_frame(
         working=True,
         status_text=qa_agent_status_text_for_instance(instance),
+        workflow=_workflow_for_instance(instance),
     )
 
     path = Path(instance.events_path)
@@ -119,6 +121,7 @@ def stream_for_instance(
             yield _heartbeat_frame(
                 working=True,
                 status_text=qa_agent_status_text_for_instance(instance),
+                workflow=_workflow_for_instance(instance),
             )
             last_heartbeat = time.monotonic()
         time.sleep(_POLL_INTERVAL)
@@ -160,6 +163,7 @@ def stream_for_instance(
                 yield _heartbeat_frame(
                     working=True,
                     status_text=qa_agent_status_text_for_instance(instance),
+                    workflow=_workflow_for_instance(instance),
                 )
                 last_heartbeat = time.monotonic()
             time.sleep(_POLL_INTERVAL)
@@ -220,6 +224,7 @@ def system_workflow_stream(
     yield _heartbeat_frame(
         working=True,
         status_text=system_workflow_status_text(workflow),
+        workflow=workflow,
     )
     deadline = time.monotonic() + _IDLE_MAX_STREAM_SECONDS
     last_heartbeat = time.monotonic()
@@ -241,6 +246,7 @@ def system_workflow_stream(
             yield _heartbeat_frame(
                 working=True,
                 status_text=system_workflow_status_text(workflow),
+                workflow=workflow,
             )
             last_heartbeat = time.monotonic()
         time.sleep(_IDLE_POLL_INTERVAL)
@@ -335,12 +341,60 @@ def _workflow_input_request_frames(
         seen[request_id] = marker
 
 
-def _heartbeat_frame(*, working: bool, status_text: str = "") -> bytes:
-    payload_data: dict[str, bool | str] = {"working": working}
+def _heartbeat_frame(
+    *,
+    working: bool,
+    status_text: str = "",
+    workflow: SystemWorkflow | None = None,
+) -> bytes:
+    payload_data: dict[str, Any] = {"working": working}
     if status_text:
         payload_data["statusText"] = status_text
+    if workflow is not None and workflow.kind == SystemWorkflow.KIND_PR_QA:
+        progress = pr_workflow_progress(workflow)
+        payload_data["prWorkflowProgress"] = progress
     payload = json.dumps(payload_data).encode("utf-8")
     return b"event: heartbeat\ndata: " + payload + b"\n\n"
+
+
+def pr_workflow_progress(workflow: SystemWorkflow | None) -> list[dict[str, str]]:
+    if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
+        return []
+    raw_gates = workflow.state.get("pr_gates") if isinstance(workflow.state, dict) else []
+    if not isinstance(raw_gates, list) or not raw_gates:
+        return []
+    progress: list[dict[str, str]] = []
+    for raw in raw_gates:
+        if not isinstance(raw, dict):
+            continue
+        key = raw.get("key")
+        label = raw.get("label")
+        status = raw.get("status")
+        summary = raw.get("summary")
+        if not isinstance(key, str) or not isinstance(label, str):
+            continue
+        if status not in {"passed", "blocked", "pending", "checking", "stopped"}:
+            status = "pending"
+        progress.append(
+            {
+                "key": key,
+                "label": label,
+                "status": status,
+                "statusLabel": _pr_gate_status_label(status),
+                "summary": summary if isinstance(summary, str) else "",
+            }
+        )
+    return progress
+
+
+def _pr_gate_status_label(status: str) -> str:
+    return {
+        "blocked": "Blocked",
+        "checking": "Checking",
+        "passed": "Passed",
+        "pending": "Pending",
+        "stopped": "Stopped",
+    }.get(status, "Pending")
 
 
 def qa_agent_status_text_for_instance(instance: CodexInstance | None) -> str:
@@ -503,6 +557,12 @@ def _running_system_agent_instance(workflow_id: int) -> CodexInstance | None:
         .first()
     )
     return run.instance if run is not None else None
+
+
+def _workflow_for_instance(instance: CodexInstance) -> SystemWorkflow | None:
+    if instance.workflow_id is None:
+        return None
+    return SystemWorkflow.objects.filter(pk=instance.workflow_id).first()
 
 
 def _is_done(instance_id: int) -> bool:

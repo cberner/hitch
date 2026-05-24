@@ -4682,6 +4682,16 @@ class SessionStreamViewTests(TestCase):
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
             step="qa_running",
+            state={
+                "pr_gates": [
+                    {
+                        "key": "ci",
+                        "label": "CI",
+                        "status": "pending",
+                        "summary": "CI is still running.",
+                    }
+                ]
+            },
         )
 
         response = self.client.get(
@@ -4692,6 +4702,63 @@ class SessionStreamViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertIn(b"event: heartbeat", body)
         self.assertIn(b'"working": true', body)
+        self.assertIn(b'"prWorkflowProgress"', body)
+        self.assertIn(b'"label": "CI"', body)
+        self.assertIn(b'"statusLabel": "Pending"', body)
+
+    @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
+    @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
+    def test_system_workflow_heartbeat_clears_empty_pr_progress(self) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-workflow-empty-progress",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step="qa_running",
+        )
+
+        response = self.client.get(
+            self._stream_url(
+                "thread-workflow-empty-progress", workflow=str(workflow.pk)
+            )
+        )
+        body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
+
+        self.assertIn(b'"prWorkflowProgress": []', body)
+
+    def test_active_instance_stream_includes_pr_progress(self) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-active-progress",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_FEEDBACK_RUNNING,
+            state={
+                "pr_gates": [
+                    {
+                        "key": "review",
+                        "label": "Review",
+                        "status": "blocked",
+                        "summary": "Review changes requested.",
+                    }
+                ]
+            },
+        )
+        instance = self._make(
+            thread_id="thread-active-progress",
+            workflow_id=workflow.pk,
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            display_author=system_agents.PR_MONITOR_DISPLAY_AUTHOR,
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+
+        stream = streaming.stream_for_instance(instance)
+        body = next(stream) + next(stream)
+
+        self.assertIn(b'"prWorkflowProgress"', body)
+        self.assertIn(b'"label": "Review"', body)
+        self.assertIn(b'"statusLabel": "Blocked"', body)
 
     def test_reloads_when_page_render_state_is_stale(self) -> None:
         # The classic out-of-band-spawn race: page rendered with no
