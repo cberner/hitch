@@ -52,6 +52,7 @@ from hitch.main import (
     coding_agents,
     demo,
     rollout,
+    session_index,
     streaming,
     system_agents,
 )
@@ -643,6 +644,110 @@ def _session_list_page(
     instances_by_thread_id = (
         _system_agent_instances_by_thread_id(system_thread_ids) if system_only else {}
     )
+    required_archived = current_settings.show_archived_sessions
+    active_complete = session_index.is_complete(archived=False)
+    archived_complete = (
+        not required_archived or session_index.is_complete(archived=True)
+    )
+    if (
+        not _request_uses_codex_cursor(request)
+        and (not active_complete or not archived_complete)
+    ):
+        session_index.refresh_from_codex(
+            codex,
+            projects=projects,
+            include_active=not active_complete,
+            include_archived=required_archived and not archived_complete,
+            max_pages=None,
+        )
+    if (
+        _request_uses_codex_cursor(request)
+        or not _session_index_sources_complete(include_archived=required_archived)
+    ):
+        return _session_list_page_from_codex(
+            codex,
+            request,
+            current_settings=current_settings,
+            projects=projects,
+            current_project=current_project,
+            hidden_thread_ids=hidden_thread_ids,
+            system_thread_ids=system_thread_ids,
+            runs_by_thread_id=runs_by_thread_id,
+            instances_by_thread_id=instances_by_thread_id,
+            system_only=system_only,
+            accepted_visible_thread_ids=accepted_visible_thread_ids,
+        )
+    request_uses_index_cursor = _request_uses_index_cursor(request)
+    refresh_active = (
+        not request_uses_index_cursor and session_index.should_refresh(archived=False)
+    )
+    refresh_archived = (
+        not request_uses_index_cursor
+        and current_settings.show_archived_sessions
+        and session_index.should_refresh(archived=True)
+    )
+    if refresh_active or refresh_archived:
+        session_index.refresh_from_codex(
+            codex,
+            projects=projects,
+            include_active=refresh_active,
+            include_archived=refresh_archived,
+            max_pages=1,
+        )
+    return _session_list_page_from_index(
+        request,
+        current_project=current_project,
+        show_archived=current_settings.show_archived_sessions,
+        hidden_thread_ids=hidden_thread_ids,
+        system_thread_ids=system_thread_ids,
+        runs_by_thread_id=runs_by_thread_id,
+        instances_by_thread_id=instances_by_thread_id,
+        projects=projects,
+        system_only=system_only,
+        accepted_visible_thread_ids=accepted_visible_thread_ids,
+    )
+
+
+def _request_uses_codex_cursor(request: HttpRequest) -> bool:
+    cursor = request.GET.get("cursor", "")
+    if cursor and not _is_index_cursor(cursor):
+        return True
+    return any(
+        request.GET.get(param)
+        for param in (
+            "done",
+            "archived_cursor",
+            "archived_offset",
+            "archived_done",
+            "materialized_order",
+        )
+    )
+
+
+def _request_uses_index_cursor(request: HttpRequest) -> bool:
+    return _is_index_cursor(request.GET.get("cursor", ""))
+
+
+def _session_index_sources_complete(*, include_archived: bool) -> bool:
+    if not session_index.is_complete(archived=False):
+        return False
+    return not include_archived or session_index.is_complete(archived=True)
+
+
+def _session_list_page_from_codex(
+    codex: Codex,
+    request: HttpRequest,
+    *,
+    current_settings: SettingsValues,
+    projects: list[Project],
+    current_project: Project | None,
+    hidden_thread_ids: set[str],
+    system_thread_ids: set[str],
+    runs_by_thread_id: dict[str, SystemAgentRun],
+    instances_by_thread_id: dict[str, CodexInstance],
+    system_only: bool,
+    accepted_visible_thread_ids: set[str],
+) -> SessionListPage:
     project_cache: dict[str, Project | None] = {}
     if not system_only and request.GET.get("materialized_order") == "1":
         return _materialized_session_list_page_from_codex(
@@ -689,9 +794,6 @@ def _session_list_page(
         accepted_visible_thread_ids=accepted_visible_thread_ids,
     )
     if active.needs_materialized_order:
-        # QA runs are DB-owned activity that can reorder main sessions across
-        # Codex cursor pages, so use a materialized effective-order page only
-        # after the fetched page proves that ordering can be affected.
         return _materialized_session_list_page_from_codex(
             codex,
             request,
@@ -731,6 +833,209 @@ def _session_list_page(
     )
 
 
+def _session_list_page_from_index(
+    request: HttpRequest,
+    *,
+    current_project: Project | None,
+    show_archived: bool,
+    hidden_thread_ids: set[str],
+    system_thread_ids: set[str],
+    runs_by_thread_id: dict[str, SystemAgentRun],
+    instances_by_thread_id: dict[str, CodexInstance],
+    projects: list[Project],
+    system_only: bool,
+    accepted_visible_thread_ids: set[str],
+) -> SessionListPage:
+    rows = session_index.indexed_sessions()
+    if system_only:
+        _ensure_indexed_system_threads(system_thread_ids, projects=projects)
+        rows = session_index.indexed_sessions()
+    indexed_system_thread_ids = set(
+        rows.filter(codex_thread_source="subagent")
+        .exclude(thread_id__in=accepted_visible_thread_ids)
+        .values_list("thread_id", flat=True)
+    )
+    hidden_thread_ids.update(indexed_system_thread_ids)
+    if system_only:
+        system_thread_ids.update(indexed_system_thread_ids)
+    if current_project is not None:
+        rows = rows.filter(project=current_project)
+    if not show_archived:
+        rows = rows.filter(codex_archived=False)
+    if system_only:
+        rows = rows.filter(thread_id__in=system_thread_ids)
+    else:
+        rows = rows.exclude(thread_id__in=hidden_thread_ids)
+    metadata_rows = list(rows)
+    qa_updated_at_by_main_thread = (
+        {}
+        if system_only
+        else _qa_activity_updated_at_by_metadata_thread_id(
+            metadata_rows, hidden_thread_ids
+        )
+    )
+    sessions = [
+        session
+        for metadata in metadata_rows
+        if (
+            session := _session_row_for_metadata(
+                metadata,
+                qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
+                runs_by_thread_id=runs_by_thread_id,
+                instances_by_thread_id=instances_by_thread_id,
+                system_only=system_only,
+            )
+        )
+        is not None
+    ]
+    sessions = _sort_session_rows(sessions)
+    index_cursor = _index_cursor_sort_key(request.GET.get("cursor", ""))
+    if index_cursor is not None:
+        sessions = [
+            session
+            for session in sessions
+            if _session_index_sort_key(session) < index_cursor
+        ]
+        offset = 0
+    else:
+        offset = _non_negative_int(request.GET.get("offset", ""))
+    page = sessions[offset : offset + _SESSION_PAGE_SIZE]
+    next_offset = offset + len(page)
+    done = next_offset >= len(sessions)
+    next_cursor = "" if done or not page else _index_cursor_for_session(page[-1])
+    return SessionListPage(
+        sessions=page,
+        next_cursor=next_cursor,
+        next_offset=0 if next_cursor else (next_offset if not done else 0),
+        next_done=done,
+        include_archived_source=False,
+        archived_next_cursor="",
+        archived_next_offset=0,
+        archived_next_done=True,
+    )
+
+
+def _ensure_indexed_system_threads(
+    system_thread_ids: set[str], *, projects: list[Project]
+) -> None:
+    missing_thread_ids = set(system_thread_ids) - set(
+        SessionMetadata.objects.filter(
+            thread_id__in=system_thread_ids,
+        )
+        .exclude(codex_updated_at__isnull=True)
+        .values_list("thread_id", flat=True)
+    )
+    if not missing_thread_ids:
+        return
+    instances = (
+        CodexInstance.objects.filter(
+            thread_id__in=missing_thread_ids,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        )
+        .exclude(thread_id="")
+        .order_by("thread_id", "-started_at", "-pk")
+    )
+    indexed: set[str] = set()
+    for instance in instances:
+        if instance.thread_id in indexed:
+            continue
+        indexed.add(instance.thread_id)
+        session_index.upsert_local_session(
+            thread_id=instance.thread_id,
+            cwd=instance.cwd,
+            projects=projects,
+            name=instance.display_author or instance.agent_kind,
+            preview=instance.prompt,
+        )
+
+
+def _session_row_for_metadata(
+    metadata: SessionMetadata,
+    *,
+    qa_updated_at_by_main_thread: Mapping[str, Any],
+    runs_by_thread_id: dict[str, SystemAgentRun],
+    instances_by_thread_id: dict[str, CodexInstance],
+    system_only: bool,
+) -> dict[str, Any] | None:
+    row = {
+        "id": metadata.thread_id,
+        "cwd": metadata.cwd,
+        "updated_at": _latest_updated_at(
+            metadata.codex_updated_at,
+            qa_updated_at_by_main_thread.get(metadata.thread_id),
+        ),
+        "display_title": metadata.codex_display_title or metadata.thread_id,
+        "name_value": metadata.codex_name,
+        "is_archived": metadata.codex_archived,
+        "project": metadata.project,
+    }
+    if system_only:
+        run = runs_by_thread_id.get(metadata.thread_id)
+        instance = run.instance if run is not None else instances_by_thread_id.get(metadata.thread_id)
+        untracked_hitch_system = metadata.codex_thread_source == "subagent"
+        if instance is None and not untracked_hitch_system:
+            return None
+        row.update(
+            {
+                "detail_url": reverse("system_session", kwargs={"session_id": metadata.thread_id}),
+                "system_kind": (
+                    _system_agent_run_label(run, instance)
+                    if instance is not None
+                    else "Hitch system"
+                ),
+                "system_status": (
+                    _system_agent_status(run, instance)
+                    if instance is not None
+                    else "untracked"
+                ),
+            }
+        )
+    return row
+
+
+def _qa_activity_updated_at_by_metadata_thread_id(
+    metadata_rows: Iterable[SessionMetadata], hidden_thread_ids: set[str]
+) -> dict[str, Any]:
+    main_thread_ids = [metadata.thread_id for metadata in metadata_rows]
+    if not main_thread_ids:
+        return {}
+    hidden_metadata_by_thread_id = {
+        metadata.thread_id: metadata
+        for metadata in SessionMetadata.objects.filter(thread_id__in=hidden_thread_ids)
+    }
+    runs = (
+        SystemAgentRun.objects.filter(
+            workflow__kind=SystemWorkflow.KIND_PR_QA,
+            workflow__main_thread_id__in=main_thread_ids,
+        )
+        .exclude(thread_id="")
+        .select_related("workflow")
+    )
+    updated_at_by_main_thread: dict[str, Any] = {}
+    for run in runs:
+        main_thread_id = run.workflow.main_thread_id
+        if not main_thread_id:
+            continue
+        hidden_metadata = hidden_metadata_by_thread_id.get(run.thread_id)
+        local_run_updated_at = _latest_updated_at(run.updated_at, run.workflow.updated_at)
+        if hidden_metadata is None:
+            run_updated_at = local_run_updated_at
+        elif (_updated_at_seconds(local_run_updated_at) or 0.0) > (
+            _updated_at_seconds(hidden_metadata.codex_last_synced_at) or 0.0
+        ):
+            run_updated_at = _latest_updated_at(
+                hidden_metadata.codex_updated_at,
+                local_run_updated_at,
+            )
+        else:
+            run_updated_at = hidden_metadata.codex_updated_at
+        updated_at_by_main_thread[main_thread_id] = _latest_updated_at(
+            updated_at_by_main_thread.get(main_thread_id),
+            run_updated_at,
+        )
+    return updated_at_by_main_thread
+
+
 def _materialized_session_list_page_from_codex(
     codex: Codex,
     request: HttpRequest,
@@ -756,6 +1061,8 @@ def _materialized_session_list_page_from_codex(
         system_only=system_only,
         accepted_visible_thread_ids=accepted_visible_thread_ids,
     )
+    for thread in threads:
+        session_index.upsert_thread(thread, projects=projects)
     metadata_by_thread = _metadata_by_thread_id(threads)
     qa_updated_at_by_main_thread = _qa_activity_updated_at_by_main_thread_id(
         threads, hidden_thread_ids
@@ -928,6 +1235,8 @@ def _peek_source_session(
                 system_only=system_only,
                 accepted_visible_thread_ids=accepted_visible_thread_ids,
             )
+            for thread in source.page.threads:
+                session_index.upsert_thread(thread, projects=projects)
             source.next_page_cursor = source.page.next_cursor
             source.metadata_by_thread = _metadata_by_thread_id(source.page.threads)
             detect_materialized_order = (
@@ -1038,6 +1347,8 @@ def _visible_session_page_from_codex(
             system_only=system_only,
             accepted_visible_thread_ids=accepted_visible_thread_ids,
         )
+        for thread in page.threads:
+            session_index.upsert_thread(thread, projects=projects)
         can_materialize_qa_activity = (
             materialized_fallback_allowed
             and not system_only
@@ -1181,9 +1492,42 @@ def _add_thread_derived_hidden_ids(
 def _sort_session_rows(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         sessions,
-        key=lambda session: _updated_at_sort_key(session["updated_at"]),
+        key=_session_index_sort_key,
         reverse=True,
     )
+
+
+def _session_index_sort_key(session: dict[str, Any]) -> tuple[float, str]:
+    return (_updated_at_sort_key(session["updated_at"]), str(session["id"]))
+
+
+def _index_cursor_for_session(session: dict[str, Any]) -> str:
+    payload = {
+        "updated_at": _updated_at_sort_key(session["updated_at"]),
+        "id": str(session["id"]),
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode()
+    ).decode()
+    return f"idx:{encoded}"
+
+
+def _index_cursor_sort_key(cursor: str) -> tuple[float, str] | None:
+    if not _is_index_cursor(cursor):
+        return None
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(cursor[4:].encode()).decode())
+    except (ValueError, binascii.Error, json.JSONDecodeError):
+        return None
+    updated_at = payload.get("updated_at")
+    thread_id = payload.get("id")
+    if not isinstance(updated_at, int | float) or not isinstance(thread_id, str):
+        return None
+    return (float(updated_at), thread_id)
+
+
+def _is_index_cursor(cursor: str) -> bool:
+    return cursor.startswith("idx:")
 
 
 def _thread_list_page(codex: Codex, *, archived: bool, cursor: str) -> ThreadListPage:
@@ -4557,6 +4901,7 @@ def set_session_name(request: HttpRequest, session_id: str) -> HttpResponse:
     config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
     with Codex(config=config) as codex:
         codex._client.thread_set_name(session_id, name)
+    session_index.update_cached_name(session_id, name)
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return HttpResponse(status=204)
     if request.POST.get("next", "").strip() == "index":
@@ -4578,6 +4923,7 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
             codex.thread_archive(session_id)
         else:
             codex.thread_unarchive(session_id)
+    session_index.update_cached_archived(session_id, archived=archived == "true")
     ArchivedSessionTokenUsage.objects.all().delete()
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return HttpResponse(status=204)
@@ -5668,15 +6014,14 @@ def new_session(request: HttpRequest) -> HttpResponse:
         if qa_activation:
             workflow_kwargs["open_pr_on_lgtm"] = False
         system_agents.start_pr_qa_workflow(**workflow_kwargs)
-        session_metadata, _created = SessionMetadata.objects.update_or_create(
+        session_metadata = session_index.upsert_local_session(
             thread_id=thread_id,
-            defaults={
-                "cwd": session_cwd,
-                "project": source_project,
-                "project_cleared": target.project_cleared,
-                "auto_pr_enabled": False,
-                "auto_qa_enabled": False,
-            },
+            cwd=session_cwd,
+            project=source_project,
+            project_cleared=target.project_cleared,
+            name=thread_name,
+            auto_pr_enabled=False,
+            auto_qa_enabled=False,
         )
         _accept_proposed_session_for_session(proposed_session, session_metadata)
         remembered_values = settings._replace(last_selected_repo=cwd)
@@ -5797,15 +6142,20 @@ def new_session(request: HttpRequest) -> HttpResponse:
         if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
             spec_workflow_kwargs["qa_panel_enabled"] = True
         system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
-        session_metadata, _created = SessionMetadata.objects.update_or_create(
+        spec_thread_name = (
+            proposed_session.title
+            if proposed_session is not None
+            else prompt.split("\n", 1)[0]
+        )
+        session_metadata = session_index.upsert_local_session(
             thread_id=thread_id,
-            defaults={
-                "cwd": session_cwd,
-                "project": session_project,
-                "project_cleared": target.project_cleared,
-                "auto_pr_enabled": auto_pr_enabled,
-                "auto_qa_enabled": auto_qa_enabled,
-            },
+            cwd=session_cwd,
+            project=session_project,
+            project_cleared=target.project_cleared,
+            name=spec_thread_name,
+            preview=prompt,
+            auto_pr_enabled=auto_pr_enabled,
+            auto_qa_enabled=auto_qa_enabled,
         )
         _accept_proposed_session_for_session(proposed_session, session_metadata)
         remembered_values = settings._replace(last_selected_repo=cwd)
@@ -5833,15 +6183,15 @@ def new_session(request: HttpRequest) -> HttpResponse:
                     "failed to clean up managed worktree %s", managed_worktree.path
                 )
         raise
-    session_metadata, _created = SessionMetadata.objects.update_or_create(
+    session_metadata = session_index.upsert_local_session(
         thread_id=instance.thread_id,
-        defaults={
-            "cwd": session_cwd,
-            "project": session_project,
-            "project_cleared": target.project_cleared,
-            "auto_pr_enabled": auto_pr_enabled,
-            "auto_qa_enabled": auto_qa_enabled,
-        },
+        cwd=session_cwd,
+        project=session_project,
+        project_cleared=target.project_cleared,
+        name=proposed_session.title if proposed_session is not None else "",
+        preview=prompt,
+        auto_pr_enabled=auto_pr_enabled,
+        auto_qa_enabled=auto_qa_enabled,
     )
     _accept_proposed_session_for_session(proposed_session, session_metadata)
     remembered_values = settings._replace(last_selected_repo=cwd)

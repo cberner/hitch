@@ -17,7 +17,7 @@ from django.utils.dateparse import parse_datetime
 from openai_codex import AppServerError, Codex
 from openai_codex.generated.v2_all import GetAccountRateLimitsResponse, ThreadSource
 
-from hitch.main import codex_events, codex_pool, demo
+from hitch.main import codex_events, codex_pool, demo, session_index
 from hitch.main.diffs import build_worktree_diff_text
 from hitch.main.local_merges import (
     LocalBranchMergeError,
@@ -2361,16 +2361,14 @@ def _spawn_standing_order_candidate_run(
         display_author=STANDING_ORDER_DISPLAY_AUTHOR,
         output_schema=_STANDING_ORDER_CANDIDATE_OUTPUT_SCHEMA,
     )
-    metadata, _created = SessionMetadata.objects.update_or_create(
+    metadata = session_index.upsert_local_session(
         thread_id=instance.thread_id,
-        defaults={
-            "cwd": workflow.cwd,
-            "project": standing_order.project,
-            "project_cleared": False,
-            "auto_pr_enabled": False,
-            "auto_merge_to_local_branch": False,
-            "auto_merge_branch": "",
-        },
+        cwd=workflow.cwd,
+        project=standing_order.project,
+        preview=prompt,
+        auto_pr_enabled=False,
+        auto_merge_to_local_branch=False,
+        auto_merge_branch="",
     )
     workflow.state = {**workflow.state, "candidate_session_id": metadata.pk}
     workflow.save(update_fields=["state", "updated_at"])
@@ -2413,16 +2411,14 @@ def _spawn_standing_order_judge_run(
         display_author=STANDING_ORDER_JUDGE_DISPLAY_AUTHOR,
         output_schema=_STANDING_ORDER_JUDGE_OUTPUT_SCHEMA,
     )
-    metadata, _created = SessionMetadata.objects.update_or_create(
+    metadata = session_index.upsert_local_session(
         thread_id=instance.thread_id,
-        defaults={
-            "cwd": workflow.cwd,
-            "project": standing_order.project,
-            "project_cleared": False,
-            "auto_pr_enabled": False,
-            "auto_merge_to_local_branch": False,
-            "auto_merge_branch": "",
-        },
+        cwd=workflow.cwd,
+        project=standing_order.project,
+        preview=prompt,
+        auto_pr_enabled=False,
+        auto_merge_to_local_branch=False,
+        auto_merge_branch="",
     )
     workflow.state = {**workflow.state, "judge_session_id": metadata.pk}
     workflow.save(update_fields=["state", "updated_at"])
@@ -2642,17 +2638,16 @@ def _start_standing_order_implementation_session(
                     managed_worktree.path,
                 )
         raise
-    metadata, _created = SessionMetadata.objects.update_or_create(
+    metadata = session_index.upsert_local_session(
         thread_id=instance.thread_id,
-        defaults={
-            "cwd": implementation_cwd,
-            "project": standing_order.project,
-            "project_cleared": False,
-            "auto_pr_enabled": auto_pr_enabled,
-            "auto_qa_enabled": auto_qa_enabled,
-            "auto_merge_to_local_branch": auto_merge_to_local_branch,
-            "auto_merge_branch": auto_merge_branch,
-        },
+        cwd=implementation_cwd,
+        project=standing_order.project,
+        name=proposal.title,
+        preview=prompt,
+        auto_pr_enabled=auto_pr_enabled,
+        auto_qa_enabled=auto_qa_enabled,
+        auto_merge_to_local_branch=auto_merge_to_local_branch,
+        auto_merge_branch=auto_merge_branch,
     )
     _record_proposal_automation_success(
         proposal,
