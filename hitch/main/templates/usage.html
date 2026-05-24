@@ -180,6 +180,48 @@
             color: var(--text-muted);
             font-size: 0.86rem;
         }
+        .usage-title-button {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            border: 0;
+            border-radius: 4px;
+            background: transparent;
+            color: inherit;
+            font: inherit;
+            margin: 0;
+            padding: 0;
+            cursor: pointer;
+        }
+        .usage-title-button:hover {
+            color: var(--accent-hover);
+        }
+        .usage-title-button:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 4px;
+        }
+        .usage-title-button::after {
+            content: "";
+            width: 0.42rem;
+            height: 0.42rem;
+            border-right: 1.5px solid currentColor;
+            border-bottom: 1.5px solid currentColor;
+            transform: translateY(-0.12rem) rotate(45deg);
+            transition: transform 0.12s ease;
+        }
+        .usage-title-button[aria-expanded="true"]::after {
+            transform: translateY(0.08rem) rotate(225deg);
+        }
+        .usage-total-chart {
+            display: none;
+            margin: -0.15rem 0 1rem;
+            border-top: 1px solid var(--border);
+            padding-top: 0.8rem;
+            --lifetime-chart-stack-height: 7.75rem;
+        }
+        .usage-total-chart.is-expanded {
+            display: block;
+        }
         .lifetime-stats {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -441,9 +483,24 @@
         <section class="usage-section" aria-labelledby="lifetime-title">
             <p class="section-label">Token usage</p>
             <div class="usage-header">
-                <h2 id="lifetime-title">All sessions</h2>
+                <h2 id="lifetime-title">
+                    {% if lifetime_usage and lifetime_usage.total.chart %}
+                    <button type="button"
+                            class="usage-title-button"
+                            aria-expanded="false"
+                            aria-controls="lifetime-total-chart"
+                            data-lifetime-total-toggle>
+                        All sessions
+                    </button>
+                    {% else %}
+                    All sessions
+                    {% endif %}
+                </h2>
             </div>
             {% if lifetime_usage %}
+            {% if lifetime_usage.total.chart %}
+            {% include "_lifetime_token_chart.html" with chart=lifetime_usage.total.chart chart_axis=lifetime_usage.total.chart_axis chart_label="All sessions token usage by date" chart_class="usage-total-chart" chart_id="lifetime-total-chart" only %}
+            {% endif %}
             <div class="lifetime-stats" aria-label="All sessions token usage">
                 <div class="lifetime-stat" role="button" tabindex="0" aria-expanded="false">
                     <span class="lifetime-label">Sessions</span>
@@ -462,32 +519,7 @@
                         </span>
                     </div>
                     {% if lifetime_usage.sessions.chart %}
-                    <div class="lifetime-chart" aria-label="Sessions token usage by date">
-                        <div class="lifetime-chart-plot">
-                            <div class="lifetime-chart-axis" aria-hidden="true">
-                                {% for value in lifetime_usage.sessions.chart_axis %}
-                                <span class="lifetime-chart-axis-value">{{ value }}</span>
-                                {% endfor %}
-                            </div>
-                            <div class="lifetime-chart-bars">
-                                {% for day in lifetime_usage.sessions.chart %}
-                                <div class="lifetime-chart-day" title="{{ day.date }}: {{ day.total }} tokens">
-                                    <div class="lifetime-chart-stack">
-                                        <span class="lifetime-chart-segment input" style="height: {{ day.input_percent }}%" title="Input {{ day.input }}"></span>
-                                        <span class="lifetime-chart-segment output" style="height: {{ day.output_percent }}%" title="Output {{ day.output }}"></span>
-                                        <span class="lifetime-chart-segment cached" style="height: {{ day.cached_percent }}%" title="Cached {{ day.cached }}"></span>
-                                    </div>
-                                    <span class="lifetime-chart-label">{{ day.date|slice:"5:" }}</span>
-                                </div>
-                                {% endfor %}
-                            </div>
-                        </div>
-                        <div class="lifetime-chart-legend" aria-hidden="true">
-                            <span class="lifetime-chart-legend-item"><span class="lifetime-chart-swatch input"></span>Input</span>
-                            <span class="lifetime-chart-legend-item"><span class="lifetime-chart-swatch output"></span>Output</span>
-                            <span class="lifetime-chart-legend-item"><span class="lifetime-chart-swatch cached"></span>Cached</span>
-                        </div>
-                    </div>
+                    {% include "_lifetime_token_chart.html" with chart=lifetime_usage.sessions.chart chart_axis=lifetime_usage.sessions.chart_axis chart_label="Sessions token usage by date" chart_class="lifetime-chart" only %}
                     {% endif %}
                 </div>
                 <div class="lifetime-stat" role="button" tabindex="0" aria-expanded="false">
@@ -507,32 +539,7 @@
                         </span>
                     </div>
                     {% if lifetime_usage.system.chart %}
-                    <div class="lifetime-chart" aria-label="HITCH system token usage by date">
-                        <div class="lifetime-chart-plot">
-                            <div class="lifetime-chart-axis" aria-hidden="true">
-                                {% for value in lifetime_usage.system.chart_axis %}
-                                <span class="lifetime-chart-axis-value">{{ value }}</span>
-                                {% endfor %}
-                            </div>
-                            <div class="lifetime-chart-bars">
-                                {% for day in lifetime_usage.system.chart %}
-                                <div class="lifetime-chart-day" title="{{ day.date }}: {{ day.total }} tokens">
-                                    <div class="lifetime-chart-stack">
-                                        <span class="lifetime-chart-segment input" style="height: {{ day.input_percent }}%" title="Input {{ day.input }}"></span>
-                                        <span class="lifetime-chart-segment output" style="height: {{ day.output_percent }}%" title="Output {{ day.output }}"></span>
-                                        <span class="lifetime-chart-segment cached" style="height: {{ day.cached_percent }}%" title="Cached {{ day.cached }}"></span>
-                                    </div>
-                                    <span class="lifetime-chart-label">{{ day.date|slice:"5:" }}</span>
-                                </div>
-                                {% endfor %}
-                            </div>
-                        </div>
-                        <div class="lifetime-chart-legend" aria-hidden="true">
-                            <span class="lifetime-chart-legend-item"><span class="lifetime-chart-swatch input"></span>Input</span>
-                            <span class="lifetime-chart-legend-item"><span class="lifetime-chart-swatch output"></span>Output</span>
-                            <span class="lifetime-chart-legend-item"><span class="lifetime-chart-swatch cached"></span>Cached</span>
-                        </div>
-                    </div>
+                    {% include "_lifetime_token_chart.html" with chart=lifetime_usage.system.chart chart_axis=lifetime_usage.system.chart_axis chart_label="HITCH system token usage by date" chart_class="lifetime-chart" only %}
                     {% endif %}
                 </div>
             </div>
@@ -584,6 +591,18 @@
     {% include "_settings_dialog.html" %}
     <script>
         (function () {
+            const totalToggle = document.querySelector("[data-lifetime-total-toggle]");
+            if (totalToggle) {
+                const chartId = totalToggle.getAttribute("aria-controls");
+                const totalChart = chartId ? document.getElementById(chartId) : null;
+                if (totalChart) {
+                    totalToggle.addEventListener("click", () => {
+                        const expanded = totalChart.classList.toggle("is-expanded");
+                        totalToggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+                    });
+                }
+            }
+
             document.querySelectorAll(".lifetime-stat").forEach((tile) => {
                 function toggleTile() {
                     const expanded = tile.classList.toggle("is-expanded");

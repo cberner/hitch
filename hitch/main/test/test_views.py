@@ -931,22 +931,34 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "All sessions")
         self.assertContains(response, "Sessions")
         self.assertContains(response, "HITCH system")
+        self.assertContains(response, 'class="usage-title-button"')
+        self.assertContains(response, 'aria-controls="lifetime-total-chart"')
+        self.assertContains(response, "data-lifetime-total-toggle")
         self.assertContains(
             response,
             '<div class="lifetime-stat" role="button" tabindex="0" aria-expanded="false">',
             count=2,
         )
+        self.assertContains(response, "All sessions token usage by date")
         self.assertContains(response, "Sessions token usage by date")
         self.assertContains(response, "HITCH system token usage by date")
         self.assertContains(
             response,
             '<span class="lifetime-chart-label">01-05</span>',
-            count=2,
+            count=3,
         )
         self.assertContains(
             response,
             '<div class="lifetime-chart-axis" aria-hidden="true">',
-            count=2,
+            count=3,
+        )
+        self.assertContains(
+            response,
+            '<span class="lifetime-chart-axis-value">4.5K</span>',
+        )
+        self.assertContains(
+            response,
+            '<span class="lifetime-chart-axis-value">2.3K</span>',
         )
         self.assertContains(
             response,

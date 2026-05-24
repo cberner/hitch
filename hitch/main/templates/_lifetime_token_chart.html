@@ -1,0 +1,26 @@
+<div{% if chart_id %} id="{{ chart_id }}"{% endif %} class="{{ chart_class }}" aria-label="{{ chart_label }}">
+    <div class="lifetime-chart-plot">
+        <div class="lifetime-chart-axis" aria-hidden="true">
+            {% for value in chart_axis %}
+            <span class="lifetime-chart-axis-value">{{ value }}</span>
+            {% endfor %}
+        </div>
+        <div class="lifetime-chart-bars">
+            {% for day in chart %}
+            <div class="lifetime-chart-day" title="{{ day.date }}: {{ day.total }} tokens">
+                <div class="lifetime-chart-stack">
+                    <span class="lifetime-chart-segment input" style="height: {{ day.input_percent }}%" title="Input {{ day.input }}"></span>
+                    <span class="lifetime-chart-segment output" style="height: {{ day.output_percent }}%" title="Output {{ day.output }}"></span>
+                    <span class="lifetime-chart-segment cached" style="height: {{ day.cached_percent }}%" title="Cached {{ day.cached }}"></span>
+                </div>
+                <span class="lifetime-chart-label">{{ day.date|slice:"5:" }}</span>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    <div class="lifetime-chart-legend" aria-hidden="true">
+        <span class="lifetime-chart-legend-item"><span class="lifetime-chart-swatch input"></span>Input</span>
+        <span class="lifetime-chart-legend-item"><span class="lifetime-chart-swatch output"></span>Output</span>
+        <span class="lifetime-chart-legend-item"><span class="lifetime-chart-swatch cached"></span>Cached</span>
+    </div>
+</div>

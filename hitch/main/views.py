@@ -1822,8 +1822,10 @@ def _system_agent_run_detail_title(run: SystemAgentRun) -> str:
 
 def _lifetime_token_usage_for(threads: list[Any]) -> dict[str, Any]:
     hidden_thread_ids = system_agents.hidden_thread_ids()
+    total_usage = _empty_lifetime_token_usage()
     session_usage = _empty_lifetime_token_usage()
     system_usage = _empty_lifetime_token_usage()
+    total_by_date: dict[str, dict[str, int]] = {}
     session_by_date: dict[str, dict[str, int]] = {}
     system_by_date: dict[str, dict[str, int]] = {}
     for thread in threads:
@@ -1832,15 +1834,24 @@ def _lifetime_token_usage_for(threads: list[Any]) -> dict[str, Any]:
             continue
         thread_id = getattr(thread, "id", None)
         is_system = isinstance(thread_id, str) and thread_id in hidden_thread_ids
+        total_usage["input"] += _non_cached_input_tokens(usage)
+        total_usage["output"] += usage.get("output_tokens", 0)
+        total_usage["cached"] += usage.get("cached_input_tokens", 0)
         bucket = system_usage if is_system else session_usage
         bucket["input"] += _non_cached_input_tokens(usage)
         bucket["output"] += usage.get("output_tokens", 0)
         bucket["cached"] += usage.get("cached_input_tokens", 0)
+        _add_token_usage_history_by_date(total_by_date, thread)
         _add_token_usage_history_by_date(
             system_by_date if is_system else session_by_date,
             thread,
         )
     return {
+        "total": {
+            **_format_lifetime_token_usage(total_usage),
+            "chart": _format_lifetime_token_chart(total_by_date),
+            "chart_axis": _format_lifetime_token_chart_axis(total_by_date),
+        },
         "sessions": {
             **_format_lifetime_token_usage(session_usage),
             "chart": _format_lifetime_token_chart(session_by_date),
