@@ -12,17 +12,20 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, cast, override
 from unittest.mock import MagicMock, call, patch
 
 from django.contrib.auth import get_user_model
 from django.core import signing
+from django.core.exceptions import SuspiciousOperation
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError
-from django.test import Client, TestCase, override_settings
+from django.http import HttpResponse
+from django.test import Client, RequestFactory, TestCase, override_settings
 from django.urls import reverse
 from openai_codex.errors import AppServerError, MethodNotFoundError
 
-from hitch.main import coding_agents, demo, streaming, system_agents, views
+from hitch.main import codex_pool, coding_agents, demo, streaming, system_agents, views
 from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
@@ -43,6 +46,11 @@ from hitch.main.worktrees import (
     WorktreeCreationError,
 )
 
+_PNG_BYTES = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+_JPEG_BYTES = b"\xff\xd8\xff\xe0JFIF"
+_GIF_BYTES = b"GIF89a\x01\x00\x01\x00"
+_WEBP_BYTES = b"RIFF\x0c\x00\x00\x00WEBPVP8 "
+
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _MODEL_COOKIE = "hitch_model"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
@@ -59,6 +67,26 @@ _PR_PROMPT = (
     "Rebase on master, clean it up, and then open a PR"
 )
 _QA_PROMPT = "Run the QA agent on the current diff and fix anything it finds"
+
+
+class _FailingUploadWriter:
+    def __init__(self, fd: int) -> None:
+        self.fd = fd
+
+    def __enter__(self) -> "_FailingUploadWriter":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        os.close(self.fd)
+
+    def write(self, _chunk: bytes) -> None:
+        raise OSError("disk full")
+
+
+class _UnreadableUpload(SimpleUploadedFile):
+    @override
+    def read(self, *_args: object, **_kwargs: object) -> bytes:
+        raise OSError("/tmp/private/screen.png")
 
 
 def _rollout_line(
@@ -239,6 +267,53 @@ class PendingPlanStateTests(TestCase):
         views._mark_pending_plan_actions(entries)
 
         self.assertFalse(entries[1]["show_plan_actions"])
+
+
+class ActiveTurnTrimTests(TestCase):
+    def test_user_message_text_ignores_empty_text_parts_before_images(self) -> None:
+        item = SimpleNamespace(
+            content=[
+                SimpleNamespace(root=SimpleNamespace(type="text", text="")),
+                SimpleNamespace(
+                    root=SimpleNamespace(
+                        type="localImage",
+                        path="/tmp/private/screen.png",
+                    )
+                ),
+            ]
+        )
+
+        self.assertEqual(views._user_message_text(item), "[image]")
+
+    def test_steer_attachment_ledger_does_not_change_active_turn_marker(self) -> None:
+        active = CodexInstance.objects.create(
+            pid=1,
+            thread_id="thread-1",
+            cwd="/repo",
+            prompt="initial prompt",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+            input_attachment_paths=["/tmp/private/steer.png"],
+        )
+        entries = [
+            {"kind": "user", "text": "before"},
+            {"kind": "agent", "text": "before reply"},
+            {"kind": "user", "text": "initial prompt"},
+            {"kind": "agent", "text": "working"},
+            {"kind": "user", "text": "[image]"},
+            {"kind": "agent", "text": "working after steer"},
+        ]
+
+        trimmed = views._trim_in_progress_turn(entries, active)
+
+        self.assertEqual(
+            trimmed,
+            [
+                {"kind": "user", "text": "before"},
+                {"kind": "agent", "text": "before reply"},
+            ],
+        )
+        self.assertEqual(views._pending_user_prompt(active), "initial prompt")
 
 
 class IndexViewTests(TestCase):
@@ -1000,6 +1075,13 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "/home/user/proj-a")
         self.assertContains(response, "/home/user/proj-b")
         self.assertContains(response, 'name="cwd"')
+        self.assertContains(response, 'enctype="multipart/form-data"')
+        self.assertContains(response, 'name="input_images"')
+        self.assertContains(response, "data-new-session-image-input")
+        self.assertContains(response, 'accept="image/png,image/jpeg,image/gif,image/webp"')
+        self.assertContains(response, "function clearNewSessionImages()")
+        self.assertContains(response, "function requireNewSessionPromptOrImages()")
+        self.assertContains(response, "!commandPrompt && !newSessionHasImages()")
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -1114,6 +1196,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "parseNewSessionQaCommand")
         self.assertContains(response, 'toLowerCase() !== "/plan"')
         self.assertContains(response, 'toLowerCase() !== "/qa"')
+        self.assertContains(response, "Enter a prompt or attach an image.")
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -1483,6 +1566,452 @@ class NewSessionViewTests(TestCase):
         )
         metadata = SessionMetadata.objects.get(thread_id="thread-spec")
         self.assertEqual(metadata.cwd, self.REPO)
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_spawns_worker_with_uploaded_image(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            response = self.client.post(
+                reverse("new_session"),
+                data={
+                    "prompt": "Use the screenshot",
+                    "cwd": self.REPO,
+                    "input_images": SimpleUploadedFile(
+                        "screen.png", _PNG_BYTES, content_type="image/png"
+                    ),
+                },
+            )
+
+            self.assertEqual(response.status_code, 302)
+            image_paths = mock_spawn.call_args.kwargs["input_image_paths"]
+            self.assertEqual(len(image_paths), 1)
+            saved_image = Path(image_paths[0])
+            self.assertEqual(saved_image.suffix, ".png")
+            self.assertTrue(saved_image.is_file())
+            self.assertEqual(saved_image.read_bytes(), _PNG_BYTES)
+            self.assertEqual(saved_image.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(saved_image.parent.stat().st_mode & 0o777, 0o700)
+            self.assertEqual(saved_image.parent.parent.stat().st_mode & 0o777, 0o700)
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_spawns_worker_with_image_only_prompt(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            response = self.client.post(
+                reverse("new_session"),
+                data={
+                    "prompt": "",
+                    "cwd": self.REPO,
+                    "input_images": SimpleUploadedFile(
+                        "screen.png", _PNG_BYTES, content_type="image/png"
+                    ),
+                },
+            )
+
+            self.assertEqual(response.status_code, 302)
+            image_paths = mock_spawn.call_args.kwargs["input_image_paths"]
+            self.assertEqual(len(image_paths), 1)
+            self.assertEqual(Path(image_paths[0]).read_bytes(), _PNG_BYTES)
+        mock_spawn.assert_called_once()
+        self.assertEqual(mock_spawn.call_args.kwargs["prompt"], "")
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_spawns_worker_with_multiple_uploaded_image_formats(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+
+        uploads = [
+            ("screen.png", _PNG_BYTES, ".png", "image/png"),
+            ("photo.jpg", _JPEG_BYTES, ".jpg", "image/jpeg"),
+            ("clip.gif", _GIF_BYTES, ".gif", "image/gif"),
+            ("mock.webp", _WEBP_BYTES, ".webp", "image/webp"),
+        ]
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            response = self.client.post(
+                reverse("new_session"),
+                data={
+                    "prompt": "Use these screenshots",
+                    "cwd": self.REPO,
+                    "input_images": [
+                        SimpleUploadedFile(name, body, content_type=content_type)
+                        for name, body, _suffix, content_type in uploads
+                    ],
+                },
+            )
+
+            self.assertEqual(response.status_code, 302)
+            image_paths = mock_spawn.call_args.kwargs["input_image_paths"]
+            self.assertEqual(
+                [Path(path).suffix for path in image_paths],
+                [suffix for _name, _body, suffix, _content_type in uploads],
+            )
+            self.assertEqual(
+                [Path(path).read_bytes() for path in image_paths],
+                [body for _name, body, _suffix, _content_type in uploads],
+            )
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_cleans_uploaded_images_when_spawn_handoff_fails(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.side_effect = RuntimeError("launch failed")
+        _setup_codex(mock_codex, models=[])
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.client.post(
+                    reverse("new_session"),
+                    data={
+                        "prompt": "Use the screenshot",
+                        "cwd": self.REPO,
+                        "input_images": SimpleUploadedFile(
+                            "screen.png", _PNG_BYTES, content_type="image/png"
+                        ),
+                    },
+                )
+            attachments = Path(raw) / "attachments"
+            self.assertEqual(
+                [path for path in attachments.rglob("*") if path.is_file()],
+                [],
+            )
+
+    def test_input_image_upload_handler_rejects_limits_during_parse(self) -> None:
+        with patch("hitch.main.views._INPUT_IMAGE_MAX_BYTES", 8):
+            handler = views._InputImageLimitUploadHandler()
+            with self.assertRaisesMessage(
+                SuspiciousOperation,
+                "image attachment is too large",
+            ):
+                handler.new_file(
+                    "input_images",
+                    "screen.png",
+                    "image/png",
+                    9,
+                )
+
+            handler = views._InputImageLimitUploadHandler()
+            handler.new_file("input_images", "screen.png", "image/png", None)
+            with self.assertRaisesMessage(
+                SuspiciousOperation,
+                "image attachment is too large",
+            ):
+                handler.receive_data_chunk(b"123456789", 0)
+
+        handler = views._InputImageLimitUploadHandler()
+        with self.assertRaisesMessage(
+            SuspiciousOperation,
+            "at most 4 image attachments are allowed",
+        ):
+            for index in range(5):
+                handler.new_file(
+                    "input_images",
+                    f"screen-{index}.png",
+                    "image/png",
+                    1,
+                )
+
+    def test_input_image_request_size_cap_runs_before_parse(self) -> None:
+        request = RequestFactory().post(reverse("new_session"), data={})
+        request.META["CONTENT_LENGTH"] = str(views._INPUT_IMAGE_MAX_REQUEST_BYTES + 1)
+
+        self.assertEqual(
+            views._input_image_request_size_error(request),
+            "image attachments are too large",
+        )
+
+    def test_input_image_upload_limiter_handles_cased_multipart_before_csrf(
+        self,
+    ) -> None:
+        def view(request: Any) -> Any:
+            self.assertIsInstance(
+                request.upload_handlers[0],
+                views._InputImageLimitUploadHandler,
+            )
+            return HttpResponse("ok")
+
+        request = RequestFactory().generic("POST", reverse("new_session"), data=b"")
+        request.content_type = "Multipart/form-data"
+        request.META["CONTENT_TYPE"] = "Multipart/form-data; boundary=BOUNDARY"
+        cast(Any, request)._dont_enforce_csrf_checks = True
+
+        response = views._limit_input_image_uploads(view)(request)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(getattr(views.new_session, "csrf_exempt", False))
+        self.assertTrue(getattr(views.send_message, "csrf_exempt", False))
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_upload_limited_new_session_still_enforces_csrf(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+        client = Client(enforce_csrf_checks=True)
+        url = reverse("new_session")
+
+        denied = client.post(
+            url,
+            data={
+                "prompt": "Use this screenshot",
+                "cwd": self.REPO,
+                "input_images": SimpleUploadedFile(
+                    "screen.png", _PNG_BYTES, content_type="image/png"
+                ),
+            },
+        )
+
+        self.assertEqual(denied.status_code, 403)
+        mock_spawn.assert_not_called()
+
+        client.get(reverse("index"))
+        token = client.cookies["csrftoken"].value
+        allowed = client.post(
+            url,
+            data={
+                "csrfmiddlewaretoken": token,
+                "prompt": "Use this screenshot",
+                "cwd": self.REPO,
+                "input_images": SimpleUploadedFile(
+                    "screen.png", _PNG_BYTES, content_type="image/png"
+                ),
+            },
+        )
+
+        self.assertEqual(allowed.status_code, 302)
+        mock_spawn.assert_called_once()
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_rejects_invalid_image_uploads_before_spawn(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        _setup_codex(mock_codex, models=[])
+        cases: list[tuple[str, object, str]] = [
+            (
+                "too many",
+                [
+                    SimpleUploadedFile(
+                        f"screen-{index}.png", _PNG_BYTES, content_type="image/png"
+                    )
+                    for index in range(5)
+                ],
+                "at most 4 image attachments are allowed",
+            ),
+            (
+                "empty",
+                SimpleUploadedFile("screen.png", b"", content_type="image/png"),
+                "image attachment is empty",
+            ),
+            (
+                "bad magic",
+                SimpleUploadedFile("screen.png", b"not an image", content_type="image/png"),
+                "image attachment must be PNG, JPEG, GIF, or WebP",
+            ),
+        ]
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            for label, upload, message in cases:
+                with self.subTest(label=label):
+                    mock_spawn.reset_mock()
+                    response = self.client.post(
+                        reverse("new_session"),
+                        data={
+                            "prompt": "Use the screenshot",
+                            "cwd": self.REPO,
+                            "input_images": upload,
+                        },
+                    )
+
+                    self.assertContains(response, message, status_code=400)
+                    mock_spawn.assert_not_called()
+                    self.assertFalse((Path(raw) / "attachments").exists())
+
+            with patch("hitch.main.views._INPUT_IMAGE_MAX_BYTES", len(_PNG_BYTES) - 1):
+                response = self.client.post(
+                    reverse("new_session"),
+                    data={
+                        "prompt": "Use the screenshot",
+                        "cwd": self.REPO,
+                        "input_images": SimpleUploadedFile(
+                            "screen.png", _PNG_BYTES, content_type="image/png"
+                        ),
+                    },
+                )
+
+            self.assertContains(response, "image attachment is too large", status_code=400)
+            mock_spawn.assert_not_called()
+            self.assertFalse((Path(raw) / "attachments").exists())
+
+            with patch(
+                "hitch.main.views.os.fdopen",
+                side_effect=lambda fd, *_args: _FailingUploadWriter(fd),
+            ), self.assertLogs("hitch.main.views", level="ERROR"):
+                response = self.client.post(
+                    reverse("new_session"),
+                    data={
+                        "prompt": "Use the screenshot",
+                        "cwd": self.REPO,
+                        "input_images": SimpleUploadedFile(
+                            "screen.png", _PNG_BYTES, content_type="image/png"
+                        ),
+                    },
+                )
+
+            self.assertContains(
+                response,
+                "failed to save image attachment",
+                status_code=400,
+            )
+            self.assertNotContains(response, "disk full", status_code=400)
+            mock_spawn.assert_not_called()
+            attachments = Path(raw) / "attachments"
+            self.assertTrue(attachments.exists())
+            self.assertEqual([path for path in attachments.rglob("*") if path.is_file()], [])
+
+            real_fdopen = os.fdopen
+            fdopen_calls = 0
+
+            def fail_second_file(fd: int, *args: Any, **kwargs: Any) -> Any:
+                nonlocal fdopen_calls
+                fdopen_calls += 1
+                if fdopen_calls == 2:
+                    return _FailingUploadWriter(fd)
+                return real_fdopen(fd, *args, **kwargs)
+
+            with patch(
+                "hitch.main.views.os.fdopen",
+                side_effect=fail_second_file,
+            ), self.assertLogs("hitch.main.views", level="ERROR"):
+                response = self.client.post(
+                    reverse("new_session"),
+                    data={
+                        "prompt": "Use the screenshots",
+                        "cwd": self.REPO,
+                        "input_images": [
+                            SimpleUploadedFile(
+                                "first.png", _PNG_BYTES, content_type="image/png"
+                            ),
+                            SimpleUploadedFile(
+                                "second.png", _PNG_BYTES, content_type="image/png"
+                            ),
+                        ],
+                    },
+                )
+
+            self.assertContains(
+                response,
+                "failed to save image attachment",
+                status_code=400,
+            )
+            self.assertEqual([path for path in attachments.rglob("*") if path.is_file()], [])
+
+    def test_image_upload_read_failure_returns_generic_error(self) -> None:
+        with self.assertLogs("hitch.main.views", level="ERROR"):
+            _extension, error = views._uploaded_input_image_extension(
+                _UnreadableUpload("screen.png", _PNG_BYTES, content_type="image/png")
+            )
+
+        self.assertEqual(error, "failed to read image attachment")
+        assert error is not None
+        self.assertNotIn("/tmp/private", error)
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.codex_pool.create_session_thread")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_rejects_workflow_image_uploads_before_side_effects(
+        self,
+        mock_discover: MagicMock,
+        mock_codex: MagicMock,
+        mock_create_thread: MagicMock,
+        mock_spawn: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        _setup_codex(mock_codex, models=[])
+
+        for prompt in ("/pr", "/qa"):
+            with self.subTest(prompt=prompt):
+                response = self.client.post(
+                    reverse("new_session"),
+                    data={
+                        "prompt": prompt,
+                        "cwd": self.REPO,
+                        "input_images": SimpleUploadedFile(
+                            "screen.png", _PNG_BYTES, content_type="image/png"
+                        ),
+                    },
+                )
+
+                self.assertContains(
+                    response,
+                    "image attachments are not supported for PR workflow requests",
+                    status_code=400,
+                )
+                mock_create_thread.assert_not_called()
+                mock_spawn.assert_not_called()
+                mock_start_workflow.assert_not_called()
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
@@ -2173,6 +2702,46 @@ class NewSessionViewTests(TestCase):
         self.assertContains(response, "prompt is required", status_code=400)
         mock_spawn.assert_not_called()
 
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_plan_slash_command_allows_image_only_prompt(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-plan-image")
+        _setup_codex(mock_codex, models=[_make_model("gpt-default", is_default=True)])
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            response = self.client.post(
+                reverse("new_session"),
+                data={
+                    "prompt": "/plan",
+                    "cwd": self.REPO,
+                    "input_images": SimpleUploadedFile(
+                        "screen.png", _PNG_BYTES, content_type="image/png"
+                    ),
+                },
+            )
+
+        self.assertEqual(response.status_code, 302)
+        image_paths = mock_spawn.call_args.kwargs["input_image_paths"]
+        self.assertEqual(len(image_paths), 1)
+        self._assert_new_session_spawn(
+            mock_spawn,
+            prompt="",
+            model="gpt-default",
+            reasoning_effort="medium",
+            plan_mode=True,
+            input_image_paths=image_paths,
+        )
+
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.create_session_thread")
@@ -2517,6 +3086,48 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
+    def test_cleans_up_managed_worktree_when_upload_validation_fails(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+        mock_create_worktree: MagicMock,
+        mock_cleanup: MagicMock,
+    ) -> None:
+        worktree = ManagedWorktree(
+            path=Path("/home/user/.hitch/worktrees/proj/20260516120000-abcdef12"),
+            branch="hitch/proj/20260516120000-abcdef12",
+            source_repo=Path(self.REPO),
+        )
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_create_worktree.return_value = worktree
+        _setup_codex(mock_codex, models=[])
+        _seed_cookies(self.client, **{_USE_WORKTREES_COOKIE: "true"})
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "use this screenshot",
+                "cwd": self.REPO,
+                "input_images": SimpleUploadedFile(
+                    "screen.png", b"not an image", content_type="image/png"
+                ),
+            },
+        )
+
+        self.assertContains(
+            response,
+            "image attachment must be PNG, JPEG, GIF, or WebP",
+            status_code=400,
+        )
+        mock_cleanup.assert_called_once_with(worktree)
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.views.cleanup_worktree")
+    @patch("hitch.main.views.create_worktree_for_session")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
     def test_preserves_spawn_error_when_managed_worktree_cleanup_fails(
         self,
         mock_discover: MagicMock,
@@ -2781,6 +3392,51 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.codex_pool.steer_instance")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
+    def test_steers_active_instance_with_uploaded_image(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_steer: MagicMock,
+    ) -> None:
+        instance = CodexInstance.objects.create(
+            pid=123,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="already running",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        mock_steer.return_value = instance
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            response = self.client.post(
+                reverse("send_message", kwargs={"session_id": "abc"}),
+                data={
+                    "prompt": "use this image",
+                    "input_images": SimpleUploadedFile(
+                        "screen.png", _PNG_BYTES, content_type="image/png"
+                    ),
+                },
+            )
+
+            self.assertEqual(response.status_code, 302)
+            image_paths = mock_steer.call_args.kwargs["input_image_paths"]
+            self.assertEqual(len(image_paths), 1)
+            self.assertEqual(Path(image_paths[0]).read_bytes(), _PNG_BYTES)
+
+        mock_steer.assert_called_once()
+        self.assertEqual(mock_steer.call_args.args[0], instance.pk)
+        self.assertEqual(mock_steer.call_args.kwargs["expected_thread_id"], "abc")
+        self.assertEqual(mock_steer.call_args.kwargs["prompt"], "use this image")
+        mock_spawn.assert_not_called()
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views.codex_pool.steer_instance")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
     def test_rejects_invalid_active_instance(
         self,
         mock_codex: MagicMock,
@@ -2798,7 +3454,7 @@ class SendMessageViewTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.codex_pool.steer_instance", return_value=None)
+    @patch("hitch.main.views.codex_pool.steer_instance")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_failed_steer_falls_back_to_spawn_matrix(
@@ -2809,6 +3465,7 @@ class SendMessageViewTests(TestCase):
         mock_discover: MagicMock,
     ) -> None:
         mock_discover.return_value = [Path("/repo")]
+        mock_steer.return_value = None
         resolved_plan_path = str(self._make_resolved_plan_rollout())
         cases: list[
             tuple[str, dict[str, str], str | None, int | str, str, dict[str, Any]]
@@ -2897,6 +3554,113 @@ class SendMessageViewTests(TestCase):
                     prompt=prompt,
                 )
                 self._assert_follow_up_spawn(mock_spawn, prompt=prompt, **expected)
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.steer_instance", return_value=None)
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_failed_steer_falls_back_to_spawn_with_uploaded_image(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_steer: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+
+        def fail_steer_and_delete_owned_copy(*_args: Any, **kwargs: Any) -> None:
+            for image_path in kwargs.get("input_image_paths", []):
+                Path(image_path).unlink()
+            return None
+
+        mock_steer.side_effect = fail_steer_and_delete_owned_copy
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            response = self.client.post(
+                reverse("send_message", kwargs={"session_id": "abc"}),
+                data={
+                    "prompt": "use this screenshot",
+                    "active_instance": "42",
+                    "input_images": SimpleUploadedFile(
+                        "screen.png", _PNG_BYTES, content_type="image/png"
+                    ),
+                },
+            )
+
+            self.assertEqual(response.status_code, 302)
+            steered_paths = mock_steer.call_args.kwargs["input_image_paths"]
+            spawned_paths = mock_spawn.call_args.kwargs["input_image_paths"]
+            self.assertNotEqual(spawned_paths, steered_paths)
+            self.assertEqual(len(spawned_paths), 1)
+            self.assertEqual(Path(spawned_paths[0]).read_bytes(), _PNG_BYTES)
+            self.assertFalse(Path(steered_paths[0]).exists())
+
+        mock_steer.assert_called_once_with(
+            42,
+            expected_thread_id="abc",
+            prompt="use this screenshot",
+            input_image_paths=steered_paths,
+        )
+        self._assert_follow_up_spawn(
+            mock_spawn,
+            prompt="use this screenshot",
+            input_image_paths=spawned_paths,
+        )
+
+    @patch("hitch.main.views.codex_pool.steer_instance")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_image_steer_attachment_cap_returns_bad_request_without_fallback(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_steer: MagicMock,
+    ) -> None:
+        mock_steer.side_effect = codex_pool.InputAttachmentLimitExceededError(
+            "too many image attachments are queued for this turn"
+        )
+        instance = CodexInstance.objects.create(
+            pid=123,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="already running",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            response = self.client.post(
+                reverse("send_message", kwargs={"session_id": "abc"}),
+                data={
+                    "prompt": "use this screenshot",
+                    "input_images": SimpleUploadedFile(
+                        "screen.png", _PNG_BYTES, content_type="image/png"
+                    ),
+                },
+            )
+
+            self.assertContains(
+                response,
+                "too many image attachments are queued for this turn",
+                status_code=400,
+            )
+            attachments = Path(raw) / "attachments"
+            self.assertEqual(
+                [path for path in attachments.rglob("*") if path.is_file()],
+                [],
+            )
+
+        mock_steer.assert_called_once()
+        self.assertEqual(mock_steer.call_args.args[0], instance.pk)
+        mock_spawn.assert_not_called()
+        mock_codex.assert_not_called()
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
@@ -3004,6 +3768,296 @@ class SendMessageViewTests(TestCase):
             sandbox_policy=None,
             approval_mode="auto_review",
         )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_spawns_turn_with_uploaded_image(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            response = self.client.post(
+                reverse("send_message", kwargs={"session_id": "abc"}),
+                data={
+                    "prompt": "use this screenshot",
+                    "input_images": SimpleUploadedFile(
+                        "screen.png", _PNG_BYTES, content_type="image/png"
+                    ),
+                },
+            )
+
+            self.assertEqual(response.status_code, 302)
+            image_paths = mock_spawn.call_args.kwargs["input_image_paths"]
+            self.assertEqual(len(image_paths), 1)
+            self.assertEqual(Path(image_paths[0]).read_bytes(), _PNG_BYTES)
+
+        mock_spawn.assert_called_once()
+        self.assertEqual(mock_spawn.call_args.kwargs["prompt"], "use this screenshot")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_spawns_turn_with_image_only_prompt(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            response = self.client.post(
+                reverse("send_message", kwargs={"session_id": "abc"}),
+                data={
+                    "prompt": "",
+                    "input_images": SimpleUploadedFile(
+                        "screen.png", _PNG_BYTES, content_type="image/png"
+                    ),
+                },
+            )
+
+            self.assertEqual(response.status_code, 302)
+            image_paths = mock_spawn.call_args.kwargs["input_image_paths"]
+            self.assertEqual(len(image_paths), 1)
+            self.assertEqual(Path(image_paths[0]).read_bytes(), _PNG_BYTES)
+
+        mock_spawn.assert_called_once()
+        self.assertEqual(mock_spawn.call_args.kwargs["prompt"], "")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_spawns_turn_with_multiple_uploaded_image_formats(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        uploads = [
+            ("screen.png", _PNG_BYTES, ".png", "image/png"),
+            ("photo.jpg", _JPEG_BYTES, ".jpg", "image/jpeg"),
+            ("clip.gif", _GIF_BYTES, ".gif", "image/gif"),
+            ("mock.webp", _WEBP_BYTES, ".webp", "image/webp"),
+        ]
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            response = self.client.post(
+                reverse("send_message", kwargs={"session_id": "abc"}),
+                data={
+                    "prompt": "use these screenshots",
+                    "input_images": [
+                        SimpleUploadedFile(name, body, content_type=content_type)
+                        for name, body, _suffix, content_type in uploads
+                    ],
+                },
+            )
+
+            self.assertEqual(response.status_code, 302)
+            image_paths = mock_spawn.call_args.kwargs["input_image_paths"]
+            self.assertEqual(
+                [Path(path).suffix for path in image_paths],
+                [suffix for _name, _body, suffix, _content_type in uploads],
+            )
+            self.assertEqual(
+                [Path(path).read_bytes() for path in image_paths],
+                [body for _name, body, _suffix, _content_type in uploads],
+            )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_send_message_cleans_uploaded_images_when_spawn_handoff_fails(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        mock_spawn.side_effect = RuntimeError("launch failed")
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            with self.assertRaises(RuntimeError):
+                self.client.post(
+                    reverse("send_message", kwargs={"session_id": "abc"}),
+                    data={
+                        "prompt": "use this screenshot",
+                        "input_images": SimpleUploadedFile(
+                            "screen.png", _PNG_BYTES, content_type="image/png"
+                        ),
+                    },
+                )
+
+            attachments = Path(raw) / "attachments"
+            self.assertEqual(
+                [path for path in attachments.rglob("*") if path.is_file()],
+                [],
+            )
+
+    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_send_message_cleans_uploaded_images_when_resume_validation_fails(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+        _mock_managed_worktrees: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex, cwd="/repo")
+        mock_discover.return_value = [Path("/other")]
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            response = self.client.post(
+                reverse("send_message", kwargs={"session_id": "abc"}),
+                data={
+                    "prompt": "use this screenshot",
+                    "input_images": SimpleUploadedFile(
+                        "screen.png", _PNG_BYTES, content_type="image/png"
+                    ),
+                },
+            )
+
+            self.assertContains(
+                response,
+                "thread cwd is not an allowed repository",
+                status_code=400,
+            )
+            mock_spawn.assert_not_called()
+            attachments = Path(raw) / "attachments"
+            self.assertEqual(
+                [path for path in attachments.rglob("*") if path.is_file()],
+                [],
+            )
+
+    @patch("hitch.main.views.codex_pool.steer_instance")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_send_message_rejects_invalid_image_uploads_before_side_effects(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_steer: MagicMock,
+    ) -> None:
+        cases: list[tuple[str, object, str]] = [
+            (
+                "too many",
+                [
+                    SimpleUploadedFile(
+                        f"screen-{index}.png", _PNG_BYTES, content_type="image/png"
+                    )
+                    for index in range(5)
+                ],
+                "at most 4 image attachments are allowed",
+            ),
+            (
+                "empty",
+                SimpleUploadedFile("screen.png", b"", content_type="image/png"),
+                "image attachment is empty",
+            ),
+            (
+                "bad magic",
+                SimpleUploadedFile("screen.png", b"not an image", content_type="image/png"),
+                "image attachment must be PNG, JPEG, GIF, or WebP",
+            ),
+        ]
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            for label, upload, message in cases:
+                with self.subTest(label=label):
+                    mock_steer.reset_mock()
+                    mock_spawn.reset_mock()
+                    mock_codex.reset_mock()
+                    response = self.client.post(
+                        reverse("send_message", kwargs={"session_id": "abc"}),
+                        data={
+                            "prompt": "use this",
+                            "active_instance": "42",
+                            "input_images": upload,
+                        },
+                    )
+
+                    self.assertContains(response, message, status_code=400)
+                    mock_steer.assert_not_called()
+                    mock_spawn.assert_not_called()
+                    mock_codex.assert_not_called()
+                    self.assertFalse((Path(raw) / "attachments").exists())
+
+            with patch("hitch.main.views._INPUT_IMAGE_MAX_BYTES", len(_PNG_BYTES) - 1):
+                response = self.client.post(
+                    reverse("send_message", kwargs={"session_id": "abc"}),
+                    data={
+                        "prompt": "use this",
+                        "active_instance": "42",
+                        "input_images": SimpleUploadedFile(
+                            "screen.png", _PNG_BYTES, content_type="image/png"
+                        ),
+                    },
+                )
+
+            self.assertContains(response, "image attachment is too large", status_code=400)
+            mock_steer.assert_not_called()
+            mock_spawn.assert_not_called()
+            mock_codex.assert_not_called()
+            self.assertFalse((Path(raw) / "attachments").exists())
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_send_message_rejects_workflow_image_uploads_before_side_effects(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        for prompt in ("/pr", "/qa"):
+            with self.subTest(prompt=prompt):
+                response = self.client.post(
+                    reverse("send_message", kwargs={"session_id": "abc"}),
+                    data={
+                        "prompt": prompt,
+                        "input_images": SimpleUploadedFile(
+                            "screen.png", _PNG_BYTES, content_type="image/png"
+                        ),
+                    },
+                )
+
+                self.assertContains(
+                    response,
+                    "image attachments are not supported for PR workflow requests",
+                    status_code=400,
+                )
+                mock_start_workflow.assert_not_called()
+                mock_spawn.assert_not_called()
+                mock_codex.assert_not_called()
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
@@ -3570,6 +4624,43 @@ class SendMessageViewTests(TestCase):
 
                 self.assertEqual(response.status_code, 302)
                 self._assert_follow_up_spawn(mock_spawn, **expected)
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_plan_slash_follow_up_allows_image_only_prompt(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        self._patch_codex(mock_codex, model="gpt-5.4")
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            response = self.client.post(
+                reverse("send_message", kwargs={"session_id": "abc"}),
+                data={
+                    "prompt": "/plan",
+                    "input_images": SimpleUploadedFile(
+                        "screen.png", _PNG_BYTES, content_type="image/png"
+                    ),
+                },
+            )
+
+        self.assertEqual(response.status_code, 302)
+        image_paths = mock_spawn.call_args.kwargs["input_image_paths"]
+        self.assertEqual(len(image_paths), 1)
+        self._assert_follow_up_spawn(
+            mock_spawn,
+            prompt="",
+            model="gpt-5.4",
+            plan_mode=True,
+            input_image_paths=image_paths,
+        )
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.discover_repos")
@@ -4796,6 +5887,22 @@ class SetSessionArchivedViewTests(TestCase):
         ))
         mock_codex.return_value.__enter__.return_value.thread_archive.assert_called_once_with("abc")
 
+    @patch("hitch.main.views.codex_pool.cleanup_input_images_for_thread")
+    @patch("hitch.main.views.Codex")
+    def test_archive_keeps_retained_input_images_for_unarchive(
+        self, mock_codex: MagicMock, mock_cleanup_images: MagicMock
+    ) -> None:
+        response = self.client.post(
+            reverse("set_session_archived", kwargs={"session_id": "abc"}),
+            data={"archived": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_cleanup_images.assert_not_called()
+        mock_codex.return_value.__enter__.return_value.thread_archive.assert_called_once_with(
+            "abc"
+        )
+
     @patch("hitch.main.views.Codex")
     def test_rejects_invalid_archive_requests(self, mock_codex: MagicMock) -> None:
         cases: list[tuple[str, dict[str, str], int]] = [
@@ -4837,6 +5944,51 @@ class StopSessionViewTests(TestCase):
             response.headers["Location"],
             reverse("session", kwargs={"session_id": "abc"}),
         )
+        mock_interrupt_instance.assert_called_once_with(42, expected_thread_id="abc")
+        mock_interrupt_active.assert_not_called()
+
+    @patch("hitch.main.views.codex_pool.interrupt_instance")
+    @patch("hitch.main.views.codex_pool.interrupt_active")
+    def test_stop_with_selected_images_still_interrupts_worker(
+        self,
+        mock_interrupt_active: MagicMock,
+        mock_interrupt_instance: MagicMock,
+    ) -> None:
+        response = self.client.post(
+            reverse("stop_session", kwargs={"session_id": "abc"}),
+            data={
+                "instance": "42",
+                "input_images": SimpleUploadedFile(
+                    "screen.png", _PNG_BYTES, content_type="image/png"
+                ),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_interrupt_instance.assert_called_once_with(42, expected_thread_id="abc")
+        mock_interrupt_active.assert_not_called()
+
+    @patch("hitch.main.views.codex_pool.interrupt_instance")
+    @patch("hitch.main.views.codex_pool.interrupt_active")
+    def test_stop_with_over_limit_images_still_interrupts_worker(
+        self,
+        mock_interrupt_active: MagicMock,
+        mock_interrupt_instance: MagicMock,
+    ) -> None:
+        response = self.client.post(
+            reverse("stop_session", kwargs={"session_id": "abc"}),
+            data={
+                "instance": "42",
+                "input_images": [
+                    SimpleUploadedFile(
+                        f"screen-{index}.png", _PNG_BYTES, content_type="image/png"
+                    )
+                    for index in range(5)
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
         mock_interrupt_instance.assert_called_once_with(42, expected_thread_id="abc")
         mock_interrupt_active.assert_not_called()
 
@@ -5670,6 +6822,8 @@ class StandingOrderViewTests(TestCase):
         self.assertContains(response, "Find useful test coverage increments.")
         self.assertContains(response, "Judge log")
         self.assertContains(response, 'name="proposed_session"')
+        self.assertContains(response, "function requireNewSessionPromptOrImages()")
+        self.assertContains(response, 'command === "/pr" || command === "/qa"')
         self.assertNotContains(response, "Other proposal")
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])

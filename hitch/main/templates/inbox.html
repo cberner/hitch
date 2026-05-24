@@ -381,14 +381,18 @@
     </main>
     {% include "_settings_dialog.html" %}
     <dialog class="new-session" data-new-session-dialog aria-labelledby="new-session-title">
-        <form method="post" action="{{ new_session_url }}">
+        <form method="post" action="{{ new_session_url }}" enctype="multipart/form-data">
             {% csrf_token %}
             <input type="hidden" name="plan_mode" value="">
             <input type="hidden" name="proposed_session" value="" data-proposed-session-input>
             <h2 id="new-session-title">Start a new session</h2>
             <label>
                 Prompt
-                <textarea id="new-session-prompt" name="prompt" required autocomplete="off" placeholder="Describe what you want the agent to do..."></textarea>
+                <textarea id="new-session-prompt" name="prompt" autocomplete="off" placeholder="Describe what you want the agent to do..."></textarea>
+            </label>
+            <label>
+                Image attachment
+                <input type="file" name="input_images" accept="{{ input_image_accept }}" multiple>
             </label>
             <label>
                 Project
@@ -507,6 +511,7 @@
             const newSessionDialog = document.querySelector("[data-new-session-dialog]");
             const newSessionForm = newSessionDialog && newSessionDialog.querySelector("form");
             const newSessionInput = newSessionForm && newSessionForm.querySelector("textarea[name='prompt']");
+            const newSessionImageInput = newSessionForm && newSessionForm.querySelector("input[name='input_images']");
             const proposedSessionInput = newSessionForm && newSessionForm.querySelector("[data-proposed-session-input]");
             const newSessionProjectSelect = newSessionForm && newSessionForm.querySelector("[data-new-session-project]");
             const newSessionRepoField = newSessionForm && newSessionForm.querySelector("[data-new-session-repo-field]");
@@ -543,6 +548,27 @@
                 showDialog(newSessionDialog);
                 if (newSessionInput) newSessionInput.focus();
             }
+            function newSessionHasImages() {
+                return Boolean(newSessionImageInput && (newSessionImageInput.files || []).length);
+            }
+            function clearNewSessionImages() {
+                if (newSessionImageInput) newSessionImageInput.value = "";
+            }
+            function clearNewSessionPromptValidity() {
+                if (newSessionInput) newSessionInput.setCustomValidity("");
+            }
+            function requireNewSessionPromptOrImages() {
+                if (
+                    !newSessionInput
+                    || newSessionInput.value.trim().length
+                    || newSessionHasImages()
+                ) {
+                    return true;
+                }
+                newSessionInput.setCustomValidity("Enter a prompt or attach an image.");
+                newSessionInput.reportValidity();
+                return false;
+            }
             syncNewSessionProjectFields();
             if (newSessionProjectSelect) {
                 newSessionProjectSelect.addEventListener("change", syncNewSessionProjectFields);
@@ -553,6 +579,25 @@
                 });
                 newSessionAutoQa.addEventListener("change", () => {
                     if (newSessionAutoQa.checked) newSessionAutoPr.checked = false;
+                });
+            }
+            if (newSessionInput) {
+                newSessionInput.addEventListener("input", clearNewSessionPromptValidity);
+            }
+            if (newSessionImageInput) {
+                newSessionImageInput.addEventListener("change", clearNewSessionPromptValidity);
+            }
+            if (newSessionForm) {
+                newSessionForm.addEventListener("submit", (event) => {
+                    const command = newSessionInput ? newSessionInput.value.trim().toLowerCase() : "";
+                    if (command === "/pr" || command === "/qa") {
+                        clearNewSessionImages();
+                        return;
+                    }
+                    if (!requireNewSessionPromptOrImages()) {
+                        event.preventDefault();
+                        if (newSessionInput) newSessionInput.focus();
+                    }
                 });
             }
             if (newSessionCancel) newSessionCancel.addEventListener("click", () => hideDialog(newSessionDialog));

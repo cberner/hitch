@@ -1146,6 +1146,77 @@
             gap: 0.5rem;
             align-items: flex-end;
         }
+        .composer-attachment {
+            position: relative;
+            flex: 0 0 auto;
+            min-height: 40px;
+            padding: 0.6rem 0.75rem;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            background: var(--surface);
+            color: var(--text-muted);
+            font-size: 0.86rem;
+            font-weight: 600;
+            cursor: pointer;
+            user-select: none;
+        }
+        .composer-attachment:hover,
+        .composer-attachment:focus-within {
+            background: var(--surface-2);
+            border-color: var(--accent);
+            color: var(--text);
+        }
+        .composer-attachment[data-has-images="true"] {
+            border-color: var(--accent);
+            background: var(--accent-soft);
+            color: var(--text);
+        }
+        .composer-attachment[data-has-images="true"]::after {
+            content: attr(data-count);
+            position: absolute;
+            top: -0.45rem;
+            right: -0.45rem;
+            min-width: 1.15rem;
+            height: 1.15rem;
+            padding: 0 0.28rem;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 999px;
+            background: var(--accent);
+            color: var(--accent-fg);
+            font-size: 0.68rem;
+            line-height: 1;
+            box-shadow: 0 0 0 2px var(--bg);
+        }
+        .composer-attachment input {
+            position: absolute;
+            inset: 0;
+            opacity: 0;
+            cursor: pointer;
+        }
+        .composer-attachment:has(input:disabled) {
+            background: var(--surface-3);
+            color: var(--text-faint);
+            cursor: not-allowed;
+        }
+        .composer-attachment input:disabled {
+            cursor: not-allowed;
+        }
+        .composer-attachment-summary {
+            flex: 0 1 8rem;
+            max-width: 10rem;
+            color: var(--text-muted);
+            font-size: 0.78rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            align-self: center;
+        }
+        .composer-attachment-summary[hidden] { display: none; }
         .live-work {
             position: fixed;
             left: 50%;
@@ -1394,6 +1465,20 @@
             background: var(--surface-3);
             border-color: var(--border-strong);
             color: var(--text-faint);
+        }
+        .composer button.composer-attachment-clear {
+            padding: 0.6rem 0.7rem;
+            background: var(--surface);
+            border-color: var(--border-strong);
+            color: var(--text-muted);
+        }
+        .composer button.composer-attachment-clear:hover {
+            background: var(--surface-2);
+            border-color: var(--accent);
+            color: var(--text);
+        }
+        .composer button.composer-attachment-clear[hidden] {
+            display: none;
         }
         .composer-command {
             position: relative;
@@ -1859,7 +1944,27 @@
             .live-work[data-slash-menu-open="true"] .live-goal {
                 flex: 1 1 100%;
             }
-            .composer-inner { padding: 0.6rem 0.7rem; }
+            .composer-inner {
+                padding: 0.6rem 0.7rem;
+                flex-wrap: wrap;
+                align-items: stretch;
+            }
+            .composer textarea {
+                order: 1;
+                flex: 1 1 100%;
+                min-width: 100%;
+            }
+            .composer-command,
+            .composer-attachment,
+            .composer button.composer-attachment-clear,
+            .composer button[data-composer-submit],
+            .composer button.stop {
+                order: 2;
+            }
+            .composer button[data-composer-submit] {
+                margin-left: auto;
+            }
+            .composer-attachment-summary { display: none; }
             .diff-fab {
                 right: 0.75rem;
                 bottom: calc(5.4rem + var(--safe-bottom) + var(--composer-keyboard-offset));
@@ -2238,8 +2343,17 @@
     {% endif %}
 
     {% if not read_only %}
+    {% if active_worker or active_system_workflow %}
+    <form id="stop-session-form" method="post" action="{{ stop_url }}" data-stop-form>
+        {% csrf_token %}
+        {% if active_worker %}
+        <input type="hidden" name="instance" value="{{ active_instance.id }}">
+        {% endif %}
+    </form>
+    {% endif %}
     <form class="composer"
           method="post"
+          enctype="multipart/form-data"
           action="{{ send_message_url }}"
           data-composer
           data-stream-url="{{ stream_url }}"
@@ -2265,12 +2379,28 @@
                     </button>
                 </div>
             </div>
+            <label class="composer-attachment" data-image-button>
+                Image
+                <input type="file"
+                       name="input_images"
+                       accept="{{ input_image_accept }}"
+                       multiple
+                       data-image-input
+                       {% if active_system_workflow %}disabled{% endif %}>
+            </label>
+            <span class="composer-attachment-summary" data-image-summary hidden></span>
+            <button type="button"
+                    class="composer-attachment-clear"
+                    data-image-clear
+                    hidden
+                    {% if active_system_workflow %}disabled{% endif %}>
+                Clear
+            </button>
             {% if active_worker %}
             <input type="hidden" name="active_instance" value="{{ active_instance.id }}">
             {% endif %}
             <textarea name="prompt"
                       rows="1"
-                      required
                       {% if active_system_workflow %}disabled{% endif %}
                       autocomplete="off"
                       placeholder="{% if active_system_workflow %}{{ workflow_composer_label }} is running…{% elif active_worker %}Add instructions…{% else %}Send a message…{% endif %}"
@@ -2279,9 +2409,9 @@
             <button type="submit" data-composer-submit {% if active_system_workflow %}disabled{% endif %}>{% if active_system_workflow %}Waiting{% elif active_worker %}Steer{% else %}Send{% endif %}</button>
             {% if active_worker or active_system_workflow %}
             {% if active_worker %}
-            <button type="submit" class="stop" formaction="{{ stop_url }}" formnovalidate name="instance" value="{{ active_instance.id }}" data-composer-stop aria-label="Stop the running turn">Stop</button>
+            <button type="submit" class="stop" form="stop-session-form" formnovalidate data-composer-stop aria-label="Stop the running turn">Stop</button>
             {% else %}
-            <button type="submit" class="stop" formaction="{{ stop_url }}" formnovalidate data-composer-stop aria-label="Stop the {{ workflow_composer_label }}">Stop</button>
+            <button type="submit" class="stop" form="stop-session-form" formnovalidate data-composer-stop aria-label="Stop the {{ workflow_composer_label }}">Stop</button>
             {% endif %}
             {% endif %}
         </div>
@@ -2532,6 +2662,20 @@
                     submitter.click();
                 }
             }
+            const stopForm = document.querySelector("[data-stop-form]");
+            let stopSubmitting = false;
+            if (stopForm) {
+                stopForm.addEventListener("submit", (event) => {
+                    if (stopSubmitting) {
+                        event.preventDefault();
+                        return;
+                    }
+                    stopSubmitting = true;
+                    for (const button of document.querySelectorAll("[data-composer-stop]")) {
+                        button.disabled = true;
+                    }
+                });
+            }
 
             // Composer: auto-grow the textarea up to its CSS max-height and
             // disable submit when empty. Enter inserts a newline; Super+Enter
@@ -2549,6 +2693,10 @@
                 const slashPlan = composer.querySelector("[data-slash-plan]");
                 const slashPr = composer.querySelector("[data-slash-pr]");
                 const slashQa = composer.querySelector("[data-slash-qa]");
+                const imageButton = composer.querySelector("[data-image-button]");
+                const imageInput = composer.querySelector("[data-image-input]");
+                const imageSummary = composer.querySelector("[data-image-summary]");
+                const imageClear = composer.querySelector("[data-image-clear]");
                 const liveWork = document.querySelector("[data-live-work]");
                 const nextMessageConfig = document.querySelector("[data-next-message-config]");
                 const nextMessageItems = nextMessageConfig
@@ -2562,10 +2710,46 @@
                 const workflowLocked = composer.dataset.workflowLocked === "true";
                 let composerKeyboardFrame = 0;
                 let composerKeyboardSettleTimers = [];
+                const hasImages = () => imageInput && (imageInput.files || []).length > 0;
                 const sync = () => {
                     input.style.height = "auto";
                     input.style.height = input.scrollHeight + "px";
-                    submit.disabled = workflowLocked || input.value.trim().length === 0;
+                    submit.disabled = workflowLocked || (
+                        input.value.trim().length === 0 && !hasImages()
+                    );
+                };
+                const syncImageSummary = () => {
+                    if (!imageInput) return;
+                    const files = Array.from(imageInput.files || []);
+                    if (!files.length) {
+                        if (imageButton) {
+                            delete imageButton.dataset.hasImages;
+                            delete imageButton.dataset.count;
+                        }
+                        if (imageSummary) {
+                            imageSummary.hidden = true;
+                            imageSummary.textContent = "";
+                        }
+                        if (imageClear) imageClear.hidden = true;
+                        return;
+                    }
+                    if (imageButton) {
+                        imageButton.dataset.hasImages = "true";
+                        imageButton.dataset.count = String(files.length);
+                    }
+                    if (imageSummary) {
+                        imageSummary.hidden = false;
+                        imageSummary.textContent = files.length === 1
+                            ? files[0].name
+                            : `${files.length} images`;
+                    }
+                    if (imageClear) imageClear.hidden = false;
+                };
+                const clearImages = () => {
+                    if (!imageInput) return;
+                    imageInput.value = "";
+                    syncImageSummary();
+                    sync();
                 };
                 const clearComposerKeyboardOffset = () => {
                     document.documentElement.style.removeProperty(composerKeyboardOffsetProperty);
@@ -2685,6 +2869,14 @@
                 };
                 setPlanMode(composer.dataset.initialPlanMode === "true");
                 sync();
+                syncImageSummary();
+                if (imageInput) {
+                    imageInput.addEventListener("change", () => {
+                        syncImageSummary();
+                        sync();
+                    });
+                }
+                if (imageClear) imageClear.addEventListener("click", clearImages);
                 if (slashTrigger && slashMenu) {
                     slashTrigger.addEventListener("click", () => {
                         if (slashMenu.hidden) {
@@ -2709,6 +2901,7 @@
                 if (slashPr) {
                     slashPr.addEventListener("click", () => {
                         setPlanMode(false, true);
+                        clearImages();
                         input.value = prPrompt;
                         sync();
                         closeSlashMenu();
@@ -2718,6 +2911,7 @@
                 if (slashQa) {
                     slashQa.addEventListener("click", () => {
                         setPlanMode(false, true);
+                        clearImages();
                         input.value = qaPrompt;
                         sync();
                         closeSlashMenu();
@@ -2764,24 +2958,30 @@
                         event.preventDefault();
                         return;
                     }
-                    const prCommandPrompt = parsePrCommand();
-                    const qaCommandPrompt = prCommandPrompt === null ? parseQaCommand() : null;
-                    const workflowCommandPrompt = prCommandPrompt || qaCommandPrompt;
-                    const commandPrompt = workflowCommandPrompt === null ? parsePlanCommand() : null;
-                    if (workflowCommandPrompt !== null) {
-                        setPlanMode(false, true);
-                        input.value = workflowCommandPrompt;
-                        sync();
-                    } else if (commandPrompt !== null) {
-                        setPlanMode(true, true);
-                        input.value = commandPrompt;
-                        if (!commandPrompt) {
-                            event.preventDefault();
+                    const isStopSubmit = submitter === stop;
+                    if (isStopSubmit) {
+                        clearImages();
+                    } else {
+                        const prCommandPrompt = parsePrCommand();
+                        const qaCommandPrompt = prCommandPrompt === null ? parseQaCommand() : null;
+                        const workflowCommandPrompt = prCommandPrompt || qaCommandPrompt;
+                        const commandPrompt = workflowCommandPrompt === null ? parsePlanCommand() : null;
+                        if (workflowCommandPrompt !== null) {
+                            setPlanMode(false, true);
+                            clearImages();
+                            input.value = workflowCommandPrompt;
                             sync();
-                            input.focus();
-                            return;
+                        } else if (commandPrompt !== null) {
+                            setPlanMode(true, true);
+                            input.value = commandPrompt;
+                            if (!commandPrompt && !hasImages()) {
+                                event.preventDefault();
+                                sync();
+                                input.focus();
+                                return;
+                            }
+                            sync();
                         }
-                        sync();
                     }
                     // Defer the disable until after the form's entry
                     // list has been serialized: the Stop button carries
@@ -3140,11 +3340,13 @@
                 for (const wrapped of item.content || []) {
                     const inner = wrapped || {};
                     switch (inner.type) {
-                        case "text": parts.push(inner.text || ""); break;
+                        case "text":
+                            if (inner.text) parts.push(inner.text);
+                            break;
                         case "mention": parts.push("@" + (inner.name || "")); break;
                         case "skill": parts.push("/" + (inner.name || "")); break;
                         case "image": parts.push("[image]"); break;
-                        case "localImage": parts.push("[image: " + (inner.path || "") + "]"); break;
+                        case "localImage": parts.push("[image]"); break;
                     }
                 }
                 return parts.join("\n");

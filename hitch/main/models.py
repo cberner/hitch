@@ -424,6 +424,9 @@ class CodexInstance(models.Model):
     # beginning with a dash can't be reinterpreted as argparse options and
     # so a worker can be re-spawned from this row alone if needed.
     prompt = models.TextField(blank=True, default="")
+    input_image_paths = models.JSONField(default=list, blank=True)
+    input_attachment_paths = models.JSONField(default=list, blank=True)
+    input_attachment_cleanup_requested = models.BooleanField(default=False)
     # Thread-scoped developer instructions from the settings dialog. Each
     # detached worker re-supplies them on resume so the turn does not rely on
     # app-server in-memory state from the request process that created the

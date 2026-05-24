@@ -46,6 +46,8 @@ from django.utils import timezone
 from openai_codex import (
     ApprovalMode,
     Codex,
+    Input,
+    LocalImageInput,
     TextInput,
     Thread,
     TurnHandle,
@@ -56,6 +58,7 @@ from openai_codex.generated.v2_all import (
     AskForApprovalValue,
     CollaborationMode,
     DangerFullAccessSandboxPolicy,
+    LocalImageUserInput,
     ModeKind,
     ReadOnlySandboxPolicy,
     ReasoningEffort,
@@ -75,7 +78,12 @@ from openai_codex.models import Notification
 from pydantic import BaseModel
 
 from hitch.main.codex_events import GOAL_METHODS
-from hitch.main.codex_pool import app_server_config, control_path_for
+from hitch.main.codex_pool import (
+    app_server_config,
+    cleanup_requested_input_images_for,
+    control_path_for,
+    discard_input_attachment_paths,
+)
 from hitch.main.codex_tools import (
     ToolContext,
     handle_dynamic_tool_call,
@@ -263,6 +271,7 @@ class Command(BaseCommand):
             instance.error = repr(exc)
             instance.save(update_fields=["status", "ended_at", "error"])
             _notify_system_agents(instance)
+            cleanup_requested_input_images_for(instance)
             raise
 
         instance.ended_at = timezone.now()
@@ -284,6 +293,7 @@ class Command(BaseCommand):
             )
         instance.save(update_fields=["status", "ended_at", "error"])
         _notify_system_agents(instance)
+        cleanup_requested_input_images_for(instance)
 
 
 def _notify_system_agents(instance: CodexInstance) -> None:
@@ -418,6 +428,7 @@ def _run_turn(
                 codex,
                 thread,
                 prompt=prompt,
+                input_image_paths=_instance_input_image_paths(instance),
                 model=model,
                 effort=effort,
                 sandbox_policy=policy,
@@ -428,6 +439,7 @@ def _run_turn(
             )
             steer_forwarder = _start_steer_control_forwarder(
                 turn,
+                instance=instance,
                 control_path=control_path,
             )
             try:
@@ -486,6 +498,7 @@ class _SteerControlForwarder:
 def _start_steer_control_forwarder(
     turn: TurnHandle,
     *,
+    instance: CodexInstance,
     control_path: Path,
 ) -> _SteerControlForwarder:
     """Start a side drain for per-turn steer payloads."""
@@ -497,6 +510,7 @@ def _start_steer_control_forwarder(
             target=_forward_steer_requests,
             kwargs={
                 "turn": turn,
+                "instance": instance,
                 "control_path": control_path,
                 "wakeup": wakeup,
                 "stop": stop,
@@ -524,6 +538,7 @@ def _stop_steer_control_forwarder(forwarder: _SteerControlForwarder) -> None:
 def _forward_steer_requests(
     *,
     turn: TurnHandle,
+    instance: CodexInstance,
     control_path: Path,
     wakeup: threading.Event,
     stop: threading.Event,
@@ -538,6 +553,7 @@ def _forward_steer_requests(
     while not stop.is_set():
         control_offset = _drain_steer_requests(
             turn,
+            instance=instance,
             control_path=control_path,
             control_offset=control_offset,
         )
@@ -545,6 +561,7 @@ def _forward_steer_requests(
         wakeup.clear()
     _drain_steer_requests(
         turn,
+        instance=instance,
         control_path=control_path,
         control_offset=control_offset,
     )
@@ -553,6 +570,7 @@ def _forward_steer_requests(
 def _drain_steer_requests(
     turn: TurnHandle,
     *,
+    instance: CodexInstance,
     control_path: Path,
     control_offset: int,
 ) -> int:
@@ -581,15 +599,54 @@ def _drain_steer_requests(
         if not isinstance(request, dict) or request.get("op") != "steer":
             continue
         text = request.get("input")
-        if isinstance(text, str) and text.strip():
-            _try_steer(turn, text)
+        input_image_paths = _control_input_image_paths(request.get("inputImagePaths"))
+        if isinstance(text, str) and (text.strip() or input_image_paths):
+            sent = _try_steer(turn, text, input_image_paths=input_image_paths)
+            if not sent:
+                discard_input_attachment_paths(instance, input_image_paths)
     return control_offset + len(complete)
 
 
-def _try_steer(turn: TurnHandle, text: str) -> bool:
+def _instance_input_image_paths(instance: CodexInstance) -> list[str]:
+    return _control_input_image_paths(instance.input_image_paths)
+
+
+def _control_input_image_paths(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [path for path in value if isinstance(path, str) and path.strip()]
+
+
+def _turn_input(prompt: str, input_image_paths: list[str] | None = None) -> Input:
+    image_paths = _control_input_image_paths(input_image_paths)
+    if not image_paths:
+        return TextInput(prompt)
+    input_items: list[Any] = []
+    if prompt:
+        input_items.append(TextInput(prompt))
+    input_items.extend(LocalImageInput(path=path) for path in image_paths)
+    return input_items
+
+
+def _typed_turn_input(
+    prompt: str, input_image_paths: list[str] | None = None
+) -> list[UserInput]:
+    input_items: list[UserInput] = []
+    if prompt:
+        input_items.append(UserInput(root=TextUserInput(type="text", text=prompt)))
+    input_items.extend(
+        UserInput(root=LocalImageUserInput(type="localImage", path=path))
+        for path in _control_input_image_paths(input_image_paths)
+    )
+    return input_items
+
+
+def _try_steer(
+    turn: TurnHandle, text: str, input_image_paths: list[str] | None = None
+) -> bool:
     """Send one SDK-level steer request; report whether it was attempted."""
     try:
-        turn.steer(TextInput(text))
+        turn.steer(_turn_input(text, input_image_paths))
     except Exception:
         return False
     else:
@@ -601,6 +658,7 @@ def _start_turn(
     thread: Thread,
     *,
     prompt: str,
+    input_image_paths: list[str] | None,
     model: str | None,
     effort: ReasoningEffort | None,
     sandbox_policy: SandboxPolicy | None,
@@ -626,6 +684,7 @@ def _start_turn(
             codex,
             thread,
             prompt=prompt,
+            input_image_paths=input_image_paths,
             model=model,
             sandbox_policy=sandbox_policy,
             approval_mode=approval_mode,
@@ -636,6 +695,7 @@ def _start_turn(
             codex,
             thread,
             prompt=prompt,
+            input_image_paths=input_image_paths,
             model=model,
             effort=effort,
             sandbox_policy=sandbox_policy,
@@ -646,7 +706,7 @@ def _start_turn(
         raise ValueError(f"unsupported collaboration mode: {collaboration_mode}")
 
     if approval_mode in _USER_REVIEWER_APPROVAL_MODES:
-        typed_input = [UserInput(root=TextUserInput(type="text", text=prompt))]
+        typed_input = _typed_turn_input(prompt, input_image_paths)
         params = TurnStartParams(
             thread_id=thread.id,
             input=typed_input,
@@ -676,7 +736,7 @@ def _start_turn(
     mode = _build_approval_mode(approval_mode)
     if mode is not None:
         turn_kwargs["approval_mode"] = mode
-    return thread.turn(TextInput(prompt), **turn_kwargs)
+    return thread.turn(_turn_input(prompt, input_image_paths), **turn_kwargs)
 
 
 def _start_plan_turn(
@@ -684,6 +744,7 @@ def _start_plan_turn(
     thread: Thread,
     *,
     prompt: str,
+    input_image_paths: list[str] | None,
     model: str | None,
     sandbox_policy: SandboxPolicy | None,
     approval_mode: str | None,
@@ -703,6 +764,7 @@ def _start_plan_turn(
         codex,
         thread,
         prompt=prompt,
+        input_image_paths=input_image_paths,
         collaboration_mode=collaboration_mode,
         sandbox_policy=sandbox_policy,
         approval_mode=approval_mode,
@@ -715,6 +777,7 @@ def _start_default_collaboration_turn(
     thread: Thread,
     *,
     prompt: str,
+    input_image_paths: list[str] | None,
     model: str | None,
     effort: ReasoningEffort | None,
     sandbox_policy: SandboxPolicy | None,
@@ -735,6 +798,7 @@ def _start_default_collaboration_turn(
         codex,
         thread,
         prompt=prompt,
+        input_image_paths=input_image_paths,
         collaboration_mode=collaboration_mode,
         sandbox_policy=sandbox_policy,
         approval_mode=approval_mode,
@@ -747,12 +811,13 @@ def _start_collaboration_turn(
     thread: Thread,
     *,
     prompt: str,
+    input_image_paths: list[str] | None,
     collaboration_mode: CollaborationMode,
     sandbox_policy: SandboxPolicy | None,
     approval_mode: str | None,
     output_schema: dict[str, Any] | None,
 ) -> TurnHandle:
-    typed_input = [UserInput(root=TextUserInput(type="text", text=prompt))]
+    typed_input = _typed_turn_input(prompt, input_image_paths)
     wire_input = [item.model_dump(mode="json", by_alias=True) for item in typed_input]
     params: dict[str, Any] = {
         "threadId": thread.id,
@@ -831,12 +896,31 @@ def _serialize_event(
         payload_data = dataclasses.asdict(payload)
     else:
         payload_data = payload
+    payload_data = _redact_local_image_paths(payload_data)
     event: dict[str, Any] = {"method": method, "payload": payload_data}
     if recorded_at is not None:
         event["recordedAt"] = recorded_at
     if event_seq is not None:
         event["eventSeq"] = event_seq
     return json.dumps(event)
+
+
+def _redact_local_image_paths(value: Any) -> Any:
+    if isinstance(value, dict):
+        is_local_image = value.get("type") == "localImage"
+        return {
+            key: (
+                "[redacted]"
+                if is_local_image and key == "path"
+                else ["[redacted]" for _item in child]
+                if key == "local_images" and isinstance(child, list)
+                else _redact_local_image_paths(child)
+            )
+            for key, child in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_local_image_paths(child) for child in value]
+    return value
 
 
 WriteEvent = Callable[[str, Any], None]

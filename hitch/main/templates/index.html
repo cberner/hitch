@@ -783,7 +783,7 @@
 
     {% if show_new_session_controls %}
     <dialog class="new-session" data-new-session-dialog aria-labelledby="new-session-title">
-        <form method="post" action="{{ new_session_url }}">
+        <form method="post" action="{{ new_session_url }}" enctype="multipart/form-data">
             {% csrf_token %}
             <input type="hidden" name="plan_mode" value="" data-plan-mode-input>
             <h2 id="new-session-title">Start a new session</h2>
@@ -798,9 +798,13 @@
                             </button>
                         </div>
                     </div>
-                    <textarea id="new-session-prompt" name="prompt" required autocomplete="off" placeholder="Describe what you want the agent to do…"></textarea>
+                    <textarea id="new-session-prompt" name="prompt" autocomplete="off" placeholder="Describe what you want the agent to do…"></textarea>
                 </div>
             </div>
+            <label>
+                Image attachment
+                <input type="file" name="input_images" accept="{{ input_image_accept }}" multiple data-new-session-image-input>
+            </label>
             <label>
                 Project
                 <select name="project" required data-new-session-project>
@@ -1265,6 +1269,7 @@
             const newSessionRepoSelect = newSessionForm && newSessionForm.querySelector("[data-new-session-repo]");
             const newSessionAutoPr = newSessionForm && newSessionForm.querySelector("[data-new-session-auto-pr]");
             const newSessionAutoQa = newSessionForm && newSessionForm.querySelector("[data-new-session-auto-qa]");
+            const newSessionImageInput = newSessionForm && newSessionForm.querySelector("[data-new-session-image-input]");
             const newSessionSlashCommand = newSessionForm && newSessionForm.querySelector("[data-slash-command]");
             const newSessionSlashTrigger = newSessionForm && newSessionForm.querySelector("[data-slash-trigger]");
             const newSessionSlashMenu = newSessionForm && newSessionForm.querySelector("[data-slash-menu]");
@@ -1305,6 +1310,27 @@
                 if (newSessionPlanModeInput) newSessionPlanModeInput.value = enabled ? "true" : "";
                 if (newSessionSlashTrigger) newSessionSlashTrigger.setAttribute("aria-pressed", enabled ? "true" : "false");
                 if (newSessionSlashPlan) newSessionSlashPlan.setAttribute("aria-checked", enabled ? "true" : "false");
+            }
+            function clearNewSessionImages() {
+                if (newSessionImageInput) newSessionImageInput.value = "";
+            }
+            function newSessionHasImages() {
+                return Boolean(newSessionImageInput && (newSessionImageInput.files || []).length);
+            }
+            function newSessionHasPromptOrImages() {
+                return Boolean(
+                    (newSessionInput && newSessionInput.value.trim().length)
+                    || newSessionHasImages()
+                );
+            }
+            function clearNewSessionPromptValidity() {
+                if (newSessionInput) newSessionInput.setCustomValidity("");
+            }
+            function requireNewSessionPromptOrImages() {
+                if (!newSessionInput || newSessionHasPromptOrImages()) return true;
+                newSessionInput.setCustomValidity("Enter a prompt or attach an image.");
+                newSessionInput.reportValidity();
+                return false;
             }
             function closeNewSessionSlashMenu() {
                 if (!newSessionSlashMenu || !newSessionSlashTrigger) return;
@@ -1385,12 +1411,16 @@
             });
             if (newSessionInput) {
                 newSessionInput.addEventListener("input", () => {
+                    clearNewSessionPromptValidity();
                     if (newSessionInput.value.trim() === "/") {
                         openNewSessionSlashMenu();
                     } else {
                         closeNewSessionSlashMenu();
                     }
                 });
+            }
+            if (newSessionImageInput) {
+                newSessionImageInput.addEventListener("change", clearNewSessionPromptValidity);
             }
             if (newSessionProjectSelect) {
                 newSessionProjectSelect.addEventListener("change", syncNewSessionProjectFields);
@@ -1416,14 +1446,19 @@
                     const commandPrompt = workflowCommandPrompt === null ? parseNewSessionPlanCommand() : null;
                     if (workflowCommandPrompt !== null && newSessionInput) {
                         setNewSessionPlanMode(false);
+                        clearNewSessionImages();
                         newSessionInput.value = workflowCommandPrompt;
                     } else if (commandPrompt !== null && newSessionInput) {
                         setNewSessionPlanMode(true);
                         newSessionInput.value = commandPrompt;
-                        if (!commandPrompt) {
+                        if (!commandPrompt && !newSessionHasImages()) {
                             event.preventDefault();
+                            requireNewSessionPromptOrImages();
                             newSessionInput.focus();
                         }
+                    } else if (!requireNewSessionPromptOrImages()) {
+                        event.preventDefault();
+                        if (newSessionInput) newSessionInput.focus();
                     }
                 });
             }

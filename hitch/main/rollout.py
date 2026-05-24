@@ -945,9 +945,9 @@ def _user_message_text(payload: dict[str, Any]) -> str:
     """Render a user_message payload to its plain-text UI form.
 
     The rollout's `message` field already inlines `@mention` / `/skill` text,
-    but `images` and `local_images` live alongside as separate arrays; mirror
-    the SDK's `_user_message_text` and append `[image]` / `[image: path]`
-    markers so image-only or mixed multimodal prompts don't render blank.
+    but `images` and `local_images` live alongside as separate arrays; append
+    generic image markers so image-only or mixed multimodal prompts don't
+    render blank without leaking server-side attachment paths.
     """
     parts: list[str] = []
     message = payload.get("message")
@@ -959,8 +959,8 @@ def _user_message_text(payload: dict[str, Any]) -> str:
             parts.append("[image]")
     local_images = payload.get("local_images")
     if isinstance(local_images, list):
-        for path in local_images:
-            parts.append(f"[image: {path}]")
+        for _ in local_images:
+            parts.append("[image]")
     return "\n".join(parts)
 
 

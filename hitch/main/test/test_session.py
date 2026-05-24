@@ -548,6 +548,31 @@ class SessionViewTests(TestCase):
         self.assertNotContains(response, "Open PR")
 
     @patch("hitch.main.views.Codex")
+    def test_local_image_entries_redact_server_paths(self, mock_codex: MagicMock) -> None:
+        local_image_message = _root(
+            SimpleNamespace(
+                type="userMessage",
+                content=[
+                    _root(SimpleNamespace(type="text", text="see attached")),
+                    _root(
+                        SimpleNamespace(
+                            type="localImage",
+                            path="/tmp/private/screen.png",
+                        )
+                    ),
+                ],
+            )
+        )
+        thread = _thread([_turn([local_image_message, _agent_message("Done.")])])
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertContains(response, "see attached")
+        self.assertContains(response, "[image]")
+        self.assertNotContains(response, "/tmp/private/screen.png")
+
+    @patch("hitch.main.views.Codex")
     def test_next_message_settings_render_under_title(
         self, mock_codex: MagicMock
     ) -> None:
@@ -2742,19 +2767,25 @@ class SessionViewActiveWorkerTests(TestCase):
             '<div class="message user pending" data-copyable-message>',
             html=False,
         )
-        # Stop button is wired to the interrupt endpoint via formaction so
-        # the user can abort an in-progress turn without leaving the page.
+        # Stop uses a separate non-multipart form so selected image
+        # attachments cannot delay or block cancellation.
         # The regular composer submit carries the same active instance in a
         # hidden field so it steers this running turn instead of spawning an
         # overlapping follow-up worker.
-        # The button's name/value carries the *specific* worker the page
-        # is showing — clicking Stop on a stale tab must not accidentally
-        # abort a newer overlapping worker the user can't see.
+        # The stop form carries the *specific* worker the page is showing —
+        # clicking Stop on a stale tab must not accidentally abort a newer
+        # overlapping worker the user can't see.
         stop_url = reverse("stop_session", kwargs={"session_id": "thread-1"})
         self.assertContains(response, f'name="active_instance" value="{instance.id}"')
         self.assertContains(response, ">Steer</button>")
-        self.assertContains(response, f'formaction="{stop_url}"')
+        self.assertContains(response, f'action="{stop_url}"')
+        self.assertContains(response, 'form="stop-session-form"')
         self.assertContains(response, f'name="instance" value="{instance.id}"')
+        self.assertContains(response, "!commandPrompt && !hasImages()")
+        self.assertContains(response, "let stopSubmitting = false")
+        self.assertContains(response, 'document.querySelector("[data-stop-form]")')
+        self.assertContains(response, 'document.querySelectorAll("[data-composer-stop]")')
+        self.assertContains(response, "if (inner.text) parts.push(inner.text)")
 
     @patch("hitch.main.views.Codex")
     def test_inactive_thread_omits_stop_button(
@@ -3077,6 +3108,17 @@ class SessionViewActiveWorkerTests(TestCase):
         # empty — empty is the canonical encoding of "page knows of no
         # prior state".
         self.assertContains(response, "data-composer")
+        self.assertContains(response, 'enctype="multipart/form-data"')
+        self.assertContains(response, 'name="input_images"')
+        self.assertContains(response, "data-image-button")
+        self.assertContains(response, "data-image-clear")
+        self.assertContains(response, 'data-count')
+        self.assertContains(response, "const hasImages = ()")
+        self.assertContains(response, "clearImages()")
+        self.assertContains(response, ".composer-attachment[data-has-images")
+        self.assertNotContains(response, "[image:")
+        self.assertContains(response, "flex-wrap: wrap;")
+        self.assertContains(response, "min-width: 100%;")
         self.assertContains(
             response,
             f'data-stream-url="{stream_path}?baseline=&amp;active=&amp;workflow=&amp;demo="',
@@ -3256,6 +3298,50 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertNotIn("working on it", body)
         self.assertContains(response, "data-pending-user>")
         self.assertContains(response, "run tests")
+        self.assertContains(response, "data-live-root")
+
+    @patch("hitch.main.views.Codex")
+    def test_in_progress_image_only_turn_is_trimmed_when_worker_active(
+        self, mock_codex: MagicMock
+    ) -> None:
+        image_user = _root(
+            SimpleNamespace(
+                type="userMessage",
+                content=[
+                    _root(
+                        SimpleNamespace(
+                            type="localImage",
+                            path="/tmp/private/screen.png",
+                        )
+                    )
+                ],
+            )
+        )
+        thread = _thread(
+            [
+                _turn([_user_message("earlier"), _agent_message("earlier reply")]),
+                _turn([image_user, _agent_message("working on image")]),
+            ]
+        )
+        _patch_thread(self, mock_codex, thread)
+        _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_RUNNING,
+            prompt="",
+            input_image_paths=["/tmp/private/screen.png"],
+            pid=_LIVE_PID,
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode()
+        self.assertIn("earlier", body)
+        self.assertIn("earlier reply", body)
+        self.assertNotIn("working on image", body)
+        self.assertNotIn("/tmp/private/screen.png", body)
+        self.assertContains(response, "data-pending-user>")
+        self.assertContains(response, "[image]")
         self.assertContains(response, "data-live-root")
 
     @patch("hitch.main.views.Codex")
