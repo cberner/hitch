@@ -388,6 +388,10 @@ class LocalMergeTests(SimpleTestCase):
             marker_text = (
                 "hello\n"
                 "Binary files are not always binary\n"
+                "Binary file not shown\n"
+                "File preview truncated\n"
+                "Symlink not shown\n"
+                "4 untracked files omitted from diff preview\n"
                 "GIT binary patch\n"
                 "new file mode 120000\n"
                 "Subproject commit docs\n"
