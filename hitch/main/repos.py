@@ -4,17 +4,8 @@ import subprocess
 from pathlib import Path
 
 _GIT_TIMEOUT_SECONDS = 10
-_DEFAULT_BRANCH_REFS = (
-    "refs/remotes/origin/HEAD",
-    "refs/remotes/origin/main",
-    "refs/remotes/origin/master",
-    "refs/remotes/origin/trunk",
-    "refs/remotes/origin/develop",
-    "refs/heads/main",
-    "refs/heads/master",
-    "refs/heads/trunk",
-    "refs/heads/develop",
-)
+_DEFAULT_BRANCH_NAMES = ("main", "master", "trunk", "develop")
+_DEFAULT_BRANCH_HEAD_REFS = ("refs/remotes/origin/HEAD",)
 
 
 def discover_repos(home: Path | None = None, *, max_depth: int = 2) -> list[Path]:
@@ -136,18 +127,43 @@ def _commit_hash_for_ref(repo: Path, ref: str) -> str | None:
 
 
 def _default_branch_ref(repo: Path) -> str | None:
-    for ref in _DEFAULT_BRANCH_REFS:
-        resolved_ref = _resolve_symbolic_ref(repo, ref)
-        sha = _commit_hash_for_ref(repo, resolved_ref)
-        if sha:
-            return resolved_ref
+    explicit_ref = _explicit_default_branch_ref(repo)
+    if explicit_ref is not None:
+        return explicit_ref
+    named_refs = _named_default_branch_refs(repo)
+    if len(named_refs) == 1:
+        return next(iter(named_refs.values()))
+    if named_refs:
+        return None
     return _single_local_branch_ref(repo)
+
+
+def _explicit_default_branch_ref(repo: Path) -> str | None:
+    for ref in _DEFAULT_BRANCH_HEAD_REFS:
+        resolved_ref = _resolve_symbolic_ref(repo, ref)
+        if resolved_ref == ref:
+            continue
+        if _commit_hash_for_ref(repo, resolved_ref):
+            return resolved_ref
+    return None
 
 
 def _resolve_symbolic_ref(repo: Path, ref: str) -> str:
     output = _git_output(repo, ["symbolic-ref", "--quiet", ref])
     resolved = output.strip() if output else ""
     return resolved or ref
+
+
+def _named_default_branch_refs(repo: Path) -> dict[str, str]:
+    refs_by_name: dict[str, str] = {}
+    for name in _DEFAULT_BRANCH_NAMES:
+        local_ref = f"refs/heads/{name}"
+        remote_ref = f"refs/remotes/origin/{name}"
+        if _commit_hash_for_ref(repo, local_ref):
+            refs_by_name[name] = local_ref
+        elif _commit_hash_for_ref(repo, remote_ref):
+            refs_by_name[name] = remote_ref
+    return refs_by_name
 
 
 def _single_local_branch_ref(repo: Path) -> str | None:

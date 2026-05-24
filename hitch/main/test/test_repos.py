@@ -142,6 +142,65 @@ class DiscoverReposTests(TestCase):
 
             self.assertEqual(default_branch_commit_hash(repo), main_sha)
 
+    def test_default_branch_commit_hash_does_not_guess_between_main_and_master(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            repo = Path(raw_root) / "repo"
+            repo.mkdir()
+            _git(repo, "init", "--initial-branch=master")
+            _git(repo, "config", "user.email", "dev@example.com")
+            _git(repo, "config", "user.name", "Dev")
+            (repo / "README.md").write_text("master\n")
+            _git(repo, "add", "README.md")
+            _git(repo, "commit", "-m", "master")
+            _git(repo, "checkout", "-b", "main")
+            (repo / "README.md").write_text("main\n")
+            _git(repo, "commit", "-am", "main")
+
+            self.assertIsNone(default_branch_commit_hash(repo))
+
+    def test_default_branch_commit_hash_does_not_guess_between_origin_main_and_master(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            repo = Path(raw_root) / "repo"
+            repo.mkdir()
+            _git(repo, "init", "--initial-branch=stable")
+            _git(repo, "config", "user.email", "dev@example.com")
+            _git(repo, "config", "user.name", "Dev")
+            (repo / "README.md").write_text("stable\n")
+            _git(repo, "add", "README.md")
+            _git(repo, "commit", "-m", "stable")
+            master_sha = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "update-ref", "refs/remotes/origin/master", master_sha)
+            (repo / "README.md").write_text("main\n")
+            _git(repo, "commit", "-am", "main")
+            main_sha = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "update-ref", "refs/remotes/origin/main", main_sha)
+
+            self.assertIsNone(default_branch_commit_hash(repo))
+            self.assertIsNone(default_branch_checkout_commit_hash(repo))
+
+    def test_default_branch_checkout_rejects_ambiguous_local_named_branches(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            repo = Path(raw_root) / "repo"
+            repo.mkdir()
+            _git(repo, "init", "--initial-branch=master")
+            _git(repo, "config", "user.email", "dev@example.com")
+            _git(repo, "config", "user.name", "Dev")
+            (repo / "README.md").write_text("master\n")
+            _git(repo, "add", "README.md")
+            _git(repo, "commit", "-m", "master")
+            _git(repo, "checkout", "-b", "main")
+            (repo / "README.md").write_text("main\n")
+            _git(repo, "commit", "-am", "main")
+            _git(repo, "checkout", "master")
+
+            self.assertIsNone(default_branch_checkout_commit_hash(repo))
+
     def test_default_branch_checkout_rejects_feature_branch_at_same_commit(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
             repo = Path(raw_root) / "repo"
