@@ -47,6 +47,7 @@ _MODEL_COOKIE = "hitch_model"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
+_AUTO_QA_COOKIE = "hitch_auto_qa"
 _QA_PANEL_COOKIE = "hitch_qa_panel"
 _SPEC_CRITIC_COOKIE = "hitch_spec_critic"
 _WEB_SEARCH_COOKIE = "hitch_web_search_mode"
@@ -1363,6 +1364,7 @@ class NewSessionViewTests(TestCase):
             web_search_mode="live",
             initial_user_message_index=0,
             auto_pr_enabled=False,
+            auto_qa_enabled=False,
         )
         metadata = SessionMetadata.objects.get(thread_id="thread-spec")
         self.assertEqual(metadata.cwd, self.REPO)
@@ -1634,6 +1636,109 @@ class NewSessionViewTests(TestCase):
                 if case["expected"]:
                     expected_spawn["auto_pr_enabled"] = True
                 mock_spawn.assert_called_once_with(**expected_spawn)
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_auto_qa_precedence_matrix(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        _setup_codex(mock_codex, models=[])
+        cases: list[dict[str, Any]] = [
+            {
+                "name": "posted override enables bare repo",
+                "post_auto_qa": "true",
+                "expected_auto_pr": False,
+                "expected_auto_qa": True,
+            },
+            {
+                "name": "posted override disables global setting",
+                "global_auto_qa": "true",
+                "post_auto_qa": "false",
+                "expected_auto_pr": False,
+                "expected_auto_qa": False,
+            },
+            {
+                "name": "global setting enables bare repo",
+                "global_auto_qa": "true",
+                "expected_auto_pr": False,
+                "expected_auto_qa": True,
+            },
+            {
+                "name": "auto-PR takes precedence",
+                "post_auto_pr": "true",
+                "post_auto_qa": "true",
+                "expected_auto_pr": True,
+                "expected_auto_qa": False,
+            },
+        ]
+
+        for index, case in enumerate(cases):
+            with self.subTest(case["name"]):
+                client = Client()
+                repo = f"{self.REPO}-auto-qa-{index}"
+                thread_id = f"auto-qa-thread-{index}"
+                data = {"prompt": "do thing", "cwd": repo}
+                if "post_auto_pr" in case:
+                    data["auto_pr"] = case["post_auto_pr"]
+                if "post_auto_qa" in case:
+                    data["auto_qa"] = case["post_auto_qa"]
+                cookies: dict[str, str] = {}
+                if "global_auto_qa" in case:
+                    cookies[_AUTO_QA_COOKIE] = case["global_auto_qa"]
+                if cookies:
+                    _seed_cookies(client, **cookies)
+                mock_discover.return_value = [Path(repo)]
+                mock_spawn.return_value = SimpleNamespace(thread_id=thread_id)
+                mock_spawn.reset_mock()
+
+                response = client.post(reverse("new_session"), data=data)
+
+                self.assertEqual(response.status_code, 302)
+                metadata = SessionMetadata.objects.get(thread_id=thread_id)
+                self.assertEqual(
+                    metadata.auto_pr_enabled, case["expected_auto_pr"]
+                )
+                self.assertEqual(
+                    metadata.auto_qa_enabled, case["expected_auto_qa"]
+                )
+                kwargs = mock_spawn.call_args.kwargs
+                self.assertEqual(
+                    kwargs.get("auto_pr_enabled", False),
+                    case["expected_auto_pr"],
+                )
+                self.assertEqual(
+                    kwargs.get("auto_qa_enabled", False),
+                    case["expected_auto_qa"],
+                )
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_auto_qa_forwards_qa_panel_to_spawn(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        _setup_codex(mock_codex, models=[])
+        repo = f"{self.REPO}-auto-qa-panel"
+        _seed_cookies(self.client, **{_QA_PANEL_COOKIE: "true"})
+        mock_discover.return_value = [Path(repo)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="auto-qa-panel-thread")
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "do thing", "cwd": repo, "auto_qa": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertTrue(kwargs["auto_qa_enabled"])
+        self.assertTrue(kwargs["qa_panel_enabled"])
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
@@ -2747,6 +2852,7 @@ class SendMessageViewTests(TestCase):
             web_search_mode="cached",
             initial_user_message_index=0,
             auto_pr_enabled=False,
+            auto_qa_enabled=False,
         )
 
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
@@ -3071,6 +3177,86 @@ class SendMessageViewTests(TestCase):
             user_message_index=0,
             stored_model="gpt-5.4",
             stored_reasoning_effort="high",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_auto_qa_session_marks_follow_up_turn(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(
+            mock_codex,
+            model="gpt-5.4",
+            reasoning_effort="high",
+        )
+        mock_discover.return_value = [Path("/repo")]
+        SessionMetadata.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            auto_qa_enabled=True,
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="follow-up",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            auto_qa_enabled=True,
+            user_message_index=0,
+            stored_model="gpt-5.4",
+            stored_reasoning_effort="high",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_auto_qa_session_forwards_qa_panel_to_follow_up_turn(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(
+            mock_codex,
+            model="gpt-5.4",
+            reasoning_effort="high",
+        )
+        _seed_cookies(self.client, **{_QA_PANEL_COOKIE: "true"})
+        mock_discover.return_value = [Path("/repo")]
+        SessionMetadata.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            auto_qa_enabled=True,
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="follow-up",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            auto_qa_enabled=True,
+            user_message_index=0,
+            stored_model="gpt-5.4",
+            stored_reasoning_effort="high",
+            qa_panel_enabled=True,
         )
 
     @patch("hitch.main.views.discover_repos")
@@ -5180,6 +5366,7 @@ class StandingOrderViewTests(TestCase):
             goal="Find useful test coverage increments.",
             ambition=StandingOrder.AMBITION_HIGH,
             autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            auto_qa_enabled=True,
             web_search_mode=StandingOrder.WEB_SEARCH_LIVE,
         )
         StandingOrder.objects.create(
@@ -5220,6 +5407,13 @@ class StandingOrderViewTests(TestCase):
         self.assertContains(response, "Ambition: High")
         self.assertContains(response, "Autonomy")
         self.assertContains(response, "Autonomy: Draft patch")
+        self.assertContains(response, "Auto-QA: On")
+        self.assertContains(
+            response, 'value="draft_patch" data-auto-qa-supported="true"'
+        )
+        self.assertContains(
+            response, 'value="draft_pr" data-auto-qa-supported="false"'
+        )
         self.assertContains(response, "Web search: Live")
         self.assertContains(
             response,
@@ -5228,6 +5422,7 @@ class StandingOrderViewTests(TestCase):
         self.assertContains(
             response, f'data-autonomy="{StandingOrder.AUTONOMY_DRAFT_PATCH}"'
         )
+        self.assertContains(response, 'data-auto-qa="true"')
         self.assertContains(
             response, f'data-web-search-mode="{StandingOrder.WEB_SEARCH_LIVE}"'
         )
@@ -5235,6 +5430,28 @@ class StandingOrderViewTests(TestCase):
         self.assertNotContains(response, "Add parser coverage")
         self.assertNotContains(response, 'name="proposed_session"')
         self.assertNotContains(response, "Other order")
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_edit_form_sync_does_not_mutate_auto_qa_choice(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            auto_qa_enabled=True,
+        )
+
+        response = self.client.get(reverse("standing_orders"))
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode()
+        self.assertIn("autoQa.disabled = !supported;", body)
+        self.assertNotIn("autoQa.checked =", body)
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
@@ -5381,6 +5598,18 @@ class StandingOrderViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'data-standing-order-create-form')
+        self.assertContains(response, "data-standing-order-auto-qa")
+        self.assertContains(
+            response,
+            '<input type="checkbox" name="auto_qa" value="true" data-standing-order-auto-qa disabled>',
+            html=True,
+        )
+        self.assertContains(
+            response, 'value="draft_patch" data-auto-qa-supported="true"'
+        )
+        self.assertContains(
+            response, 'value="draft_pr" data-auto-qa-supported="false"'
+        )
         self.assertContains(response, "Create standing order")
         self.assertNotContains(response, "No standing orders yet.")
         self.assertNotContains(
@@ -5432,6 +5661,7 @@ class StandingOrderViewTests(TestCase):
                 "goal": "Find useful test coverage increments.",
                 "ambition": StandingOrder.AMBITION_YOLO,
                 "autonomy": StandingOrder.AUTONOMY_DRAFT_PR,
+                "auto_qa": "true",
                 "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
                 "web_search_mode": StandingOrder.WEB_SEARCH_LIVE,
             },
@@ -5443,6 +5673,7 @@ class StandingOrderViewTests(TestCase):
         self.assertEqual(order.title, "Improve tests")
         self.assertEqual(order.ambition, StandingOrder.AMBITION_YOLO)
         self.assertEqual(order.autonomy, StandingOrder.AUTONOMY_DRAFT_PR)
+        self.assertFalse(order.auto_qa_enabled)
         self.assertEqual(order.web_search_mode, StandingOrder.WEB_SEARCH_LIVE)
         self.assertEqual(
             order.confidence_threshold,
@@ -5469,6 +5700,7 @@ class StandingOrderViewTests(TestCase):
                 "goal": "Find useful docs increments.",
                 "ambition": StandingOrder.AMBITION_HIGH,
                 "autonomy": StandingOrder.AUTONOMY_DRAFT_PATCH,
+                "auto_qa": "true",
                 "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
                 "web_search_mode": StandingOrder.WEB_SEARCH_DISABLED,
             },
@@ -5480,6 +5712,7 @@ class StandingOrderViewTests(TestCase):
         self.assertEqual(order.goal, "Find useful docs increments.")
         self.assertEqual(order.ambition, StandingOrder.AMBITION_HIGH)
         self.assertEqual(order.autonomy, StandingOrder.AUTONOMY_DRAFT_PATCH)
+        self.assertTrue(order.auto_qa_enabled)
         self.assertEqual(order.web_search_mode, StandingOrder.WEB_SEARCH_DISABLED)
         self.assertEqual(
             order.confidence_threshold,
@@ -5542,6 +5775,63 @@ class StandingOrderViewTests(TestCase):
         order.refresh_from_db()
         self.assertEqual(order.autonomy, StandingOrder.AUTONOMY_DRAFT_PR)
         self.assertEqual(order.web_search_mode, StandingOrder.WEB_SEARCH_CACHED)
+
+    def test_edit_standing_order_preserves_auto_qa_when_omitted(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            ambition=StandingOrder.AMBITION_INCREMENTAL,
+            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            auto_qa_enabled=True,
+            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+        )
+
+        response = self.client.post(
+            reverse("edit_standing_order", args=[order.pk]),
+            {
+                "title": "Improve docs",
+                "goal": "Find useful docs increments.",
+                "ambition": StandingOrder.AMBITION_HIGH,
+                "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.autonomy, StandingOrder.AUTONOMY_DRAFT_PATCH)
+        self.assertTrue(order.auto_qa_enabled)
+
+    def test_edit_standing_order_disables_auto_qa_when_false_is_explicit(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            ambition=StandingOrder.AMBITION_INCREMENTAL,
+            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            auto_qa_enabled=True,
+            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+        )
+
+        response = self.client.post(
+            reverse("edit_standing_order", args=[order.pk]),
+            {
+                "title": "Improve docs",
+                "goal": "Find useful docs increments.",
+                "ambition": StandingOrder.AMBITION_HIGH,
+                "autonomy": StandingOrder.AUTONOMY_DRAFT_PATCH,
+                "auto_qa": "false",
+                "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        order.refresh_from_db()
+        self.assertFalse(order.auto_qa_enabled)
 
     def test_edit_standing_order_is_scoped_to_selected_project(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -5617,6 +5907,17 @@ class StandingOrderViewTests(TestCase):
                     "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
                 },
                 "autonomy is invalid",
+            ),
+            (
+                {
+                    "title": "Improve docs",
+                    "goal": "Find useful docs increments.",
+                    "ambition": StandingOrder.AMBITION_HIGH,
+                    "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
+                    "auto_qa": "yes",
+                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                },
+                "auto-QA setting is invalid",
             ),
             (
                 {

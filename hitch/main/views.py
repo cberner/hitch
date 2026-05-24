@@ -79,6 +79,7 @@ class SettingsValues(NamedTuple):
     extra_system_prompt: str
     use_worktrees: bool
     auto_pr_enabled: bool
+    auto_qa_enabled: bool
     qa_panel_enabled: bool
     spec_critic_enabled: bool
     web_search_mode: str
@@ -98,6 +99,7 @@ class StandingOrderValues(NamedTuple):
     goal: str
     ambition: str
     autonomy: str
+    auto_qa_enabled: bool
     confidence_threshold: str
     web_search_mode: str
 
@@ -166,6 +168,7 @@ _CODING_AGENT_COOKIE = "hitch_coding_agent"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
+_AUTO_QA_COOKIE = "hitch_auto_qa"
 _QA_PANEL_COOKIE = "hitch_qa_panel"
 _SPEC_CRITIC_COOKIE = "hitch_spec_critic"
 _WEB_SEARCH_COOKIE = "hitch_web_search_mode"
@@ -329,6 +332,7 @@ def _settings_dialog_context(
         "extra_system_prompt_max_len": _EXTRA_SYSTEM_PROMPT_MAX_LEN,
         "current_use_worktrees": current_settings.use_worktrees,
         "current_auto_pr": current_settings.auto_pr_enabled,
+        "current_auto_qa": current_settings.auto_qa_enabled,
         "current_qa_panel": current_settings.qa_panel_enabled,
         "current_spec_critic": current_settings.spec_critic_enabled,
         "current_web_search": current_settings.web_search_mode,
@@ -385,6 +389,9 @@ def _new_session_dialog_context(
         current_new_session_project,
         global_enabled=current_settings.auto_pr_enabled,
     )
+    current_new_session_auto_qa = (
+        current_settings.auto_qa_enabled and not current_new_session_auto_pr
+    )
     current_coding_agent = _effective_coding_agent(current_settings)
     return {
         "repos": repos,
@@ -399,6 +406,7 @@ def _new_session_dialog_context(
             else ""
         ),
         "current_new_session_auto_pr": current_new_session_auto_pr,
+        "current_new_session_auto_qa": current_new_session_auto_qa,
         "bare_repo_project_value": _BARE_REPO_PROJECT_VALUE,
         "new_session_coding_agent_options": [
             {"id": value, "display_name": label}
@@ -716,6 +724,8 @@ def standing_orders(request: HttpRequest) -> HttpResponse:
             "default_ambition": StandingOrder.AMBITION_INCREMENTAL,
             "autonomy_choices": StandingOrder.AUTONOMY_CHOICES,
             "default_autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
+            "default_auto_qa": False,
+            "auto_qa_supported_autonomies": tuple(StandingOrder.AUTO_QA_AUTONOMIES),
             "confidence_choices": StandingOrder.CONFIDENCE_CHOICES,
             "default_confidence": StandingOrder.CONFIDENCE_HIGH,
             "web_search_mode_choices": _WEB_SEARCH_MODE_OPTIONS,
@@ -743,6 +753,7 @@ def create_standing_order(request: HttpRequest) -> HttpResponse:
         goal=values.goal,
         ambition=values.ambition,
         autonomy=values.autonomy,
+        auto_qa_enabled=values.auto_qa_enabled,
         confidence_threshold=values.confidence_threshold,
         web_search_mode=values.web_search_mode,
     )
@@ -763,6 +774,7 @@ def edit_standing_order(request: HttpRequest, standing_order_id: int) -> HttpRes
     values, error = _validated_standing_order_values(
         request,
         autonomy_default=standing_order.autonomy,
+        auto_qa_default=standing_order.auto_qa_enabled,
         web_search_default=standing_order.web_search_mode,
     )
     if error is not None:
@@ -775,6 +787,7 @@ def edit_standing_order(request: HttpRequest, standing_order_id: int) -> HttpRes
         "goal",
         "ambition",
         "autonomy",
+        "auto_qa_enabled",
         "confidence_threshold",
         "web_search_mode",
     ):
@@ -890,6 +903,7 @@ def _validated_standing_order_values(
     request: HttpRequest,
     *,
     autonomy_default: str = StandingOrder.AUTONOMY_PROPOSE_ONLY,
+    auto_qa_default: bool = False,
     web_search_default: str = StandingOrder.WEB_SEARCH_DEFAULT,
 ) -> tuple[StandingOrderValues | None, str | None]:
     title, error = _validated_standing_order_title(request.POST.get("title", ""))
@@ -909,6 +923,14 @@ def _validated_standing_order_values(
     valid_autonomies = {value for value, _label in StandingOrder.AUTONOMY_CHOICES}
     if autonomy not in valid_autonomies:
         return None, "autonomy is invalid"
+    supported_auto_qa = StandingOrder.auto_qa_supported_for_autonomy(autonomy)
+    auto_qa_values = [value.strip() for value in request.POST.getlist("auto_qa")]
+    if any(value not in {"", "false", "true"} for value in auto_qa_values):
+        return None, "auto-QA setting is invalid"
+    if auto_qa_values:
+        auto_qa_enabled = auto_qa_values[-1] == "true" and supported_auto_qa
+    else:
+        auto_qa_enabled = auto_qa_default and supported_auto_qa
     threshold = request.POST.get("confidence_threshold", "").strip()
     valid_thresholds = {value for value, _label in StandingOrder.CONFIDENCE_CHOICES}
     if threshold not in valid_thresholds:
@@ -925,6 +947,7 @@ def _validated_standing_order_values(
         goal=goal,
         ambition=ambition,
         autonomy=autonomy,
+        auto_qa_enabled=auto_qa_enabled,
         confidence_threshold=threshold,
         web_search_mode=web_search_mode,
     ), None
@@ -2489,6 +2512,7 @@ def _stored_settings(request: HttpRequest) -> SettingsValues:
         extra_system_prompt=_read_extra_system_prompt_cookie(request),
         use_worktrees=_read_cookie(request, _USE_WORKTREES_COOKIE) == "true",
         auto_pr_enabled=_read_cookie(request, _AUTO_PR_COOKIE) == "true",
+        auto_qa_enabled=_read_cookie(request, _AUTO_QA_COOKIE) == "true",
         qa_panel_enabled=_read_cookie(request, _QA_PANEL_COOKIE) == "true",
         spec_critic_enabled=_read_cookie(request, _SPEC_CRITIC_COOKIE) == "true",
         web_search_mode=_read_cookie(request, _WEB_SEARCH_COOKIE),
@@ -2514,6 +2538,7 @@ def _settings_values_for_user(settings: UserSettings) -> SettingsValues:
         extra_system_prompt=settings.extra_system_prompt,
         use_worktrees=settings.use_worktrees,
         auto_pr_enabled=settings.auto_pr_enabled,
+        auto_qa_enabled=settings.auto_qa_enabled,
         qa_panel_enabled=settings.qa_panel_enabled,
         spec_critic_enabled=settings.spec_critic_enabled,
         web_search_mode=settings.web_search_mode,
@@ -2536,6 +2561,7 @@ def _save_user_settings(user: Any, values: SettingsValues) -> UserSettings:
         ("extra_system_prompt", values.extra_system_prompt),
         ("use_worktrees", values.use_worktrees),
         ("auto_pr_enabled", values.auto_pr_enabled),
+        ("auto_qa_enabled", values.auto_qa_enabled),
         ("qa_panel_enabled", values.qa_panel_enabled),
         ("spec_critic_enabled", values.spec_critic_enabled),
         ("web_search_mode", values.web_search_mode),
@@ -2564,6 +2590,7 @@ def _settings_cookie_updates(values: SettingsValues) -> dict[str, str]:
         ),
         _USE_WORKTREES_COOKIE: "true" if values.use_worktrees else "false",
         _AUTO_PR_COOKIE: "true" if values.auto_pr_enabled else "false",
+        _AUTO_QA_COOKIE: "true" if values.auto_qa_enabled else "false",
         _QA_PANEL_COOKIE: "true" if values.qa_panel_enabled else "false",
         _SPEC_CRITIC_COOKIE: "true" if values.spec_critic_enabled else "false",
         _WEB_SEARCH_COOKIE: values.web_search_mode,
@@ -2625,6 +2652,9 @@ def _valid_cookie_setting_updates(request: HttpRequest) -> dict[str, str | bool 
     auto_pr = _read_signed_cookie_if_present(request, _AUTO_PR_COOKIE)
     if auto_pr in {"true", "false"}:
         updates["auto_pr_enabled"] = auto_pr == "true"
+    auto_qa = _read_signed_cookie_if_present(request, _AUTO_QA_COOKIE)
+    if auto_qa in {"true", "false"}:
+        updates["auto_qa_enabled"] = auto_qa == "true"
     qa_panel = _read_signed_cookie_if_present(request, _QA_PANEL_COOKIE)
     if qa_panel in {"true", "false"}:
         updates["qa_panel_enabled"] = qa_panel == "true"
@@ -2832,6 +2862,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     extra_system_prompt = request.POST.get("extra_system_prompt", "").strip()
     use_worktrees = request.POST.get("use_worktrees", "").strip()
     auto_pr = request.POST.get("auto_pr", "").strip()
+    auto_qa = request.POST.get("auto_qa", "").strip()
     qa_panel = request.POST.get("qa_panel", "").strip()
     spec_critic = request.POST.get("spec_critic", "").strip()
     web_search_mode = request.POST.get("web_search_mode", "").strip()
@@ -2869,6 +2900,9 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     if auto_pr not in {"", "true"}:
         return HttpResponseBadRequest("invalid auto-PR setting")
     auto_pr = "true" if auto_pr == "true" else "false"
+    if auto_qa not in {"", "true"}:
+        return HttpResponseBadRequest("invalid auto-QA setting")
+    auto_qa = "true" if auto_qa == "true" else "false"
     if qa_panel not in {"", "true"}:
         return HttpResponseBadRequest("invalid QA panel setting")
     qa_panel = "true" if qa_panel == "true" else "false"
@@ -2903,6 +2937,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         extra_system_prompt=extra_system_prompt,
         use_worktrees=use_worktrees == "true",
         auto_pr_enabled=auto_pr == "true",
+        auto_qa_enabled=auto_qa == "true",
         qa_panel_enabled=qa_panel == "true",
         spec_critic_enabled=spec_critic == "true",
         web_search_mode=web_search_mode,
@@ -3189,6 +3224,17 @@ def _posted_auto_pr_override(raw: str | None, *, default: bool) -> tuple[bool, s
     if value == "true":
         return True, None
     return False, "invalid auto-PR setting"
+
+
+def _posted_auto_qa_override(raw: str | None, *, default: bool) -> tuple[bool, str | None]:
+    if raw is None:
+        return default, None
+    value = raw.strip().lower()
+    if value in {"", "false"}:
+        return False, None
+    if value == "true":
+        return True, None
+    return False, "invalid auto-QA setting"
 
 
 def _posted_web_search_override(
@@ -3519,6 +3565,9 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         settings, explicit_default=True
     )
     auto_pr_enabled = _auto_pr_enabled_for_session(session_id)
+    auto_qa_enabled = (
+        False if auto_pr_enabled else _auto_qa_enabled_for_session(session_id)
+    )
     if qa_workflow_activation:
         developer_instructions = (
             previous_instance.developer_instructions
@@ -3564,16 +3613,19 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         spawn_kwargs["base_instructions"] = base_instructions
     if settings.enable_memories:
         spawn_kwargs["enable_memories"] = True
-    if auto_pr_enabled:
-        auto_pr_model = _string_value(getattr(resumed, "model", None)) or settings.model
-        auto_pr_reasoning_effort = (
+    if auto_pr_enabled or auto_qa_enabled:
+        auto_review_model = _string_value(getattr(resumed, "model", None)) or settings.model
+        auto_review_reasoning_effort = (
             _string_value(getattr(resumed, "reasoning_effort", None))
             or settings.reasoning_effort
         )
-        spawn_kwargs["auto_pr_enabled"] = True
+        if auto_pr_enabled:
+            spawn_kwargs["auto_pr_enabled"] = True
+        if auto_qa_enabled:
+            spawn_kwargs["auto_qa_enabled"] = True
         spawn_kwargs["user_message_index"] = _count_user_entries(thread_entries)
-        spawn_kwargs["stored_model"] = auto_pr_model or None
-        spawn_kwargs["stored_reasoning_effort"] = auto_pr_reasoning_effort or None
+        spawn_kwargs["stored_model"] = auto_review_model or None
+        spawn_kwargs["stored_reasoning_effort"] = auto_review_reasoning_effort or None
         if settings.qa_panel_enabled:
             spawn_kwargs["qa_panel_enabled"] = True
     if plan_mode:
@@ -3614,12 +3666,13 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             "enable_memories": settings.enable_memories,
             "initial_user_message_index": _count_user_entries(thread_entries),
             "auto_pr_enabled": auto_pr_enabled,
+            "auto_qa_enabled": auto_qa_enabled,
         }
         if base_instructions:
             spec_workflow_kwargs["base_instructions"] = base_instructions
         if should_forward_web_search_mode:
             spec_workflow_kwargs["web_search_mode"] = web_search_mode
-        if auto_pr_enabled and settings.qa_panel_enabled:
+        if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
             spec_workflow_kwargs["qa_panel_enabled"] = True
         system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
         return redirect("session", session_id=session_id)
@@ -3734,6 +3787,12 @@ def _count_user_entries(entries: list[dict[str, Any]]) -> int:
 def _auto_pr_enabled_for_session(session_id: str) -> bool:
     return SessionMetadata.objects.filter(
         thread_id=session_id, auto_pr_enabled=True
+    ).exists()
+
+
+def _auto_qa_enabled_for_session(session_id: str) -> bool:
+    return SessionMetadata.objects.filter(
+        thread_id=session_id, auto_qa_enabled=True
     ).exists()
 
 
@@ -4020,6 +4079,13 @@ def new_session(request: HttpRequest) -> HttpResponse:
     )
     if auto_pr_error is not None:
         return HttpResponseBadRequest(auto_pr_error)
+    auto_qa_enabled, auto_qa_error = _posted_auto_qa_override(
+        request.POST.get("auto_qa"), default=settings.auto_qa_enabled
+    )
+    if auto_qa_error is not None:
+        return HttpResponseBadRequest(auto_qa_error)
+    if auto_pr_enabled:
+        auto_qa_enabled = False
     web_search_mode, web_search_error = _posted_web_search_override(
         request.POST.get("web_search_mode"),
         default=settings.web_search_mode,
@@ -4077,6 +4143,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
                 "project": source_project,
                 "project_cleared": target.project_cleared,
                 "auto_pr_enabled": False,
+                "auto_qa_enabled": False,
             },
         )
         _accept_proposed_session_for_session(proposed_session, session_metadata)
@@ -4129,8 +4196,10 @@ def new_session(request: HttpRequest) -> HttpResponse:
         spawn_kwargs["plan_mode"] = True
     if auto_pr_enabled:
         spawn_kwargs["auto_pr_enabled"] = True
-        if settings.qa_panel_enabled:
-            spawn_kwargs["qa_panel_enabled"] = True
+    if auto_qa_enabled:
+        spawn_kwargs["auto_qa_enabled"] = True
+    if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
+        spawn_kwargs["qa_panel_enabled"] = True
     if (
         settings.spec_critic_enabled
         and not plan_mode
@@ -4174,12 +4243,13 @@ def new_session(request: HttpRequest) -> HttpResponse:
             "enable_memories": settings.enable_memories,
             "initial_user_message_index": 0,
             "auto_pr_enabled": auto_pr_enabled,
+            "auto_qa_enabled": auto_qa_enabled,
         }
         if base_instructions:
             spec_workflow_kwargs["base_instructions"] = base_instructions
         if web_search_mode:
             spec_workflow_kwargs["web_search_mode"] = web_search_mode
-        if auto_pr_enabled and settings.qa_panel_enabled:
+        if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
             spec_workflow_kwargs["qa_panel_enabled"] = True
         system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
         session_metadata, _created = SessionMetadata.objects.update_or_create(
@@ -4189,6 +4259,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
                 "project": session_project,
                 "project_cleared": target.project_cleared,
                 "auto_pr_enabled": auto_pr_enabled,
+                "auto_qa_enabled": auto_qa_enabled,
             },
         )
         _accept_proposed_session_for_session(proposed_session, session_metadata)
@@ -4220,6 +4291,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
             "project": session_project,
             "project_cleared": target.project_cleared,
             "auto_pr_enabled": auto_pr_enabled,
+            "auto_qa_enabled": auto_qa_enabled,
         },
     )
     _accept_proposed_session_for_session(proposed_session, session_metadata)

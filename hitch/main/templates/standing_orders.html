@@ -267,6 +267,16 @@
             padding: 0.65rem 0.75rem;
         }
         textarea { min-height: 7rem; resize: vertical; }
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+        }
+        .checkbox-label input[type="checkbox"] {
+            width: auto;
+            accent-color: var(--accent);
+        }
         .proposal-list,
         .order-list {
             list-style: none;
@@ -431,6 +441,7 @@
                                 data-goal="{{ order.goal }}"
                                 data-ambition="{{ order.ambition }}"
                                 data-autonomy="{{ order.autonomy }}"
+                                data-auto-qa="{% if order.auto_qa_enabled %}true{% else %}false{% endif %}"
                                 data-confidence-threshold="{{ order.confidence_threshold }}"
                                 data-web-search-mode="{{ order.web_search_mode }}"
                             >Edit</button>
@@ -440,6 +451,7 @@
                     <div class="order-meta">
                         <span class="meta">Ambition: {{ order.get_ambition_display }}</span>
                         <span class="meta">Autonomy: {{ order.get_autonomy_display }}</span>
+                        <span class="meta">Auto-QA: {% if order.auto_qa_enabled %}On{% else %}Off{% endif %}</span>
                         <span class="meta">Threshold: {{ order.get_confidence_threshold_display }}</span>
                         <span class="meta">Web search: {{ order.get_web_search_mode_display }}</span>
                         {% if order.latest_workflow %}
@@ -505,9 +517,14 @@
                 Autonomy
                 <select name="autonomy" required data-edit-standing-order-autonomy>
                     {% for value, label in autonomy_choices %}
-                    <option value="{{ value }}">{{ label }}</option>
+                    <option value="{{ value }}" data-auto-qa-supported="{% if value in auto_qa_supported_autonomies %}true{% else %}false{% endif %}">{{ label }}</option>
                     {% endfor %}
                 </select>
+            </label>
+            <label class="checkbox-label" data-standing-order-auto-qa-field>
+                <span>Auto-QA</span>
+                <input type="hidden" name="auto_qa" value="false">
+                <input type="checkbox" name="auto_qa" value="true" data-edit-standing-order-auto-qa data-standing-order-auto-qa>
             </label>
             <label>
                 Confidence threshold
@@ -566,6 +583,7 @@
             const editOrderGoal = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-goal]");
             const editOrderAmbition = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-ambition]");
             const editOrderAutonomy = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-autonomy]");
+            const editOrderAutoQa = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-auto-qa]");
             const editOrderConfidence = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-confidence-threshold]");
             const editOrderWebSearch = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-web-search-mode]");
             const editOrderCancel = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-cancel]");
@@ -576,6 +594,25 @@
             const pageMenu = document.querySelector("[data-page-menu]");
             const pageMenuButton = pageMenu && pageMenu.querySelector("[data-page-menu-open]");
             const pageMenuPanel = pageMenu && pageMenu.querySelector("[data-page-menu-panel]");
+            function selectedAutoQaSupported(autonomySelect) {
+                const option = autonomySelect && autonomySelect.selectedOptions && autonomySelect.selectedOptions[0];
+                return Boolean(option && option.dataset.autoQaSupported === "true");
+            }
+            function syncStandingOrderAutoQa(form) {
+                if (!form) return;
+                const autonomySelect = form.querySelector("select[name='autonomy']");
+                const autoQa = form.querySelector("[data-standing-order-auto-qa]");
+                if (!autonomySelect || !autoQa) return;
+                const supported = selectedAutoQaSupported(autonomySelect);
+                autoQa.disabled = !supported;
+            }
+            for (const form of document.querySelectorAll("[data-standing-order-create-form]")) {
+                const autonomySelect = form.querySelector("select[name='autonomy']");
+                syncStandingOrderAutoQa(form);
+                if (autonomySelect) {
+                    autonomySelect.addEventListener("change", () => syncStandingOrderAutoQa(form));
+                }
+            }
             function closePageMenu() {
                 if (!pageMenuButton || !pageMenuPanel) return;
                 pageMenuPanel.hidden = true;
@@ -612,11 +649,18 @@
                     if (editOrderGoal) editOrderGoal.value = button.dataset.goal || "";
                     if (editOrderAmbition) editOrderAmbition.value = button.dataset.ambition || "";
                     if (editOrderAutonomy) editOrderAutonomy.value = button.dataset.autonomy || "";
+                    if (editOrderAutoQa) {
+                        editOrderAutoQa.checked = button.dataset.autoQa === "true";
+                    }
+                    syncStandingOrderAutoQa(editOrderForm);
                     if (editOrderConfidence) editOrderConfidence.value = button.dataset.confidenceThreshold || "";
                     if (editOrderWebSearch) editOrderWebSearch.value = button.dataset.webSearchMode || "";
                     showDialog(editOrderDialog);
                     if (editOrderTitle) editOrderTitle.focus();
                 });
+            }
+            if (editOrderAutonomy) {
+                editOrderAutonomy.addEventListener("change", () => syncStandingOrderAutoQa(editOrderForm));
             }
             if (editOrderCancel) editOrderCancel.addEventListener("click", () => hideDialog(editOrderDialog));
             {% include "_primary_nav_script.html" %}

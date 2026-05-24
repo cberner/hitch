@@ -22,6 +22,7 @@ _CODING_AGENT_COOKIE = "hitch_coding_agent"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
+_AUTO_QA_COOKIE = "hitch_auto_qa"
 _QA_PANEL_COOKIE = "hitch_qa_panel"
 _SPEC_CRITIC_COOKIE = "hitch_spec_critic"
 _WEB_SEARCH_COOKIE = "hitch_web_search_mode"
@@ -149,6 +150,21 @@ def _cookie_value(response: object, name: str) -> str:
     """Pull a signed cookie's plaintext value out of a TestClient response."""
     raw = response.cookies[name].value  # type: ignore[attr-defined]
     return _signer(name).unsign(raw)
+
+
+def _new_session_dialog_html(response: object) -> str:
+    content: bytes = response.content  # type: ignore[attr-defined]
+    body = content.decode()
+    start = body.index('<dialog class="new-session" data-new-session-dialog')
+    end = body.index("</dialog>", start)
+    return body[start:end]
+
+
+def _input_tag_containing(html: str, marker: str) -> str:
+    marker_pos = html.index(marker)
+    start = html.rfind("<input", 0, marker_pos)
+    end = html.index(">", marker_pos) + 1
+    return html[start:end]
 
 
 def _encode_extra_system_prompt(value: str) -> str:
@@ -280,6 +296,8 @@ class SettingsDialogRenderTests(TestCase):
         self.assertContains(response, "Use worktrees")
         self.assertContains(response, 'name="auto_pr"')
         self.assertContains(response, "Auto-PR")
+        self.assertContains(response, 'name="auto_qa"')
+        self.assertContains(response, "Auto-QA")
         self.assertContains(response, 'name="qa_panel"')
         self.assertContains(response, "Parallel QA panel")
         self.assertContains(response, 'name="spec_critic"')
@@ -399,6 +417,74 @@ class SettingsDialogRenderTests(TestCase):
         response = self.client.get(reverse("index"))
 
         self.assertContains(response, 'name="auto_pr" value="true" checked')
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_saved_auto_qa_setting_renders_checked(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _seed_cookies(self.client, **{_AUTO_QA_COOKIE: "true"})
+        _configure_codex(
+            mock_codex,
+            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+        )
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, 'name="auto_qa" value="true" checked')
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_saved_auto_qa_setting_checks_new_session_dialogs(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _seed_cookies(self.client, **{_AUTO_QA_COOKIE: "true"})
+        _configure_codex(
+            mock_codex,
+            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+        )
+        mock_discover.return_value = []
+
+        for view_name in ("index", "inbox"):
+            with self.subTest(view=view_name):
+                response = self.client.get(reverse(view_name))
+                dialog_html = _new_session_dialog_html(response)
+                auto_qa_input = _input_tag_containing(
+                    dialog_html, "data-new-session-auto-qa"
+                )
+
+                self.assertIn('name="auto_qa"', auto_qa_input)
+                self.assertIn("checked", auto_qa_input)
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_auto_pr_takes_precedence_in_new_session_dialogs(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _seed_cookies(
+            self.client,
+            **{_AUTO_PR_COOKIE: "true", _AUTO_QA_COOKIE: "true"},
+        )
+        _configure_codex(
+            mock_codex,
+            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+        )
+        mock_discover.return_value = []
+
+        for view_name in ("index", "inbox"):
+            with self.subTest(view=view_name):
+                response = self.client.get(reverse(view_name))
+                dialog_html = _new_session_dialog_html(response)
+                auto_pr_input = _input_tag_containing(
+                    dialog_html, "data-new-session-auto-pr"
+                )
+                auto_qa_input = _input_tag_containing(
+                    dialog_html, "data-new-session-auto-qa"
+                )
+
+                self.assertIn("checked", auto_pr_input)
+                self.assertNotIn("checked", auto_qa_input)
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -995,6 +1081,14 @@ class UpdateSettingsViewTests(TestCase):
             ),
             ("auto-PR disabled", {}, {}, _AUTO_PR_COOKIE, "false"),
             (
+                "auto-QA enabled",
+                {"auto_qa": "true"},
+                {},
+                _AUTO_QA_COOKIE,
+                "true",
+            ),
+            ("auto-QA disabled", {}, {}, _AUTO_QA_COOKIE, "false"),
+            (
                 "QA panel enabled",
                 {"qa_panel": "true"},
                 {},
@@ -1089,6 +1183,12 @@ class UpdateSettingsViewTests(TestCase):
                 _AUTO_PR_COOKIE,
                 "true",
                 {"auto_pr": "yes"},
+            ),
+            (
+                "auto-QA setting",
+                _AUTO_QA_COOKIE,
+                "true",
+                {"auto_qa": "yes"},
             ),
             (
                 "QA panel setting",

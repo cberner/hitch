@@ -94,6 +94,7 @@ class StandingOrder(models.Model):
         (WEB_SEARCH_CACHED, "Cached"),
         (WEB_SEARCH_LIVE, "Live"),
     )
+    AUTO_QA_AUTONOMIES: ClassVar[frozenset[str]] = frozenset({AUTONOMY_DRAFT_PATCH})
 
     project = models.ForeignKey(
         Project,
@@ -117,6 +118,7 @@ class StandingOrder(models.Model):
         choices=AUTONOMY_CHOICES,
         default=AUTONOMY_PROPOSE_ONLY,
     )
+    auto_qa_enabled = models.BooleanField(default=False)
     web_search_mode = models.CharField(
         max_length=16,
         choices=WEB_SEARCH_CHOICES,
@@ -135,6 +137,10 @@ class StandingOrder(models.Model):
     @override
     def __str__(self) -> str:
         return self.title
+
+    @classmethod
+    def auto_qa_supported_for_autonomy(cls, autonomy: str) -> bool:
+        return autonomy in cls.AUTO_QA_AUTONOMIES
 
 
 class ProposedSession(models.Model):
@@ -315,6 +321,7 @@ class SessionMetadata(models.Model):
     )
     project_cleared = models.BooleanField(default=False)
     auto_pr_enabled = models.BooleanField(default=False)
+    auto_qa_enabled = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -427,8 +434,10 @@ class CodexInstance(models.Model):
     web_search_mode = models.CharField(max_length=16, blank=True, default="")
     plan_mode = models.BooleanField(default=False)
     auto_pr_enabled = models.BooleanField(default=False)
+    auto_qa_enabled = models.BooleanField(default=False)
     qa_panel_enabled = models.BooleanField(default=False)
     auto_pr_triggered_at = models.DateTimeField(null=True, blank=True)
+    auto_qa_triggered_at = models.DateTimeField(null=True, blank=True)
     events_path = models.CharField(max_length=4096)
     status = models.CharField(max_length=32, choices=STATUS_CHOICES, default=STATUS_STARTING)
     started_at = models.DateTimeField(auto_now_add=True)
@@ -705,6 +714,7 @@ class UserSettings(models.Model):
     extra_system_prompt = models.TextField(blank=True, default="")
     use_worktrees = models.BooleanField(default=False)
     auto_pr_enabled = models.BooleanField(default=False)
+    auto_qa_enabled = models.BooleanField(default=False)
     qa_panel_enabled = models.BooleanField(default=False)
     spec_critic_enabled = models.BooleanField(default=False)
     web_search_mode = models.CharField(max_length=16, blank=True, default="")

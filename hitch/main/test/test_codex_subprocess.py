@@ -214,6 +214,28 @@ class SpawnNewSessionTests(TestCase):
 
     @patch("hitch.main.codex_pool._launch_worker_process")
     @patch("hitch.main.codex_pool.Codex")
+    def test_spawn_new_session_persists_auto_qa_enabled(
+        self, mock_codex: MagicMock, mock_launch: MagicMock
+    ) -> None:
+        _stub_codex_thread_start(mock_codex, "thread-abc")
+        mock_launch.return_value = SimpleNamespace(pid=4242)
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_new_session(
+                cwd="/repo",
+                prompt="hi",
+                auto_qa_enabled=True,
+            )
+
+        instance.refresh_from_db()
+        self.assertTrue(instance.auto_qa_enabled)
+        self.assertFalse(instance.auto_pr_enabled)
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.codex_pool.Codex")
     def test_initial_thread_name_derivation(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
@@ -518,6 +540,25 @@ class SpawnTurnTests(TestCase):
             sandbox_policy=None,
             approval_mode=None,
         )
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    def test_spawn_turn_persists_auto_qa_enabled(self, mock_launch: MagicMock) -> None:
+        mock_launch.return_value = SimpleNamespace(pid=1234)
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_turn(
+                thread_id="thread-xyz",
+                cwd="/repo",
+                prompt="follow-up",
+                auto_qa_enabled=True,
+            )
+
+        instance.refresh_from_db()
+        self.assertTrue(instance.auto_qa_enabled)
+        self.assertFalse(instance.auto_pr_enabled)
 
     @patch("hitch.main.codex_pool._launch_worker_process")
     def test_plan_mode_turn_forwards_model_and_plan_flag(
