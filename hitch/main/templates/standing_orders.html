@@ -647,7 +647,6 @@
                 if (!autonomySelect || !autoQa) return;
                 const supported = selectedAutoQaSupported(autonomySelect);
                 autoQa.disabled = !supported;
-                if (!supported) autoQa.checked = false;
             }
             function closePageMenu() {
                 if (!pageMenuButton || !pageMenuPanel) return;

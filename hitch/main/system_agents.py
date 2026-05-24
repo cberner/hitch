@@ -1249,20 +1249,17 @@ def _record_auto_review_workflow_for_proposals(
     if metadata is None:
         return
     if automation == "auto_qa":
-        updates: dict[str, object] = {
+        base_updates: dict[str, object] = {
             "auto_qa_status": "started",
             "auto_qa_workflow_id": workflow.pk,
         }
     else:
-        updates = {
+        base_updates = {
             "auto_pr_status": "started",
             "auto_pr_workflow_id": workflow.pk,
         }
     for proposal in ProposedSession.objects.filter(accepted_session=metadata):
-        updates: dict[str, object] = {
-            "auto_pr_status": "started",
-            "auto_pr_workflow_id": workflow.pk,
-        }
+        updates = dict(base_updates)
         auto_merge_branch = _state_string(workflow, "auto_merge_branch")
         if auto_merge_branch:
             updates["auto_merge_branch"] = auto_merge_branch
