@@ -129,6 +129,8 @@ class StandingOrder(models.Model):
     auto_proposal_last_no_proposal_sha = models.CharField(
         max_length=64, blank=True, default=""
     )
+    auto_merge_to_local_branch = models.BooleanField(default=False)
+    auto_merge_branch = models.CharField(max_length=255, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -326,6 +328,8 @@ class SessionMetadata(models.Model):
     project_cleared = models.BooleanField(default=False)
     auto_pr_enabled = models.BooleanField(default=False)
     auto_qa_enabled = models.BooleanField(default=False)
+    auto_merge_to_local_branch = models.BooleanField(default=False)
+    auto_merge_branch = models.CharField(max_length=255, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -443,6 +447,8 @@ class CodexInstance(models.Model):
     auto_pr_enabled = models.BooleanField(default=False)
     auto_qa_enabled = models.BooleanField(default=False)
     qa_panel_enabled = models.BooleanField(default=False)
+    auto_merge_to_local_branch = models.BooleanField(default=False)
+    auto_merge_branch = models.CharField(max_length=255, blank=True, default="")
     auto_pr_triggered_at = models.DateTimeField(null=True, blank=True)
     auto_qa_triggered_at = models.DateTimeField(null=True, blank=True)
     events_path = models.CharField(max_length=4096)

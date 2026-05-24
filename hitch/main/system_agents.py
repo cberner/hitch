@@ -18,6 +18,12 @@ from openai_codex.generated.v2_all import GetAccountRateLimitsResponse, ThreadSo
 
 from hitch.main import codex_events, codex_pool, demo
 from hitch.main.diffs import build_worktree_diff_text
+from hitch.main.local_merges import (
+    LocalBranchMergeError,
+    LocalBranchMergeResult,
+    build_auto_merge_review_patch,
+    merge_worktree_diff_to_branch,
+)
 from hitch.main.models import (
     CodexInstance,
     Project,
@@ -30,6 +36,12 @@ from hitch.main.models import (
     UserInputRequest,
 )
 from hitch.main.repos import default_branch_checkout_commit_hash
+from hitch.main.worktrees import (
+    WorktreeCleanupError,
+    WorktreeCreationError,
+    cleanup_worktree,
+    create_worktree_for_session,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +88,7 @@ STEP_PR_MONITORING = "pr_monitoring"
 STEP_PR_FEEDBACK_RUNNING = "pr_feedback_running"
 STEP_PR_READY = "pr_ready"
 STEP_PR_CLOSED = "pr_closed"
+STEP_LOCAL_BRANCH_MERGED = "local_branch_merged"
 STEP_STANDING_ORDER_CANDIDATE_RUNNING = "standing_order_candidate_running"
 STEP_STANDING_ORDER_JUDGE_RUNNING = "standing_order_judge_running"
 STEP_STANDING_ORDER_PROPOSED = "standing_order_proposed"
@@ -147,6 +160,9 @@ _PR_GATE_OBSERVATION_FIELDS = frozenset(
     }
 )
 QA_APPROVAL_INSERT_INDEX_STATE_KEY = "qa_approval_insert_index"
+AUTO_MERGE_REVIEWED_DIFF_STATE_KEY = "auto_merge_reviewed_diff"
+AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY = "auto_merge_reviewed_target_sha"
+AUTO_MERGE_SESSION_BASE_SHA_STATE_KEY = "auto_merge_session_base_sha"
 _PR_HANDOFF_FIELDS = (
     "url",
     "repository_full_name",
@@ -681,8 +697,11 @@ def start_pr_qa_workflow(
     initial_user_message_index: int = 0,
     open_pr_on_lgtm: bool = True,
     qa_panel_enabled: bool = False,
+    auto_merge_branch: str = "",
 ) -> SystemWorkflow:
     """Start a QA workflow before optionally running the work-agent PR prompt."""
+    auto_merge_branch = auto_merge_branch.strip()
+    open_pr_on_lgtm = open_pr_on_lgtm and not auto_merge_branch
     try:
         with transaction.atomic():
             workflow = SystemWorkflow.objects.create(
@@ -709,6 +728,7 @@ def start_pr_qa_workflow(
                     "next_user_message_index": max(initial_user_message_index, 0),
                     "open_pr_on_lgtm": open_pr_on_lgtm,
                     "qa_panel_enabled": qa_panel_enabled,
+                    "auto_merge_branch": auto_merge_branch,
                 },
             )
     except IntegrityError:
@@ -1198,6 +1218,14 @@ def _maybe_start_auto_review_workflow(instance: CodexInstance) -> None:
             workflow_kwargs["qa_panel_enabled"] = True
         if automation == "auto_qa":
             workflow_kwargs["open_pr_on_lgtm"] = False
+        auto_merge_branch = (
+            instance.auto_merge_branch.strip()
+            if instance.auto_merge_to_local_branch
+            else ""
+        )
+        if auto_merge_branch:
+            workflow_kwargs["open_pr_on_lgtm"] = False
+            workflow_kwargs["auto_merge_branch"] = auto_merge_branch
         workflow = start_pr_qa_workflow(**workflow_kwargs)
         if isinstance(workflow, SystemWorkflow):
             _record_auto_review_workflow_for_proposals(
@@ -1231,10 +1259,33 @@ def _record_auto_review_workflow_for_proposals(
             "auto_pr_workflow_id": workflow.pk,
         }
     for proposal in ProposedSession.objects.filter(accepted_session=metadata):
+        updates: dict[str, object] = {
+            "auto_pr_status": "started",
+            "auto_pr_workflow_id": workflow.pk,
+        }
+        auto_merge_branch = _state_string(workflow, "auto_merge_branch")
+        if auto_merge_branch:
+            updates["auto_merge_branch"] = auto_merge_branch
+            if workflow.status == SystemWorkflow.STATUS_BLOCKED:
+                updates["auto_merge_status"] = "failed"
+                updates["auto_merge_error"] = _state_string(workflow, "error")
+            else:
+                updates["auto_merge_status"] = "qa_started"
         proposal.outcome_metadata = _proposal_outcome_metadata(
             proposal,
             updates,
         )
+        proposal.save(update_fields=["outcome_metadata", "updated_at"])
+
+
+def _record_auto_merge_result_for_proposals(
+    workflow: SystemWorkflow, updates: dict[str, object]
+) -> None:
+    metadata = SessionMetadata.objects.filter(thread_id=workflow.main_thread_id).first()
+    if metadata is None:
+        return
+    for proposal in ProposedSession.objects.filter(accepted_session=metadata):
+        proposal.outcome_metadata = _proposal_outcome_metadata(proposal, updates)
         proposal.save(update_fields=["outcome_metadata", "updated_at"])
 
 
@@ -1424,6 +1475,10 @@ def _complete_pr_qa_verdict(
     lgtm = parsed["lgtm"]
     workflow.state = {**workflow.state, "last_feedback": feedback}
     if lgtm:
+        auto_merge_branch = _state_string(workflow, "auto_merge_branch")
+        if auto_merge_branch:
+            _complete_local_branch_merge(workflow, auto_merge_branch)
+            return
         if workflow.state.get("open_pr_on_lgtm", True) is not True:
             workflow.status = SystemWorkflow.STATUS_COMPLETED
             workflow.step = STEP_QA_APPROVED
@@ -1466,6 +1521,77 @@ def _complete_pr_qa_verdict(
         _spawn_qa_feedback_turn(workflow, feedback, synthesis_gate=synthesis_gate)
     except Exception as exc:
         _block_workflow(workflow, f"failed to start QA feedback turn: {exc!r}")
+
+
+def _complete_local_branch_merge(workflow: SystemWorkflow, branch: str) -> None:
+    reviewed_patch = workflow.state.get(AUTO_MERGE_REVIEWED_DIFF_STATE_KEY)
+    if not isinstance(reviewed_patch, str):
+        _fail_local_branch_merge(
+            workflow,
+            branch,
+            LocalBranchMergeError("reviewed diff is missing"),
+        )
+        return
+    reviewed_target_sha = workflow.state.get(AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY)
+    if not isinstance(reviewed_target_sha, str) or not reviewed_target_sha:
+        _fail_local_branch_merge(
+            workflow,
+            branch,
+            LocalBranchMergeError("reviewed target branch SHA is missing"),
+        )
+        return
+    try:
+        result = merge_worktree_diff_to_branch(
+            workflow.cwd,
+            branch,
+            reviewed_patch,
+            reviewed_target_sha,
+        )
+    except LocalBranchMergeError as exc:
+        _fail_local_branch_merge(workflow, branch, exc)
+        return
+
+    workflow.status = SystemWorkflow.STATUS_COMPLETED
+    workflow.step = STEP_LOCAL_BRANCH_MERGED
+    workflow.state = {
+        **workflow.state,
+        "auto_merge_result": _local_branch_merge_result_dict(result),
+    }
+    workflow.save(update_fields=["status", "step", "state", "updated_at"])
+    _record_auto_merge_result_for_proposals(
+        workflow,
+        {
+            "auto_merge_status": "merged" if result.changed else "already_applied",
+            "auto_merge_branch": result.branch,
+            "auto_merge_commit_sha": result.commit_sha,
+        },
+    )
+
+
+def _fail_local_branch_merge(
+    workflow: SystemWorkflow, branch: str, exc: LocalBranchMergeError
+) -> None:
+    error = f"auto merge to local branch failed: {exc}"
+    _record_auto_merge_result_for_proposals(
+        workflow,
+        {
+            "auto_merge_status": "failed",
+            "auto_merge_branch": branch,
+            "auto_merge_error": str(exc),
+        },
+    )
+    _block_workflow(workflow, error)
+
+
+def _local_branch_merge_result_dict(
+    result: LocalBranchMergeResult,
+) -> dict[str, str | bool]:
+    return {
+        "branch": result.branch,
+        "commit_sha": result.commit_sha,
+        "target_worktree": result.target_worktree,
+        "changed": result.changed,
+    }
 
 
 def _handle_workflow_user_turn_finished(instance: CodexInstance) -> None:
@@ -2044,7 +2170,7 @@ def _handle_standing_order_agent_finished(
 # Hidden QA subagents do not surface approval prompts in the main workflow UI.
 # Keep their approval mode fixed; workflow approval state is for visible turns.
 def _spawn_pr_qa_run(workflow: SystemWorkflow) -> SystemAgentRun:
-    diff_text = build_worktree_diff_text(workflow.cwd)
+    diff_text = _review_diff_text_for_workflow(workflow)
     prompt = _qa_prompt(workflow.cwd, diff_text)
     instance = codex_pool.spawn_new_session(
         cwd=workflow.cwd,
@@ -2078,7 +2204,7 @@ def _spawn_pr_qa_run(workflow: SystemWorkflow) -> SystemAgentRun:
 
 
 def _spawn_pr_qa_panel_runs(workflow: SystemWorkflow) -> list[SystemAgentRun]:
-    diff_text = build_worktree_diff_text(workflow.cwd)
+    diff_text = _review_diff_text_for_workflow(workflow)
     runs: list[SystemAgentRun] = []
     try:
         for lane in _QA_PANEL_LANES:
@@ -2125,8 +2251,23 @@ def _spawn_pr_qa_panel_runs(workflow: SystemWorkflow) -> list[SystemAgentRun]:
     return runs
 
 
+def _review_diff_text_for_workflow(workflow: SystemWorkflow) -> str:
+    auto_merge_branch = _state_string(workflow, "auto_merge_branch")
+    if not auto_merge_branch:
+        return build_worktree_diff_text(workflow.cwd)
+    review_patch = build_auto_merge_review_patch(workflow.cwd, auto_merge_branch)
+    workflow.state = {
+        **workflow.state,
+        AUTO_MERGE_REVIEWED_DIFF_STATE_KEY: review_patch.patch,
+        AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY: review_patch.target_sha,
+        AUTO_MERGE_SESSION_BASE_SHA_STATE_KEY: review_patch.base_sha,
+    }
+    workflow.save(update_fields=["state", "updated_at"])
+    return review_patch.patch
+
+
 def _spawn_qa_panel_synthesizer_run(workflow: SystemWorkflow) -> SystemAgentRun:
-    diff_text = build_worktree_diff_text(workflow.cwd)
+    diff_text = _review_diff_text_for_workflow(workflow)
     prompt = _qa_panel_synthesizer_prompt(workflow, diff_text)
     instance = codex_pool.spawn_new_session(
         cwd=workflow.cwd,
@@ -2187,6 +2328,8 @@ def _spawn_standing_order_candidate_run(
             "project": standing_order.project,
             "project_cleared": False,
             "auto_pr_enabled": False,
+            "auto_merge_to_local_branch": False,
+            "auto_merge_branch": "",
         },
     )
     workflow.state = {**workflow.state, "candidate_session_id": metadata.pk}
@@ -2237,6 +2380,8 @@ def _spawn_standing_order_judge_run(
             "project": standing_order.project,
             "project_cleared": False,
             "auto_pr_enabled": False,
+            "auto_merge_to_local_branch": False,
+            "auto_merge_branch": "",
         },
     )
     workflow.state = {**workflow.state, "judge_session_id": metadata.pk}
@@ -2403,26 +2548,61 @@ def _start_standing_order_implementation_session(
 ) -> SessionMetadata:
     auto_pr_enabled = standing_order.autonomy == StandingOrder.AUTONOMY_DRAFT_PR
     auto_qa_enabled = standing_order.auto_qa_enabled and not auto_pr_enabled
-    prompt = proposal.prompt.strip() or _fallback_proposed_session_prompt(proposal)
-    instance = codex_pool.spawn_new_session(
-        cwd=standing_order.project.repo_path,
-        prompt=prompt,
-        thread_name=proposal.title,
-        sandbox_policy=STANDING_ORDER_IMPLEMENTATION_SANDBOX_POLICY,
-        approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
-        web_search_mode=_workflow_web_search_mode(workflow),
-        auto_pr_enabled=auto_pr_enabled,
-        auto_qa_enabled=auto_qa_enabled,
-        user_message_index=0,
+    auto_merge_branch = (
+        standing_order.auto_merge_branch.strip()
+        if standing_order.auto_merge_to_local_branch
+        else ""
     )
+    if not auto_qa_enabled:
+        auto_merge_branch = ""
+    auto_merge_to_local_branch = bool(auto_merge_branch)
+    implementation_cwd = standing_order.project.repo_path
+    managed_worktree = None
+    if auto_merge_to_local_branch:
+        try:
+            managed_worktree = create_worktree_for_session(
+                standing_order.project.repo_path,
+                base_ref=f"refs/heads/{auto_merge_branch}",
+                disable_hooks=True,
+            )
+        except WorktreeCreationError as exc:
+            raise RuntimeError(f"failed to create auto-merge worktree: {exc}") from exc
+        implementation_cwd = str(managed_worktree.path)
+    prompt = proposal.prompt.strip() or _fallback_proposed_session_prompt(proposal)
+    try:
+        instance = codex_pool.spawn_new_session(
+            cwd=implementation_cwd,
+            prompt=prompt,
+            thread_name=proposal.title,
+            sandbox_policy=STANDING_ORDER_IMPLEMENTATION_SANDBOX_POLICY,
+            approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
+            web_search_mode=_workflow_web_search_mode(workflow),
+            auto_pr_enabled=auto_pr_enabled,
+            auto_qa_enabled=auto_qa_enabled,
+            auto_merge_to_local_branch=auto_merge_to_local_branch,
+            auto_merge_branch=auto_merge_branch,
+            user_message_index=0,
+        )
+    except Exception:
+        if managed_worktree is not None:
+            try:
+                cleanup_worktree(managed_worktree)
+            except WorktreeCleanupError:
+                logger.exception(
+                    "failed to clean up auto-merge worktree %s",
+                    managed_worktree.path,
+                )
+        raise
     metadata, _created = SessionMetadata.objects.update_or_create(
         thread_id=instance.thread_id,
         defaults={
-            "cwd": standing_order.project.repo_path,
+            "cwd": implementation_cwd,
             "project": standing_order.project,
             "project_cleared": False,
             "auto_pr_enabled": auto_pr_enabled,
             "auto_qa_enabled": auto_qa_enabled,
+            "auto_merge_to_local_branch": auto_merge_to_local_branch,
+            "auto_merge_branch": auto_merge_branch,
         },
     )
     _record_proposal_automation_success(
@@ -2431,6 +2611,8 @@ def _start_standing_order_implementation_session(
         autonomy=standing_order.autonomy,
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
+        auto_merge_to_local_branch=auto_merge_to_local_branch,
+        auto_merge_branch=auto_merge_branch,
     )
     return metadata
 
@@ -2452,11 +2634,18 @@ def _record_proposal_automation_success(
     autonomy: str,
     auto_pr_enabled: bool,
     auto_qa_enabled: bool,
+    auto_merge_to_local_branch: bool = False,
+    auto_merge_branch: str = "",
 ) -> None:
     proposal.outcome_status = ProposedSession.OUTCOME_ACCEPTED
     proposal.accepted_session = implementation
     note = "Standing order autonomy started an implementation session automatically."
-    if auto_pr_enabled:
+    if auto_merge_to_local_branch:
+        note = (
+            f"{note} Auto-QA will merge approved changes into "
+            f"{auto_merge_branch}."
+        )
+    elif auto_pr_enabled:
         note = f"{note} Auto-PR will run after that session completes."
     elif auto_qa_enabled:
         note = f"{note} Auto-QA will run after that session completes."
@@ -2473,6 +2662,8 @@ def _record_proposal_automation_success(
             "implementation_thread_id": implementation.thread_id,
             "auto_pr_enabled": auto_pr_enabled,
             "auto_qa_enabled": auto_qa_enabled,
+            "auto_merge_to_local_branch": auto_merge_to_local_branch,
+            "auto_merge_branch": auto_merge_branch or None,
         },
     )
     proposal.save(

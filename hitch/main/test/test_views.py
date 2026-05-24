@@ -5062,6 +5062,35 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
+    def test_auto_merge_session_marks_follow_up_turn(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        SessionMetadata.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            auto_qa_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="main",
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(mock_spawn.call_args.kwargs["auto_qa_enabled"])
+        self.assertTrue(mock_spawn.call_args.kwargs["auto_merge_to_local_branch"])
+        self.assertEqual(mock_spawn.call_args.kwargs["auto_merge_branch"], "main")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
     def test_auto_qa_session_forwards_qa_panel_to_follow_up_turn(
         self,
         mock_codex: MagicMock,
@@ -7333,6 +7362,8 @@ class StandingOrderViewTests(TestCase):
             autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
             auto_qa_enabled=True,
             web_search_mode=StandingOrder.WEB_SEARCH_LIVE,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="main",
         )
         StandingOrder.objects.create(
             project=other_project,
@@ -7381,6 +7412,7 @@ class StandingOrderViewTests(TestCase):
         )
         self.assertContains(response, "Web search: Live")
         self.assertContains(response, "Auto-proposal: Off")
+        self.assertContains(response, "Auto merge: main")
         self.assertContains(
             response,
             f'data-edit-url="{reverse("edit_standing_order", args=[order.pk])}"',
@@ -7393,6 +7425,8 @@ class StandingOrderViewTests(TestCase):
             response, f'data-web-search-mode="{StandingOrder.WEB_SEARCH_LIVE}"'
         )
         self.assertContains(response, 'data-auto-proposal-enabled="false"')
+        self.assertContains(response, 'data-auto-merge-to-local-branch="true"')
+        self.assertContains(response, 'data-auto-merge-branch="main"')
         self.assertContains(response, 'data-standing-order-edit')
         self.assertNotContains(response, "Add parser coverage")
         self.assertNotContains(response, 'name="proposed_session"')
@@ -7651,6 +7685,31 @@ class StandingOrderViewTests(TestCase):
             StandingOrder.CONFIDENCE_VERY_HIGH,
         )
 
+    def test_create_standing_order_stores_auto_merge_branch(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+
+        with patch("hitch.main.views.local_branch_names", return_value=["main"]):
+            response = self.client.post(
+                reverse("create_standing_order"),
+                {
+                    "title": "Improve tests",
+                    "goal": "Find useful test coverage increments.",
+                    "ambition": StandingOrder.AMBITION_HIGH,
+                    "autonomy": StandingOrder.AUTONOMY_DRAFT_PATCH,
+                    "auto_qa": "true",
+                    "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
+                    "auto_merge_to_local_branch": "true",
+                    "auto_merge_branch": "main",
+                },
+            )
+
+        self.assertEqual(response.status_code, 302)
+        order = StandingOrder.objects.get()
+        self.assertTrue(order.auto_qa_enabled)
+        self.assertTrue(order.auto_merge_to_local_branch)
+        self.assertEqual(order.auto_merge_branch, "main")
+
     def test_edit_standing_order_updates_selected_project_order(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
@@ -7721,6 +7780,68 @@ class StandingOrderViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         order.refresh_from_db()
         self.assertEqual(order.web_search_mode, StandingOrder.WEB_SEARCH_DEFAULT)
+
+    def test_edit_standing_order_updates_auto_merge_branch(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+        )
+
+        with patch("hitch.main.views.local_branch_names", return_value=["release"]):
+            response = self.client.post(
+                reverse("edit_standing_order", args=[order.pk]),
+                {
+                    "title": "Improve tests",
+                    "goal": "Find useful test coverage increments.",
+                    "ambition": StandingOrder.AMBITION_HIGH,
+                    "autonomy": StandingOrder.AUTONOMY_DRAFT_PATCH,
+                    "auto_qa": "true",
+                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                    "auto_merge_to_local_branch": "true",
+                    "auto_merge_branch": "release",
+                },
+            )
+
+        self.assertEqual(response.status_code, 302)
+        order.refresh_from_db()
+        self.assertTrue(order.auto_qa_enabled)
+        self.assertTrue(order.auto_merge_to_local_branch)
+        self.assertEqual(order.auto_merge_branch, "release")
+
+    def test_edit_standing_order_clears_auto_merge_when_unchecked(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            auto_qa_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="release",
+        )
+
+        response = self.client.post(
+            reverse("edit_standing_order", args=[order.pk]),
+            {
+                "title": "Improve tests",
+                "goal": "Find useful test coverage increments.",
+                "ambition": StandingOrder.AMBITION_HIGH,
+                "autonomy": StandingOrder.AUTONOMY_DRAFT_PATCH,
+                "auto_qa": "true",
+                "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        order.refresh_from_db()
+        self.assertTrue(order.auto_qa_enabled)
+        self.assertFalse(order.auto_merge_to_local_branch)
+        self.assertEqual(order.auto_merge_branch, "")
 
     def test_edit_standing_order_preserves_autonomy_when_omitted(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -7961,6 +8082,31 @@ class StandingOrderViewTests(TestCase):
                     "web_search_mode": "maybe",
                 },
                 "web search setting is invalid",
+            ),
+            (
+                {
+                    "title": "Improve docs",
+                    "goal": "Find useful docs increments.",
+                    "ambition": StandingOrder.AMBITION_HIGH,
+                    "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
+                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                    "auto_merge_to_local_branch": "true",
+                    "auto_merge_branch": "main",
+                },
+                "auto merge requires auto-QA",
+            ),
+            (
+                {
+                    "title": "Improve docs",
+                    "goal": "Find useful docs increments.",
+                    "ambition": StandingOrder.AMBITION_HIGH,
+                    "autonomy": StandingOrder.AUTONOMY_DRAFT_PATCH,
+                    "auto_qa": "true",
+                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                    "auto_merge_to_local_branch": "true",
+                    "auto_merge_branch": "missing",
+                },
+                "auto merge branch is invalid",
             ),
         ):
             with self.subTest(message=message):

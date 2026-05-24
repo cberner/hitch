@@ -85,6 +85,8 @@ def spawn_new_session(
     auto_pr_enabled: bool = False,
     auto_qa_enabled: bool = False,
     qa_panel_enabled: bool = False,
+    auto_merge_to_local_branch: bool = False,
+    auto_merge_branch: str = "",
 ) -> CodexInstance:
     """Create a fresh Codex thread and detach a worker to run the initial prompt.
 
@@ -156,6 +158,8 @@ def spawn_new_session(
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
         qa_panel_enabled=qa_panel_enabled,
+        auto_merge_to_local_branch=auto_merge_to_local_branch,
+        auto_merge_branch=auto_merge_branch,
     )
 
 
@@ -232,6 +236,8 @@ def spawn_turn(
     auto_pr_enabled: bool = False,
     auto_qa_enabled: bool = False,
     qa_panel_enabled: bool = False,
+    auto_merge_to_local_branch: bool = False,
+    auto_merge_branch: str = "",
 ) -> CodexInstance:
     """Detach a worker that resumes an existing thread to run one prompt.
 
@@ -273,6 +279,8 @@ def spawn_turn(
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
         qa_panel_enabled=qa_panel_enabled,
+        auto_merge_to_local_branch=auto_merge_to_local_branch,
+        auto_merge_branch=auto_merge_branch,
     )
 
 
@@ -1159,6 +1167,8 @@ def _spawn_worker(
     auto_pr_enabled: bool = False,
     auto_qa_enabled: bool = False,
     qa_panel_enabled: bool = False,
+    auto_merge_to_local_branch: bool = False,
+    auto_merge_branch: str = "",
 ) -> CodexInstance:
     web_search_mode = _normalized_web_search_mode(web_search_mode)
     target_dir = events_dir()
@@ -1198,6 +1208,8 @@ def _spawn_worker(
             auto_pr_enabled=auto_pr_enabled,
             auto_qa_enabled=auto_qa_enabled,
             qa_panel_enabled=qa_panel_enabled,
+            auto_merge_to_local_branch=auto_merge_to_local_branch,
+            auto_merge_branch=auto_merge_branch,
             events_path="",
             status=CodexInstance.STATUS_STARTING,
             pid=0,

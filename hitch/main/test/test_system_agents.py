@@ -12,6 +12,11 @@ from django.test import TestCase
 from openai_codex.generated.v2_all import GetAccountRateLimitsResponse, ThreadSource
 
 from hitch.main import demo, streaming, system_agents
+from hitch.main.local_merges import (
+    AutoMergeReviewPatch,
+    LocalBranchMergeError,
+    LocalBranchMergeResult,
+)
 from hitch.main.models import (
     CodexInstance,
     Project,
@@ -36,6 +41,8 @@ def _instance(
     auto_pr_enabled: bool = False,
     auto_qa_enabled: bool = False,
     qa_panel_enabled: bool = False,
+    auto_merge_to_local_branch: bool = False,
+    auto_merge_branch: str = "",
     plan_mode: bool = False,
     model: str = "",
     reasoning_effort: str = "",
@@ -63,6 +70,8 @@ def _instance(
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
         qa_panel_enabled=qa_panel_enabled,
+        auto_merge_to_local_branch=auto_merge_to_local_branch,
+        auto_merge_branch=auto_merge_branch,
         events_path=events_path,
         status=status,
         purpose=purpose,
@@ -824,6 +833,67 @@ class SpecCriticWorkflowTests(TestCase):
             workflow.max_iterations, system_agents.QA_WORKFLOW_MAX_ITERATIONS
         )
 
+    @patch(
+        "hitch.main.system_agents.build_auto_merge_review_patch",
+        return_value=AutoMergeReviewPatch(
+            patch="diff --git",
+            target_sha="base123",
+            base_sha="session-base123",
+        ),
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_local_auto_merge_workflow_stores_reviewed_diff(
+        self, mock_spawn: MagicMock, mock_patch: MagicMock
+    ) -> None:
+        mock_spawn.return_value = _instance(
+            thread_id="qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        )
+
+        workflow = system_agents.start_pr_qa_workflow(
+            main_thread_id="main-thread",
+            cwd="/repo",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            auto_merge_branch="main",
+        )
+
+        workflow.refresh_from_db()
+        mock_patch.assert_called_once_with("/repo", "main")
+        self.assertEqual(
+            workflow.state[system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY],
+            "diff --git",
+        )
+        self.assertEqual(
+            workflow.state[system_agents.AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY],
+            "base123",
+        )
+        self.assertEqual(
+            workflow.state[system_agents.AUTO_MERGE_SESSION_BASE_SHA_STATE_KEY],
+            "session-base123",
+        )
+
+    @patch(
+        "hitch.main.system_agents.build_auto_merge_review_patch",
+        side_effect=LocalBranchMergeError("no merge base"),
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_local_auto_merge_workflow_blocks_without_strict_patch(
+        self, mock_spawn: MagicMock, _mock_patch: MagicMock
+    ) -> None:
+        workflow = system_agents.start_pr_qa_workflow(
+            main_thread_id="main-thread",
+            cwd="/repo",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            auto_merge_branch="main",
+        )
+
+        mock_spawn.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertIn("no merge base", workflow.state["error"])
+
     @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_parallel_qa_panel_starts_all_hidden_lanes(
@@ -876,6 +946,83 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(len(runs), len(system_agents._QA_PANEL_LANES))
         self.assertEqual([run.agent_kind for run in runs], list(system_agents._QA_PANEL_LANE_KINDS))
         self.assertEqual(runs[0].input["lane"], system_agents._QA_PANEL_LANES[0].label)
+
+    @patch(
+        "hitch.main.system_agents.build_auto_merge_review_patch",
+        side_effect=[
+            AutoMergeReviewPatch(
+                patch="diff --git strict lanes",
+                target_sha="base1",
+                base_sha="session-base1",
+            ),
+            AutoMergeReviewPatch(
+                patch="diff --git strict synth",
+                target_sha="base2",
+                base_sha="session-base2",
+            ),
+        ],
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_parallel_qa_panel_auto_merge_reviews_strict_patch(
+        self, mock_spawn: MagicMock, mock_patch: MagicMock
+    ) -> None:
+        lane_instances = [
+            _instance(
+                thread_id=f"qa-lane-{index}",
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                events_path=_events_file(
+                    self,
+                    {
+                        "summary": f"{lane.label} clean",
+                        "findings": [],
+                        "lgtm": True,
+                    },
+                ),
+                agent_kind=lane.agent_kind,
+            )
+            for index, lane in enumerate(system_agents._QA_PANEL_LANES)
+        ]
+        synth_instance = _instance(
+            thread_id="qa-synth",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.PR_QA_PANEL_SYNTHESIZER_AGENT_KIND,
+        )
+        mock_spawn.side_effect = [*lane_instances, synth_instance]
+
+        workflow = system_agents.start_pr_qa_workflow(
+            main_thread_id="main-thread",
+            cwd="/repo",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            qa_panel_enabled=True,
+            auto_merge_branch="main",
+        )
+
+        lane_prompts = [
+            call.kwargs["prompt"]
+            for call in mock_spawn.call_args_list[: len(system_agents._QA_PANEL_LANES)]
+        ]
+        self.assertTrue(
+            all("diff --git strict lanes" in prompt for prompt in lane_prompts)
+        )
+        for instance in lane_instances:
+            system_agents.on_codex_instance_finished(instance)
+
+        self.assertIn("diff --git strict synth", mock_spawn.call_args.kwargs["prompt"])
+        workflow.refresh_from_db()
+        self.assertEqual(mock_patch.call_count, 2)
+        self.assertEqual(
+            workflow.state[system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY],
+            "diff --git strict synth",
+        )
+        self.assertEqual(
+            workflow.state[system_agents.AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY],
+            "base2",
+        )
+        self.assertEqual(
+            workflow.state[system_agents.AUTO_MERGE_SESSION_BASE_SHA_STATE_KEY],
+            "session-base2",
+        )
 
     @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -1237,6 +1384,70 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIsNotNone(instance.auto_pr_triggered_at)
         self.assertIsNone(instance.auto_qa_triggered_at)
         self.assertNotIn("open_pr_on_lgtm", mock_start.call_args.kwargs)
+
+    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    def test_auto_qa_forwards_local_auto_merge_setting(
+        self, mock_start: MagicMock
+    ) -> None:
+        instance = _instance(
+            auto_qa_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="main",
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        self.assertFalse(mock_start.call_args.kwargs["open_pr_on_lgtm"])
+        self.assertEqual(mock_start.call_args.kwargs["auto_merge_branch"], "main")
+
+    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    def test_auto_merge_start_block_records_failed_metadata(
+        self, mock_start: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        metadata = SessionMetadata.objects.create(
+            thread_id="main-thread",
+            cwd="/repo",
+            project=project,
+            auto_qa_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="main",
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Add parser coverage",
+            accepted_session=metadata,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            outcome_metadata={},
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_BLOCKED,
+            step=system_agents.STEP_BLOCKED,
+            state={
+                "auto_merge_branch": "main",
+                "error": "failed to start QA agent: no merge base",
+            },
+        )
+        mock_start.return_value = workflow
+        instance = _instance(
+            thread_id="main-thread",
+            auto_qa_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="main",
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_metadata["auto_merge_status"], "failed")
+        self.assertEqual(proposal.outcome_metadata["auto_merge_branch"], "main")
+        self.assertEqual(
+            proposal.outcome_metadata["auto_merge_error"],
+            "failed to start QA agent: no merge base",
+        )
 
     @patch("hitch.main.system_agents.start_pr_qa_workflow")
     def test_auto_pr_does_not_stamp_when_workflow_start_fails(
@@ -1974,6 +2185,229 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_QA_APPROVED)
         self.assertEqual(workflow.state["next_user_message_index"], 4)
         self.assertEqual(workflow.state["last_feedback"], "Looks good")
+
+    @patch("hitch.main.system_agents.merge_worktree_diff_to_branch")
+    def test_qa_lgtm_merges_configured_local_branch(
+        self, mock_merge: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        implementation = SessionMetadata.objects.create(
+            thread_id="main-thread",
+            cwd="/repo",
+            project=project,
+            auto_pr_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="main",
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Add parser coverage",
+            accepted_session=implementation,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            outcome_metadata={},
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step="qa_running",
+            state={
+                "open_pr_on_lgtm": False,
+                "auto_merge_branch": "main",
+                system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY: "diff --git",
+                system_agents.AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY: "base123",
+            },
+        )
+        mock_merge.return_value = LocalBranchMergeResult(
+            branch="main",
+            commit_sha="abc123",
+            target_worktree="/repo",
+            changed=True,
+        )
+        instance = _instance(
+            thread_id="qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {"feedback": "Looks good", "lgtm": True},
+            ),
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="qa-thread",
+            instance=instance,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        mock_merge.assert_called_once_with("/repo", "main", "diff --git", "base123")
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_LOCAL_BRANCH_MERGED)
+        self.assertEqual(workflow.state["auto_merge_result"]["commit_sha"], "abc123")
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_metadata["auto_merge_status"], "merged")
+        self.assertEqual(proposal.outcome_metadata["auto_merge_branch"], "main")
+        self.assertEqual(
+            proposal.outcome_metadata["auto_merge_commit_sha"], "abc123"
+        )
+
+    @patch("hitch.main.system_agents._surface_workflow_failure")
+    @patch("hitch.main.system_agents.merge_worktree_diff_to_branch")
+    def test_qa_lgtm_blocks_when_local_branch_merge_fails(
+        self, mock_merge: MagicMock, mock_surface: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        implementation = SessionMetadata.objects.create(
+            thread_id="main-thread",
+            cwd="/repo",
+            project=project,
+            auto_pr_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="main",
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Add parser coverage",
+            accepted_session=implementation,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            outcome_metadata={},
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step="qa_running",
+            state={
+                "open_pr_on_lgtm": False,
+                "auto_merge_branch": "main",
+                system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY: "diff --git",
+                system_agents.AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY: "base123",
+            },
+        )
+        mock_merge.side_effect = LocalBranchMergeError("patch conflict")
+        instance = _instance(
+            thread_id="qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {"feedback": "Looks good", "lgtm": True},
+            ),
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="qa-thread",
+            instance=instance,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        mock_surface.assert_called_once()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        self.assertIn("patch conflict", workflow.state["error"])
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_metadata["auto_merge_status"], "failed")
+        self.assertEqual(proposal.outcome_metadata["auto_merge_branch"], "main")
+        self.assertEqual(
+            proposal.outcome_metadata["auto_merge_error"], "patch conflict"
+        )
+
+    @patch("hitch.main.system_agents.merge_worktree_diff_to_branch")
+    @patch(
+        "hitch.main.system_agents.build_auto_merge_review_patch",
+        return_value=AutoMergeReviewPatch(
+            patch="diff --git final", target_sha="final-base"
+        ),
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_auto_merge_feedback_loop_uses_refreshed_review_patch(
+        self,
+        mock_turn: MagicMock,
+        mock_spawn: MagicMock,
+        _mock_patch: MagicMock,
+        mock_merge: MagicMock,
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_QA_RUNNING,
+            state={
+                "open_pr_on_lgtm": False,
+                "auto_merge_branch": "main",
+                system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY: (
+                    "diff --git stale"
+                ),
+                system_agents.AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY: (
+                    "stale-base"
+                ),
+            },
+        )
+        rejected = _instance(
+            thread_id="qa-rejected",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {"feedback": "Fix this", "lgtm": False},
+            ),
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="qa-rejected",
+            instance=rejected,
+        )
+        feedback = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            workflow_id=workflow.pk,
+        )
+        final_qa = _instance(
+            thread_id="qa-final",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {"feedback": "Looks good", "lgtm": True},
+            ),
+        )
+        mock_turn.return_value = feedback
+        mock_spawn.return_value = final_qa
+        mock_merge.return_value = LocalBranchMergeResult(
+            branch="main",
+            commit_sha="merged123",
+            target_worktree="/repo",
+            changed=True,
+        )
+
+        system_agents.on_codex_instance_finished(rejected)
+        system_agents.on_codex_instance_finished(feedback)
+        workflow.refresh_from_db()
+        self.assertEqual(
+            workflow.state[system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY],
+            "diff --git final",
+        )
+        self.assertEqual(
+            workflow.state[system_agents.AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY],
+            "final-base",
+        )
+
+        system_agents.on_codex_instance_finished(final_qa)
+
+        mock_merge.assert_called_once_with(
+            "/repo", "main", "diff --git final", "final-base"
+        )
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_stores_handoff_and_starts_monitor(
@@ -4880,6 +5314,166 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertFalse(proposal.outcome_metadata["auto_qa_enabled"])
         self.assertIn("Auto-PR will run", proposal.outcome_notes)
 
+    @patch("hitch.main.system_agents.create_worktree_for_session")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_standing_order_auto_merge_config_propagates_to_implementation(
+        self, mock_spawn: MagicMock, mock_worktree: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            auto_qa_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="main",
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            state={
+                "standing_order_id": standing_order.pk,
+                "candidate": {
+                    "title": "Add parser coverage",
+                    "implementation_direction": "Add focused tests.",
+                    "relevant_files": [],
+                },
+            },
+        )
+        instance = _instance(
+            thread_id="judge-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {
+                    "confidence": "high",
+                    "summary": "This adds focused parser coverage.",
+                    "rationale": "The files are well-scoped.",
+                },
+            ),
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            thread_id="judge-thread",
+            instance=instance,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="implementation-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+            auto_qa_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="main",
+        )
+        mock_worktree.return_value = MagicMock(path=Path("/repo-worktree"))
+
+        system_agents.on_codex_instance_finished(instance)
+
+        mock_worktree.assert_called_once_with(
+            "/repo", base_ref="refs/heads/main", disable_hooks=True
+        )
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(kwargs["cwd"], "/repo-worktree")
+        self.assertTrue(kwargs["auto_qa_enabled"])
+        self.assertTrue(kwargs["auto_merge_to_local_branch"])
+        self.assertEqual(kwargs["auto_merge_branch"], "main")
+        proposal = ProposedSession.objects.get()
+        implementation = SessionMetadata.objects.get(thread_id="implementation-thread")
+        self.assertEqual(implementation.cwd, "/repo-worktree")
+        self.assertTrue(implementation.auto_merge_to_local_branch)
+        self.assertEqual(implementation.auto_merge_branch, "main")
+        self.assertTrue(proposal.outcome_metadata["auto_merge_to_local_branch"])
+        self.assertEqual(proposal.outcome_metadata["auto_merge_branch"], "main")
+        self.assertIn(
+            "Auto-QA will merge approved changes into main", proposal.outcome_notes
+        )
+
+    @patch("hitch.main.system_agents.cleanup_worktree")
+    @patch("hitch.main.system_agents.create_worktree_for_session")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_standing_order_auto_merge_spawn_failure_cleans_up_worktree(
+        self,
+        mock_spawn: MagicMock,
+        mock_worktree: MagicMock,
+        mock_cleanup: MagicMock,
+    ) -> None:
+        mock_spawn.side_effect = RuntimeError("app-server unavailable")
+        managed_worktree = MagicMock(path=Path("/repo-worktree"))
+        mock_worktree.return_value = managed_worktree
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            auto_qa_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="main",
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            state={
+                "standing_order_id": standing_order.pk,
+                "candidate": {
+                    "title": "Add parser coverage",
+                    "implementation_direction": "Add focused tests.",
+                    "relevant_files": [],
+                },
+            },
+        )
+        instance = _instance(
+            thread_id="judge-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {
+                    "confidence": "high",
+                    "summary": "This adds focused parser coverage.",
+                    "rationale": "The files are well-scoped.",
+                },
+            ),
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            thread_id="judge-thread",
+            instance=instance,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        mock_cleanup.assert_called_once_with(managed_worktree)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        proposal = ProposedSession.objects.get()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertIsNone(proposal.accepted_session)
+        self.assertIn(
+            "failed to start implementation session", proposal.outcome_notes
+        )
+        self.assertEqual(
+            proposal.outcome_metadata["automation_status"],
+            "implementation_start_failed",
+        )
+
     @patch("hitch.main.system_agents.start_pr_qa_workflow")
     def test_draft_pr_implementation_completion_records_pr_workflow(
         self, mock_start: MagicMock
@@ -4896,7 +5490,9 @@ class StandingOrderWorkflowTests(TestCase):
             title="Add parser coverage",
             accepted_session=implementation,
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
-            outcome_metadata={"standing_order_autonomy": StandingOrder.AUTONOMY_DRAFT_PR},
+            outcome_metadata={
+                "standing_order_autonomy": StandingOrder.AUTONOMY_DRAFT_PR
+            },
         )
         pr_workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,

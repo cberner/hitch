@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import tempfile
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -32,7 +33,9 @@ class ManagedWorktree:
     source_repo: Path
 
 
-def create_worktree_for_session(source_cwd: str) -> ManagedWorktree:
+def create_worktree_for_session(
+    source_cwd: str, *, base_ref: str = "HEAD", disable_hooks: bool = False
+) -> ManagedWorktree:
     """Create a new branch and worktree for a Codex session."""
     repo = _repo_root(Path(source_cwd))
     if repo is None:
@@ -46,10 +49,20 @@ def create_worktree_for_session(source_cwd: str) -> ManagedWorktree:
         path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise WorktreeCreationError(str(exc)) from exc
-    if _has_head_commit(repo):
-        _git(repo, ["worktree", "add", "-b", branch, str(path), "HEAD"])
+    if _has_commit(repo, base_ref):
+        _add_worktree(
+            repo,
+            ["worktree", "add", "-b", branch, str(path), base_ref],
+            disable_hooks=disable_hooks,
+        )
+    elif base_ref == "HEAD":
+        _add_worktree(
+            repo,
+            ["worktree", "add", "--orphan", "-b", branch, str(path)],
+            disable_hooks=disable_hooks,
+        )
     else:
-        _git(repo, ["worktree", "add", "--orphan", "-b", branch, str(path)])
+        raise WorktreeCreationError(f"base ref {base_ref!r} does not exist")
     return ManagedWorktree(path=path, branch=branch, source_repo=repo)
 
 
@@ -102,8 +115,18 @@ def _resolved_path(path: Path) -> Path:
         return path
 
 
-def _has_head_commit(repo: Path) -> bool:
-    return _git(repo, ["rev-parse", "--verify", "HEAD"], raise_on_error=False) is not None
+def _has_commit(repo: Path, ref: str) -> bool:
+    return (
+        _git(repo, ["rev-parse", "--verify", ref], raise_on_error=False) is not None
+    )
+
+
+def _add_worktree(repo: Path, args: list[str], *, disable_hooks: bool) -> None:
+    if disable_hooks:
+        with tempfile.TemporaryDirectory(prefix="hitch-hooks-") as raw_hooks:
+            _git(repo, args, hooks_path=Path(raw_hooks))
+        return
+    _git(repo, args)
 
 
 def _branch_exists(repo: Path, branch: str) -> bool:
@@ -131,10 +154,15 @@ def _git(
     *,
     raise_on_error: bool = True,
     error_cls: type[Exception] = WorktreeCreationError,
+    hooks_path: Path | None = None,
 ) -> str | None:
+    command = ["git"]
+    if hooks_path is not None:
+        command.extend(["-c", f"core.hooksPath={hooks_path}"])
+    command.extend(["-C", str(cwd), *args])
     try:
         result = subprocess.run(
-            ["git", "-C", str(cwd), *args],
+            command,
             capture_output=True,
             check=False,
             timeout=_GIT_TIMEOUT_SECONDS,
