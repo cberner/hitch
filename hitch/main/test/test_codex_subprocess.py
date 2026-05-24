@@ -214,10 +214,10 @@ class SpawnNewSessionTests(TestCase):
 
     @patch("hitch.main.codex_pool._launch_worker_process")
     @patch("hitch.main.codex_pool.Codex")
-    def test_spawn_new_session_persists_auto_qa_enabled(
+    def test_spawn_new_session_persists_auto_qa_and_auto_merge_fields(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
-        _stub_codex_thread_start(mock_codex, "thread-abc")
+        _stub_codex_thread_start(mock_codex, "thread-auto-merge")
         mock_launch.return_value = SimpleNamespace(pid=4242)
 
         with (
@@ -228,11 +228,19 @@ class SpawnNewSessionTests(TestCase):
                 cwd="/repo",
                 prompt="hi",
                 auto_qa_enabled=True,
+                auto_merge_to_local_branch=True,
+                auto_merge_branch="release",
             )
 
+        self.assertTrue(instance.auto_qa_enabled)
+        self.assertFalse(instance.auto_pr_enabled)
+        self.assertTrue(instance.auto_merge_to_local_branch)
+        self.assertEqual(instance.auto_merge_branch, "release")
         instance.refresh_from_db()
         self.assertTrue(instance.auto_qa_enabled)
         self.assertFalse(instance.auto_pr_enabled)
+        self.assertTrue(instance.auto_merge_to_local_branch)
+        self.assertEqual(instance.auto_merge_branch, "release")
 
     @patch("hitch.main.codex_pool._launch_worker_process")
     @patch("hitch.main.codex_pool.Codex")

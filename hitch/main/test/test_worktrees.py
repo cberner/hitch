@@ -78,6 +78,34 @@ class ManagedWorktreeTests(SimpleTestCase):
             self.assertRegex(branch, r"^hitch/source-repo/\d{14}-[0-9a-f]{8}$")
             self.assertEqual((worktree / "README.md").read_text(), "hello\n")
 
+    def test_creates_worktree_from_base_ref_with_hooks_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "source"
+            managed = root / "managed"
+            _init_repo(repo)
+            _git(repo, "checkout", "-b", "release")
+            (repo / "README.md").write_text("release\n")
+            _git(repo, "add", "README.md")
+            _git(repo, "commit", "-m", "release")
+            _git(repo, "checkout", "master")
+            hook = repo / ".git" / "hooks" / "post-checkout"
+            hook.write_text("#!/bin/sh\ntouch ../hook-ran\nexit 1\n")
+            hook.chmod(0o755)
+
+            with override_settings(HITCH_WORKTREES_DIR=managed):
+                managed_worktree = create_worktree_for_session(
+                    str(repo),
+                    base_ref="refs/heads/release",
+                    disable_hooks=True,
+                )
+
+            self.assertEqual(
+                (managed_worktree.path / "README.md").read_text(), "release\n"
+            )
+            self.assertFalse((repo.parent / "hook-ran").exists())
+            self.assertEqual(_git(repo, "branch", "--show-current"), "master")
+
     def test_creates_orphan_worktree_for_unborn_head(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

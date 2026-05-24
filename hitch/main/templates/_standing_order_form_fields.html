@@ -16,7 +16,7 @@
 </label>
 <label>
     Autonomy
-    <select name="autonomy" required>
+    <select name="autonomy" required data-standing-order-autonomy>
         {% for value, label in autonomy_choices %}
         <option value="{{ value }}"{% if value == default_autonomy %} selected{% endif %} data-auto-qa-supported="{% if value in auto_qa_supported_autonomies %}true{% else %}false{% endif %}">{{ label }}</option>
         {% endfor %}
@@ -45,6 +45,20 @@
     <select name="web_search_mode">
         {% for value, label in web_search_mode_choices %}
         <option value="{{ value }}"{% if value == default_web_search_mode %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+    </select>
+</label>
+<label class="checkbox-label">
+    <span>Auto merge to local branch</span>
+    <input type="hidden" name="auto_merge_to_local_branch" value="false">
+    <input type="checkbox" name="auto_merge_to_local_branch" value="true" data-standing-order-auto-merge>
+</label>
+<label>
+    Local branch
+    <select name="auto_merge_branch" data-standing-order-auto-merge-branch>
+        <option value="">Select branch</option>
+        {% for branch in local_branch_choices %}
+        <option value="{{ branch }}">{{ branch }}</option>
         {% endfor %}
     </select>
 </label>

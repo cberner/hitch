@@ -3040,6 +3040,63 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertLess(body.index("Done"), body.index("QA agent approved the diff."))
 
     @patch("hitch.main.views.Codex")
+    def test_completed_local_merge_approval_shows_branch_and_commit(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _patch_thread(
+            self,
+            mock_codex,
+            _thread([_turn([_user_message("Change it"), _agent_message("Done")])]),
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-1",
+            cwd="/tmp/demo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_LOCAL_BRANCH_MERGED,
+            state={
+                "next_user_message_index": 1,
+                "last_feedback": "No qualifying findings.",
+                "auto_merge_result": {
+                    "branch": "main",
+                    "commit_sha": "abc123",
+                    "target_worktree": "/tmp/demo",
+                    "changed": True,
+                },
+            },
+        )
+        instance = _make_codex_instance(
+            thread_id="hidden-thread",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="hidden-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+            output={"feedback": "No qualifying findings.", "lgtm": True},
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response, "QA agent approved the diff and merged it into main."
+        )
+        self.assertContains(response, "Commit: abc123")
+        self.assertContains(response, "No qualifying findings.")
+        self.assertLess(
+            body.index("Done"),
+            body.index("QA agent approved the diff and merged it into main."),
+        )
+
+    @patch("hitch.main.views.Codex")
     def test_system_session_detail_is_read_only_and_shows_system_prompt(
         self, mock_codex: MagicMock
     ) -> None:

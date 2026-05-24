@@ -56,6 +56,7 @@ from hitch.main import (
 )
 from hitch.main.diffs import build_worktree_diff
 from hitch.main.formatting import looks_like_markdown, render_markdown
+from hitch.main.local_merges import local_branch_names
 from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
@@ -114,6 +115,8 @@ class StandingOrderValues(NamedTuple):
     auto_proposal_enabled: bool
     confidence_threshold: str
     web_search_mode: str
+    auto_merge_to_local_branch: bool
+    auto_merge_branch: str
 
 
 class ThreadListPage(NamedTuple):
@@ -1438,6 +1441,11 @@ def standing_orders(request: HttpRequest) -> HttpResponse:
         if current_project is not None
         else []
     )
+    local_branch_choices = (
+        local_branch_names(current_project.repo_path)
+        if current_project is not None
+        else []
+    )
     _attach_standing_order_run_state(orders)
     settings_dialog_context = _settings_dialog_context(current_settings, models_data)
     response = render(
@@ -1461,6 +1469,7 @@ def standing_orders(request: HttpRequest) -> HttpResponse:
             "default_confidence": StandingOrder.CONFIDENCE_HIGH,
             "web_search_mode_choices": _WEB_SEARCH_MODE_OPTIONS,
             "default_web_search_mode": StandingOrder.WEB_SEARCH_DEFAULT,
+            "local_branch_choices": local_branch_choices,
             "title_max_len": _STANDING_ORDER_TITLE_MAX_LEN,
             **settings_dialog_context,
         },
@@ -1474,7 +1483,10 @@ def create_standing_order(request: HttpRequest) -> HttpResponse:
     project = _active_project_from_request(request)
     if project is None:
         return HttpResponseBadRequest("active project is required")
-    values, error = _validated_standing_order_values(request)
+    values, error = _validated_standing_order_values(
+        request,
+        local_branches=local_branch_names(project.repo_path),
+    )
     if error is not None:
         return HttpResponseBadRequest(error)
     assert values is not None
@@ -1488,6 +1500,8 @@ def create_standing_order(request: HttpRequest) -> HttpResponse:
         auto_proposal_enabled=values.auto_proposal_enabled,
         confidence_threshold=values.confidence_threshold,
         web_search_mode=values.web_search_mode,
+        auto_merge_to_local_branch=values.auto_merge_to_local_branch,
+        auto_merge_branch=values.auto_merge_branch,
     )
     return redirect("standing_orders")
 
@@ -1509,6 +1523,7 @@ def edit_standing_order(request: HttpRequest, standing_order_id: int) -> HttpRes
         auto_qa_default=standing_order.auto_qa_enabled,
         web_search_default=standing_order.web_search_mode,
         auto_proposal_default=standing_order.auto_proposal_enabled,
+        local_branches=local_branch_names(project.repo_path),
     )
     if error is not None:
         return HttpResponseBadRequest(error)
@@ -1524,6 +1539,8 @@ def edit_standing_order(request: HttpRequest, standing_order_id: int) -> HttpRes
         "auto_proposal_enabled",
         "confidence_threshold",
         "web_search_mode",
+        "auto_merge_to_local_branch",
+        "auto_merge_branch",
     ):
         value = getattr(values, field)
         if getattr(standing_order, field) != value:
@@ -1643,6 +1660,7 @@ def _validated_standing_order_values(
     auto_qa_default: bool = False,
     web_search_default: str = StandingOrder.WEB_SEARCH_DEFAULT,
     auto_proposal_default: bool = False,
+    local_branches: list[str] | None = None,
 ) -> tuple[StandingOrderValues | None, str | None]:
     title, error = _validated_standing_order_title(request.POST.get("title", ""))
     if error is not None:
@@ -1687,6 +1705,21 @@ def _validated_standing_order_values(
     )
     if web_search_mode not in {"", *_VALID_WEB_SEARCH_MODES}:
         return None, "web search setting is invalid"
+    auto_merge = request.POST.get("auto_merge_to_local_branch", "").strip()
+    if auto_merge not in {"", "false", "true"}:
+        return None, "auto merge setting is invalid"
+    auto_merge_to_local_branch = auto_merge == "true"
+    auto_merge_branch = request.POST.get("auto_merge_branch", "").strip()
+    valid_local_branches = set(local_branches or [])
+    if auto_merge_to_local_branch:
+        if not auto_qa_enabled:
+            return None, "auto merge requires auto-QA"
+        if not auto_merge_branch:
+            return None, "auto merge branch is required"
+        if auto_merge_branch not in valid_local_branches:
+            return None, "auto merge branch is invalid"
+    else:
+        auto_merge_branch = ""
     return StandingOrderValues(
         title=title,
         goal=goal,
@@ -1696,6 +1729,8 @@ def _validated_standing_order_values(
         auto_proposal_enabled=auto_proposal_enabled,
         confidence_threshold=threshold,
         web_search_mode=web_search_mode,
+        auto_merge_to_local_branch=auto_merge_to_local_branch,
+        auto_merge_branch=auto_merge_branch,
     ), None
 
 
@@ -3187,6 +3222,7 @@ def _qa_approval_entries(session_id: str) -> Iterator[tuple[int, dict[str, Any]]
                 system_agents.STEP_QA_APPROVED,
                 system_agents.STEP_PR_READY,
                 system_agents.STEP_PR_CLOSED,
+                system_agents.STEP_LOCAL_BRANCH_MERGED,
             ],
         )
         .order_by("created_at")
@@ -3200,10 +3236,13 @@ def _qa_approval_entries(session_id: str) -> Iterator[tuple[int, dict[str, Any]]
         if run is None:
             continue
         feedback = _qa_feedback_text(workflow, run)
-        text = "QA agent approved the diff."
+        text = _qa_approval_text(workflow)
         if feedback:
             text = f"{text}\n\n{feedback}"
-        if workflow.step == system_agents.STEP_QA_APPROVED:
+        if workflow.step in {
+            system_agents.STEP_QA_APPROVED,
+            system_agents.STEP_LOCAL_BRANCH_MERGED,
+        }:
             insert_index = next_user_message_index
         else:
             prompt_index = workflow.state.get(
@@ -3220,6 +3259,26 @@ def _qa_approval_entries(session_id: str) -> Iterator[tuple[int, dict[str, Any]]
             "text": text,
             "timestamp": int(workflow.updated_at.timestamp()),
         }
+
+
+def _qa_approval_text(workflow: SystemWorkflow) -> str:
+    if workflow.step != system_agents.STEP_LOCAL_BRANCH_MERGED:
+        return "QA agent approved the diff."
+    result = workflow.state.get("auto_merge_result")
+    if not isinstance(result, dict):
+        return "QA agent approved the diff and merged it to the local branch."
+    branch = result.get("branch")
+    commit_sha = result.get("commit_sha")
+    changed = result.get("changed")
+    if not isinstance(branch, str) or not branch.strip():
+        return "QA agent approved the diff and merged it to the local branch."
+    action = "merged it into"
+    if changed is False:
+        action = "found it already applied to"
+    text = f"QA agent approved the diff and {action} {branch.strip()}."
+    if isinstance(commit_sha, str) and commit_sha.strip():
+        text = f"{text}\n\nCommit: {commit_sha.strip()}"
+    return text
 
 
 def _approved_qa_run(workflow: SystemWorkflow) -> SystemAgentRun | None:
@@ -4612,6 +4671,12 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         auto_qa_enabled = (
             False if auto_pr_enabled else _auto_qa_enabled_for_session(session_id)
         )
+        auto_merge_to_local_branch, auto_merge_branch = (
+            _auto_merge_to_local_branch_for_session(session_id)
+        )
+        if not auto_qa_enabled:
+            auto_merge_to_local_branch = False
+            auto_merge_branch = ""
         if qa_workflow_activation:
             developer_instructions = (
                 previous_instance.developer_instructions
@@ -4678,6 +4743,9 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             spawn_kwargs["stored_reasoning_effort"] = auto_review_reasoning_effort or None
             if settings.qa_panel_enabled:
                 spawn_kwargs["qa_panel_enabled"] = True
+            if auto_merge_to_local_branch:
+                spawn_kwargs["auto_merge_to_local_branch"] = True
+                spawn_kwargs["auto_merge_branch"] = auto_merge_branch
         if plan_mode:
             if not collaboration_model:
                 _cleanup_saved_input_images(input_image_paths)
@@ -4745,7 +4813,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         if not input_images_owned:
             _cleanup_saved_input_images(input_image_paths)
         raise
-
 
 def _thread_awaits_plan_approval(thread: Any) -> bool:
     return _entries_await_plan_approval(list(_entries_for(thread)))
@@ -4861,6 +4928,18 @@ def _auto_qa_enabled_for_session(session_id: str) -> bool:
     return SessionMetadata.objects.filter(
         thread_id=session_id, auto_qa_enabled=True
     ).exists()
+
+
+def _auto_merge_to_local_branch_for_session(session_id: str) -> tuple[bool, str]:
+    metadata = (
+        SessionMetadata.objects.filter(thread_id=session_id)
+        .only("auto_merge_to_local_branch", "auto_merge_branch")
+        .first()
+    )
+    if metadata is None or not metadata.auto_merge_to_local_branch:
+        return False, ""
+    branch = metadata.auto_merge_branch.strip()
+    return bool(branch), branch
 
 
 def _posted_input_image_uploads(request: HttpRequest) -> list[UploadedFile]:
