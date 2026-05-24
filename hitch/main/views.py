@@ -655,6 +655,7 @@ def system_sessions(request: HttpRequest) -> HttpResponse:
     hidden_thread_ids = system_agents.hidden_thread_ids()
     system_thread_ids = hidden_thread_ids | _demo_system_thread_ids()
     runs_by_thread_id = _system_agent_runs_by_thread_id(system_thread_ids)
+    instances_by_thread_id = _system_agent_instances_by_thread_id(system_thread_ids)
     threads = sorted(threads, key=lambda s: s.updated_at, reverse=True)
     projects = list(Project.objects.all())
     current_project = _selected_project_for_settings(current_settings, projects)
@@ -665,6 +666,11 @@ def system_sessions(request: HttpRequest) -> HttpResponse:
         if not isinstance(thread_id, str) or thread_id not in system_thread_ids:
             continue
         run = runs_by_thread_id.get(thread_id)
+        instance = (
+            run.instance if run is not None else instances_by_thread_id.get(thread_id)
+        )
+        if instance is None:
+            continue
         session_project = _project_for_thread(thread, metadata_by_thread, projects)
         if current_project is not None and session_project != current_project:
             continue
@@ -680,8 +686,8 @@ def system_sessions(request: HttpRequest) -> HttpResponse:
                 "detail_url": reverse(
                     "system_session", kwargs={"session_id": thread_id}
                 ),
-                "system_kind": _system_agent_run_label(run),
-                "system_status": run.status if run is not None else "",
+                "system_kind": _system_agent_run_label(run, instance),
+                "system_status": _system_agent_status(run, instance),
             }
         )
     settings_dialog_context = _settings_dialog_context(current_settings, models_data)
@@ -707,19 +713,22 @@ def system_sessions(request: HttpRequest) -> HttpResponse:
 
 @require_http_methods(["GET"])
 def system_session(request: HttpRequest, session_id: str) -> HttpResponse:
-    run = _system_agent_run_for_thread(
-        session_id,
-        run_id=_positive_int(request.GET.get("run_id", "")),
-    )
-    if run is None:
+    run_id = _positive_int(request.GET.get("run_id", ""))
+    run = _system_agent_run_for_thread(session_id, run_id=run_id)
+    instance = run.instance if run is not None else None
+    if instance is None and run_id is None:
+        instance = _system_agent_instance_for_thread(session_id)
+    if instance is None:
         raise Http404("system session not found")
     return _render_session_detail(
         request,
         session_id,
         read_only=True,
-        display_title=_system_agent_run_detail_title(run),
-        system_prompt=run.instance.prompt,
-        hide_demo_agent_entries=run.agent_kind != demo.DEMO_AGENT_KIND,
+        display_title=_system_agent_run_detail_title(run, instance),
+        system_prompt=instance.prompt,
+        hide_demo_agent_entries=(
+            _system_agent_kind(run, instance) != demo.DEMO_AGENT_KIND
+        ),
     )
 
 
@@ -1679,6 +1688,27 @@ def _system_agent_runs_by_thread_id(
     return by_thread_id
 
 
+def _system_agent_instances_by_thread_id(
+    thread_ids: Iterable[str],
+) -> dict[str, CodexInstance]:
+    ids = [thread_id for thread_id in thread_ids if thread_id]
+    if not ids:
+        return {}
+    instances = (
+        CodexInstance.objects.filter(
+            thread_id__in=ids,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        )
+        .exclude(thread_id="")
+        .exclude(agent_kind=demo.DEMO_AGENT_KIND)
+        .order_by("thread_id", "-started_at", "-pk")
+    )
+    by_thread_id: dict[str, CodexInstance] = {}
+    for instance in instances:
+        by_thread_id.setdefault(instance.thread_id, instance)
+    return by_thread_id
+
+
 def _qa_activity_updated_at_by_main_thread_id(
     threads: Iterable[Any], hidden_thread_ids: set[str]
 ) -> dict[str, Any]:
@@ -1806,17 +1836,53 @@ def _system_agent_run_for_thread(
     )
 
 
-def _system_agent_run_label(run: SystemAgentRun | None) -> str:
-    if run is None:
-        return ""
-    display_author = run.instance.display_author.strip()
+def _system_agent_instance_for_thread(thread_id: str) -> CodexInstance | None:
+    if not thread_id:
+        return None
+    return (
+        CodexInstance.objects.filter(
+            thread_id=thread_id,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        )
+        .exclude(agent_kind=demo.DEMO_AGENT_KIND)
+        .order_by("-started_at", "-pk")
+        .first()
+    )
+
+
+def _system_agent_kind(
+    run: SystemAgentRun | None, instance: CodexInstance | None = None
+) -> str:
+    if run is not None:
+        return run.agent_kind
+    if instance is not None:
+        return instance.agent_kind
+    return ""
+
+
+def _system_agent_run_label(
+    run: SystemAgentRun | None, instance: CodexInstance | None = None
+) -> str:
+    source_instance = run.instance if run is not None else instance
+    display_author = source_instance.display_author.strip() if source_instance else ""
     if display_author:
         return display_author
-    return run.agent_kind.replace("_", " ")
+    agent_kind = _system_agent_kind(run, instance)
+    return agent_kind.replace("_", " ") if agent_kind else "system agent"
 
 
-def _system_agent_run_detail_title(run: SystemAgentRun) -> str:
-    label = _system_agent_run_label(run)
+def _system_agent_status(
+    run: SystemAgentRun | None, instance: CodexInstance | None = None
+) -> str:
+    if run is not None:
+        return run.status
+    return instance.status if instance is not None else ""
+
+
+def _system_agent_run_detail_title(
+    run: SystemAgentRun | None, instance: CodexInstance | None = None
+) -> str:
+    label = _system_agent_run_label(run, instance)
     return f"{label} log" if label else "System session"
 
 

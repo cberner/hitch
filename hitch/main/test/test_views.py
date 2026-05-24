@@ -385,6 +385,66 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    def test_hides_system_agent_instance_threads_without_run_record(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        visible = _session("visible", preview="Visible")
+        hidden = _session("standing-order-thread", preview="Hidden standing order")
+        hidden.turns = []
+        client = _setup_codex(mock_codex, threads=[visible, hidden])
+        client._client.thread_resume.return_value = SimpleNamespace(thread=hidden)
+        mock_discover.return_value = []
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_STANDING_ORDER_RUN,
+            main_thread_id="standing-order:1",
+            cwd="/repo",
+        )
+        CodexInstance.objects.create(
+            pid=1,
+            thread_id="standing-order-thread",
+            cwd="/repo",
+            prompt="standing order",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Visible")
+        self.assertNotContains(response, "Hidden standing order")
+
+        system_response = self.client.get(reverse("system_sessions"))
+
+        self.assertEqual(system_response.status_code, 200)
+        self.assertContains(system_response, "Hidden standing order")
+        self.assertContains(system_response, "standing order run")
+        self.assertContains(system_response, "completed")
+        self.assertContains(
+            system_response,
+            reverse(
+                "system_session",
+                kwargs={"session_id": "standing-order-thread"},
+            ),
+        )
+
+        detail_response = self.client.get(
+            reverse(
+                "system_session",
+                kwargs={"session_id": "standing-order-thread"},
+            )
+        )
+
+        self.assertEqual(detail_response.status_code, 200)
+        self.assertContains(detail_response, "standing order run log")
+        self.assertContains(detail_response, "System prompt")
+        self.assertContains(detail_response, "standing order")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
     def test_paginates_sessions_before_hiding_system_agent_threads(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
