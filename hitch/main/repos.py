@@ -130,12 +130,20 @@ def _default_branch_ref(repo: Path) -> str | None:
     explicit_ref = _explicit_default_branch_ref(repo)
     if explicit_ref is not None:
         return explicit_ref
+    local_refs = _local_branch_refs(repo)
+    if len(local_refs) == 1:
+        return local_refs[0]
+    has_custom_local_branch = any(
+        _branch_name_from_ref(ref) not in _DEFAULT_BRANCH_NAMES for ref in local_refs
+    )
+    if has_custom_local_branch:
+        return None
     named_refs = _named_default_branch_refs(repo)
     if len(named_refs) == 1:
         return next(iter(named_refs.values()))
     if named_refs:
         return None
-    return _single_local_branch_ref(repo)
+    return None
 
 
 def _explicit_default_branch_ref(repo: Path) -> str | None:
@@ -166,14 +174,11 @@ def _named_default_branch_refs(repo: Path) -> dict[str, str]:
     return refs_by_name
 
 
-def _single_local_branch_ref(repo: Path) -> str | None:
+def _local_branch_refs(repo: Path) -> list[str]:
     output = _git_output(repo, ["for-each-ref", "--format=%(refname)", "refs/heads"])
     if not output:
-        return None
-    refs = [line.strip() for line in output.splitlines() if line.strip()]
-    if len(refs) != 1:
-        return None
-    return refs[0]
+        return []
+    return [line.strip() for line in output.splitlines() if line.strip()]
 
 
 def _current_branch_name(repo: Path) -> str | None:
