@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("main", "0032_web_search_settings"),
+        ("main", "0033_auto_qa"),
     ]
 
     operations = [
