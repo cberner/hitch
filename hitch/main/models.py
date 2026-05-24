@@ -339,6 +339,7 @@ class SessionMetadata(models.Model):
     codex_path = models.CharField(max_length=4096, blank=True, default="")
     codex_thread_source = models.CharField(max_length=64, blank=True, default="")
     codex_last_synced_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    usage_last_checked_at = models.DateTimeField(null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

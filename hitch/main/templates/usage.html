@@ -496,6 +496,9 @@
                     All sessions
                     {% endif %}
                 </h2>
+                {% if lifetime_usage.refresh_pending %}
+                <p class="usage-plan">Refreshing session token usage...</p>
+                {% endif %}
             </div>
             {% if lifetime_usage %}
             {% if lifetime_usage.total.chart %}
