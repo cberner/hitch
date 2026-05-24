@@ -1,5 +1,6 @@
 """URL configuration for hitch project."""
 
+from django.conf import settings
 from django.contrib import admin
 from django.urls import path
 
@@ -116,3 +117,8 @@ urlpatterns = [
     ),
     path("admin/", admin.site.urls),
 ]
+
+if "debug_toolbar" in settings.INSTALLED_APPS:
+    from debug_toolbar.toolbar import debug_toolbar_urls
+
+    urlpatterns += debug_toolbar_urls()
