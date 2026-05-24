@@ -3624,6 +3624,224 @@ class NewSessionViewTests(TestCase):
             thread_name="Add parser coverage",
         )
 
+    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    def test_new_session_accepts_candidate_worktree_and_starts_turn(
+        self,
+        mock_turn: MagicMock,
+        mock_new_session: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_managed_worktrees: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
+        _setup_codex(mock_codex, models=[])
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+        )
+        proposal = ProposedSession.objects.create(
+            standing_order=order,
+            candidate_session=candidate,
+            title="Add parser coverage",
+        )
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Go ahead and implement this proposed session.",
+                "cwd": self.REPO,
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.headers["Location"],
+            reverse("session", kwargs={"session_id": "candidate-thread"}),
+        )
+        mock_turn.assert_called_once_with(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            prompt="Go ahead and implement this proposed session.",
+            developer_instructions=None,
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
+        self.assertEqual(proposal.accepted_session, candidate)
+        mock_new_session.assert_not_called()
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    def test_new_session_candidate_worktree_slash_commands_start_qa_workflow(
+        self,
+        mock_turn: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_managed_worktrees: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
+        codex = _setup_codex(mock_codex, models=[])
+        codex._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(turns=[])
+        )
+        cases = [
+            ("/pr", {}),
+            ("/qa", {"open_pr_on_lgtm": False}),
+        ]
+
+        for index, (prompt, expected) in enumerate(cases):
+            with self.subTest(prompt=prompt):
+                project = Project.objects.create(
+                    name=f"Hitch {index}", repo_path=f"{self.REPO}-{index}"
+                )
+                order = StandingOrder.objects.create(
+                    project=project,
+                    title="Improve tests",
+                    goal="Find useful test coverage increments.",
+                )
+                candidate = SessionMetadata.objects.create(
+                    thread_id=f"candidate-thread-{index}",
+                    cwd="/repo-worktree",
+                    project=project,
+                )
+                proposal = ProposedSession.objects.create(
+                    standing_order=order,
+                    candidate_session=candidate,
+                    title="Add parser coverage",
+                )
+                mock_discover.return_value = [Path(project.repo_path)]
+                mock_start_workflow.reset_mock()
+                mock_turn.reset_mock()
+
+                response = self.client.post(
+                    reverse("new_session"),
+                    data={
+                        "prompt": prompt,
+                        "cwd": project.repo_path,
+                        "proposed_session": str(proposal.pk),
+                    },
+                )
+
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(
+                    response.headers["Location"],
+                    reverse(
+                        "session",
+                        kwargs={"session_id": f"candidate-thread-{index}"},
+                    ),
+                )
+                workflow_kwargs: dict[str, Any] = {
+                    "main_thread_id": f"candidate-thread-{index}",
+                    "cwd": "/repo-worktree",
+                    "sandbox_policy": None,
+                    "approval_mode": "auto_review",
+                    "model": None,
+                    "reasoning_effort": None,
+                    "developer_instructions": None,
+                    "enable_memories": False,
+                    "initial_user_message_index": 0,
+                }
+                workflow_kwargs.update(expected)
+                mock_start_workflow.assert_called_once_with(**workflow_kwargs)
+                mock_turn.assert_not_called()
+                proposal.refresh_from_db()
+                candidate.refresh_from_db()
+                self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
+                self.assertEqual(proposal.accepted_session, candidate)
+                self.assertFalse(candidate.auto_pr_enabled)
+                self.assertFalse(candidate.auto_qa_enabled)
+
+    @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
+    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    def test_new_session_candidate_worktree_uses_spec_critic(
+        self,
+        mock_turn: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_managed_worktrees: MagicMock,
+        mock_start_spec_critic: MagicMock,
+    ) -> None:
+        _seed_cookies(self.client, **{_SPEC_CRITIC_COOKIE: "true"})
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
+        codex = _setup_codex(mock_codex, models=[])
+        codex._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(turns=[])
+        )
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+        )
+        proposal = ProposedSession.objects.create(
+            standing_order=order,
+            candidate_session=candidate,
+            title="Add parser coverage",
+        )
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Go ahead and implement this proposed session.",
+                "cwd": self.REPO,
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.headers["Location"],
+            reverse("session", kwargs={"session_id": "candidate-thread"}),
+        )
+        mock_turn.assert_not_called()
+        mock_start_spec_critic.assert_called_once_with(
+            main_thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            prompt="Go ahead and implement this proposed session.",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model=None,
+            reasoning_effort=None,
+            developer_instructions=None,
+            enable_memories=False,
+            initial_user_message_index=0,
+            auto_pr_enabled=False,
+            auto_qa_enabled=False,
+        )
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
+        self.assertEqual(proposal.accepted_session, candidate)
+
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos", return_value=[Path(REPO)])
@@ -9080,6 +9298,28 @@ class StandingOrderViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(mock_start.call_count, 1)
         self.assertEqual(mock_start.call_args.kwargs["standing_order"], order)
+        self.assertFalse(mock_start.call_args.kwargs["use_worktrees"])
+
+    @patch("hitch.main.views.system_agents.start_standing_order_workflow")
+    def test_run_single_propagates_worktree_setting(
+        self, mock_start: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(
+            self.client,
+            hitch_selected_project_id=str(project.pk),
+            **{_USE_WORKTREES_COOKIE: "true"},
+        )
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+
+        response = self.client.post(reverse("run_standing_order", args=[order.pk]))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(mock_start.call_args.kwargs["use_worktrees"])
 
     @patch("hitch.main.views.system_agents.start_standing_order_workflow")
     def test_run_single_is_scoped_to_selected_project(
@@ -9128,6 +9368,10 @@ class StandingOrderViewTests(TestCase):
         self.assertEqual(
             [call.kwargs["standing_order"] for call in mock_start.call_args_list],
             [first, second],
+        )
+        self.assertEqual(
+            [call.kwargs["use_worktrees"] for call in mock_start.call_args_list],
+            [False, False],
         )
 
     def test_reject_proposed_session_requires_reason(self) -> None:

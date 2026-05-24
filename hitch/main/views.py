@@ -2060,7 +2060,11 @@ def run_standing_order(request: HttpRequest, standing_order_id: int) -> HttpResp
     ).first()
     if standing_order is None:
         raise Http404("standing order not found")
-    system_agents.start_standing_order_workflow(standing_order=standing_order)
+    use_worktrees = _stored_settings(request).use_worktrees
+    system_agents.start_standing_order_workflow(
+        standing_order=standing_order,
+        use_worktrees=use_worktrees,
+    )
     return redirect("standing_orders")
 
 
@@ -2069,8 +2073,12 @@ def run_standing_orders(request: HttpRequest) -> HttpResponse:
     project = _active_project_from_request(request)
     if project is None:
         return HttpResponseBadRequest("active project is required")
+    use_worktrees = _stored_settings(request).use_worktrees
     for standing_order in StandingOrder.objects.filter(project=project):
-        system_agents.start_standing_order_workflow(standing_order=standing_order)
+        system_agents.start_standing_order_workflow(
+            standing_order=standing_order,
+            use_worktrees=use_worktrees,
+        )
     return redirect("standing_orders")
 
 
@@ -4783,7 +4791,9 @@ def _posted_proposed_session_for_new_session(
     if session_id < 1 or session_id > _MAX_BIGAUTOFIELD:
         return None, "proposed session is required"
     proposed_session = (
-        ProposedSession.objects.select_related("project", "standing_order__project")
+        ProposedSession.objects.select_related(
+            "project", "standing_order__project", "candidate_session"
+        )
         .filter(
             pk=session_id,
             inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL,
@@ -4803,6 +4813,22 @@ def _posted_proposed_session_for_new_session(
     if target.project is None and target.cwd != session_project.repo_path:
         return None, "proposed session does not match project"
     return proposed_session, None
+
+
+def _candidate_session_to_continue_from_proposal(
+    proposed_session: ProposedSession | None,
+) -> SessionMetadata | None:
+    if proposed_session is None or proposed_session.candidate_session is None:
+        return None
+    candidate_session = proposed_session.candidate_session
+    if not candidate_session.cwd:
+        return None
+    project = proposed_session.project
+    if project is None and proposed_session.standing_order is not None:
+        project = proposed_session.standing_order.project
+    if project is not None and candidate_session.cwd == project.repo_path:
+        return None
+    return candidate_session
 
 
 def _accept_proposed_session_for_session(
@@ -5767,6 +5793,217 @@ def _allowed_session_cwds() -> set[str]:
     return {str(p) for p in [*discover_repos(), *discover_managed_worktrees()]}
 
 
+def _candidate_thread_user_message_index(
+    thread_id: str, settings: SettingsValues
+) -> int:
+    config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
+    with Codex(config=config) as codex:
+        resumed = codex._client.thread_resume(thread_id)
+    return _count_user_entries(list(_entries_for(resumed.thread)))
+
+
+def _finish_candidate_proposal_start(
+    *,
+    request: HttpRequest,
+    proposed_session: ProposedSession,
+    candidate_session: SessionMetadata,
+    cwd: str,
+    target: _NewSessionTarget,
+    settings: SettingsValues,
+    cookie_updates: dict[str, str],
+    auto_pr_enabled: bool,
+    auto_qa_enabled: bool,
+) -> HttpResponse:
+    candidate_cwd = candidate_session.cwd
+    session_project = (
+        None
+        if target.project_cleared
+        else candidate_session.project or target.project
+    )
+    SessionMetadata.objects.filter(pk=candidate_session.pk).update(
+        cwd=candidate_cwd,
+        project=session_project,
+        project_cleared=target.project_cleared,
+        auto_pr_enabled=auto_pr_enabled,
+        auto_qa_enabled=auto_qa_enabled,
+    )
+    candidate_session.refresh_from_db()
+    _accept_proposed_session_for_session(proposed_session, candidate_session)
+    remembered_values = settings._replace(last_selected_repo=cwd)
+    user = _authenticated_user(request)
+    if user is not None:
+        _save_user_settings(user, remembered_values)
+        cookie_updates = _settings_cookie_updates(remembered_values)
+    else:
+        cookie_updates = {**cookie_updates, _LAST_SELECTED_REPO_COOKIE: cwd}
+    response = redirect("session", session_id=candidate_session.thread_id)
+    _apply_cookie_updates(response, cookie_updates)
+    return response
+
+
+def _start_candidate_proposal_session(
+    *,
+    request: HttpRequest,
+    proposed_session: ProposedSession,
+    candidate_session: SessionMetadata,
+    prompt: str,
+    plan_mode: bool,
+    qa_activation: bool,
+    qa_workflow_activation: bool,
+    cwd: str,
+    target: _NewSessionTarget,
+    settings: SettingsValues,
+    spawn_settings: SettingsValues,
+    cookie_updates: dict[str, str],
+    auto_pr_enabled: bool,
+    auto_qa_enabled: bool,
+    web_search_mode: str,
+) -> HttpResponse:
+    """Start a proposal on its existing candidate thread before accepting it."""
+    candidate_cwd = candidate_session.cwd
+    if not candidate_cwd:
+        return HttpResponseBadRequest("candidate session has no cwd")
+    if candidate_cwd not in _allowed_session_cwds():
+        return HttpResponseBadRequest(
+            "candidate session cwd is not an allowed repository"
+        )
+    base_instructions = _base_instructions_for_settings(spawn_settings)
+    if qa_workflow_activation:
+        workflow_kwargs: dict[str, Any] = {
+            "main_thread_id": candidate_session.thread_id,
+            "cwd": candidate_cwd,
+            "sandbox_policy": settings.sandbox_policy or None,
+            "approval_mode": settings.approval_mode,
+            "model": settings.model or None,
+            "reasoning_effort": settings.reasoning_effort or None,
+            "developer_instructions": settings.extra_system_prompt or None,
+            "enable_memories": settings.enable_memories,
+            "initial_user_message_index": _candidate_thread_user_message_index(
+                candidate_session.thread_id, settings
+            ),
+        }
+        if web_search_mode:
+            workflow_kwargs["web_search_mode"] = web_search_mode
+        if base_instructions:
+            workflow_kwargs["base_instructions"] = base_instructions
+        if settings.qa_panel_enabled:
+            workflow_kwargs["qa_panel_enabled"] = True
+        if qa_activation:
+            workflow_kwargs["open_pr_on_lgtm"] = False
+        system_agents.start_pr_qa_workflow(**workflow_kwargs)
+        return _finish_candidate_proposal_start(
+            request=request,
+            proposed_session=proposed_session,
+            candidate_session=candidate_session,
+            cwd=cwd,
+            target=target,
+            settings=settings,
+            cookie_updates=cookie_updates,
+            auto_pr_enabled=False,
+            auto_qa_enabled=False,
+        )
+
+    input_image_paths, input_image_error = _save_posted_input_images(request)
+    if input_image_error is not None:
+        return HttpResponseBadRequest(input_image_error)
+    spawn_kwargs: dict[str, Any] = {
+        "thread_id": candidate_session.thread_id,
+        "cwd": candidate_cwd,
+        "prompt": prompt,
+        "developer_instructions": settings.extra_system_prompt or None,
+        "model": settings.model or None,
+        "reasoning_effort": settings.reasoning_effort or None,
+        "sandbox_policy": settings.sandbox_policy or None,
+        "approval_mode": settings.approval_mode,
+    }
+    if input_image_paths:
+        spawn_kwargs["input_image_paths"] = input_image_paths
+    if web_search_mode:
+        spawn_kwargs["web_search_mode"] = web_search_mode
+    if base_instructions:
+        spawn_kwargs["base_instructions"] = base_instructions
+    if settings.enable_memories:
+        spawn_kwargs["enable_memories"] = True
+    if plan_mode:
+        spawn_kwargs["plan_mode"] = True
+    if auto_pr_enabled:
+        spawn_kwargs["auto_pr_enabled"] = True
+    if auto_qa_enabled:
+        spawn_kwargs["auto_qa_enabled"] = True
+    if auto_pr_enabled or auto_qa_enabled:
+        spawn_kwargs["stored_model"] = settings.model or None
+        spawn_kwargs["stored_reasoning_effort"] = settings.reasoning_effort or None
+        spawn_kwargs["user_message_index"] = _candidate_thread_user_message_index(
+            candidate_session.thread_id, settings
+        )
+        if settings.qa_panel_enabled:
+            spawn_kwargs["qa_panel_enabled"] = True
+    if (
+        settings.spec_critic_enabled
+        and not input_image_paths
+        and not plan_mode
+        and system_agents.spec_critic_should_run(prompt)
+    ):
+        spec_workflow_kwargs: dict[str, Any] = {
+            "main_thread_id": candidate_session.thread_id,
+            "cwd": candidate_cwd,
+            "prompt": prompt,
+            "sandbox_policy": settings.sandbox_policy or None,
+            "approval_mode": settings.approval_mode,
+            "model": settings.model or None,
+            "reasoning_effort": settings.reasoning_effort or None,
+            "developer_instructions": settings.extra_system_prompt or None,
+            "enable_memories": settings.enable_memories,
+            "initial_user_message_index": _candidate_thread_user_message_index(
+                candidate_session.thread_id, settings
+            ),
+            "auto_pr_enabled": auto_pr_enabled,
+            "auto_qa_enabled": auto_qa_enabled,
+        }
+        if base_instructions:
+            spec_workflow_kwargs["base_instructions"] = base_instructions
+        if web_search_mode:
+            spec_workflow_kwargs["web_search_mode"] = web_search_mode
+        if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
+            spec_workflow_kwargs["qa_panel_enabled"] = True
+        system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
+        return _finish_candidate_proposal_start(
+            request=request,
+            proposed_session=proposed_session,
+            candidate_session=candidate_session,
+            cwd=cwd,
+            target=target,
+            settings=settings,
+            cookie_updates=cookie_updates,
+            auto_pr_enabled=auto_pr_enabled,
+            auto_qa_enabled=auto_qa_enabled,
+        )
+
+    input_images_owned = False
+    try:
+        codex_pool.spawn_turn(**spawn_kwargs)
+        input_images_owned = True
+    except codex_pool.InputAttachmentLimitExceededError as exc:
+        _cleanup_saved_input_images(input_image_paths)
+        return HttpResponseBadRequest(str(exc))
+    except Exception:
+        if not input_images_owned:
+            _cleanup_saved_input_images(input_image_paths)
+        raise
+
+    return _finish_candidate_proposal_start(
+        request=request,
+        proposed_session=proposed_session,
+        candidate_session=candidate_session,
+        cwd=cwd,
+        target=target,
+        settings=settings,
+        cookie_updates=cookie_updates,
+        auto_pr_enabled=auto_pr_enabled,
+        auto_qa_enabled=auto_qa_enabled,
+    )
+
+
 def _parse_instance_id(raw: str) -> tuple[int | None, str | None]:
     try:
         instance_id = int(raw)
@@ -5971,6 +6208,26 @@ def new_session(request: HttpRequest) -> HttpResponse:
     if qa_workflow_activation and has_input_images:
         return HttpResponseBadRequest(
             "image attachments are not supported for PR workflow requests"
+        )
+    candidate_session = _candidate_session_to_continue_from_proposal(proposed_session)
+    if candidate_session is not None:
+        assert proposed_session is not None
+        return _start_candidate_proposal_session(
+            request=request,
+            proposed_session=proposed_session,
+            candidate_session=candidate_session,
+            prompt=prompt,
+            plan_mode=plan_mode,
+            qa_activation=qa_activation,
+            qa_workflow_activation=qa_workflow_activation,
+            cwd=cwd,
+            target=target,
+            settings=settings,
+            spawn_settings=spawn_settings,
+            cookie_updates=cookie_updates,
+            auto_pr_enabled=auto_pr_enabled,
+            auto_qa_enabled=auto_qa_enabled,
+            web_search_mode=web_search_mode,
         )
 
     session_cwd = cwd
