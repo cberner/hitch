@@ -788,7 +788,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_qa_only_workflow_keeps_default_iteration_limit(
+    def test_qa_only_workflow_uses_ten_iteration_limit(
         self, mock_spawn: MagicMock, _mock_diff: MagicMock
     ) -> None:
         mock_spawn.return_value = _instance(
@@ -804,6 +804,7 @@ class SpecCriticWorkflowTests(TestCase):
             open_pr_on_lgtm=False,
         )
 
+        self.assertEqual(system_agents.QA_WORKFLOW_MAX_ITERATIONS, 10)
         self.assertEqual(
             workflow.max_iterations, system_agents.QA_WORKFLOW_MAX_ITERATIONS
         )
