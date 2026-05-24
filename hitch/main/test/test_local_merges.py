@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -322,6 +323,40 @@ class LocalMergeTests(SimpleTestCase):
             self.assertIn("-approved", review.patch)
             self.assertEqual(_git(repo, "show", "main:README.md"), "hello")
 
+    def test_follow_up_review_rebuilds_source_base_after_target_rewind(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            session = root / "session"
+            _init_repo(repo)
+            _git(repo, "branch", "release")
+            initial_release = _git(repo, "rev-parse", "release")
+            _git(repo, "worktree", "add", "-b", "session", str(session), "release")
+            (session / "README.md").write_text("hello\napproved\n")
+            first = _merge_reviewed_patch(session, "release")
+            _git(
+                repo,
+                "update-ref",
+                "refs/heads/release",
+                initial_release,
+                first.commit_sha,
+            )
+
+            review = build_auto_merge_review_patch(session, "release")
+            second = merge_worktree_diff_to_branch(
+                session,
+                "release",
+                review.patch,
+                review.target_sha,
+            )
+
+            self.assertTrue(first.changed)
+            self.assertTrue(second.changed)
+            self.assertIn("+approved", review.patch)
+            self.assertEqual(
+                _git(repo, "show", "release:README.md"), "hello\napproved"
+            )
+
     def test_auto_merge_patch_keeps_target_commits_added_before_review(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -544,6 +579,21 @@ class LocalMergeTests(SimpleTestCase):
                 _git(repo, "show", "main:README.md"), "hello\napproved"
             )
             self.assertIn("160000", _git(repo, "ls-tree", "main", "vendor/lib"))
+
+    def test_auto_merge_review_patch_rejects_removed_submodule(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            submodule_src = root / "submodule-src"
+            session = root / "session"
+            _init_repo(repo)
+            _init_repo(submodule_src)
+            _add_submodule(repo, submodule_src)
+            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
+            shutil.rmtree(session / "vendor" / "lib")
+
+            with self.assertRaisesRegex(LocalBranchMergeError, "submodule changes"):
+                build_auto_merge_review_patch(session, "main")
 
     def test_auto_merge_review_patch_rejects_submodule_gitlink_changes(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

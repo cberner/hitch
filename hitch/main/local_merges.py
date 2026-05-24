@@ -86,24 +86,50 @@ def _auto_merge_source_base(
     source_repo: Path, target_ref: str, hooks_path: Path
 ) -> str:
     ref = _auto_merge_source_base_ref(source_repo, target_ref)
-    result = _run_git(
+    source_base = _run_git(
         source_repo,
         ["rev-parse", "--verify", f"{ref}^{{commit}}"],
         hooks_path=hooks_path,
         check=False,
     )
-    return result.stdout.strip() if result.returncode == 0 else ""
+    if source_base.returncode != 0:
+        return ""
+    source_base_sha = source_base.stdout.strip()
+    # A recorded source base is only valid while the target still contains
+    # the target commit that source snapshot was reviewed and merged onto.
+    target_parent = _run_git(
+        source_repo,
+        ["rev-parse", "--verify", f"{source_base_sha}^"],
+        hooks_path=hooks_path,
+        check=False,
+    )
+    if target_parent.returncode != 0:
+        return ""
+    contains_parent = _run_git(
+        source_repo,
+        ["merge-base", "--is-ancestor", target_parent.stdout.strip(), target_ref],
+        hooks_path=hooks_path,
+        check=False,
+    )
+    return source_base_sha if contains_parent.returncode == 0 else ""
 
 
 def _record_auto_merge_source_base(
-    source_repo: Path, target_ref: str, *, hooks_path: Path
+    source_repo: Path, target_ref: str, target_sha: str, *, hooks_path: Path
 ) -> None:
     # The source-session tree is the authority for follow-up deltas; the target
     # branch may also contain unrelated commits that must not become deletions.
     tree_sha = _source_worktree_tree(source_repo, hooks_path=hooks_path)
     commit_sha = _git(
         source_repo,
-        ["commit-tree", tree_sha, "-m", "Record Hitch auto-merge source base"],
+        [
+            "commit-tree",
+            tree_sha,
+            "-p",
+            target_sha,
+            "-m",
+            "Record Hitch auto-merge source base",
+        ],
         hooks_path=hooks_path,
     ).strip()
     _git(
@@ -242,7 +268,7 @@ def merge_worktree_diff_to_branch(
                     hooks_path=hooks,
                 )
             _record_auto_merge_source_base(
-                source_repo, target_ref, hooks_path=hooks
+                source_repo, target_ref, commit_sha, hooks_path=hooks
             )
             return LocalBranchMergeResult(
                 branch=branch,
@@ -414,6 +440,7 @@ def _worktree_index_entry(
             source_repo,
             relpath,
             cached_sha=cached_entry.blob_sha,
+            skip_worktree=cached_entry.skip_worktree,
             hooks_path=hooks_path,
         )
     path = source_repo / relpath
@@ -466,9 +493,21 @@ def _submodule_index_entry(
     relpath: str,
     *,
     cached_sha: str,
+    skip_worktree: bool,
     hooks_path: Path | None,
 ) -> tuple[str, str]:
+    if skip_worktree:
+        return "160000", cached_sha
+    status = _git(
+        source_repo,
+        ["status", "--porcelain", "--ignore-submodules=none", "--", relpath],
+        hooks_path=hooks_path,
+    ).strip()
+    if status:
+        raise LocalBranchMergeError("auto merge does not support submodule changes")
     path = source_repo / relpath
+    if path.exists() and not path.is_dir():
+        raise LocalBranchMergeError("auto merge does not support submodule changes")
     if (path / ".git").exists():
         current_sha = _submodule_head(path, hooks_path=hooks_path)
         if current_sha and current_sha != cached_sha:
