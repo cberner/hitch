@@ -255,6 +255,12 @@
             font-size: 0.85rem;
             font-weight: 600;
         }
+        label.checkbox-label {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+        }
         input,
         textarea,
         select {
@@ -265,6 +271,13 @@
             color: var(--text);
             font: inherit;
             padding: 0.65rem 0.75rem;
+        }
+        label.checkbox-label input[type="checkbox"] {
+            width: 1.1rem;
+            height: 1.1rem;
+            accent-color: var(--accent);
+            flex: 0 0 auto;
+            padding: 0;
         }
         textarea { min-height: 7rem; resize: vertical; }
         .checkbox-label {
@@ -442,6 +455,7 @@
                                 data-ambition="{{ order.ambition }}"
                                 data-autonomy="{{ order.autonomy }}"
                                 data-auto-qa="{% if order.auto_qa_enabled %}true{% else %}false{% endif %}"
+                                data-auto-proposal-enabled="{% if order.auto_proposal_enabled %}true{% else %}false{% endif %}"
                                 data-confidence-threshold="{{ order.confidence_threshold }}"
                                 data-web-search-mode="{{ order.web_search_mode }}"
                             >Edit</button>
@@ -452,6 +466,7 @@
                         <span class="meta">Ambition: {{ order.get_ambition_display }}</span>
                         <span class="meta">Autonomy: {{ order.get_autonomy_display }}</span>
                         <span class="meta">Auto-QA: {% if order.auto_qa_enabled %}On{% else %}Off{% endif %}</span>
+                        <span class="meta">Auto-proposal: {% if order.auto_proposal_enabled %}On{% else %}Off{% endif %}</span>
                         <span class="meta">Threshold: {{ order.get_confidence_threshold_display }}</span>
                         <span class="meta">Web search: {{ order.get_web_search_mode_display }}</span>
                         {% if order.latest_workflow %}
@@ -526,6 +541,11 @@
                 <input type="hidden" name="auto_qa" value="false">
                 <input type="checkbox" name="auto_qa" value="true" data-edit-standing-order-auto-qa data-standing-order-auto-qa>
             </label>
+            <label class="checkbox-label">
+                Auto-proposal
+                <input type="hidden" name="auto_proposal" value="false">
+                <input type="checkbox" name="auto_proposal" value="true" data-edit-standing-order-auto-proposal>
+            </label>
             <label>
                 Confidence threshold
                 <select name="confidence_threshold" required data-edit-standing-order-confidence-threshold>
@@ -584,6 +604,7 @@
             const editOrderAmbition = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-ambition]");
             const editOrderAutonomy = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-autonomy]");
             const editOrderAutoQa = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-auto-qa]");
+            const editOrderAutoProposal = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-auto-proposal]");
             const editOrderConfidence = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-confidence-threshold]");
             const editOrderWebSearch = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-web-search-mode]");
             const editOrderCancel = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-cancel]");
@@ -653,6 +674,7 @@
                         editOrderAutoQa.checked = button.dataset.autoQa === "true";
                     }
                     syncStandingOrderAutoQa(editOrderForm);
+                    if (editOrderAutoProposal) editOrderAutoProposal.checked = button.dataset.autoProposalEnabled === "true";
                     if (editOrderConfidence) editOrderConfidence.value = button.dataset.confidenceThreshold || "";
                     if (editOrderWebSearch) editOrderWebSearch.value = button.dataset.webSearchMode || "";
                     showDialog(editOrderDialog);

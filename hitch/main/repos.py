@@ -4,6 +4,17 @@ import subprocess
 from pathlib import Path
 
 _GIT_TIMEOUT_SECONDS = 10
+_DEFAULT_BRANCH_REFS = (
+    "refs/remotes/origin/HEAD",
+    "refs/remotes/origin/main",
+    "refs/remotes/origin/master",
+    "refs/remotes/origin/trunk",
+    "refs/remotes/origin/develop",
+    "refs/heads/main",
+    "refs/heads/master",
+    "refs/heads/trunk",
+    "refs/heads/develop",
+)
 
 
 def discover_repos(home: Path | None = None, *, max_depth: int = 2) -> list[Path]:
@@ -54,6 +65,40 @@ def git_common_dir(cwd: str | Path) -> Path | None:
     return _resolved_path(common)
 
 
+def default_branch_commit_hash(cwd: str | Path) -> str | None:
+    """Return the current commit hash for the repository's default branch."""
+    repo = _repo_root(Path(cwd).expanduser())
+    if repo is None:
+        return None
+    ref = _default_branch_ref(repo)
+    if ref is None:
+        return None
+    return _commit_hash_for_ref(repo, ref)
+
+
+def default_branch_checkout_commit_hash(cwd: str | Path) -> str | None:
+    """Return the default branch SHA only when the checkout has that clean tree."""
+    repo = _repo_root(Path(cwd).expanduser())
+    if repo is None:
+        return None
+    default_ref = _default_branch_ref(repo)
+    if default_ref is None:
+        return None
+    default_branch = _branch_name_from_ref(default_ref)
+    current_branch = _current_branch_name(repo)
+    if not default_branch or current_branch != default_branch:
+        return None
+    default_sha = _commit_hash_for_ref(repo, default_ref)
+    if not default_sha:
+        return None
+    head_sha = _commit_hash_for_ref(repo, "HEAD")
+    if head_sha != default_sha:
+        return None
+    if not _worktree_is_clean(repo):
+        return None
+    return default_sha
+
+
 def same_repo_or_worktree(cwd: str | Path, repo_path: str | Path, repo_common_dir: str = "") -> bool:
     """Return whether ``cwd`` is ``repo_path`` or a worktree of it."""
     cwd_path = _resolved_path(Path(cwd).expanduser())
@@ -80,6 +125,67 @@ def _git_output(cwd: Path, args: list[str]) -> str | None:
     if result.returncode != 0:
         return None
     return result.stdout.decode("utf-8", errors="replace")
+
+
+def _commit_hash_for_ref(repo: Path, ref: str) -> str | None:
+    output = _git_output(repo, ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"])
+    if not output:
+        return None
+    sha = output.strip().splitlines()[0] if output.strip() else ""
+    return sha or None
+
+
+def _default_branch_ref(repo: Path) -> str | None:
+    for ref in _DEFAULT_BRANCH_REFS:
+        resolved_ref = _resolve_symbolic_ref(repo, ref)
+        sha = _commit_hash_for_ref(repo, resolved_ref)
+        if sha:
+            return resolved_ref
+    return _single_local_branch_ref(repo)
+
+
+def _resolve_symbolic_ref(repo: Path, ref: str) -> str:
+    output = _git_output(repo, ["symbolic-ref", "--quiet", ref])
+    resolved = output.strip() if output else ""
+    return resolved or ref
+
+
+def _single_local_branch_ref(repo: Path) -> str | None:
+    output = _git_output(repo, ["for-each-ref", "--format=%(refname)", "refs/heads"])
+    if not output:
+        return None
+    refs = [line.strip() for line in output.splitlines() if line.strip()]
+    if len(refs) != 1:
+        return None
+    return refs[0]
+
+
+def _current_branch_name(repo: Path) -> str | None:
+    output = _git_output(repo, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+    branch = output.strip() if output else ""
+    return branch or None
+
+
+def _branch_name_from_ref(ref: str) -> str:
+    if ref.startswith("refs/remotes/"):
+        parts = ref.split("/")
+        return "/".join(parts[3:])
+    if ref.startswith("refs/heads/"):
+        return ref.removeprefix("refs/heads/")
+    return ref.rsplit("/", maxsplit=1)[-1]
+
+
+def _worktree_is_clean(cwd: Path) -> bool:
+    output = _git_output(cwd, ["-c", "core.fsmonitor=false", "status", "--porcelain"])
+    return output == ""
+
+
+def _repo_root(cwd: Path) -> Path | None:
+    output = _git_output(cwd, ["rev-parse", "--show-toplevel"])
+    if not output:
+        return None
+    root = output.strip()
+    return Path(root) if root else None
 
 
 def _resolved_path(path: Path) -> Path:

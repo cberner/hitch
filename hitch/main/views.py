@@ -100,6 +100,7 @@ class StandingOrderValues(NamedTuple):
     ambition: str
     autonomy: str
     auto_qa_enabled: bool
+    auto_proposal_enabled: bool
     confidence_threshold: str
     web_search_mode: str
 
@@ -737,6 +738,7 @@ def standing_orders(request: HttpRequest) -> HttpResponse:
             "default_autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
             "default_auto_qa": False,
             "auto_qa_supported_autonomies": tuple(StandingOrder.AUTO_QA_AUTONOMIES),
+            "default_auto_proposal": False,
             "confidence_choices": StandingOrder.CONFIDENCE_CHOICES,
             "default_confidence": StandingOrder.CONFIDENCE_HIGH,
             "web_search_mode_choices": _WEB_SEARCH_MODE_OPTIONS,
@@ -765,6 +767,7 @@ def create_standing_order(request: HttpRequest) -> HttpResponse:
         ambition=values.ambition,
         autonomy=values.autonomy,
         auto_qa_enabled=values.auto_qa_enabled,
+        auto_proposal_enabled=values.auto_proposal_enabled,
         confidence_threshold=values.confidence_threshold,
         web_search_mode=values.web_search_mode,
     )
@@ -787,6 +790,7 @@ def edit_standing_order(request: HttpRequest, standing_order_id: int) -> HttpRes
         autonomy_default=standing_order.autonomy,
         auto_qa_default=standing_order.auto_qa_enabled,
         web_search_default=standing_order.web_search_mode,
+        auto_proposal_default=standing_order.auto_proposal_enabled,
     )
     if error is not None:
         return HttpResponseBadRequest(error)
@@ -799,6 +803,7 @@ def edit_standing_order(request: HttpRequest, standing_order_id: int) -> HttpRes
         "ambition",
         "autonomy",
         "auto_qa_enabled",
+        "auto_proposal_enabled",
         "confidence_threshold",
         "web_search_mode",
     ):
@@ -807,6 +812,9 @@ def edit_standing_order(request: HttpRequest, standing_order_id: int) -> HttpRes
             setattr(standing_order, field, value)
             updates.append(field)
     if updates:
+        if standing_order.auto_proposal_last_no_proposal_sha:
+            standing_order.auto_proposal_last_no_proposal_sha = ""
+            updates.append("auto_proposal_last_no_proposal_sha")
         standing_order.save(update_fields=[*updates, "updated_at"])
     return redirect("standing_orders")
 
@@ -916,6 +924,7 @@ def _validated_standing_order_values(
     autonomy_default: str = StandingOrder.AUTONOMY_PROPOSE_ONLY,
     auto_qa_default: bool = False,
     web_search_default: str = StandingOrder.WEB_SEARCH_DEFAULT,
+    auto_proposal_default: bool = False,
 ) -> tuple[StandingOrderValues | None, str | None]:
     title, error = _validated_standing_order_title(request.POST.get("title", ""))
     if error is not None:
@@ -942,6 +951,13 @@ def _validated_standing_order_values(
         auto_qa_enabled = auto_qa_values[-1] == "true" and supported_auto_qa
     else:
         auto_qa_enabled = auto_qa_default and supported_auto_qa
+    auto_proposal_enabled, auto_proposal_error = _posted_standing_order_bool(
+        request.POST.get("auto_proposal"),
+        default=auto_proposal_default,
+        setting_name="auto-proposal",
+    )
+    if auto_proposal_error is not None:
+        return None, auto_proposal_error
     threshold = request.POST.get("confidence_threshold", "").strip()
     valid_thresholds = {value for value, _label in StandingOrder.CONFIDENCE_CHOICES}
     if threshold not in valid_thresholds:
@@ -959,9 +975,23 @@ def _validated_standing_order_values(
         ambition=ambition,
         autonomy=autonomy,
         auto_qa_enabled=auto_qa_enabled,
+        auto_proposal_enabled=auto_proposal_enabled,
         confidence_threshold=threshold,
         web_search_mode=web_search_mode,
     ), None
+
+
+def _posted_standing_order_bool(
+    raw: str | None, *, default: bool, setting_name: str
+) -> tuple[bool, str | None]:
+    if raw is None:
+        return default, None
+    value = raw.strip().lower()
+    if value in {"", "false"}:
+        return False, None
+    if value == "true":
+        return True, None
+    return False, f"{setting_name} is invalid"
 
 
 def _attach_standing_order_run_state(orders: list[StandingOrder]) -> None:

@@ -125,6 +125,10 @@ class StandingOrder(models.Model):
         blank=True,
         default=WEB_SEARCH_DEFAULT,
     )
+    auto_proposal_enabled = models.BooleanField(default=False)
+    auto_proposal_last_no_proposal_sha = models.CharField(
+        max_length=64, blank=True, default=""
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
