@@ -298,6 +298,30 @@ class LocalMergeTests(SimpleTestCase):
             self.assertFalse(second.changed)
             self.assertEqual(second.commit_sha, first.commit_sha)
 
+    def test_follow_up_review_can_revert_previously_merged_change(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            session = root / "session"
+            _init_repo(repo)
+            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
+            (session / "README.md").write_text("hello\napproved\n")
+            first = _merge_reviewed_patch(session, "main")
+            (session / "README.md").write_text("hello\n")
+
+            review = build_auto_merge_review_patch(session, "main")
+            second = merge_worktree_diff_to_branch(
+                session,
+                "main",
+                review.patch,
+                review.target_sha,
+            )
+
+            self.assertTrue(first.changed)
+            self.assertTrue(second.changed)
+            self.assertIn("-approved", review.patch)
+            self.assertEqual(_git(repo, "show", "main:README.md"), "hello")
+
     def test_auto_merge_patch_keeps_target_commits_added_before_review(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
