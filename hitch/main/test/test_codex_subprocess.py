@@ -499,17 +499,28 @@ class SpawnFailureTests(TestCase):
         with (
             _events_dir() as events_dir,
             override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
-            self.assertRaises(OSError),
         ):
-            codex_pool.spawn_turn(thread_id="t", cwd="/repo", prompt="hi")
+            image_path = codex_pool.input_attachments_dir() / "req" / "1.png"
+            image_path.parent.mkdir(parents=True)
+            image_path.write_bytes(b"image")
+            with self.assertRaises(OSError):
+                codex_pool.spawn_turn(
+                    thread_id="t",
+                    cwd="/repo",
+                    prompt="hi",
+                    input_image_paths=[str(image_path)],
+                )
+            self.assertFalse(image_path.exists())
 
-        # The exception propagates to the caller, but the row is left in a
-        # terminal state so it isn't treated as forever-pending.
+            # The exception propagates to the caller, but the row is left in a
+            # terminal state so it isn't treated as forever-pending.
         instance = CodexInstance.objects.latest("started_at")
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertEqual(instance.pid, 0)
         self.assertIn("boom", instance.error)
         self.assertIsNotNone(instance.ended_at)
+        self.assertEqual(instance.input_image_paths, [])
+        self.assertEqual(instance.input_attachment_paths, [])
 
 
 class SpawnTurnTests(TestCase):
@@ -527,11 +538,16 @@ class SpawnTurnTests(TestCase):
             override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
         ):
             instance = codex_pool.spawn_turn(
-                thread_id="thread-xyz", cwd="/repo", prompt="follow-up"
+                thread_id="thread-xyz",
+                cwd="/repo",
+                prompt="follow-up",
+                input_image_paths=["/tmp/screen.png"],
             )
 
         self.assertEqual(instance.thread_id, "thread-xyz")
         self.assertEqual(instance.prompt, "follow-up")
+        self.assertEqual(instance.input_image_paths, ["/tmp/screen.png"])
+        self.assertEqual(instance.input_attachment_paths, ["/tmp/screen.png"])
         self.assertEqual(instance.developer_instructions, "")
         self.assertEqual(instance.pid, 1234)
         mock_launch.assert_called_once_with(
@@ -1085,6 +1101,179 @@ class ReconcileAndLookupTests(TestCase):
         self.assertIsNone(live_running.ended_at)
         self.assertEqual(completed.status, CodexInstance.STATUS_COMPLETED)
         self.assertIn("exited", dead_running.error)
+
+    @patch("hitch.main.codex_pool.worker_is_alive")
+    def test_reconcile_dead_retains_pending_attachments(
+        self, mock_worker_alive: MagicMock
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            dead_path = codex_pool.input_attachments_dir() / "dead" / "1.png"
+            live_path = codex_pool.input_attachments_dir() / "live" / "1.png"
+            completed_path = codex_pool.input_attachments_dir() / "done" / "1.png"
+            for path in (dead_path, live_path, completed_path):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"image")
+            dead_running = self._make(
+                pid=10,
+                status=CodexInstance.STATUS_RUNNING,
+            )
+            live_running = self._make(
+                pid=11,
+                status=CodexInstance.STATUS_RUNNING,
+            )
+            completed = self._make(
+                pid=12,
+                status=CodexInstance.STATUS_COMPLETED,
+            )
+            CodexInstance.objects.filter(pk=dead_running.pk).update(
+                input_image_paths=[str(dead_path)],
+                input_attachment_paths=[str(dead_path)],
+            )
+            CodexInstance.objects.filter(pk=live_running.pk).update(
+                input_attachment_paths=[str(live_path)]
+            )
+            CodexInstance.objects.filter(pk=completed.pk).update(
+                input_attachment_paths=[str(completed_path)]
+            )
+            mock_worker_alive.side_effect = (
+                lambda instance: instance.pk == live_running.pk
+            )
+
+            n = codex_pool.reconcile_dead()
+
+            self.assertEqual(n, 1)
+            self.assertTrue(dead_path.exists())
+            self.assertTrue(live_path.exists())
+            self.assertTrue(completed_path.exists())
+            dead_running.refresh_from_db()
+            live_running.refresh_from_db()
+            completed.refresh_from_db()
+            self.assertEqual(dead_running.input_image_paths, [str(dead_path)])
+            self.assertEqual(dead_running.input_attachment_paths, [str(dead_path)])
+            self.assertEqual(live_running.input_attachment_paths, [str(live_path)])
+            self.assertEqual(completed.input_attachment_paths, [str(completed_path)])
+
+    def test_cleanup_keeps_attachment_ledger_for_unlink_failures(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            image_path = codex_pool.input_attachments_dir() / "busy" / "1.png"
+            image_path.parent.mkdir(parents=True, exist_ok=True)
+            image_path.write_bytes(b"image")
+            instance = self._make(status=CodexInstance.STATUS_FAILED)
+            CodexInstance.objects.filter(pk=instance.pk).update(
+                input_image_paths=[str(image_path)],
+                input_attachment_paths=[str(image_path)],
+            )
+
+            with patch.object(Path, "unlink", side_effect=OSError("busy")):
+                codex_pool.cleanup_input_images_for(instance)
+
+            instance.refresh_from_db()
+            self.assertEqual(instance.input_image_paths, [])
+            self.assertEqual(instance.input_attachment_paths, [str(image_path)])
+            self.assertTrue(instance.input_attachment_cleanup_requested)
+            self.assertTrue(image_path.exists())
+
+    def test_retry_failed_input_image_cleanups_retries_requested_rows(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            retry_path = codex_pool.input_attachments_dir() / "retry" / "1.png"
+            retained_path = codex_pool.input_attachments_dir() / "retained" / "1.png"
+            for path in (retry_path, retained_path):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"image")
+            retry_instance = self._make(status=CodexInstance.STATUS_FAILED)
+            retained_instance = self._make(status=CodexInstance.STATUS_COMPLETED)
+            CodexInstance.objects.filter(pk=retry_instance.pk).update(
+                input_attachment_paths=[str(retry_path)],
+                input_attachment_cleanup_requested=True,
+            )
+            CodexInstance.objects.filter(pk=retained_instance.pk).update(
+                input_image_paths=[str(retained_path)],
+                input_attachment_paths=[str(retained_path)],
+            )
+
+            retried = codex_pool.retry_failed_input_image_cleanups()
+
+            self.assertEqual(retried, 1)
+            self.assertFalse(retry_path.exists())
+            self.assertTrue(retained_path.exists())
+            retry_instance.refresh_from_db()
+            retained_instance.refresh_from_db()
+            self.assertEqual(retry_instance.input_attachment_paths, [])
+            self.assertFalse(retry_instance.input_attachment_cleanup_requested)
+            self.assertEqual(
+                retained_instance.input_attachment_paths, [str(retained_path)]
+            )
+
+    def test_cleanup_input_images_for_thread_deletes_retained_thread_images(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            target_path = codex_pool.input_attachments_dir() / "target" / "1.png"
+            active_path = codex_pool.input_attachments_dir() / "active" / "1.png"
+            other_path = codex_pool.input_attachments_dir() / "other" / "1.png"
+            for path in (target_path, active_path, other_path):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"image")
+            target = self._make(thread_id="target", status=CodexInstance.STATUS_COMPLETED)
+            active = self._make(thread_id="target", status=CodexInstance.STATUS_RUNNING)
+            other = self._make(thread_id="other", status=CodexInstance.STATUS_COMPLETED)
+            CodexInstance.objects.filter(pk=target.pk).update(
+                input_image_paths=[str(target_path)],
+                input_attachment_paths=[str(target_path)],
+            )
+            CodexInstance.objects.filter(pk=active.pk).update(
+                input_image_paths=[str(active_path)],
+                input_attachment_paths=[str(active_path)],
+            )
+            CodexInstance.objects.filter(pk=other.pk).update(
+                input_image_paths=[str(other_path)],
+                input_attachment_paths=[str(other_path)],
+            )
+
+            codex_pool.cleanup_input_images_for_thread("target")
+
+            self.assertFalse(target_path.exists())
+            self.assertTrue(active_path.exists())
+            self.assertTrue(other_path.exists())
+            target.refresh_from_db()
+            active.refresh_from_db()
+            other.refresh_from_db()
+            self.assertEqual(target.input_image_paths, [])
+            self.assertEqual(target.input_attachment_paths, [])
+            self.assertFalse(target.input_attachment_cleanup_requested)
+            self.assertEqual(active.input_attachment_paths, [str(active_path)])
+            self.assertTrue(active.input_attachment_cleanup_requested)
+            self.assertEqual(other.input_attachment_paths, [str(other_path)])
+
+    def test_cleanup_keeps_attachment_ledger_for_paths_outside_root(self) -> None:
+        outside_path = "/tmp/not-hitch-input.png"
+        instance = self._make(
+            status=CodexInstance.STATUS_FAILED,
+        )
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            input_image_paths=[outside_path],
+            input_attachment_paths=[outside_path],
+        )
+
+        with tempfile.TemporaryDirectory() as raw, override_settings(
+            CODEX_EVENTS_DIR=Path(raw)
+        ):
+            codex_pool.cleanup_input_images_for(instance)
+
+        instance.refresh_from_db()
+        self.assertEqual(instance.input_image_paths, [])
+        self.assertEqual(instance.input_attachment_paths, [outside_path])
+        self.assertTrue(instance.input_attachment_cleanup_requested)
 
     @patch("hitch.main.system_agents.on_codex_instance_finished")
     @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
@@ -1724,6 +1913,107 @@ class SteerInstanceTests(TestCase):
 
     @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.codex_pool.os.kill")
+    def test_queues_image_paths_for_steer(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            target = self._make(
+                pid=4321,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(Path(raw) / "target.jsonl"),
+            )
+
+            result = codex_pool.steer_instance(
+                target.pk,
+                expected_thread_id="t",
+                prompt="use this",
+                input_image_paths=["/tmp/screen.png"],
+            )
+
+            self.assertIsNotNone(result)
+            mock_kill.assert_called_once_with(4321, signal.SIGUSR1)
+            line = codex_pool.control_path_for(target).read_text(encoding="utf-8")
+            self.assertEqual(
+                json.loads(line),
+                {
+                    "op": "steer",
+                    "input": "use this",
+                    "inputImagePaths": ["/tmp/screen.png"],
+                },
+            )
+            target.refresh_from_db()
+            self.assertEqual(target.input_image_paths, [])
+            self.assertEqual(target.input_attachment_paths, ["/tmp/screen.png"])
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_queues_image_only_steer(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            target = self._make(
+                pid=4321,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(Path(raw) / "target.jsonl"),
+            )
+
+            result = codex_pool.steer_instance(
+                target.pk,
+                expected_thread_id="t",
+                prompt="",
+                input_image_paths=["/tmp/screen.png"],
+            )
+
+            self.assertIsNotNone(result)
+            mock_kill.assert_called_once_with(4321, signal.SIGUSR1)
+            line = codex_pool.control_path_for(target).read_text(encoding="utf-8")
+            self.assertEqual(
+                json.loads(line),
+                {
+                    "op": "steer",
+                    "input": "",
+                    "inputImagePaths": ["/tmp/screen.png"],
+                },
+            )
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_image_steer_records_ledger_before_control_request(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        original_append = codex_pool._append_control_request
+
+        def append_and_assert_tracked(
+            instance: CodexInstance,
+            payload: dict[str, Any],
+        ) -> None:
+            instance.refresh_from_db()
+            self.assertEqual(instance.input_attachment_paths, ["/tmp/screen.png"])
+            original_append(instance, payload)
+
+        with tempfile.TemporaryDirectory() as raw:
+            target = self._make(
+                pid=4321,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(Path(raw) / "target.jsonl"),
+            )
+
+            with patch(
+                "hitch.main.codex_pool._append_control_request",
+                side_effect=append_and_assert_tracked,
+            ):
+                result = codex_pool.steer_instance(
+                    target.pk,
+                    expected_thread_id="t",
+                    prompt="use this",
+                    input_image_paths=["/tmp/screen.png"],
+                )
+
+            self.assertIsNotNone(result)
+            mock_kill.assert_called_once_with(4321, signal.SIGUSR1)
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
     def test_starting_instance_queues_without_signal(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -1747,14 +2037,170 @@ class SteerInstanceTests(TestCase):
 
     @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.codex_pool.os.kill")
-    def test_starting_instance_returns_none_if_refresh_sees_terminal(
+    def test_starting_image_steer_does_not_change_initial_inputs(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make(
+                pid=4321,
+                status=CodexInstance.STATUS_STARTING,
+                events_path=str(Path(raw) / "events.jsonl"),
+            )
+
+            result = codex_pool.steer_instance(
+                instance.pk,
+                expected_thread_id="t",
+                prompt="use this later",
+                input_image_paths=["/tmp/steer.png"],
+            )
+
+            self.assertIsNotNone(result)
+            mock_kill.assert_not_called()
+            instance.refresh_from_db()
+            self.assertEqual(instance.input_image_paths, [])
+            self.assertEqual(instance.input_attachment_paths, ["/tmp/steer.png"])
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_terminal_after_image_tracking_rolls_back_steer_ledger(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        original_add = codex_pool._add_input_attachment_paths
+
+        def add_and_finish(instance: CodexInstance, paths: list[str]) -> None:
+            original_add(instance, paths)
+            CodexInstance.objects.filter(pk=instance.pk).update(
+                status=CodexInstance.STATUS_FAILED
+            )
+
+        with tempfile.TemporaryDirectory() as raw:
+            image_path = Path(raw) / "screen.png"
+            image_path.write_bytes(b"image")
+            instance = self._make(
+                pid=4321,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(Path(raw) / "events.jsonl"),
+            )
+
+            with patch(
+                "hitch.main.codex_pool._add_input_attachment_paths",
+                side_effect=add_and_finish,
+            ):
+                result = codex_pool.steer_instance(
+                    instance.pk,
+                    expected_thread_id="t",
+                    prompt="use this",
+                    input_image_paths=[str(image_path)],
+                )
+
+            self.assertIsNone(result)
+            mock_kill.assert_not_called()
+            instance.refresh_from_db()
+            self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+            self.assertEqual(instance.input_attachment_paths, [])
+            self.assertTrue(image_path.exists())
+
+    def test_attachment_tracking_merges_from_current_row(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            stale = self._make(
+                pid=4321,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(Path(raw) / "events.jsonl"),
+            )
+            CodexInstance.objects.filter(pk=stale.pk).update(
+                input_attachment_paths=["/tmp/first.png"]
+            )
+
+            codex_pool._add_input_attachment_paths(stale, ["/tmp/second.png"])
+
+            stale.refresh_from_db()
+            self.assertEqual(
+                stale.input_attachment_paths,
+                ["/tmp/first.png", "/tmp/second.png"],
+            )
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_image_steer_rejects_aggregate_attachment_over_cap(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make(
+                pid=4321,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(Path(raw) / "events.jsonl"),
+            )
+            existing_paths = [
+                f"/tmp/screen-{index}.png"
+                for index in range(codex_pool._MAX_INPUT_ATTACHMENT_PATHS_PER_INSTANCE)
+            ]
+            CodexInstance.objects.filter(pk=instance.pk).update(
+                input_attachment_paths=existing_paths
+            )
+
+            with self.assertRaises(codex_pool.InputAttachmentLimitExceededError):
+                codex_pool.steer_instance(
+                    instance.pk,
+                    expected_thread_id="t",
+                    prompt="use one more",
+                    input_image_paths=["/tmp/too-many.png"],
+                )
+
+            mock_identity.assert_called_once_with(4321, instance.pk)
+            mock_kill.assert_not_called()
+            self.assertFalse(codex_pool.control_path_for(instance).exists())
+            instance.refresh_from_db()
+            self.assertEqual(instance.input_attachment_paths, existing_paths)
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_image_steer_rejects_thread_attachment_over_cap(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            active = self._make(
+                pid=4321,
+                thread_id="t",
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(Path(raw) / "active.jsonl"),
+            )
+            existing = self._make(
+                pid=0,
+                thread_id="t",
+                status=CodexInstance.STATUS_COMPLETED,
+                events_path=str(Path(raw) / "done.jsonl"),
+            )
+            existing_paths = [
+                f"/tmp/thread-{index}.png"
+                for index in range(codex_pool._MAX_INPUT_ATTACHMENT_PATHS_PER_THREAD)
+            ]
+            CodexInstance.objects.filter(pk=existing.pk).update(
+                input_attachment_paths=existing_paths
+            )
+
+            with self.assertRaises(codex_pool.InputAttachmentLimitExceededError):
+                codex_pool.steer_instance(
+                    active.pk,
+                    expected_thread_id="t",
+                    prompt="use one more",
+                    input_image_paths=["/tmp/too-many.png"],
+                )
+
+            mock_identity.assert_called_once_with(4321, active.pk)
+            mock_kill.assert_not_called()
+            active.refresh_from_db()
+            self.assertEqual(active.input_attachment_paths, [])
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_starting_instance_reports_not_steered_if_terminal_after_append(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
         original_append = codex_pool._append_control_request
 
         def append_and_finish(
             instance: CodexInstance,
-            payload: dict[str, str],
+            payload: dict[str, Any],
         ) -> None:
             original_append(instance, payload)
             CodexInstance.objects.filter(pk=instance.pk).update(
@@ -1781,6 +2227,49 @@ class SteerInstanceTests(TestCase):
             mock_identity.assert_called_once_with(4321, instance.pk)
             mock_kill.assert_not_called()
             self.assertTrue(codex_pool.control_path_for(instance).exists())
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_starting_image_steer_rolls_back_if_terminal_after_append(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        original_append = codex_pool._append_control_request
+
+        def append_and_finish(
+            instance: CodexInstance,
+            payload: dict[str, Any],
+        ) -> None:
+            original_append(instance, payload)
+            CodexInstance.objects.filter(pk=instance.pk).update(
+                status=CodexInstance.STATUS_FAILED
+            )
+
+        with tempfile.TemporaryDirectory() as raw:
+            image_path = Path(raw) / "screen.png"
+            image_path.write_bytes(b"image")
+            instance = self._make(
+                pid=4321,
+                status=CodexInstance.STATUS_STARTING,
+                events_path=str(Path(raw) / "events.jsonl"),
+            )
+            with patch(
+                "hitch.main.codex_pool._append_control_request",
+                side_effect=append_and_finish,
+            ):
+                result = codex_pool.steer_instance(
+                    instance.pk,
+                    expected_thread_id="t",
+                    prompt="use this",
+                    input_image_paths=[str(image_path)],
+                )
+
+            self.assertIsNone(result)
+            mock_identity.assert_called_once_with(4321, instance.pk)
+            mock_kill.assert_not_called()
+            instance.refresh_from_db()
+            self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+            self.assertEqual(instance.input_attachment_paths, [])
+            self.assertTrue(image_path.exists())
 
     @patch("hitch.main.codex_pool.os.kill")
     def test_thread_id_mismatch_refuses(self, mock_kill: MagicMock) -> None:
@@ -1869,7 +2358,34 @@ class SteerInstanceTests(TestCase):
 
     @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.codex_pool.os.kill")
-    def test_running_instance_returns_none_if_refresh_sees_terminal(
+    def test_image_steer_retains_ledger_when_signal_fails(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        mock_kill.side_effect = OSError("interrupted")
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make(
+                pid=4321,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(Path(raw) / "events.jsonl"),
+            )
+
+            result = codex_pool.steer_instance(
+                instance.pk,
+                expected_thread_id="t",
+                prompt="also do this",
+                input_image_paths=["/tmp/screen.png"],
+            )
+
+            self.assertIsNotNone(result)
+            mock_identity.assert_called_once_with(4321, instance.pk)
+            mock_kill.assert_called_once_with(4321, signal.SIGUSR1)
+            self.assertTrue(codex_pool.control_path_for(instance).exists())
+            instance.refresh_from_db()
+            self.assertEqual(instance.input_attachment_paths, ["/tmp/screen.png"])
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_running_instance_reports_not_steered_if_terminal_after_signal(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -1899,6 +2415,38 @@ class SteerInstanceTests(TestCase):
 
     @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.codex_pool.os.kill")
+    def test_image_steer_rolls_back_ledger_when_terminal_after_signal(
+        self, mock_kill: MagicMock, mock_identity: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make(
+                pid=4321,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(Path(raw) / "events.jsonl"),
+            )
+
+            def finish_after_signal(_pid: int, _signal: int) -> None:
+                CodexInstance.objects.filter(pk=instance.pk).update(
+                    status=CodexInstance.STATUS_COMPLETED
+                )
+
+            mock_kill.side_effect = finish_after_signal
+
+            result = codex_pool.steer_instance(
+                instance.pk,
+                expected_thread_id="t",
+                prompt="also do this",
+                input_image_paths=["/tmp/screen.png"],
+            )
+
+            self.assertIsNone(result)
+            mock_identity.assert_called_once_with(4321, instance.pk)
+            mock_kill.assert_called_once_with(4321, signal.SIGUSR1)
+            instance.refresh_from_db()
+            self.assertEqual(instance.input_attachment_paths, [])
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
     @patch("hitch.main.codex_pool._append_control_request")
     def test_control_file_write_error_reports_not_steered(
         self,
@@ -1923,6 +2471,35 @@ class SteerInstanceTests(TestCase):
             mock_identity.assert_called_once_with(4321, instance.pk)
             mock_append.assert_called_once()
             mock_kill.assert_not_called()
+
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.codex_pool._append_control_request")
+    def test_control_file_write_error_rolls_back_image_ledger(
+        self,
+        mock_append: MagicMock,
+        mock_kill: MagicMock,
+        mock_identity: MagicMock,
+    ) -> None:
+        mock_append.side_effect = OSError("disk full")
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make(
+                pid=4321,
+                events_path=str(Path(raw) / "events.jsonl"),
+            )
+
+            result = codex_pool.steer_instance(
+                instance.pk,
+                expected_thread_id="t",
+                prompt="also do this",
+                input_image_paths=["/tmp/screen.png"],
+            )
+
+            self.assertIsNone(result)
+            mock_identity.assert_called_once_with(4321, instance.pk)
+            mock_kill.assert_not_called()
+            instance.refresh_from_db()
+            self.assertEqual(instance.input_attachment_paths, [])
 
     @patch("hitch.main.codex_pool._pid_is_our_worker")
     @patch("hitch.main.codex_pool.os.kill")
@@ -2116,6 +2693,24 @@ class SerializeEventTests(TestCase):
 
         self.assertNotIn("recordedAt", parsed)
         self.assertNotIn("eventSeq", parsed)
+
+    def test_redacts_local_image_paths(self) -> None:
+        parsed = json.loads(
+            _serialize_event(
+                "turn/item",
+                {
+                    "local_images": ["/tmp/private/from-array.png"],
+                    "content": [
+                        {"type": "text", "text": "see attached"},
+                        {"type": "localImage", "path": "/tmp/private/screen.png"},
+                    ]
+                },
+            )
+        )
+
+        self.assertEqual(parsed["payload"]["content"][1]["path"], "[redacted]")
+        self.assertEqual(parsed["payload"]["local_images"], ["[redacted]"])
+        self.assertNotIn("/tmp/private", json.dumps(parsed))
 
 
 class _FakeNotificationSource:
@@ -2355,6 +2950,15 @@ class CodexWorkerCommandTests(TestCase):
             status=CodexInstance.STATUS_STARTING,
         )
 
+    def _attach_input_image(self, instance: CodexInstance, name: str = "1.png") -> Path:
+        image_path = codex_pool.input_attachments_dir() / f"req-{instance.pk}" / name
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        image_path.write_bytes(b"image")
+        instance.input_image_paths = [str(image_path)]
+        instance.input_attachment_paths = [str(image_path)]
+        instance.save(update_fields=["input_image_paths", "input_attachment_paths"])
+        return image_path
+
     @patch("hitch.main.demo.on_codex_instance_finished")
     @patch("hitch.main.system_agents.on_codex_instance_finished")
     def test_notify_system_agents_does_not_double_route_demo_system_agent(
@@ -2575,6 +3179,173 @@ class CodexWorkerCommandTests(TestCase):
         self.assertEqual(getattr(captured["input"], "text", None), "- a markdown bullet")
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_reads_input_images_from_instance_row(self, mock_codex: MagicMock) -> None:
+        captured: dict[str, object] = {}
+
+        def _capture_turn(input_obj: object) -> object:
+            captured["input"] = input_obj
+            return SimpleNamespace(
+                id="turn-1",
+                stream=lambda: iter([_completed_event("turn-1", TurnStatus.completed)]),
+            )
+
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.return_value = SimpleNamespace(turn=_capture_turn)
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            image_paths = [
+                codex_pool.input_attachments_dir() / "req" / "1.png",
+                codex_pool.input_attachments_dir() / "req" / "2.jpg",
+            ]
+            image_paths[0].parent.mkdir(parents=True)
+            for image_path in image_paths:
+                image_path.write_bytes(b"image")
+            instance = self._make_instance(Path(raw), prompt="use this")
+            instance.input_image_paths = [str(path) for path in image_paths]
+            instance.input_attachment_paths = [str(path) for path in image_paths]
+            instance.save(update_fields=["input_image_paths", "input_attachment_paths"])
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+
+        input_items = captured["input"]
+        assert isinstance(input_items, list)
+        self.assertEqual(getattr(input_items[0], "text", None), "use this")
+        self.assertEqual(
+            [getattr(item, "path", None) for item in input_items[1:]],
+            [str(path) for path in image_paths],
+        )
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_attachment_ledger_is_not_initial_turn_input(
+        self, mock_codex: MagicMock
+    ) -> None:
+        captured: dict[str, object] = {}
+
+        def _capture_turn(input_obj: object) -> object:
+            captured["input"] = input_obj
+            return SimpleNamespace(
+                id="turn-1",
+                stream=lambda: iter([_completed_event("turn-1", TurnStatus.completed)]),
+            )
+
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.return_value = SimpleNamespace(turn=_capture_turn)
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            image_path = codex_pool.input_attachments_dir() / "steer" / "1.png"
+            image_path.parent.mkdir(parents=True)
+            image_path.write_bytes(b"steer")
+            instance = self._make_instance(Path(raw), prompt="initial prompt")
+            instance.input_attachment_paths = [str(image_path)]
+            instance.save(update_fields=["input_attachment_paths"])
+
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+
+            self.assertEqual(getattr(captured["input"], "text", None), "initial prompt")
+            self.assertTrue(image_path.exists())
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_terminal_worker_retains_input_images(self, mock_codex: MagicMock) -> None:
+        events = [_completed_event("turn-1", TurnStatus.completed)]
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.return_value = _stub_thread_resume(events)
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            image_path = codex_pool.input_attachments_dir() / "req" / "1.png"
+            image_path.parent.mkdir(parents=True)
+            image_path.write_bytes(b"image")
+            instance = self._make_instance(Path(raw), prompt="use this")
+            instance.input_image_paths = [str(image_path)]
+            instance.input_attachment_paths = [str(image_path)]
+            instance.save(update_fields=["input_image_paths", "input_attachment_paths"])
+
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+
+            self.assertTrue(image_path.exists())
+            instance.refresh_from_db()
+            self.assertEqual(instance.input_image_paths, [str(image_path)])
+            self.assertEqual(instance.input_attachment_paths, [str(image_path)])
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_terminal_worker_cleans_images_when_archive_requested(
+        self, mock_codex: MagicMock
+    ) -> None:
+        events = [_completed_event("turn-1", TurnStatus.completed)]
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.return_value = _stub_thread_resume(events)
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            image_path = codex_pool.input_attachments_dir() / "req" / "1.png"
+            image_path.parent.mkdir(parents=True)
+            image_path.write_bytes(b"image")
+            instance = self._make_instance(Path(raw), prompt="use this")
+            instance.input_image_paths = [str(image_path)]
+            instance.input_attachment_paths = [str(image_path)]
+            instance.input_attachment_cleanup_requested = True
+            instance.save(
+                update_fields=[
+                    "input_image_paths",
+                    "input_attachment_paths",
+                    "input_attachment_cleanup_requested",
+                ]
+            )
+
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+
+            self.assertFalse(image_path.exists())
+            instance.refresh_from_db()
+            self.assertEqual(instance.input_image_paths, [])
+            self.assertEqual(instance.input_attachment_paths, [])
+            self.assertFalse(instance.input_attachment_cleanup_requested)
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_terminal_worker_retains_image_steers_added_after_load(
+        self, mock_codex: MagicMock
+    ) -> None:
+        captured: dict[str, Path] = {}
+
+        def _capture_turn(input_obj: object) -> object:
+            assert not isinstance(input_obj, list)
+            steer_path = codex_pool.input_attachments_dir() / "steer" / "1.png"
+            steer_path.parent.mkdir(parents=True)
+            steer_path.write_bytes(b"steer")
+            captured["steer_path"] = steer_path
+            CodexInstance.objects.filter(pk=instance.pk).update(
+                input_attachment_paths=[str(steer_path)]
+            )
+            return SimpleNamespace(
+                id="turn-1",
+                stream=lambda: iter([_completed_event("turn-1", TurnStatus.completed)]),
+            )
+
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.return_value = SimpleNamespace(turn=_capture_turn)
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            instance = self._make_instance(Path(raw), prompt="keep going")
+
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+
+            self.assertTrue(captured["steer_path"].exists())
+            instance.refresh_from_db()
+            self.assertEqual(instance.input_image_paths, [])
+            self.assertEqual(instance.input_attachment_paths, [str(captured["steer_path"])])
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_marks_failed_for_non_completed_outcomes(self, mock_codex: MagicMock) -> None:
         """Failed / interrupted turn statuses and a stream that ends without
         a turn/completed event all leave the row in STATUS_FAILED with a
@@ -2593,20 +3364,31 @@ class CodexWorkerCommandTests(TestCase):
             with self.subTest(case=expected_in_error):
                 codex_ctx.thread_resume.reset_mock()
                 codex_ctx.thread_resume.return_value = _stub_thread_resume(events)
-                with tempfile.TemporaryDirectory() as raw:
+                with (
+                    tempfile.TemporaryDirectory() as raw,
+                    override_settings(CODEX_EVENTS_DIR=Path(raw)),
+                ):
                     instance = self._make_instance(Path(raw))
+                    image_path = self._attach_input_image(instance)
                     call_command("codex_worker", "--instance-id", str(instance.pk))
+                    self.assertTrue(image_path.exists())
                     instance.refresh_from_db()
                 self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
                 self.assertIn(expected_in_error, instance.error)
                 self.assertIsNotNone(instance.ended_at)
+                self.assertEqual(instance.input_image_paths, [str(image_path)])
+                self.assertEqual(instance.input_attachment_paths, [str(image_path)])
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_records_failure_when_codex_raises(self, mock_codex: MagicMock) -> None:
         mock_codex.return_value.__enter__.side_effect = RuntimeError("boom")
 
-        with tempfile.TemporaryDirectory() as raw:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
             instance = self._make_instance(Path(raw))
+            image_path = self._attach_input_image(instance)
             with self.assertRaises(RuntimeError):
                 call_command(
                     "codex_worker",
@@ -2614,11 +3396,14 @@ class CodexWorkerCommandTests(TestCase):
                     str(instance.pk),
                     stderr=StringIO(),
                 )
+            self.assertTrue(image_path.exists())
 
         instance.refresh_from_db()
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertIn("boom", instance.error)
         self.assertIsNotNone(instance.ended_at)
+        self.assertEqual(instance.input_image_paths, [str(image_path)])
+        self.assertEqual(instance.input_attachment_paths, [str(image_path)])
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_typed_cli_args_round_trip_to_turn_kwargs(self, mock_codex: MagicMock) -> None:
@@ -2712,6 +3497,7 @@ class CodexWorkerCommandTests(TestCase):
         def _capture_turn_start(
             _thread_id: str, _input: object, *, params: object
         ) -> object:
+            captured_params["input"] = _input
             captured_params["params"] = params
             return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
 
@@ -2727,8 +3513,19 @@ class CodexWorkerCommandTests(TestCase):
             with self.subTest(mode=mode):
                 captured_params.clear()
                 codex_ctx.thread_resume.return_value.turn.reset_mock()
-                with tempfile.TemporaryDirectory() as raw:
+                with (
+                    tempfile.TemporaryDirectory() as raw,
+                    override_settings(CODEX_EVENTS_DIR=Path(raw)),
+                ):
+                    image_path = codex_pool.input_attachments_dir() / "req" / "1.png"
+                    image_path.parent.mkdir(parents=True)
+                    image_path.write_bytes(b"image")
                     instance = self._make_instance(Path(raw))
+                    instance.input_image_paths = [str(image_path)]
+                    instance.input_attachment_paths = [str(image_path)]
+                    instance.save(
+                        update_fields=["input_image_paths", "input_attachment_paths"]
+                    )
                     call_command(
                         "codex_worker",
                         "--instance-id",
@@ -2743,6 +3540,19 @@ class CodexWorkerCommandTests(TestCase):
                 codex_ctx.thread_resume.return_value.turn.assert_not_called()
                 params = captured_params["params"]
                 assert isinstance(params, TurnStartParams)
+                wire_input = captured_params["input"]
+                assert isinstance(wire_input, list)
+                assert isinstance(wire_input[0], dict)
+                assert isinstance(wire_input[1], dict)
+                self.assertEqual(wire_input[0]["type"], "text")
+                self.assertEqual(wire_input[0]["text"], "hi")
+                self.assertEqual(wire_input[1]["type"], "localImage")
+                self.assertEqual(wire_input[1]["path"], str(image_path))
+                typed_input = params.input
+                assert typed_input is not None
+                self.assertEqual(typed_input[0].root.type, "text")
+                self.assertEqual(typed_input[1].root.type, "localImage")
+                self.assertEqual(getattr(typed_input[1].root, "path", None), str(image_path))
                 # On-request approval policy + ``user`` reviewer means every
                 # escalation is routed to the client transport. ``reviewer=None``
                 # would defer to server-side routing and is NOT a safe substitute.
@@ -2761,6 +3571,7 @@ class CodexWorkerCommandTests(TestCase):
         def _capture_turn_start(
             _thread_id: str, _input: object, *, params: object
         ) -> object:
+            captured_params["input"] = _input
             captured_params["params"] = params
             return SimpleNamespace(turn=SimpleNamespace(id="turn-1"))
 
@@ -2807,8 +3618,19 @@ class CodexWorkerCommandTests(TestCase):
             with self.subTest(mode=expected["mode"]):
                 captured_params.clear()
                 codex_ctx.thread_resume.return_value.turn.reset_mock()
-                with tempfile.TemporaryDirectory() as raw:
+                with (
+                    tempfile.TemporaryDirectory() as raw,
+                    override_settings(CODEX_EVENTS_DIR=Path(raw)),
+                ):
+                    image_path = codex_pool.input_attachments_dir() / "req" / "1.png"
+                    image_path.parent.mkdir(parents=True)
+                    image_path.write_bytes(b"image")
                     instance = self._make_instance(Path(raw))
+                    instance.input_image_paths = [str(image_path)]
+                    instance.input_attachment_paths = [str(image_path)]
+                    instance.save(
+                        update_fields=["input_image_paths", "input_attachment_paths"]
+                    )
                     call_command(
                         "codex_worker",
                         "--instance-id",
@@ -2819,6 +3641,17 @@ class CodexWorkerCommandTests(TestCase):
                 codex_ctx.thread_resume.return_value.turn.assert_not_called()
                 params = captured_params["params"]
                 assert isinstance(params, dict)
+                wire_input = captured_params["input"]
+                params_input = params["input"]
+                assert isinstance(wire_input, list)
+                assert isinstance(params_input, list)
+                for input_value in (wire_input, params_input):
+                    assert isinstance(input_value[0], dict)
+                    assert isinstance(input_value[1], dict)
+                    self.assertEqual(input_value[0]["type"], "text")
+                    self.assertEqual(input_value[0]["text"], "hi")
+                    self.assertEqual(input_value[1]["type"], "localImage")
+                    self.assertEqual(input_value[1]["path"], str(image_path))
                 collaboration_mode = params["collaborationMode"]
                 assert isinstance(collaboration_mode, dict)
                 if expected["mode"] == "default":
@@ -3334,6 +4167,15 @@ class WorkerCancellationTests(TestCase):
         codex_worker_module._cancel_requested = False
         codex_worker_module._steer_wakeup = None
 
+    def _make_instance(self, raw: str | Path) -> CodexInstance:
+        return CodexInstance.objects.create(
+            pid=4321,
+            thread_id="t",
+            cwd="/r",
+            events_path=str(Path(raw) / "events.jsonl"),
+            status=CodexInstance.STATUS_RUNNING,
+        )
+
     def test_sigterm_handler_sets_flag(self) -> None:
         self.assertFalse(codex_worker_module._cancel_requested)
         codex_worker_module._on_sigterm(15, None)
@@ -3364,6 +4206,42 @@ class WorkerCancellationTests(TestCase):
         turn.steer.assert_called_once()
         self.assertEqual(turn.steer.call_args.args[0].text, "also update docs")
 
+    def test_try_steer_calls_sdk_with_text_and_images(self) -> None:
+        turn = MagicMock()
+
+        sent = codex_worker_module._try_steer(
+            turn,
+            "use this screenshot",
+            input_image_paths=["/tmp/screen.png"],
+        )
+
+        self.assertTrue(sent)
+        turn.steer.assert_called_once()
+        input_items = turn.steer.call_args.args[0]
+        assert isinstance(input_items, list)
+        self.assertEqual(getattr(input_items[0], "text", None), "use this screenshot")
+        self.assertEqual(getattr(input_items[1], "path", None), "/tmp/screen.png")
+
+    def test_image_only_turn_input_omits_empty_text_item(self) -> None:
+        input_items = codex_worker_module._turn_input(
+            "",
+            input_image_paths=["/tmp/screen.png"],
+        )
+
+        assert isinstance(input_items, list)
+        self.assertEqual(len(input_items), 1)
+        self.assertEqual(getattr(input_items[0], "path", None), "/tmp/screen.png")
+
+    def test_image_only_typed_turn_input_omits_empty_text_item(self) -> None:
+        input_items = codex_worker_module._typed_turn_input(
+            "",
+            input_image_paths=["/tmp/screen.png"],
+        )
+
+        self.assertEqual(len(input_items), 1)
+        self.assertEqual(input_items[0].root.type, "localImage")
+        self.assertEqual(getattr(input_items[0].root, "path", None), "/tmp/screen.png")
+
     def test_try_steer_reports_sdk_errors(self) -> None:
         turn = MagicMock()
         turn.steer.side_effect = RuntimeError("turn no longer accepts steer")
@@ -3385,6 +4263,7 @@ class WorkerCancellationTests(TestCase):
 
             offset = codex_worker_module._drain_steer_requests(
                 turn,
+                instance=self._make_instance(raw),
                 control_path=control_path,
                 control_offset=0,
             )
@@ -3397,6 +4276,7 @@ class WorkerCancellationTests(TestCase):
                 fh.write(b"\n")
             offset = codex_worker_module._drain_steer_requests(
                 turn,
+                instance=self._make_instance(raw),
                 control_path=control_path,
                 control_offset=offset,
             )
@@ -3404,6 +4284,65 @@ class WorkerCancellationTests(TestCase):
             self.assertEqual(turn.steer.call_count, 2)
             self.assertEqual(turn.steer.call_args.args[0].text, "wait for newline")
             self.assertEqual(offset, control_path.stat().st_size)
+
+    def test_drain_steer_requests_forwards_images(self) -> None:
+        turn = MagicMock()
+        with tempfile.TemporaryDirectory() as raw:
+            control_path = Path(raw) / "worker.control.jsonl"
+            control_path.write_text(
+                json.dumps(
+                    {
+                        "op": "steer",
+                        "input": "use this",
+                        "inputImagePaths": ["/tmp/screen.png"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            offset = codex_worker_module._drain_steer_requests(
+                turn,
+                instance=self._make_instance(raw),
+                control_path=control_path,
+                control_offset=0,
+            )
+            self.assertEqual(offset, control_path.stat().st_size)
+
+        input_items = turn.steer.call_args.args[0]
+        assert isinstance(input_items, list)
+        self.assertEqual(getattr(input_items[0], "text", None), "use this")
+        self.assertEqual(getattr(input_items[1], "path", None), "/tmp/screen.png")
+
+    def test_drain_steer_requests_forwards_image_only_input(self) -> None:
+        turn = MagicMock()
+        with tempfile.TemporaryDirectory() as raw:
+            control_path = Path(raw) / "worker.control.jsonl"
+            control_path.write_text(
+                json.dumps(
+                    {
+                        "op": "steer",
+                        "input": "",
+                        "inputImagePaths": ["/tmp/screen.png"],
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            offset = codex_worker_module._drain_steer_requests(
+                turn,
+                instance=self._make_instance(raw),
+                control_path=control_path,
+                control_offset=0,
+            )
+            self.assertEqual(offset, control_path.stat().st_size)
+
+        turn.steer.assert_called_once()
+        input_items = turn.steer.call_args.args[0]
+        assert isinstance(input_items, list)
+        self.assertEqual(len(input_items), 1)
+        self.assertEqual(getattr(input_items[0], "path", None), "/tmp/screen.png")
 
     def test_drain_steer_requests_skips_failed_steer_line(self) -> None:
         turn = MagicMock()
@@ -3416,6 +4355,7 @@ class WorkerCancellationTests(TestCase):
 
             offset = codex_worker_module._drain_steer_requests(
                 turn,
+                instance=self._make_instance(raw),
                 control_path=control_path,
                 control_offset=0,
             )
@@ -3429,6 +4369,7 @@ class WorkerCancellationTests(TestCase):
         with tempfile.TemporaryDirectory() as raw:
             offset = codex_worker_module._drain_steer_requests(
                 turn,
+                instance=self._make_instance(raw),
                 control_path=Path(raw) / "missing.control.jsonl",
                 control_offset=0,
             )
@@ -3447,6 +4388,7 @@ class WorkerCancellationTests(TestCase):
 
             offset = codex_worker_module._drain_steer_requests(
                 turn,
+                instance=self._make_instance(raw),
                 control_path=control_path,
                 control_offset=0,
             )
@@ -3459,6 +4401,44 @@ class WorkerCancellationTests(TestCase):
             "valid after malformed",
         )
 
+    def test_drain_steer_requests_discards_failed_image_steer(self) -> None:
+        turn = MagicMock()
+        turn.steer.side_effect = RuntimeError("rejected")
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+                image_path = codex_pool.input_attachments_dir() / "steer" / "1.png"
+                image_path.parent.mkdir(parents=True)
+                image_path.write_bytes(b"image")
+                instance = self._make_instance(raw)
+                instance.input_attachment_paths = [str(image_path)]
+                instance.save(update_fields=["input_attachment_paths"])
+                control_path = Path(raw) / "worker.control.jsonl"
+                control_path.write_text(
+                    json.dumps(
+                        {
+                            "op": "steer",
+                            "input": "use this",
+                            "inputImagePaths": [str(image_path)],
+                        }
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+                offset = codex_worker_module._drain_steer_requests(
+                    turn,
+                    instance=instance,
+                    control_path=control_path,
+                    control_offset=0,
+                )
+
+                self.assertEqual(offset, control_path.stat().st_size)
+                self.assertFalse(image_path.exists())
+                instance.refresh_from_db()
+                self.assertEqual(instance.input_attachment_paths, [])
+
     def test_steer_forwarder_drains_once_after_stop(self) -> None:
         turn = MagicMock()
         initial_drain = threading.Event()
@@ -3467,11 +4447,13 @@ class WorkerCancellationTests(TestCase):
         def drain_side_effect(
             turn_arg: Any,
             *,
+            instance: CodexInstance,
             control_path: Path,
             control_offset: int,
         ) -> int:
             result = original_drain(
                 turn_arg,
+                instance=instance,
                 control_path=control_path,
                 control_offset=control_offset,
             )
@@ -3494,6 +4476,7 @@ class WorkerCancellationTests(TestCase):
                     target=codex_worker_module._forward_steer_requests,
                     kwargs={
                         "turn": turn,
+                        "instance": self._make_instance(raw),
                         "control_path": control_path,
                         "wakeup": wakeup,
                         "stop": stop,
@@ -3523,11 +4506,13 @@ class WorkerCancellationTests(TestCase):
         def drain_side_effect(
             turn_arg: Any,
             *,
+            instance: CodexInstance,
             control_path: Path,
             control_offset: int,
         ) -> int:
             result = original_drain(
                 turn_arg,
+                instance=instance,
                 control_path=control_path,
                 control_offset=control_offset,
             )
@@ -3546,6 +4531,7 @@ class WorkerCancellationTests(TestCase):
             ):
                 forwarder = codex_worker_module._start_steer_control_forwarder(
                     turn,
+                    instance=self._make_instance(raw),
                     control_path=control_path,
                 )
                 try:

@@ -41,6 +41,8 @@ _TRACKED_WORKER_PROCS: dict[int, tuple[int, subprocess.Popen[bytes]]] = {}
 _REAPED_WORKERS: set[tuple[int, int]] = set()
 _TRACKED_WORKER_PROCS_LOCK = threading.Lock()
 _VALID_WEB_SEARCH_MODES = frozenset(mode.value for mode in WebSearchMode)
+_MAX_INPUT_ATTACHMENT_PATHS_PER_INSTANCE = 16
+_MAX_INPUT_ATTACHMENT_PATHS_PER_THREAD = 64
 
 
 def _normalized_web_search_mode(web_search_mode: str | None) -> str | None:
@@ -54,10 +56,15 @@ def _normalized_web_search_mode(web_search_mode: str | None) -> str | None:
     return value
 
 
+class InputAttachmentLimitExceededError(Exception):
+    """Raised when one active worker already owns too many input images."""
+
+
 def spawn_new_session(
     *,
     cwd: str,
     prompt: str,
+    input_image_paths: list[str] | None = None,
     thread_name: str | None = None,
     base_instructions: str | None = None,
     developer_instructions: str | None = None,
@@ -129,6 +136,7 @@ def spawn_new_session(
         thread_id=thread_id,
         cwd=cwd,
         prompt=prompt,
+        input_image_paths=input_image_paths,
         base_instructions=base_instructions,
         developer_instructions=developer_instructions,
         model=model if plan_mode else None,
@@ -190,8 +198,8 @@ def _initial_thread_name(prompt: str) -> str:
 
     Codex rejects whitespace-only names, so a prompt that strips to empty
     falls back to a static placeholder rather than failing the wire call.
-    The view layer already rejects empty prompts up front, so this branch
-    only protects against future callers passing a degenerate string.
+    Image-only sessions can intentionally pass an empty prompt, so fall back
+    to a stable title rather than sending Codex a whitespace-only name.
     """
     first_line = prompt.split("\n", 1)[0].strip()[:_INITIAL_THREAD_NAME_MAX_LEN].rstrip()
     return first_line or "New session"
@@ -202,6 +210,7 @@ def spawn_turn(
     thread_id: str,
     cwd: str,
     prompt: str,
+    input_image_paths: list[str] | None = None,
     model: str | None = None,
     stored_model: str | None = None,
     reasoning_effort: str | None = None,
@@ -242,6 +251,7 @@ def spawn_turn(
         thread_id=thread_id,
         cwd=cwd,
         prompt=prompt,
+        input_image_paths=input_image_paths,
         base_instructions=base_instructions or None,
         developer_instructions=developer_instructions or None,
         model=model,
@@ -492,16 +502,25 @@ def interrupt_instance(
     return _interrupt_instance(instance)
 
 
-def steer_active(thread_id: str, *, prompt: str) -> CodexInstance | None:
+def steer_active(
+    thread_id: str, *, prompt: str, input_image_paths: list[str] | None = None
+) -> CodexInstance | None:
     """Inject ``prompt`` into the most recent active worker for ``thread_id``."""
     instance = latest_active_for_thread(thread_id)
     if instance is None:
         return None
-    return _steer_instance(instance, prompt=prompt)
+    kwargs: dict[str, Any] = {"prompt": prompt}
+    if input_image_paths:
+        kwargs["input_image_paths"] = input_image_paths
+    return _steer_instance(instance, **kwargs)
 
 
 def steer_instance(
-    instance_id: int, *, expected_thread_id: str, prompt: str
+    instance_id: int,
+    *,
+    expected_thread_id: str,
+    prompt: str,
+    input_image_paths: list[str] | None = None,
 ) -> CodexInstance | None:
     """Steer a specific active worker, identified by its primary key.
 
@@ -522,7 +541,10 @@ def steer_instance(
         CodexInstance.STATUS_RUNNING,
     ):
         return None
-    return _steer_instance(instance, prompt=prompt)
+    kwargs: dict[str, Any] = {"prompt": prompt}
+    if input_image_paths:
+        kwargs["input_image_paths"] = input_image_paths
+    return _steer_instance(instance, **kwargs)
 
 
 def control_path_for(instance: CodexInstance) -> Path:
@@ -531,7 +553,12 @@ def control_path_for(instance: CodexInstance) -> Path:
     return events_path.with_name(f"{events_path.stem}.control.jsonl")
 
 
-def _steer_instance(instance: CodexInstance, *, prompt: str) -> CodexInstance | None:
+def _steer_instance(
+    instance: CodexInstance,
+    *,
+    prompt: str,
+    input_image_paths: list[str] | None = None,
+) -> CodexInstance | None:
     """Queue one steer request for ``instance`` and nudge its worker.
 
     The payload is appended before the signal so the worker never wakes up to
@@ -539,23 +566,30 @@ def _steer_instance(instance: CodexInstance, *, prompt: str) -> CodexInstance | 
     SIGUSR1: the handler may not be installed yet, and the worker drains the
     file once the ``TurnHandle`` exists.
     """
+    image_paths = _normalized_input_image_paths(input_image_paths)
     if instance.pid <= 0:
         return None
-    if not prompt.strip():
+    if not prompt.strip() and not image_paths:
         return None
     if not _pid_is_our_worker(instance.pid, instance.pk):
         _mark_failed(instance, "worker process unavailable for steer")
         return None
 
+    images_tracked = False
+    if not _track_steer_input_attachments(instance, image_paths):
+        return None
+    images_tracked = bool(image_paths)
     try:
-        _append_control_request(
-            instance,
-            {
-                "op": "steer",
-                "input": prompt,
-            },
-        )
+        payload: dict[str, Any] = {
+            "op": "steer",
+            "input": prompt,
+        }
+        if image_paths:
+            payload["inputImagePaths"] = image_paths
+        _append_control_request(instance, payload)
     except OSError:
+        if images_tracked:
+            _remove_input_attachment_paths(instance, image_paths)
         return None
     if instance.status != CodexInstance.STATUS_RUNNING:
         instance.refresh_from_db()
@@ -563,25 +597,31 @@ def _steer_instance(instance: CodexInstance, *, prompt: str) -> CodexInstance | 
             CodexInstance.STATUS_STARTING,
             CodexInstance.STATUS_RUNNING,
         ):
+            if images_tracked:
+                _remove_input_attachment_paths(instance, image_paths)
             return None
         return instance
     try:
         os.kill(instance.pid, signal.SIGUSR1)
     except ProcessLookupError:
+        if images_tracked:
+            _remove_input_attachment_paths(instance, image_paths)
         _mark_failed(instance, "worker process exited before steer")
         return None
     except OSError:
-        return None
+        return instance
     instance.refresh_from_db()
     if instance.status not in (
         CodexInstance.STATUS_STARTING,
         CodexInstance.STATUS_RUNNING,
     ):
+        if images_tracked:
+            _remove_input_attachment_paths(instance, image_paths)
         return None
     return instance
 
 
-def _append_control_request(instance: CodexInstance, payload: dict[str, str]) -> None:
+def _append_control_request(instance: CodexInstance, payload: dict[str, Any]) -> None:
     path = control_path_for(instance)
     path.parent.mkdir(parents=True, exist_ok=True)
     line = json.dumps(payload, separators=(",", ":")) + "\n"
@@ -770,7 +810,9 @@ def reconcile_dead() -> int:
         instance.ended_at = now
         instance.save(update_fields=["status", "error", "ended_at"])
         _notify_system_agents_if_needed(instance)
+        cleanup_requested_input_images_for(instance)
         updated += 1
+    retry_failed_input_image_cleanups()
     _prune_reaped_workers()
     return updated
 
@@ -833,6 +875,154 @@ def events_dir() -> Path:
     return Path.home() / ".hitch" / "codex_events"
 
 
+def input_attachments_dir() -> Path:
+    """Filesystem directory holding uploaded local-image inputs."""
+    return events_dir() / "attachments"
+
+
+def cleanup_input_images_for(instance: CodexInstance) -> None:
+    """Delete image files for an explicit session-retention boundary.
+
+    Uploaded images are submitted to Codex as local paths, and the Codex
+    thread can reference those paths on later resumes. Terminal turn status is
+    therefore not a cleanup boundary; callers should invoke this only when the
+    session/thread no longer needs those local-image references.
+    """
+    current = CodexInstance.objects.filter(pk=instance.pk).first()
+    if current is None:
+        return
+    image_paths = _merged_input_image_paths(
+        current.input_attachment_paths,
+        current.input_image_paths,
+    )
+    if not image_paths:
+        return
+    root = input_attachments_dir().resolve(strict=False)
+    remaining_paths: list[str] = []
+    for raw_path in image_paths:
+        path = Path(raw_path).resolve(strict=False)
+        if not _path_within(path, root):
+            logger.warning(
+                "refusing to clean up input image outside attachment dir: %s",
+                raw_path,
+            )
+            remaining_paths.append(raw_path)
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("failed to clean up input image attachment %s", path)
+            remaining_paths.append(raw_path)
+        else:
+            _prune_empty_attachment_dirs(path.parent, root)
+    CodexInstance.objects.filter(pk=instance.pk).update(
+        input_image_paths=[],
+        input_attachment_paths=remaining_paths,
+        input_attachment_cleanup_requested=bool(remaining_paths),
+    )
+    instance.input_image_paths = []
+    instance.input_attachment_paths = remaining_paths
+    instance.input_attachment_cleanup_requested = bool(remaining_paths)
+
+
+def cleanup_input_images_for_thread(thread_id: str) -> None:
+    """Delete retained input images for every turn in a thread."""
+    CodexInstance.objects.filter(
+        thread_id=thread_id,
+        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+    ).exclude(input_attachment_paths=[]).update(
+        input_attachment_cleanup_requested=True
+    )
+    terminal_instances = CodexInstance.objects.filter(
+        thread_id=thread_id,
+        status__in=(CodexInstance.STATUS_COMPLETED, CodexInstance.STATUS_FAILED),
+    )
+    for instance in terminal_instances:
+        cleanup_input_images_for(instance)
+
+
+def cleanup_requested_input_images_for(instance: CodexInstance) -> None:
+    current = CodexInstance.objects.filter(pk=instance.pk).first()
+    if current is None or not current.input_attachment_cleanup_requested:
+        return
+    cleanup_input_images_for(current)
+
+
+def discard_input_attachment_paths(
+    instance: CodexInstance, input_image_paths: list[str]
+) -> None:
+    """Delete undelivered steer images and release their attachment ledger paths."""
+    image_paths = _normalized_input_image_paths(input_image_paths)
+    if not image_paths:
+        return
+    root = input_attachments_dir().resolve(strict=False)
+    removed_paths: list[str] = []
+    failed_paths: list[str] = []
+    for raw_path in image_paths:
+        path = Path(raw_path).resolve(strict=False)
+        if not _path_within(path, root):
+            logger.warning(
+                "refusing to discard input image outside attachment dir: %s",
+                raw_path,
+            )
+            removed_paths.append(raw_path)
+            continue
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("failed to discard input image attachment %s", path)
+            failed_paths.append(raw_path)
+        else:
+            _prune_empty_attachment_dirs(path.parent, root)
+            removed_paths.append(raw_path)
+    if removed_paths:
+        _remove_input_attachment_paths(instance, removed_paths)
+    if failed_paths:
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            input_attachment_cleanup_requested=True
+        )
+        instance.input_attachment_cleanup_requested = True
+
+
+def retry_failed_input_image_cleanups() -> int:
+    """Retry explicit attachment cleanups that previously failed.
+
+    Rows with ``input_image_paths`` still set are retained because Codex may
+    need those paths to resume the thread. ``cleanup_input_images_for`` clears
+    that field when a real cleanup is requested, leaving failed unlinks in
+    ``input_attachment_paths`` for this retry path.
+    """
+    retried = 0
+    instances = CodexInstance.objects.filter(
+        status__in=(
+            CodexInstance.STATUS_COMPLETED,
+            CodexInstance.STATUS_FAILED,
+        ),
+        input_attachment_cleanup_requested=True,
+    ).exclude(input_attachment_paths=[])
+    for instance in instances:
+        cleanup_input_images_for(instance)
+        retried += 1
+    return retried
+
+
+def _path_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _prune_empty_attachment_dirs(path: Path, root: Path) -> None:
+    while path != root and _path_within(path, root):
+        try:
+            path.rmdir()
+        except OSError:
+            return
+        path = path.parent
+
+
 def _codex_bin() -> str | None:
     """Resolve the ``codex`` binary path for AppServerConfig.
 
@@ -854,11 +1044,100 @@ def app_server_config(
     return AppServerConfig(codex_bin=_codex_bin(), config_overrides=tuple(overrides))
 
 
+def _normalized_input_image_paths(input_image_paths: Any) -> list[str]:
+    if not isinstance(input_image_paths, list):
+        return []
+    return [
+        path for path in input_image_paths if isinstance(path, str) and path.strip()
+    ]
+
+
+def _merged_input_image_paths(*path_lists: Any) -> list[str]:
+    merged: list[str] = []
+    for path_list in path_lists:
+        for path in _normalized_input_image_paths(path_list):
+            if path not in merged:
+                merged.append(path)
+    return merged
+
+
+def _input_attachment_count_for_thread(
+    thread_id: str, *, exclude_instance_id: int | None = None
+) -> int:
+    query = CodexInstance.objects.filter(thread_id=thread_id)
+    if exclude_instance_id is not None:
+        query = query.exclude(pk=exclude_instance_id)
+    paths: set[str] = set()
+    for path_list in query.values_list("input_attachment_paths", flat=True):
+        paths.update(_normalized_input_image_paths(path_list))
+    return len(paths)
+
+
+def _add_input_attachment_paths(
+    instance: CodexInstance, input_image_paths: list[str]
+) -> None:
+    image_paths = _normalized_input_image_paths(input_image_paths)
+    if not image_paths:
+        return
+    with transaction.atomic():
+        current = CodexInstance.objects.select_for_update().get(pk=instance.pk)
+        merged = _merged_input_image_paths(current.input_attachment_paths, image_paths)
+        if len(merged) > _MAX_INPUT_ATTACHMENT_PATHS_PER_INSTANCE:
+            raise InputAttachmentLimitExceededError(
+                "too many image attachments are queued for this turn"
+            )
+        thread_total = _input_attachment_count_for_thread(
+            current.thread_id,
+            exclude_instance_id=current.pk,
+        ) + len(merged)
+        if thread_total > _MAX_INPUT_ATTACHMENT_PATHS_PER_THREAD:
+            raise InputAttachmentLimitExceededError(
+                "too many image attachments are retained for this session"
+            )
+        if merged != _normalized_input_image_paths(current.input_attachment_paths):
+            current.input_attachment_paths = merged
+            current.save(update_fields=["input_attachment_paths"])
+    instance.input_attachment_paths = merged
+
+
+def _remove_input_attachment_paths(
+    instance: CodexInstance, input_image_paths: list[str]
+) -> None:
+    image_paths = set(_normalized_input_image_paths(input_image_paths))
+    if not image_paths:
+        return
+    with transaction.atomic():
+        current = CodexInstance.objects.select_for_update().get(pk=instance.pk)
+        remaining = [
+            path
+            for path in _normalized_input_image_paths(current.input_attachment_paths)
+            if path not in image_paths
+        ]
+        current.input_attachment_paths = remaining
+        current.save(update_fields=["input_attachment_paths"])
+    instance.input_attachment_paths = remaining
+
+
+def _track_steer_input_attachments(
+    instance: CodexInstance, input_image_paths: list[str]
+) -> bool:
+    image_paths = _normalized_input_image_paths(input_image_paths)
+    if not image_paths:
+        return True
+    _add_input_attachment_paths(instance, image_paths)
+    instance.refresh_from_db(fields=["status"])
+    if instance.status in (CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING):
+        return True
+    _remove_input_attachment_paths(instance, image_paths)
+    return False
+
+
 def _spawn_worker(
     *,
     thread_id: str,
     cwd: str,
     prompt: str,
+    input_image_paths: list[str] | None = None,
     base_instructions: str | None = None,
     developer_instructions: str | None = None,
     model: str | None = None,
@@ -884,12 +1163,24 @@ def _spawn_worker(
     web_search_mode = _normalized_web_search_mode(web_search_mode)
     target_dir = events_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
+    normalized_input_image_paths = _normalized_input_image_paths(input_image_paths)
+    if (
+        normalized_input_image_paths
+        and _input_attachment_count_for_thread(thread_id)
+        + len(set(normalized_input_image_paths))
+        > _MAX_INPUT_ATTACHMENT_PATHS_PER_THREAD
+    ):
+        raise InputAttachmentLimitExceededError(
+            "too many image attachments are retained for this session"
+        )
 
     with transaction.atomic():
         instance = CodexInstance.objects.create(
             thread_id=thread_id,
             cwd=cwd,
             prompt=prompt,
+            input_image_paths=normalized_input_image_paths,
+            input_attachment_paths=normalized_input_image_paths,
             base_instructions=base_instructions or "",
             developer_instructions=developer_instructions or "",
             enable_memories=enable_memories,
@@ -945,6 +1236,7 @@ def _spawn_worker(
         instance.ended_at = timezone.now()
         instance.error = f"failed to launch worker process: {exc!r}"
         instance.save(update_fields=["status", "ended_at", "error"])
+        cleanup_input_images_for(instance)
         raise
     instance.pid = proc.pid
     instance.save(update_fields=["pid"])

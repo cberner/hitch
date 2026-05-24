@@ -1281,8 +1281,9 @@ class IterEntriesTests(TestCase):
         entries = list(rollout.iter_entries(path))
         self.assertEqual(
             entries[0]["text"],
-            "look at this\n[image]\n[image]\n[image: /tmp/c.png]",
+            "look at this\n[image]\n[image]\n[image]",
         )
+        self.assertNotIn("/tmp/c.png", entries[0]["text"])
         self.assertEqual(entries[1]["text"], "[image]")
 
     def test_agent_reasoning(self) -> None:

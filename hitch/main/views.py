@@ -1,17 +1,24 @@
 import base64
 import binascii
+import contextlib
 import json
 import logging
+import os
 import re
-from collections.abc import Iterable, Iterator, Mapping
+import uuid
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, override
 from urllib.parse import urlencode
 
 from django.contrib.auth import login as auth_login
 from django.contrib.auth import logout as auth_logout
 from django.contrib.auth.forms import AuthenticationForm, UserCreationForm
+from django.core.exceptions import SuspiciousOperation
+from django.core.files.uploadedfile import UploadedFile
+from django.core.files.uploadhandler import FileUploadHandler
 from django.db import IntegrityError, transaction
 from django.db.models import QuerySet
 from django.http import (
@@ -25,7 +32,7 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
-from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.csrf import csrf_exempt, csrf_protect
 from django.views.decorators.http import require_http_methods
 from openai_codex import AppServerError, Codex
 from openai_codex.generated.v2_all import (
@@ -200,8 +207,105 @@ _EXTRA_SYSTEM_PROMPT_MAX_LEN = 2500
 # long and would overflow the list rows without a clip.
 _DISPLAY_TITLE_MAX_LEN = 80
 _ARCHIVED_SESSIONS_DIR = "archived_sessions"
+_INPUT_IMAGE_FIELD = "input_images"
+_INPUT_IMAGE_MAX_COUNT = 4
+_INPUT_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+_INPUT_IMAGE_MAX_REQUEST_BYTES = (
+    _INPUT_IMAGE_MAX_COUNT * _INPUT_IMAGE_MAX_BYTES + 1024 * 1024
+)
+_INPUT_IMAGE_ACCEPT = "image/png,image/jpeg,image/gif,image/webp"
 _MINUTES_PER_HOUR = 60
 _MINUTES_PER_DAY = 24 * _MINUTES_PER_HOUR
+
+
+class _InputImageLimitUploadHandler(FileUploadHandler):
+    def __init__(self, request: HttpRequest | None = None) -> None:
+        super().__init__(request)
+        self._input_image_count = 0
+        self._current_input_image_bytes = 0
+        self._tracking_input_image = False
+
+    @override
+    def new_file(
+        self,
+        field_name: str,
+        file_name: str,
+        content_type: str,
+        content_length: int | None,
+        charset: str | None = None,
+        content_type_extra: dict[str, bytes] | None = None,
+    ) -> None:
+        super().new_file(
+            field_name,
+            file_name,
+            content_type,
+            content_length,
+            charset,
+            content_type_extra,
+        )
+        self._tracking_input_image = field_name == _INPUT_IMAGE_FIELD
+        self._current_input_image_bytes = 0
+        if not self._tracking_input_image:
+            return
+        self._input_image_count += 1
+        if self._input_image_count > _INPUT_IMAGE_MAX_COUNT:
+            raise SuspiciousOperation(
+                f"at most {_INPUT_IMAGE_MAX_COUNT} image attachments are allowed"
+            )
+        if content_length is not None and content_length > _INPUT_IMAGE_MAX_BYTES:
+            raise SuspiciousOperation("image attachment is too large")
+
+    @override
+    def receive_data_chunk(self, raw_data: bytes, _start: int) -> bytes:
+        if self._tracking_input_image:
+            self._current_input_image_bytes += len(raw_data)
+            if self._current_input_image_bytes > _INPUT_IMAGE_MAX_BYTES:
+                raise SuspiciousOperation("image attachment is too large")
+        return raw_data
+
+    @override
+    def file_complete(self, _file_size: int) -> UploadedFile | None:
+        return None
+
+
+def _limit_input_image_uploads(
+    view_func: Callable[..., HttpResponse],
+) -> Callable[..., HttpResponse]:
+    protected_view = csrf_protect(view_func)
+
+    @csrf_exempt
+    @wraps(view_func)
+    def wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        if error := _input_image_request_size_error(request):
+            return HttpResponseBadRequest(error)
+        content_type = (
+            request.content_type or request.META.get("CONTENT_TYPE", "")
+        ).lower()
+        if request.method == "POST" and content_type.startswith("multipart/"):
+            request.upload_handlers.insert(0, _InputImageLimitUploadHandler(request))
+        try:
+            return protected_view(request, *args, **kwargs)
+        except SuspiciousOperation as exc:
+            message = str(exc)
+            if message.startswith(("image attachment", "at most ")):
+                return HttpResponseBadRequest(message)
+            raise
+
+    return wrapper
+
+
+def _input_image_request_size_error(request: HttpRequest) -> str | None:
+    raw_content_length = request.META.get("CONTENT_LENGTH")
+    if not raw_content_length:
+        return None
+    try:
+        content_length = int(raw_content_length)
+    except ValueError:
+        return None
+    if content_length > _INPUT_IMAGE_MAX_REQUEST_BYTES:
+        return "image attachments are too large"
+    return None
+
 
 # Server-side cap on user-supplied thread names. Matches the `maxlength` we
 # set on the edit form so a client without HTML validation cannot push an
@@ -424,6 +528,7 @@ def _new_session_dialog_context(
         "new_session_default_web_search_label": _web_search_mode_label(
             current_settings.web_search_mode
         ),
+        "input_image_accept": _INPUT_IMAGE_ACCEPT,
         "pr_slash_prompt": _PR_SLASH_PROMPT,
         "qa_slash_prompt": _QA_SLASH_PROMPT,
     }
@@ -1293,6 +1398,7 @@ def _render_session_detail(
             "pending_user_author": _pending_user_author(active_instance),
             "token_usage": token_usage,
             "next_message_config": _next_message_config(settings, resumed, plan_model),
+            "input_image_accept": _INPUT_IMAGE_ACCEPT,
             "pr_slash_prompt": _PR_SLASH_PROMPT,
             "qa_slash_prompt": _QA_SLASH_PROMPT,
             "default_plan_mode": default_plan_mode,
@@ -2125,15 +2231,18 @@ def _trim_in_progress_turn(
     pass, once by the streaming JS that can't dedupe against DOM nodes
     it didn't create.
 
-    The in-progress turn is identified by the most recent user-message
-    entry whose text matches the active worker's prompt; anything from
-    that point onward is owned by the stream until the turn ends.
+    The in-progress turn is identified by the most recent user-message entry
+    whose text matches the active worker's original prompt plus its initial
+    image markers. Mid-turn steer images live in the attachment ledger but do
+    not change this identity; anything from the original user message onward
+    is owned by the stream until the turn ends.
     """
-    if active is None or not active.prompt:
+    active_text = _active_user_message_text(active)
+    if not active_text:
         return entries
     for i in range(len(entries) - 1, -1, -1):
         entry = entries[i]
-        if entry.get("kind") == "user" and entry.get("text") == active.prompt:
+        if entry.get("kind") == "user" and entry.get("text") == active_text:
             return entries[:i]
     return entries
 
@@ -2152,9 +2261,27 @@ def _pending_user_prompt(active: CodexInstance | None) -> str:
     placeholder. The streaming JS removes the bubble as soon as the
     real ``userMessage`` event lands.
     """
-    if active is None or not active.prompt or active.agent_kind == demo.DEMO_AGENT_KIND:
+    if active is None or active.agent_kind == demo.DEMO_AGENT_KIND:
         return ""
-    return active.prompt
+    return _active_user_message_text(active)
+
+
+def _active_user_message_text(active: CodexInstance | None) -> str:
+    if active is None:
+        return ""
+    parts: list[str] = []
+    if active.prompt:
+        parts.append(active.prompt)
+    parts.extend(
+        "[image]" for _path in _normalized_json_string_list(active.input_image_paths)
+    )
+    return "\n".join(parts)
+
+
+def _normalized_json_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item.strip()]
 
 
 def _task_plan_context(
@@ -3555,6 +3682,7 @@ def session_demo_proxy(
     return demo.proxy_demo_request(request, session_id, path, path_prefix=prefix)
 
 
+@_limit_input_image_uploads
 @require_http_methods(["POST"])
 def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     intent = _message_intent(request)
@@ -3563,7 +3691,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     qa_workflow_activation = pr_activation or qa_activation
     prompt = intent.prompt
     plan_mode = intent.plan_mode
-    if not prompt:
+    has_input_images = _has_input_image_uploads(request)
+    if not prompt and not has_input_images:
         return HttpResponseBadRequest("prompt is required")
     collaboration_mode = request.POST.get("collaboration_mode", "").strip().lower()
     plan_action = request.POST.get("plan_action", "").strip().lower()
@@ -3590,217 +3719,280 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         if qa_workflow_activation:
             return redirect("session", session_id=session_id)
         return HttpResponseBadRequest("PR workflow is running for this session")
+    if qa_workflow_activation and has_input_images:
+        return HttpResponseBadRequest(
+            "image attachments are not supported for PR workflow requests"
+        )
     settings = _stored_settings(request)
     raw_active = request.POST.get("active_instance", "").strip()
+    active_instance = None
+    instance_id: int | None = None
     if raw_active:
         if qa_workflow_activation:
             return HttpResponseBadRequest("PR workflow requires an idle session")
         instance_id, error = _parse_instance_id(raw_active)
         if error is not None or instance_id is None:
             return HttpResponseBadRequest(error or "invalid instance id")
-        steered = codex_pool.steer_instance(
-            instance_id,
-            expected_thread_id=session_id,
-            prompt=prompt,
-        )
-        if steered is not None:
-            return redirect("session", session_id=session_id)
     else:
         active_instance = codex_pool.latest_active_for_thread(session_id)
-        if active_instance is not None:
-            if qa_workflow_activation:
-                return HttpResponseBadRequest("PR workflow requires an idle session")
+        if active_instance is not None and qa_workflow_activation:
+            return HttpResponseBadRequest("PR workflow requires an idle session")
+
+    input_image_paths, input_image_error = _save_posted_input_images(request)
+    if input_image_error is not None:
+        return HttpResponseBadRequest(input_image_error)
+
+    input_images_owned = False
+    steer_image_paths: list[str] = []
+    try:
+        if raw_active:
+            assert instance_id is not None
+            steer_kwargs: dict[str, Any] = {
+                "expected_thread_id": session_id,
+                "prompt": prompt,
+            }
+            if input_image_paths:
+                steer_image_paths = _duplicate_saved_input_images(input_image_paths)
+                steer_kwargs["input_image_paths"] = steer_image_paths
             steered = codex_pool.steer_instance(
-                active_instance.pk,
-                expected_thread_id=session_id,
-                prompt=prompt,
+                instance_id,
+                **steer_kwargs,
             )
             if steered is not None:
+                _cleanup_saved_input_images(input_image_paths)
+                steer_image_paths = []
+                input_images_owned = True
                 return redirect("session", session_id=session_id)
-    # If steering is unavailable or races a terminal worker, preserve the
-    # submitted prompt by treating it as an ordinary follow-up turn.
-    # ``raw_active`` posts still do not retarget a different active worker.
-    # ``Thread.cwd`` is an ``AbsolutePathBuf`` pydantic RootModel, so unwrap
-    # ``.root`` to get the underlying string the worker subprocess expects;
-    # also accept a plain str so a future SDK schema change does not break us.
-    config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
-    with Codex(config=config) as codex:
-        resumed = codex._client.thread_resume(session_id)
-        thread = resumed.thread
-        thread_entries = list(_entries_for(thread))
-        thread_awaits_plan_approval = _entries_await_plan_approval(thread_entries)
-        if (
-            not collaboration_mode
-            and intent.allow_pending_plan_default
-            and not intent.explicit_plan_mode
-        ):
-            plan_mode = thread_awaits_plan_approval
-        if (
-            thread_awaits_plan_approval
-            and not collaboration_mode
-            and intent.allow_pending_plan_default
-            and not intent.explicit_plan_mode
-            and prompt == _PLAN_APPROVAL_PROMPT
-        ):
-            collaboration_mode = _DEFAULT_COLLABORATION_MODE
-            plan_mode = False
-        collaboration_model = (
-            _plan_mode_model(codex, resumed, settings)
-            if plan_mode or collaboration_mode == _DEFAULT_COLLABORATION_MODE
-            else None
+            _cleanup_saved_input_images(steer_image_paths)
+            steer_image_paths = []
+        elif active_instance is not None:
+            active_steer_kwargs: dict[str, Any] = {
+                "expected_thread_id": session_id,
+                "prompt": prompt,
+            }
+            if input_image_paths:
+                steer_image_paths = _duplicate_saved_input_images(input_image_paths)
+                active_steer_kwargs["input_image_paths"] = steer_image_paths
+            steered = codex_pool.steer_instance(
+                active_instance.pk,
+                **active_steer_kwargs,
+            )
+            if steered is not None:
+                _cleanup_saved_input_images(input_image_paths)
+                steer_image_paths = []
+                input_images_owned = True
+                return redirect("session", session_id=session_id)
+            _cleanup_saved_input_images(steer_image_paths)
+            steer_image_paths = []
+        # If steering is unavailable or races a terminal worker, preserve the
+        # submitted prompt by treating it as an ordinary follow-up turn.
+        # ``raw_active`` posts still do not retarget a different active worker.
+        # ``Thread.cwd`` is an ``AbsolutePathBuf`` pydantic RootModel, so unwrap
+        # ``.root`` to get the underlying string the worker subprocess expects;
+        # also accept a plain str so a future SDK schema change does not break us.
+        config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
+        with Codex(config=config) as codex:
+            resumed = codex._client.thread_resume(session_id)
+            thread = resumed.thread
+            thread_entries = list(_entries_for(thread))
+            thread_awaits_plan_approval = _entries_await_plan_approval(thread_entries)
+            if (
+                not collaboration_mode
+                and intent.allow_pending_plan_default
+                and not intent.explicit_plan_mode
+            ):
+                plan_mode = thread_awaits_plan_approval
+            if (
+                thread_awaits_plan_approval
+                and not collaboration_mode
+                and intent.allow_pending_plan_default
+                and not intent.explicit_plan_mode
+                and prompt == _PLAN_APPROVAL_PROMPT
+            ):
+                collaboration_mode = _DEFAULT_COLLABORATION_MODE
+                plan_mode = False
+            collaboration_model = (
+                _plan_mode_model(codex, resumed, settings)
+                if plan_mode or collaboration_mode == _DEFAULT_COLLABORATION_MODE
+                else None
+            )
+            if plan_mode and not collaboration_model and not intent.explicit_plan_mode:
+                plan_mode = False
+        cwd = _thread_cwd(thread)
+        if not cwd:
+            _cleanup_saved_input_images(input_image_paths)
+            return HttpResponseBadRequest("thread has no cwd")
+        # The session list surfaces every thread the app-server knows about, not
+        # just those created via ``new_session``, so the resumed ``cwd`` is not
+        # automatically inside the discover_repos() allowlist. Re-validate before
+        # spawning so a follow-up cannot run a worker in an unintended directory.
+        if cwd not in _allowed_session_cwds():
+            _cleanup_saved_input_images(input_image_paths)
+            return HttpResponseBadRequest("thread cwd is not an allowed repository")
+        # Sandbox policy and approval mode are applied per-turn rather than
+        # persisted on the thread, so follow-up messages have to re-forward
+        # the cookies or every turn after the first silently reverts to Codex
+        # defaults — which breaks multi-turn workflows that depend on
+        # elevated permissions or stricter escalation handling.
+        sandbox_policy = _effective_sandbox_policy(settings)
+        approval_mode = _effective_approval_mode(settings)
+        previous_instance = codex_pool.latest_for_thread(session_id)
+        configured_web_search_mode = _valid_web_search_mode_or_default(
+            settings.web_search_mode
         )
-        if plan_mode and not collaboration_model and not intent.explicit_plan_mode:
-            plan_mode = False
-    cwd = _thread_cwd(thread)
-    if not cwd:
-        return HttpResponseBadRequest("thread has no cwd")
-    # The session list surfaces every thread the app-server knows about, not
-    # just those created via ``new_session``, so the resumed ``cwd`` is not
-    # automatically inside the discover_repos() allowlist. Re-validate before
-    # spawning so a follow-up cannot run a worker in an unintended directory.
-    if cwd not in _allowed_session_cwds():
-        return HttpResponseBadRequest("thread cwd is not an allowed repository")
-    # Sandbox policy and approval mode are applied per-turn rather than
-    # persisted on the thread, so follow-up messages have to re-forward
-    # the cookies or every turn after the first silently reverts to Codex
-    # defaults — which breaks multi-turn workflows that depend on
-    # elevated permissions or stricter escalation handling.
-    sandbox_policy = _effective_sandbox_policy(settings)
-    approval_mode = _effective_approval_mode(settings)
-    previous_instance = codex_pool.latest_for_thread(session_id)
-    configured_web_search_mode = _valid_web_search_mode_or_default(
-        settings.web_search_mode
-    )
-    previous_web_search_mode = (
-        _valid_web_search_mode_or_default(previous_instance.web_search_mode)
-        if previous_instance is not None
-        else ""
-    )
-    web_search_mode = (
-        previous_web_search_mode
-        if qa_workflow_activation and not configured_web_search_mode
-        else configured_web_search_mode
-    )
-    should_forward_web_search_mode = bool(web_search_mode) or bool(
-        previous_web_search_mode
-    )
-    base_instructions = _base_instructions_for_settings(
-        settings, explicit_default=True
-    )
-    auto_pr_enabled = _auto_pr_enabled_for_session(session_id)
-    auto_qa_enabled = (
-        False if auto_pr_enabled else _auto_qa_enabled_for_session(session_id)
-    )
-    if qa_workflow_activation:
-        developer_instructions = (
-            previous_instance.developer_instructions
+        previous_web_search_mode = (
+            _valid_web_search_mode_or_default(previous_instance.web_search_mode)
             if previous_instance is not None
-            else settings.extra_system_prompt
+            else ""
         )
-        workflow_model = _string_value(getattr(resumed, "model", None)) or settings.model
-        workflow_reasoning_effort = (
-            _string_value(getattr(resumed, "reasoning_effort", None))
-            or settings.reasoning_effort
+        web_search_mode = (
+            previous_web_search_mode
+            if qa_workflow_activation and not configured_web_search_mode
+            else configured_web_search_mode
         )
-        workflow_kwargs: dict[str, Any] = {
-            "main_thread_id": session_id,
-            "cwd": cwd,
-            "sandbox_policy": sandbox_policy or None,
-            "approval_mode": approval_mode,
-            "model": workflow_model or None,
-            "reasoning_effort": workflow_reasoning_effort or None,
-            "developer_instructions": developer_instructions or None,
-            "enable_memories": settings.enable_memories,
-            "initial_user_message_index": _count_user_entries(thread_entries),
-        }
-        if should_forward_web_search_mode:
-            workflow_kwargs["web_search_mode"] = web_search_mode
-        if base_instructions:
-            workflow_kwargs["base_instructions"] = base_instructions
-        if settings.qa_panel_enabled:
-            workflow_kwargs["qa_panel_enabled"] = True
-        if qa_activation:
-            workflow_kwargs["open_pr_on_lgtm"] = False
-        system_agents.start_pr_qa_workflow(**workflow_kwargs)
-        return redirect("session", session_id=session_id)
-    spawn_kwargs: dict[str, Any] = {
-        "thread_id": session_id,
-        "cwd": cwd,
-        "prompt": prompt,
-        "sandbox_policy": sandbox_policy or None,
-        "approval_mode": approval_mode,
-    }
-    if should_forward_web_search_mode:
-        spawn_kwargs["web_search_mode"] = web_search_mode
-    if base_instructions:
-        spawn_kwargs["base_instructions"] = base_instructions
-    if settings.enable_memories:
-        spawn_kwargs["enable_memories"] = True
-    if auto_pr_enabled or auto_qa_enabled:
-        auto_review_model = _string_value(getattr(resumed, "model", None)) or settings.model
-        auto_review_reasoning_effort = (
-            _string_value(getattr(resumed, "reasoning_effort", None))
-            or settings.reasoning_effort
+        should_forward_web_search_mode = bool(web_search_mode) or bool(
+            previous_web_search_mode
         )
-        if auto_pr_enabled:
-            spawn_kwargs["auto_pr_enabled"] = True
-        if auto_qa_enabled:
-            spawn_kwargs["auto_qa_enabled"] = True
-        spawn_kwargs["user_message_index"] = _count_user_entries(thread_entries)
-        spawn_kwargs["stored_model"] = auto_review_model or None
-        spawn_kwargs["stored_reasoning_effort"] = auto_review_reasoning_effort or None
-        if settings.qa_panel_enabled:
-            spawn_kwargs["qa_panel_enabled"] = True
-    if plan_mode:
-        if not collaboration_model:
-            return HttpResponseBadRequest("plan mode requires a model")
-        spawn_kwargs["model"] = collaboration_model
-        spawn_kwargs["plan_mode"] = True
-    elif collaboration_mode == _DEFAULT_COLLABORATION_MODE:
-        if not collaboration_model:
-            return HttpResponseBadRequest("default collaboration mode requires a model")
-        spawn_kwargs["model"] = collaboration_model
-        spawn_kwargs["collaboration_mode"] = collaboration_mode
-    if (
-        settings.spec_critic_enabled
-        and not plan_mode
-        and not collaboration_mode
-        and system_agents.spec_critic_should_run(prompt)
-    ):
-        workflow_model = _string_value(getattr(resumed, "model", None)) or settings.model
-        workflow_reasoning_effort = (
-            _string_value(getattr(resumed, "reasoning_effort", None))
-            or settings.reasoning_effort
+        base_instructions = _base_instructions_for_settings(
+            settings, explicit_default=True
         )
-        spec_workflow_kwargs: dict[str, Any] = {
-            "main_thread_id": session_id,
-            "cwd": cwd,
-            "prompt": prompt,
-            "sandbox_policy": sandbox_policy or None,
-            "approval_mode": approval_mode,
-            "model": workflow_model or None,
-            "reasoning_effort": workflow_reasoning_effort or None,
-            "developer_instructions": (
+        auto_pr_enabled = _auto_pr_enabled_for_session(session_id)
+        auto_qa_enabled = (
+            False if auto_pr_enabled else _auto_qa_enabled_for_session(session_id)
+        )
+        if qa_workflow_activation:
+            developer_instructions = (
                 previous_instance.developer_instructions
                 if previous_instance is not None
                 else settings.extra_system_prompt
             )
-            or None,
-            "enable_memories": settings.enable_memories,
-            "initial_user_message_index": _count_user_entries(thread_entries),
-            "auto_pr_enabled": auto_pr_enabled,
-            "auto_qa_enabled": auto_qa_enabled,
+            workflow_model = (
+                _string_value(getattr(resumed, "model", None)) or settings.model
+            )
+            workflow_reasoning_effort = (
+                _string_value(getattr(resumed, "reasoning_effort", None))
+                or settings.reasoning_effort
+            )
+            workflow_kwargs: dict[str, Any] = {
+                "main_thread_id": session_id,
+                "cwd": cwd,
+                "sandbox_policy": sandbox_policy or None,
+                "approval_mode": approval_mode,
+                "model": workflow_model or None,
+                "reasoning_effort": workflow_reasoning_effort or None,
+                "developer_instructions": developer_instructions or None,
+                "enable_memories": settings.enable_memories,
+                "initial_user_message_index": _count_user_entries(thread_entries),
+            }
+            if should_forward_web_search_mode:
+                workflow_kwargs["web_search_mode"] = web_search_mode
+            if base_instructions:
+                workflow_kwargs["base_instructions"] = base_instructions
+            if settings.qa_panel_enabled:
+                workflow_kwargs["qa_panel_enabled"] = True
+            if qa_activation:
+                workflow_kwargs["open_pr_on_lgtm"] = False
+            system_agents.start_pr_qa_workflow(**workflow_kwargs)
+            return redirect("session", session_id=session_id)
+        spawn_kwargs: dict[str, Any] = {
+            "thread_id": session_id,
+            "cwd": cwd,
+            "prompt": prompt,
+            "sandbox_policy": sandbox_policy or None,
+            "approval_mode": approval_mode,
         }
-        if base_instructions:
-            spec_workflow_kwargs["base_instructions"] = base_instructions
+        if input_image_paths:
+            spawn_kwargs["input_image_paths"] = input_image_paths
         if should_forward_web_search_mode:
-            spec_workflow_kwargs["web_search_mode"] = web_search_mode
-        if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
-            spec_workflow_kwargs["qa_panel_enabled"] = True
-        system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
+            spawn_kwargs["web_search_mode"] = web_search_mode
+        if base_instructions:
+            spawn_kwargs["base_instructions"] = base_instructions
+        if settings.enable_memories:
+            spawn_kwargs["enable_memories"] = True
+        if auto_pr_enabled or auto_qa_enabled:
+            auto_review_model = (
+                _string_value(getattr(resumed, "model", None)) or settings.model
+            )
+            auto_review_reasoning_effort = (
+                _string_value(getattr(resumed, "reasoning_effort", None))
+                or settings.reasoning_effort
+            )
+            if auto_pr_enabled:
+                spawn_kwargs["auto_pr_enabled"] = True
+            if auto_qa_enabled:
+                spawn_kwargs["auto_qa_enabled"] = True
+            spawn_kwargs["user_message_index"] = _count_user_entries(thread_entries)
+            spawn_kwargs["stored_model"] = auto_review_model or None
+            spawn_kwargs["stored_reasoning_effort"] = auto_review_reasoning_effort or None
+            if settings.qa_panel_enabled:
+                spawn_kwargs["qa_panel_enabled"] = True
+        if plan_mode:
+            if not collaboration_model:
+                _cleanup_saved_input_images(input_image_paths)
+                return HttpResponseBadRequest("plan mode requires a model")
+            spawn_kwargs["model"] = collaboration_model
+            spawn_kwargs["plan_mode"] = True
+        elif collaboration_mode == _DEFAULT_COLLABORATION_MODE:
+            if not collaboration_model:
+                _cleanup_saved_input_images(input_image_paths)
+                return HttpResponseBadRequest(
+                    "default collaboration mode requires a model"
+                )
+            spawn_kwargs["model"] = collaboration_model
+            spawn_kwargs["collaboration_mode"] = collaboration_mode
+        if (
+            settings.spec_critic_enabled
+            and not input_image_paths
+            and not plan_mode
+            and not collaboration_mode
+            and system_agents.spec_critic_should_run(prompt)
+        ):
+            workflow_model = (
+                _string_value(getattr(resumed, "model", None)) or settings.model
+            )
+            workflow_reasoning_effort = (
+                _string_value(getattr(resumed, "reasoning_effort", None))
+                or settings.reasoning_effort
+            )
+            spec_workflow_kwargs: dict[str, Any] = {
+                "main_thread_id": session_id,
+                "cwd": cwd,
+                "prompt": prompt,
+                "sandbox_policy": sandbox_policy or None,
+                "approval_mode": approval_mode,
+                "model": workflow_model or None,
+                "reasoning_effort": workflow_reasoning_effort or None,
+                "developer_instructions": (
+                    previous_instance.developer_instructions
+                    if previous_instance is not None
+                    else settings.extra_system_prompt
+                )
+                or None,
+                "enable_memories": settings.enable_memories,
+                "initial_user_message_index": _count_user_entries(thread_entries),
+                "auto_pr_enabled": auto_pr_enabled,
+                "auto_qa_enabled": auto_qa_enabled,
+            }
+            if base_instructions:
+                spec_workflow_kwargs["base_instructions"] = base_instructions
+            if should_forward_web_search_mode:
+                spec_workflow_kwargs["web_search_mode"] = web_search_mode
+            if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
+                spec_workflow_kwargs["qa_panel_enabled"] = True
+            system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
+            return redirect("session", session_id=session_id)
+        codex_pool.spawn_turn(**spawn_kwargs)
+        input_images_owned = True
         return redirect("session", session_id=session_id)
-    codex_pool.spawn_turn(**spawn_kwargs)
-    return redirect("session", session_id=session_id)
+    except codex_pool.InputAttachmentLimitExceededError as exc:
+        _cleanup_saved_input_images(steer_image_paths)
+        _cleanup_saved_input_images(input_image_paths)
+        return HttpResponseBadRequest(str(exc))
+    except Exception:
+        _cleanup_saved_input_images(steer_image_paths)
+        if not input_images_owned:
+            _cleanup_saved_input_images(input_image_paths)
+        raise
 
 
 def _thread_awaits_plan_approval(thread: Any) -> bool:
@@ -3917,6 +4109,157 @@ def _auto_qa_enabled_for_session(session_id: str) -> bool:
     return SessionMetadata.objects.filter(
         thread_id=session_id, auto_qa_enabled=True
     ).exists()
+
+
+def _posted_input_image_uploads(request: HttpRequest) -> list[UploadedFile]:
+    return [
+        upload
+        for upload in request.FILES.getlist(_INPUT_IMAGE_FIELD)
+        if isinstance(upload, UploadedFile)
+    ]
+
+
+def _has_input_image_uploads(request: HttpRequest) -> bool:
+    return bool(_posted_input_image_uploads(request))
+
+
+def _save_posted_input_images(request: HttpRequest) -> tuple[list[str], str | None]:
+    uploads = _posted_input_image_uploads(request)
+    if not uploads:
+        return [], None
+    if len(uploads) > _INPUT_IMAGE_MAX_COUNT:
+        return [], f"at most {_INPUT_IMAGE_MAX_COUNT} image attachments are allowed"
+
+    extensions: list[str] = []
+    for upload in uploads:
+        extension, error = _uploaded_input_image_extension(upload)
+        if error is not None or extension is None:
+            return [], error or "image attachment is invalid"
+        extensions.append(extension)
+
+    saved_paths: list[str] = []
+    current_path: Path | None = None
+    try:
+        attachments_dir = codex_pool.input_attachments_dir()
+        _ensure_private_dir(attachments_dir)
+        target_dir = attachments_dir / uuid.uuid4().hex
+        target_dir.mkdir(mode=0o700)
+        target_dir.chmod(0o700)
+        for index, (upload, extension) in enumerate(
+            zip(uploads, extensions, strict=True), start=1
+        ):
+            upload.seek(0)
+            path = target_dir / f"{index}{extension}"
+            current_path = path
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as fh:
+                for chunk in upload.chunks():
+                    fh.write(chunk)
+            path.chmod(0o600)
+            saved_paths.append(str(path))
+            current_path = None
+    except Exception as exc:  # noqa: BLE001 - cleanup partial writes before re-raising
+        cleanup_paths = [*saved_paths]
+        if current_path is not None:
+            cleanup_paths.append(str(current_path))
+        _cleanup_saved_input_images(cleanup_paths)
+        if not isinstance(exc, OSError):
+            raise
+        logger.exception("failed to save uploaded image attachment")
+        return [], "failed to save image attachment"
+    return saved_paths, None
+
+
+def _ensure_private_dir(path: Path) -> None:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.chmod(0o700)
+
+
+def _uploaded_input_image_extension(
+    upload: UploadedFile,
+) -> tuple[str | None, str | None]:
+    size = upload.size
+    if size is None or size <= 0:
+        return None, "image attachment is empty"
+    if size > _INPUT_IMAGE_MAX_BYTES:
+        return None, "image attachment is too large"
+    try:
+        upload.seek(0)
+        header = upload.read(16)
+        upload.seek(0)
+    except OSError:
+        logger.exception("failed to read uploaded image attachment")
+        return None, "failed to read image attachment"
+    extension = _input_image_extension_from_header(header)
+    if extension is None:
+        return None, "image attachment must be PNG, JPEG, GIF, or WebP"
+    return extension, None
+
+
+def _input_image_extension_from_header(header: bytes) -> str | None:
+    if header.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if header.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if header.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if len(header) >= 12 and header.startswith(b"RIFF") and header[8:12] == b"WEBP":
+        return ".webp"
+    return None
+
+
+def _cleanup_saved_input_images(paths: Iterable[str]) -> None:
+    for path in paths:
+        image_path = Path(path)
+        try:
+            image_path.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("failed to clean up uploaded image attachment %s", path)
+        else:
+            with contextlib.suppress(OSError):
+                image_path.parent.rmdir()
+
+
+def _duplicate_saved_input_images(paths: Iterable[str]) -> list[str]:
+    source_paths = [Path(path) for path in paths if path]
+    if not source_paths:
+        return []
+    saved_paths: list[str] = []
+    current_path: Path | None = None
+    try:
+        attachments_dir = codex_pool.input_attachments_dir()
+        _ensure_private_dir(attachments_dir)
+        target_dir = attachments_dir / uuid.uuid4().hex
+        target_dir.mkdir(mode=0o700)
+        target_dir.chmod(0o700)
+        for index, source_path in enumerate(source_paths, start=1):
+            target_path = target_dir / f"{index}{source_path.suffix}"
+            current_path = target_path
+            fd = -1
+            try:
+                with source_path.open("rb") as source:
+                    fd = os.open(
+                        target_path,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        0o600,
+                    )
+                    with os.fdopen(fd, "wb") as target:
+                        fd = -1
+                        while chunk := source.read(1024 * 1024):
+                            target.write(chunk)
+            finally:
+                if fd != -1:
+                    os.close(fd)
+            target_path.chmod(0o600)
+            saved_paths.append(str(target_path))
+            current_path = None
+    except Exception:
+        cleanup_paths = [*saved_paths]
+        if current_path is not None:
+            cleanup_paths.append(str(current_path))
+        _cleanup_saved_input_images(cleanup_paths)
+        raise
+    return saved_paths
 
 
 def _message_intent(request: HttpRequest) -> _MessageIntent:
@@ -4140,6 +4483,7 @@ def stop_session(request: HttpRequest, session_id: str) -> HttpResponse:
     return redirect("session", session_id=session_id)
 
 
+@_limit_input_image_uploads
 @require_http_methods(["POST"])
 def new_session(request: HttpRequest) -> HttpResponse:
     intent = _message_intent(request)
@@ -4148,6 +4492,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
     qa_workflow_activation = pr_activation or qa_activation
     prompt = intent.prompt
     plan_mode = False if qa_workflow_activation else intent.plan_mode
+    has_input_images = _has_input_image_uploads(request)
     projects = list(Project.objects.all())
     target, target_error = _posted_new_session_target(request, projects)
     if target_error is not None or target is None:
@@ -4163,7 +4508,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
     if coding_agent_error is not None:
         return HttpResponseBadRequest(coding_agent_error)
     cwd = target.cwd
-    if not prompt:
+    if not prompt and not has_input_images:
         return HttpResponseBadRequest("prompt is required")
     if not cwd:
         return HttpResponseBadRequest("cwd is required")
@@ -4217,6 +4562,10 @@ def new_session(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest(web_search_error)
     if plan_mode and not settings.model:
         return HttpResponseBadRequest("plan mode requires a model")
+    if qa_workflow_activation and has_input_images:
+        return HttpResponseBadRequest(
+            "image attachments are not supported for PR workflow requests"
+        )
 
     session_cwd = cwd
     # QA workflows review the selected repo's current diff; a fresh managed
@@ -4293,6 +4642,16 @@ def new_session(request: HttpRequest) -> HttpResponse:
         if target.project_cleared
         else _project_for_cwd(session_cwd, projects) or source_project
     )
+    input_image_paths, input_image_error = _save_posted_input_images(request)
+    if input_image_error is not None:
+        if managed_worktree is not None:
+            try:
+                cleanup_worktree(managed_worktree)
+            except WorktreeCleanupError:
+                logger.exception(
+                    "failed to clean up managed worktree %s", managed_worktree.path
+                )
+        return HttpResponseBadRequest(input_image_error)
 
     # Detach a worker subprocess so the initial turn keeps running past a
     # Django restart. The thread itself is created synchronously to give the
@@ -4306,6 +4665,8 @@ def new_session(request: HttpRequest) -> HttpResponse:
         "sandbox_policy": settings.sandbox_policy or None,
         "approval_mode": settings.approval_mode,
     }
+    if input_image_paths:
+        spawn_kwargs["input_image_paths"] = input_image_paths
     if web_search_mode:
         spawn_kwargs["web_search_mode"] = web_search_mode
     if proposed_session is not None:
@@ -4325,6 +4686,7 @@ def new_session(request: HttpRequest) -> HttpResponse:
         spawn_kwargs["qa_panel_enabled"] = True
     if (
         settings.spec_critic_enabled
+        and not input_image_paths
         and not plan_mode
         and system_agents.spec_critic_should_run(prompt)
     ):
@@ -4396,9 +4758,13 @@ def new_session(request: HttpRequest) -> HttpResponse:
         response = redirect("session", session_id=thread_id)
         _apply_cookie_updates(response, cookie_updates)
         return response
+    input_images_owned = False
     try:
         instance = codex_pool.spawn_new_session(**spawn_kwargs)
+        input_images_owned = True
     except Exception:
+        if not input_images_owned:
+            _cleanup_saved_input_images(input_image_paths)
         if managed_worktree is not None:
             try:
                 cleanup_worktree(managed_worktree)
@@ -4712,7 +5078,8 @@ def _user_message_text(item: Any) -> str:
         inner = input_item.root
         match inner.type:
             case "text":
-                parts.append(inner.text)
+                if inner.text:
+                    parts.append(inner.text)
             case "mention":
                 parts.append(f"@{inner.name}")
             case "skill":
@@ -4720,7 +5087,7 @@ def _user_message_text(item: Any) -> str:
             case "image":
                 parts.append("[image]")
             case "localImage":
-                parts.append(f"[image: {inner.path}]")
+                parts.append("[image]")
     return "\n".join(parts)
 
 
