@@ -65,6 +65,14 @@
             <span>Parallel QA panel</span>
             <input type="checkbox" name="qa_panel" value="true" {% if current_qa_panel %}checked{% endif %}>
         </label>
+        <label>
+            Web search
+            <select name="web_search_mode">
+                {% for option in web_search_options %}
+                <option value="{{ option.id }}" {% if option.id == current_web_search %}selected{% endif %}>{{ option.display_name }}</option>
+                {% endfor %}
+            </select>
+        </label>
         <label class="checkbox-label">
             <span>Spec Critic preflight</span>
             <input type="checkbox" name="spec_critic" value="true" {% if current_spec_critic %}checked{% endif %}>

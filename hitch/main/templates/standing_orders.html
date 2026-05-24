@@ -432,6 +432,7 @@
                                 data-ambition="{{ order.ambition }}"
                                 data-autonomy="{{ order.autonomy }}"
                                 data-confidence-threshold="{{ order.confidence_threshold }}"
+                                data-web-search-mode="{{ order.web_search_mode }}"
                             >Edit</button>
                         </div>
                     </div>
@@ -440,6 +441,7 @@
                         <span class="meta">Ambition: {{ order.get_ambition_display }}</span>
                         <span class="meta">Autonomy: {{ order.get_autonomy_display }}</span>
                         <span class="meta">Threshold: {{ order.get_confidence_threshold_display }}</span>
+                        <span class="meta">Web search: {{ order.get_web_search_mode_display }}</span>
                         {% if order.latest_workflow %}
                         <span class="meta">Last run: {{ order.latest_workflow.get_status_display }}</span>
                         {% if order.run_log_url %}
@@ -515,6 +517,14 @@
                     {% endfor %}
                 </select>
             </label>
+            <label>
+                Web search
+                <select name="web_search_mode" data-edit-standing-order-web-search-mode>
+                    {% for value, label in web_search_mode_choices %}
+                    <option value="{{ value }}">{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </label>
             <div class="actions">
                 <button type="button" class="button secondary" data-edit-standing-order-cancel>Cancel</button>
                 <button type="submit" class="button">Save</button>
@@ -557,6 +567,7 @@
             const editOrderAmbition = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-ambition]");
             const editOrderAutonomy = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-autonomy]");
             const editOrderConfidence = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-confidence-threshold]");
+            const editOrderWebSearch = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-web-search-mode]");
             const editOrderCancel = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-cancel]");
             const createOrderDialog = document.querySelector("[data-create-standing-order-dialog]");
             const createOrderOpen = document.querySelector("[data-create-standing-order-open]");
@@ -602,6 +613,7 @@
                     if (editOrderAmbition) editOrderAmbition.value = button.dataset.ambition || "";
                     if (editOrderAutonomy) editOrderAutonomy.value = button.dataset.autonomy || "";
                     if (editOrderConfidence) editOrderConfidence.value = button.dataset.confidenceThreshold || "";
+                    if (editOrderWebSearch) editOrderWebSearch.value = button.dataset.webSearchMode || "";
                     showDialog(editOrderDialog);
                     if (editOrderTitle) editOrderTitle.focus();
                 });

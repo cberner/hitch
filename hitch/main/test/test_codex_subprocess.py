@@ -159,6 +159,12 @@ class SpawnNewSessionTests(TestCase):
 
         self.assertEqual(config.config_overrides, ("features.memories=false",))
 
+    def test_app_server_config_rejects_invalid_web_search_mode(self) -> None:
+        with self.assertRaises(ValueError):
+            codex_pool.app_server_config(
+                web_search_mode='live"\napproval_policy="never'
+            )
+
     @patch("hitch.main.codex_pool._launch_worker_process")
     @patch("hitch.main.codex_pool.Codex")
     def test_creates_thread_then_spawns_worker(
@@ -398,6 +404,38 @@ class SpawnNewSessionTests(TestCase):
 
     @patch("hitch.main.codex_pool._launch_worker_process")
     @patch("hitch.main.codex_pool.Codex")
+    def test_web_search_mode_sets_config_override_and_worker_flag(
+        self, mock_codex: MagicMock, mock_launch: MagicMock
+    ) -> None:
+        _stub_codex_thread_start(mock_codex)
+        mock_launch.return_value = SimpleNamespace(pid=1)
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_new_session(
+                cwd="/repo",
+                prompt="hi",
+                web_search_mode="live",
+            )
+
+        self.assertEqual(instance.web_search_mode, "live")
+        config = mock_codex.call_args.kwargs["config"]
+        self.assertEqual(
+            config.config_overrides,
+            ('features.memories=false', 'web_search="live"'),
+        )
+        mock_launch.assert_called_once_with(
+            instance_id=instance.pk,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode=None,
+            web_search_mode="live",
+        )
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.codex_pool.Codex")
     def test_plan_mode_forwards_model_to_worker(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
@@ -562,6 +600,71 @@ class SpawnTurnTests(TestCase):
         self.assertEqual(instance.base_instructions, "Base override.")
 
     @patch("hitch.main.codex_pool._launch_worker_process")
+    def test_omitted_web_search_mode_does_not_inherit_previous_turn(
+        self, mock_launch: MagicMock
+    ) -> None:
+        mock_launch.return_value = SimpleNamespace(pid=1234)
+        CodexInstance.objects.create(
+            pid=999,
+            thread_id="thread-xyz",
+            cwd="/repo",
+            prompt="first",
+            web_search_mode="live",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_turn(
+                thread_id="thread-xyz", cwd="/repo", prompt="follow-up"
+            )
+
+        self.assertEqual(instance.web_search_mode, "")
+        mock_launch.assert_called_once_with(
+            instance_id=instance.pk,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode=None,
+        )
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    def test_explicit_blank_web_search_mode_clears_previous_turn(
+        self, mock_launch: MagicMock
+    ) -> None:
+        mock_launch.return_value = SimpleNamespace(pid=1234)
+        CodexInstance.objects.create(
+            pid=999,
+            thread_id="thread-xyz",
+            cwd="/repo",
+            prompt="first",
+            web_search_mode="live",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_turn(
+                thread_id="thread-xyz",
+                cwd="/repo",
+                prompt="follow-up",
+                web_search_mode="",
+            )
+
+        self.assertEqual(instance.web_search_mode, "")
+        mock_launch.assert_called_once_with(
+            instance_id=instance.pk,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode=None,
+        )
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
     def test_explicit_base_instructions_override_previous_turn(
         self, mock_launch: MagicMock
     ) -> None:
@@ -699,6 +802,7 @@ class LaunchWorkerProcessTests(TestCase):
                 [("--sandbox-policy", "workspaceWrite")],
             ),
             ({"approval_mode": "deny_all"}, [("--approval-mode", "deny_all")]),
+            ({"web_search_mode": "live"}, [("--web-search-mode", "live")]),
             ({"enable_memories": True}, [("--enable-memories", None)]),
             (
                 {"collaboration_mode": "default"},
@@ -2195,6 +2299,7 @@ class CodexWorkerCommandTests(TestCase):
         base_instructions: str = "",
         developer_instructions: str = "",
         enable_memories: bool = False,
+        web_search_mode: str = "",
     ) -> CodexInstance:
         return CodexInstance.objects.create(
             pid=12345,
@@ -2204,6 +2309,7 @@ class CodexWorkerCommandTests(TestCase):
             base_instructions=base_instructions,
             developer_instructions=developer_instructions,
             enable_memories=enable_memories,
+            web_search_mode=web_search_mode,
             events_path=str(events_dir / "events.jsonl"),
             status=CodexInstance.STATUS_STARTING,
         )
@@ -2302,6 +2408,65 @@ class CodexWorkerCommandTests(TestCase):
 
         config = mock_codex.call_args.kwargs["config"]
         self.assertEqual(config.config_overrides, ("features.memories=true",))
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_web_search_row_sets_app_server_override(
+        self, mock_codex: MagicMock
+    ) -> None:
+        events = [_completed_event("turn-1", TurnStatus.completed)]
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.return_value = _stub_thread_resume(events)
+
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(Path(raw), web_search_mode="live")
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+
+        config = mock_codex.call_args.kwargs["config"]
+        self.assertEqual(
+            config.config_overrides,
+            ('features.memories=false', 'web_search="live"'),
+        )
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_web_search_cli_flag_sets_app_server_override(
+        self, mock_codex: MagicMock
+    ) -> None:
+        events = [_completed_event("turn-1", TurnStatus.completed)]
+        codex_ctx = mock_codex.return_value.__enter__.return_value
+        codex_ctx.thread_resume.return_value = _stub_thread_resume(events)
+
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(Path(raw), web_search_mode="live")
+            call_command(
+                "codex_worker",
+                "--instance-id",
+                str(instance.pk),
+                "--web-search-mode",
+                "cached",
+            )
+
+        config = mock_codex.call_args.kwargs["config"]
+        self.assertEqual(
+            config.config_overrides,
+            ('features.memories=false', 'web_search="cached"'),
+        )
+
+    @patch("hitch.main.management.commands.codex_worker.Codex")
+    def test_invalid_web_search_row_is_rejected_before_codex_starts(
+        self, mock_codex: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(
+                Path(raw),
+                web_search_mode='live"\napproval_policy="never',
+            )
+
+            with self.assertRaises(ValueError):
+                call_command("codex_worker", "--instance-id", str(instance.pk))
+
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        mock_codex.assert_not_called()
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_forwards_developer_instructions_on_resume(

@@ -37,6 +37,7 @@ def _instance(
     reasoning_effort: str = "",
     sandbox_policy: str = "",
     approval_mode: str = "",
+    web_search_mode: str = "",
     developer_instructions: str = "",
     enable_memories: bool = False,
     user_message_index: int | None = None,
@@ -53,6 +54,7 @@ def _instance(
         reasoning_effort=reasoning_effort,
         sandbox_policy=sandbox_policy,
         approval_mode=approval_mode,
+        web_search_mode=web_search_mode,
         plan_mode=plan_mode,
         auto_pr_enabled=auto_pr_enabled,
         qa_panel_enabled=qa_panel_enabled,
@@ -178,6 +180,7 @@ class PrQaWorkflowTests(TestCase):
             reasoning_effort="high",
             developer_instructions="Use repo conventions.",
             enable_memories=True,
+            web_search_mode="live",
             initial_user_message_index=2,
         )
 
@@ -195,6 +198,8 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(kwargs["reasoning_effort"], "high")
         self.assertEqual(kwargs["developer_instructions"], "Use repo conventions.")
         self.assertTrue(kwargs["enable_memories"])
+        self.assertEqual(kwargs["web_search_mode"], "live")
+        self.assertEqual(workflow.state["web_search_mode"], "live")
         self.assertEqual(kwargs["workflow_id"], workflow.pk)
         self.assertEqual(kwargs["agent_kind"], system_agents.PR_QA_AGENT_KIND)
         self.assertEqual(kwargs["display_author"], system_agents.QA_DISPLAY_AUTHOR)
@@ -253,6 +258,7 @@ class SpecCriticWorkflowTests(TestCase):
             reasoning_effort="high",
             developer_instructions="Use repo conventions.",
             enable_memories=True,
+            web_search_mode="cached",
             initial_user_message_index=2,
             auto_pr_enabled=True,
             qa_panel_enabled=True,
@@ -260,6 +266,7 @@ class SpecCriticWorkflowTests(TestCase):
 
         self.assertEqual(workflow.kind, system_agents.SPEC_CRITIC_WORKFLOW_KIND)
         self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_ANALYZING)
+        self.assertEqual(workflow.state["web_search_mode"], "cached")
         self.assertEqual(mock_spawn.call_count, 3)
         agent_kinds = {call.kwargs["agent_kind"] for call in mock_spawn.call_args_list}
         self.assertEqual(
@@ -278,6 +285,7 @@ class SpecCriticWorkflowTests(TestCase):
             self.assertEqual(call.kwargs["sandbox_policy"], "readOnly")
             self.assertEqual(call.kwargs["model"], "gpt-5.4")
             self.assertEqual(call.kwargs["reasoning_effort"], "high")
+            self.assertEqual(call.kwargs["web_search_mode"], "cached")
             self.assertIn("output_schema", call.kwargs)
         prompts = "\n\n".join(call.kwargs["prompt"] for call in mock_spawn.call_args_list)
         self.assertIn("requirements extractor", prompts)
@@ -657,6 +665,7 @@ class SpecCriticWorkflowTests(TestCase):
                 "base_instructions": "Base",
                 "developer_instructions": "Developer",
                 "enable_memories": True,
+                "web_search_mode": "live",
                 "next_user_message_index": 4,
                 "auto_pr_enabled": True,
                 "qa_panel_enabled": True,
@@ -696,6 +705,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertTrue(kwargs["auto_pr_enabled"])
         self.assertTrue(kwargs["qa_panel_enabled"])
         self.assertEqual(kwargs["user_message_index"], 4)
+        self.assertEqual(kwargs["web_search_mode"], "live")
         self.assertIn("Hitch Spec Critic synthesized", kwargs["prompt"])
         self.assertIn("Improve onboarding", kwargs["prompt"])
         self.assertIn(
@@ -819,11 +829,13 @@ class SpecCriticWorkflowTests(TestCase):
             approval_mode="prompt_user",
             model="gpt-5.4",
             reasoning_effort="high",
+            web_search_mode="cached",
             qa_panel_enabled=True,
         )
 
         self.assertEqual(workflow.step, system_agents.STEP_QA_RUNNING)
         self.assertTrue(workflow.state["qa_panel_enabled"])
+        self.assertEqual(workflow.state["web_search_mode"], "cached")
         self.assertEqual(mock_spawn.call_count, len(system_agents._QA_PANEL_LANES))
         agent_kinds = [call.kwargs["agent_kind"] for call in mock_spawn.call_args_list]
         self.assertEqual(agent_kinds, list(system_agents._QA_PANEL_LANE_KINDS))
@@ -837,6 +849,7 @@ class SpecCriticWorkflowTests(TestCase):
             self.assertEqual(kwargs["sandbox_policy"], "workspaceWrite")
             self.assertEqual(kwargs["model"], "gpt-5.4")
             self.assertEqual(kwargs["reasoning_effort"], "high")
+            self.assertEqual(kwargs["web_search_mode"], "cached")
             self.assertEqual(kwargs["display_author"], system_agents.QA_PANEL_DISPLAY_AUTHOR)
             self.assertEqual(kwargs["output_schema"], system_agents._QA_PANEL_LANE_OUTPUT_SCHEMA)
             self.assertIn(lane.label, kwargs["prompt"])
@@ -859,7 +872,7 @@ class SpecCriticWorkflowTests(TestCase):
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_QA_RUNNING,
-            state={"qa_panel_enabled": True},
+            state={"qa_panel_enabled": True, "web_search_mode": "live"},
         )
         lane_instances: list[CodexInstance] = []
         for index, lane in enumerate(system_agents._QA_PANEL_LANES):
@@ -908,6 +921,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
         kwargs = mock_spawn.call_args.kwargs
         self.assertEqual(kwargs["agent_kind"], system_agents.PR_QA_PANEL_SYNTHESIZER_AGENT_KIND)
+        self.assertEqual(kwargs["web_search_mode"], "live")
         self.assertEqual(kwargs["output_schema"], system_agents._QA_OUTPUT_SCHEMA)
         self.assertIn("final Parallel QA Panel synthesizer", kwargs["prompt"])
         self.assertIn("Deduplicate overlapping findings", kwargs["prompt"])
@@ -1076,6 +1090,7 @@ class SpecCriticWorkflowTests(TestCase):
             reasoning_effort="high",
             sandbox_policy="workspaceWrite",
             approval_mode="prompt_user",
+            web_search_mode="live",
             developer_instructions="Use repo conventions.",
             enable_memories=True,
             user_message_index=2,
@@ -1088,6 +1103,7 @@ class SpecCriticWorkflowTests(TestCase):
         workflow = SystemWorkflow.objects.get(main_thread_id="main-thread")
         self.assertEqual(workflow.state["sandbox_policy"], "workspaceWrite")
         self.assertEqual(workflow.state["approval_mode"], "prompt_user")
+        self.assertEqual(workflow.state["web_search_mode"], "live")
         self.assertEqual(workflow.state["model"], "gpt-5.4")
         self.assertEqual(workflow.state["reasoning_effort"], "high")
         self.assertEqual(workflow.state["developer_instructions"], "Use repo conventions.")
@@ -1483,6 +1499,7 @@ class SpecCriticWorkflowTests(TestCase):
                 "model": "gpt-5.4",
                 "reasoning_effort": "high",
                 "developer_instructions": "Use repo conventions.",
+                "web_search_mode": "live",
                 "next_user_message_index": 2,
             },
         )
@@ -1528,6 +1545,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(kwargs["model"], "gpt-5.4")
         self.assertEqual(kwargs["reasoning_effort"], "high")
         self.assertEqual(kwargs["developer_instructions"], "Use repo conventions.")
+        self.assertEqual(kwargs["web_search_mode"], "live")
         self.assertEqual(kwargs["user_message_index"], 2)
         self.assertIn("Feedback from Hitch QA agent", kwargs["prompt"])
         workflow.refresh_from_db()
@@ -1843,7 +1861,7 @@ class SpecCriticWorkflowTests(TestCase):
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_PR_PROMPT_RUNNING,
-            state={"next_user_message_index": 5},
+            state={"next_user_message_index": 5, "web_search_mode": "live"},
         )
         events_path = _raw_events_file(
             self,
@@ -1889,6 +1907,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(handoff["head_sha"], "abc123")
         kwargs = mock_spawn.call_args.kwargs
         self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_SYSTEM_AGENT)
+        self.assertEqual(kwargs["web_search_mode"], "live")
         self.assertEqual(
             kwargs["agent_kind"], system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND
         )
@@ -1937,6 +1956,7 @@ class SpecCriticWorkflowTests(TestCase):
             step=system_agents.STEP_PR_MONITORING,
             state={
                 "next_user_message_index": 5,
+                "web_search_mode": "cached",
                 system_agents._PR_HANDOFF_STATE_KEY: {
                     "url": "https://github.com/cberner/hitch/pull/169",
                     "repository_full_name": "cberner/hitch",
@@ -1987,6 +2007,7 @@ class SpecCriticWorkflowTests(TestCase):
         kwargs = mock_spawn.call_args.kwargs
         self.assertEqual(kwargs["thread_id"], "main-thread")
         self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_SYSTEM_FEEDBACK)
+        self.assertEqual(kwargs["web_search_mode"], "cached")
         self.assertEqual(
             kwargs["display_author"], system_agents.PR_MONITOR_DISPLAY_AUTHOR
         )
@@ -2009,6 +2030,7 @@ class SpecCriticWorkflowTests(TestCase):
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_PR_FEEDBACK_RUNNING,
             state={
+                "web_search_mode": "live",
                 system_agents._PR_HANDOFF_STATE_KEY: {
                     "url": "https://github.com/cberner/hitch/pull/169",
                     "repository_full_name": "cberner/hitch",
@@ -2062,6 +2084,7 @@ class SpecCriticWorkflowTests(TestCase):
             mock_spawn.call_args.kwargs["agent_kind"],
             system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
         )
+        self.assertEqual(mock_spawn.call_args.kwargs["web_search_mode"], "live")
 
     def test_monitor_ready_completes_workflow(self) -> None:
         workflow = SystemWorkflow.objects.create(
@@ -2497,6 +2520,7 @@ class StandingOrderWorkflowTests(TestCase):
             goal="Find small documentation improvements.",
             ambition=StandingOrder.AMBITION_HIGH,
             confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+            web_search_mode=StandingOrder.WEB_SEARCH_LIVE,
         )
         mock_spawn.return_value = _instance(
             thread_id="candidate-thread",
@@ -2512,6 +2536,7 @@ class StandingOrderWorkflowTests(TestCase):
         kwargs = mock_spawn.call_args.kwargs
         self.assertEqual(kwargs["cwd"], "/repo")
         self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
+        self.assertEqual(kwargs["web_search_mode"], StandingOrder.WEB_SEARCH_LIVE)
         self.assertEqual(kwargs["agent_kind"], system_agents.STANDING_ORDER_AGENT_KIND)
         self.assertEqual(kwargs["display_author"], system_agents.STANDING_ORDER_DISPLAY_AUTHOR)
         schema = kwargs["output_schema"]
@@ -2716,6 +2741,7 @@ class StandingOrderWorkflowTests(TestCase):
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
+            web_search_mode=StandingOrder.WEB_SEARCH_LIVE,
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.STANDING_ORDER_AGENT_KIND,
@@ -2725,7 +2751,10 @@ class StandingOrderWorkflowTests(TestCase):
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_STANDING_ORDER_CANDIDATE_RUNNING,
-            state={"standing_order_id": standing_order.pk},
+            state={
+                "standing_order_id": standing_order.pk,
+                "web_search_mode": StandingOrder.WEB_SEARCH_LIVE,
+            },
         )
         candidate_metadata = SessionMetadata.objects.create(
             thread_id="candidate-thread",
@@ -2792,6 +2821,7 @@ class StandingOrderWorkflowTests(TestCase):
         )
         kwargs = mock_spawn.call_args.kwargs
         self.assertEqual(kwargs["agent_kind"], system_agents.STANDING_ORDER_JUDGE_AGENT_KIND)
+        self.assertEqual(kwargs["web_search_mode"], StandingOrder.WEB_SEARCH_LIVE)
         self.assertIn("Add parser coverage", kwargs["prompt"])
         self.assertTrue(SessionMetadata.objects.filter(thread_id="judge-thread").exists())
 
@@ -3023,6 +3053,7 @@ class StandingOrderWorkflowTests(TestCase):
             goal="Find useful test coverage increments.",
             confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
             autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            web_search_mode=StandingOrder.WEB_SEARCH_CACHED,
         )
         candidate_metadata = SessionMetadata.objects.create(
             thread_id="candidate-thread",
@@ -3046,6 +3077,7 @@ class StandingOrderWorkflowTests(TestCase):
                 "standing_order_id": standing_order.pk,
                 "candidate_session_id": candidate_metadata.pk,
                 "judge_session_id": judge_metadata.pk,
+                "web_search_mode": StandingOrder.WEB_SEARCH_CACHED,
                 "candidate": {
                     "title": "Add parser coverage",
                     "implementation_direction": "Add focused tests.",
@@ -3077,6 +3109,9 @@ class StandingOrderWorkflowTests(TestCase):
             thread_id="implementation-thread",
             purpose=CodexInstance.PURPOSE_USER,
         )
+        StandingOrder.objects.filter(pk=standing_order.pk).update(
+            web_search_mode=StandingOrder.WEB_SEARCH_LIVE
+        )
 
         system_agents.on_codex_instance_finished(instance)
 
@@ -3103,6 +3138,7 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertEqual(kwargs["cwd"], "/repo")
         self.assertEqual(kwargs["thread_name"], "Add parser coverage")
         self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
+        self.assertEqual(kwargs["web_search_mode"], StandingOrder.WEB_SEARCH_CACHED)
         self.assertEqual(
             kwargs["sandbox_policy"],
             system_agents.STANDING_ORDER_IMPLEMENTATION_SANDBOX_POLICY,
@@ -3121,6 +3157,7 @@ class StandingOrderWorkflowTests(TestCase):
             goal="Find useful test coverage increments.",
             confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
             autonomy=StandingOrder.AUTONOMY_DRAFT_PR,
+            web_search_mode=StandingOrder.WEB_SEARCH_DISABLED,
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.STANDING_ORDER_AGENT_KIND,
@@ -3132,6 +3169,7 @@ class StandingOrderWorkflowTests(TestCase):
             step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
             state={
                 "standing_order_id": standing_order.pk,
+                "web_search_mode": StandingOrder.WEB_SEARCH_DISABLED,
                 "candidate": {
                     "title": "Add parser coverage",
                     "implementation_direction": "Add focused tests.",
@@ -3170,6 +3208,10 @@ class StandingOrderWorkflowTests(TestCase):
         proposal = ProposedSession.objects.get()
         implementation = SessionMetadata.objects.get(thread_id="implementation-thread")
         self.assertTrue(mock_spawn.call_args.kwargs["auto_pr_enabled"])
+        self.assertEqual(
+            mock_spawn.call_args.kwargs["web_search_mode"],
+            StandingOrder.WEB_SEARCH_DISABLED,
+        )
         self.assertTrue(implementation.auto_pr_enabled)
         self.assertTrue(proposal.outcome_metadata["auto_pr_enabled"])
         self.assertIn("Auto-PR will run", proposal.outcome_notes)

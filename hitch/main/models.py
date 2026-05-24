@@ -84,6 +84,16 @@ class StandingOrder(models.Model):
         (AUTONOMY_DRAFT_PATCH, "Draft patch"),
         (AUTONOMY_DRAFT_PR, "Draft PR"),
     )
+    WEB_SEARCH_DEFAULT = ""
+    WEB_SEARCH_DISABLED = "disabled"
+    WEB_SEARCH_CACHED = "cached"
+    WEB_SEARCH_LIVE = "live"
+    WEB_SEARCH_CHOICES: ClassVar[tuple[tuple[str, str], ...]] = (
+        (WEB_SEARCH_DEFAULT, "Codex default"),
+        (WEB_SEARCH_DISABLED, "Disabled"),
+        (WEB_SEARCH_CACHED, "Cached"),
+        (WEB_SEARCH_LIVE, "Live"),
+    )
 
     project = models.ForeignKey(
         Project,
@@ -106,6 +116,12 @@ class StandingOrder(models.Model):
         max_length=32,
         choices=AUTONOMY_CHOICES,
         default=AUTONOMY_PROPOSE_ONLY,
+    )
+    web_search_mode = models.CharField(
+        max_length=16,
+        choices=WEB_SEARCH_CHOICES,
+        blank=True,
+        default=WEB_SEARCH_DEFAULT,
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -408,6 +424,7 @@ class CodexInstance(models.Model):
     reasoning_effort = models.CharField(max_length=32, blank=True, default="")
     sandbox_policy = models.CharField(max_length=32, blank=True, default="")
     approval_mode = models.CharField(max_length=32, blank=True, default="")
+    web_search_mode = models.CharField(max_length=16, blank=True, default="")
     plan_mode = models.BooleanField(default=False)
     auto_pr_enabled = models.BooleanField(default=False)
     qa_panel_enabled = models.BooleanField(default=False)
@@ -690,6 +707,7 @@ class UserSettings(models.Model):
     auto_pr_enabled = models.BooleanField(default=False)
     qa_panel_enabled = models.BooleanField(default=False)
     spec_critic_enabled = models.BooleanField(default=False)
+    web_search_mode = models.CharField(max_length=16, blank=True, default="")
     show_archived_sessions = models.BooleanField(default=False)
     last_selected_repo = models.CharField(max_length=4096, blank=True, default="")
     selected_project = models.ForeignKey(

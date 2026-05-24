@@ -594,6 +594,7 @@ def start_pr_qa_workflow(
     base_instructions: str | None = None,
     developer_instructions: str | None = None,
     enable_memories: bool = False,
+    web_search_mode: str | None = None,
     initial_user_message_index: int = 0,
     open_pr_on_lgtm: bool = True,
     qa_panel_enabled: bool = False,
@@ -621,6 +622,7 @@ def start_pr_qa_workflow(
                     "base_instructions": base_instructions or "",
                     "developer_instructions": developer_instructions or "",
                     "enable_memories": enable_memories,
+                    "web_search_mode": web_search_mode or "",
                     "next_user_message_index": max(initial_user_message_index, 0),
                     "open_pr_on_lgtm": open_pr_on_lgtm,
                     "qa_panel_enabled": qa_panel_enabled,
@@ -661,7 +663,10 @@ def start_standing_order_workflow(*, standing_order: StandingOrder) -> SystemWor
                 cwd=standing_order.project.repo_path,
                 status=SystemWorkflow.STATUS_RUNNING,
                 step=STEP_STANDING_ORDER_CANDIDATE_RUNNING,
-                state={"standing_order_id": standing_order.pk},
+                state={
+                    "standing_order_id": standing_order.pk,
+                    "web_search_mode": standing_order.web_search_mode,
+                },
             )
     except IntegrityError:
         existing_workflow = SystemWorkflow.objects.filter(
@@ -717,6 +722,7 @@ def start_spec_critic_workflow(
     base_instructions: str | None = None,
     developer_instructions: str | None = None,
     enable_memories: bool = False,
+    web_search_mode: str | None = None,
     initial_user_message_index: int = 0,
     auto_pr_enabled: bool = False,
     qa_panel_enabled: bool = False,
@@ -740,6 +746,7 @@ def start_spec_critic_workflow(
                     "base_instructions": base_instructions or "",
                     "developer_instructions": developer_instructions or "",
                     "enable_memories": enable_memories,
+                    "web_search_mode": web_search_mode or "",
                     "next_user_message_index": max(initial_user_message_index, 0),
                     "auto_pr_enabled": auto_pr_enabled,
                     "qa_panel_enabled": qa_panel_enabled,
@@ -866,6 +873,7 @@ def _maybe_start_auto_pr_workflow(instance: CodexInstance) -> None:
             "base_instructions": instance.base_instructions or None,
             "developer_instructions": instance.developer_instructions or None,
             "enable_memories": instance.enable_memories,
+            "web_search_mode": instance.web_search_mode or None,
             "initial_user_message_index": (instance.user_message_index or 0) + 1,
         }
         if instance.qa_panel_enabled:
@@ -1612,7 +1620,7 @@ def _handle_standing_order_agent_finished(
         if standing_order.autonomy != StandingOrder.AUTONOMY_PROPOSE_ONLY:
             try:
                 implementation = _start_standing_order_implementation_session(
-                    standing_order, proposal
+                    workflow, standing_order, proposal
                 )
             except Exception as exc:
                 _record_proposal_automation_failure(
@@ -1656,6 +1664,7 @@ def _spawn_pr_qa_run(workflow: SystemWorkflow) -> SystemAgentRun:
         approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
         sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
         enable_memories=_state_bool(workflow, "enable_memories"),
+        web_search_mode=_workflow_web_search_mode(workflow),
         thread_source=ThreadSource.subagent,
         purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
         workflow_id=workflow.pk,
@@ -1693,6 +1702,7 @@ def _spawn_pr_qa_panel_runs(workflow: SystemWorkflow) -> list[SystemAgentRun]:
                 approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
                 sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
                 enable_memories=_state_bool(workflow, "enable_memories"),
+                web_search_mode=_workflow_web_search_mode(workflow),
                 thread_source=ThreadSource.subagent,
                 purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
                 workflow_id=workflow.pk,
@@ -1736,6 +1746,7 @@ def _spawn_qa_panel_synthesizer_run(workflow: SystemWorkflow) -> SystemAgentRun:
         approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
         sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
         enable_memories=_state_bool(workflow, "enable_memories"),
+        web_search_mode=_workflow_web_search_mode(workflow),
         thread_source=ThreadSource.subagent,
         purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
         workflow_id=workflow.pk,
@@ -1769,6 +1780,7 @@ def _spawn_standing_order_candidate_run(
         cwd=workflow.cwd,
         prompt=prompt,
         approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
+        web_search_mode=_workflow_web_search_mode(workflow),
         thread_source=ThreadSource.subagent,
         purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
         workflow_id=workflow.pk,
@@ -1818,6 +1830,7 @@ def _spawn_standing_order_judge_run(
         cwd=workflow.cwd,
         prompt=prompt,
         approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
+        web_search_mode=_workflow_web_search_mode(workflow),
         thread_source=ThreadSource.subagent,
         purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
         workflow_id=workflow.pk,
@@ -1888,6 +1901,7 @@ def _spawn_spec_critic_analysis_runs(workflow: SystemWorkflow) -> list[SystemAge
             approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
             sandbox_policy="readOnly",
             enable_memories=_state_bool(workflow, "enable_memories"),
+            web_search_mode=_workflow_web_search_mode(workflow),
             thread_source=ThreadSource.subagent,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
@@ -1925,6 +1939,7 @@ def _spawn_spec_critic_synthesizer_run(workflow: SystemWorkflow) -> SystemAgentR
         approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
         sandbox_policy="readOnly",
         enable_memories=_state_bool(workflow, "enable_memories"),
+        web_search_mode=_workflow_web_search_mode(workflow),
         thread_source=ThreadSource.subagent,
         purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
         workflow_id=workflow.pk,
@@ -1967,6 +1982,7 @@ def _spawn_spec_critic_implementation_turn(
         sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
         approval_mode=_state_string(workflow, "approval_mode") or None,
         enable_memories=_state_bool(workflow, "enable_memories"),
+        web_search_mode=_workflow_web_search_mode(workflow),
         user_message_index=_state_int(workflow, "next_user_message_index"),
         auto_pr_enabled=_state_bool(workflow, "auto_pr_enabled"),
         qa_panel_enabled=_state_bool(workflow, "qa_panel_enabled"),
@@ -1974,7 +1990,7 @@ def _spawn_spec_critic_implementation_turn(
 
 
 def _start_standing_order_implementation_session(
-    standing_order: StandingOrder, proposal: ProposedSession
+    workflow: SystemWorkflow, standing_order: StandingOrder, proposal: ProposedSession
 ) -> SessionMetadata:
     auto_pr_enabled = standing_order.autonomy == StandingOrder.AUTONOMY_DRAFT_PR
     prompt = proposal.prompt.strip() or _fallback_proposed_session_prompt(proposal)
@@ -1984,6 +2000,7 @@ def _start_standing_order_implementation_session(
         thread_name=proposal.title,
         sandbox_policy=STANDING_ORDER_IMPLEMENTATION_SANDBOX_POLICY,
         approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
+        web_search_mode=_workflow_web_search_mode(workflow),
         auto_pr_enabled=auto_pr_enabled,
         user_message_index=0,
     )
@@ -2090,6 +2107,7 @@ def _spawn_pr_followup_monitor_run(workflow: SystemWorkflow) -> SystemAgentRun:
         cwd=workflow.cwd,
         prompt=prompt,
         approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
+        web_search_mode=_workflow_web_search_mode(workflow),
         thread_source=ThreadSource.subagent,
         purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
         workflow_id=workflow.pk,
@@ -2193,6 +2211,7 @@ def _spawn_workflow_turn(
         sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
         approval_mode=_state_string(workflow, "approval_mode") or None,
         enable_memories=_state_bool(workflow, "enable_memories"),
+        web_search_mode=_workflow_web_search_mode(workflow),
         purpose=purpose,
         workflow_id=workflow.pk,
         agent_kind=(
@@ -4017,6 +4036,10 @@ def _state_int(workflow: SystemWorkflow, key: str) -> int:
 
 def _state_bool(workflow: SystemWorkflow, key: str) -> bool:
     return workflow.state.get(key) is True
+
+
+def _workflow_web_search_mode(workflow: SystemWorkflow) -> str | None:
+    return _state_string(workflow, "web_search_mode") or None
 
 
 def _confidence_meets_threshold(confidence: str, threshold: str) -> bool:

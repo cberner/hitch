@@ -30,3 +30,11 @@
         {% endfor %}
     </select>
 </label>
+<label>
+    Web search
+    <select name="web_search_mode">
+        {% for value, label in web_search_mode_choices %}
+        <option value="{{ value }}"{% if value == default_web_search_mode %} selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+    </select>
+</label>

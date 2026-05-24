@@ -24,6 +24,7 @@ _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
 _QA_PANEL_COOKIE = "hitch_qa_panel"
 _SPEC_CRITIC_COOKIE = "hitch_spec_critic"
+_WEB_SEARCH_COOKIE = "hitch_web_search_mode"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _SELECTED_PROJECT_COOKIE = "hitch_selected_project_id"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
@@ -283,6 +284,11 @@ class SettingsDialogRenderTests(TestCase):
         self.assertContains(response, "Parallel QA panel")
         self.assertContains(response, 'name="spec_critic"')
         self.assertContains(response, "Spec Critic preflight")
+        self.assertContains(response, 'name="web_search_mode"')
+        self.assertContains(response, "Web search")
+        self.assertContains(response, 'value="disabled"')
+        self.assertContains(response, 'value="cached"')
+        self.assertContains(response, 'value="live"')
         self.assertContains(response, 'name="selected_project"')
         self.assertContains(response, "All projects")
         self.assertContains(response, "Create project")
@@ -416,6 +422,7 @@ class SettingsDialogRenderTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _seed_cookies(self.client, **{_SPEC_CRITIC_COOKIE: "true"})
+
         _configure_codex(
             mock_codex,
             models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
@@ -425,6 +432,22 @@ class SettingsDialogRenderTests(TestCase):
         response = self.client.get(reverse("index"))
 
         self.assertContains(response, 'name="spec_critic" value="true" checked')
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_saved_web_search_setting_renders_selected(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _seed_cookies(self.client, **{_WEB_SEARCH_COOKIE: "live"})
+        _configure_codex(
+            mock_codex,
+            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+        )
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, 'value="live" selected')
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -996,6 +1019,20 @@ class UpdateSettingsViewTests(TestCase):
             ),
             ("memories disabled", {}, {}, _ENABLE_MEMORIES_COOKIE, "false"),
             (
+                "web search live",
+                {"web_search_mode": "live"},
+                {},
+                _WEB_SEARCH_COOKIE,
+                "live",
+            ),
+            (
+                "web search default",
+                {"web_search_mode": ""},
+                {_WEB_SEARCH_COOKIE: "live"},
+                _WEB_SEARCH_COOKIE,
+                "",
+            ),
+            (
                 "selected project",
                 {"selected_project": str(project.pk)},
                 {},
@@ -1066,6 +1103,12 @@ class UpdateSettingsViewTests(TestCase):
                 {"spec_critic": "yes"},
             ),
             (
+                "web search setting",
+                _WEB_SEARCH_COOKIE,
+                "live",
+                {"web_search_mode": "yes"},
+            ),
+            (
                 "selected project",
                 _SELECTED_PROJECT_COOKIE,
                 "1",
@@ -1081,6 +1124,67 @@ class UpdateSettingsViewTests(TestCase):
 
                 self.assertEqual(response.status_code, 400)
                 self.assertNotIn(cookie, response.cookies)
+
+
+class AuthenticatedWebSearchSettingsTests(TestCase):
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_account_web_search_setting_renders_selected(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        user_model = get_user_model()
+        user = user_model.objects.create_user(
+            "dev@example.com", password="StrongPass123!"
+        )
+        UserSettings.objects.create(user=user, web_search_mode="cached")
+        self.client.force_login(user)
+        _configure_codex(
+            mock_codex,
+            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+        )
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'value="cached" selected')
+        self.assertEqual(_cookie_value(response, _WEB_SEARCH_COOKIE), "cached")
+
+    def test_update_settings_saves_web_search_to_account(self) -> None:
+        user_model = get_user_model()
+        user = user_model.objects.create_user(
+            "dev@example.com", password="StrongPass123!"
+        )
+        UserSettings.objects.create(user=user, web_search_mode="disabled")
+        self.client.force_login(user)
+
+        response = self.client.post(
+            reverse("update_settings"),
+            data={"web_search_mode": "live"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        settings = UserSettings.objects.get(user=user)
+        self.assertEqual(settings.web_search_mode, "live")
+        self.assertEqual(_cookie_value(response, _WEB_SEARCH_COOKIE), "live")
+
+    def test_login_imports_web_search_cookie_to_account(self) -> None:
+        user_model = get_user_model()
+        user = user_model.objects.create_user(
+            "dev@example.com", password="StrongPass123!"
+        )
+        UserSettings.objects.create(user=user, web_search_mode="disabled")
+        _seed_cookies(self.client, **{_WEB_SEARCH_COOKIE: "live"})
+
+        response = self.client.post(
+            reverse("login"),
+            data={"username": "dev@example.com", "password": "StrongPass123!"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        settings = UserSettings.objects.get(user=user)
+        self.assertEqual(settings.web_search_mode, "live")
+        self.assertEqual(_cookie_value(response, _WEB_SEARCH_COOKIE), "live")
 
 
 class UpdateArchivedSessionVisibilityViewTests(TestCase):
