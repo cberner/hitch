@@ -430,6 +430,11 @@
         }
         .empty p { margin: 0; font-size: 0.95rem; }
         .empty .hint { font-size: 0.82rem; color: var(--text-faint); margin-top: 0.5rem; }
+        .load-more {
+            display: flex;
+            justify-content: center;
+            margin: 1rem 0 0;
+        }
 
         .archive-toast {
             position: fixed;
@@ -758,6 +763,9 @@
             </li>
             {% endfor %}
         </ul>
+        {% if next_sessions_url %}
+        <div class="load-more"><a class="button secondary" href="{{ next_sessions_url }}">Load more</a></div>
+        {% endif %}
         {% else %}
         <div class="empty">
             <p>{% if system_session_list %}No system sessions found.{% else %}No sessions found.{% endif %}</p>

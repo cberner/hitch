@@ -696,6 +696,7 @@ class ArchivedSessionTokenUsage(models.Model):
     total_tokens = models.PositiveBigIntegerField(default=0)
     context_tokens = models.PositiveBigIntegerField(default=0)
     model_context_window = models.PositiveBigIntegerField(default=0)
+    daily_usage = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
