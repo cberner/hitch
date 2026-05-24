@@ -6,13 +6,15 @@ import json
 import logging
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from django.db import IntegrityError, models, transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
-from openai_codex.generated.v2_all import ThreadSource
+from openai_codex import AppServerError, Codex
+from openai_codex.generated.v2_all import GetAccountRateLimitsResponse, ThreadSource
 
 from hitch.main import codex_events, codex_pool, demo
 from hitch.main.diffs import build_worktree_diff_text
@@ -104,6 +106,8 @@ _PR_GATE_PENDING = "pending"
 _CI_PASSING_STATUSES = frozenset(
     {"neutral", "pass", "passed", "skipped", "success", "successful"}
 )
+_AUTO_PROPOSAL_QUOTA_THRESHOLD_FRACTION = 0.5
+_SECONDS_PER_MINUTE = 60
 _CI_PENDING_STATUSES = frozenset(
     {
         "completed",
@@ -733,6 +737,8 @@ def maybe_start_auto_proposal_workflows(*, project: Project | None = None) -> in
     )
     if project is not None:
         orders = orders.filter(project=project)
+    if orders.exists() and _auto_proposals_paused_by_usage_quota():
+        return 0
 
     started = 0
     for standing_order_id in orders.order_by("created_at", "id").values_list(
@@ -741,6 +747,64 @@ def maybe_start_auto_proposal_workflows(*, project: Project | None = None) -> in
         if _maybe_start_auto_proposal_workflow(standing_order_id):
             started += 1
     return started
+
+
+def _auto_proposals_paused_by_usage_quota() -> bool:
+    try:
+        config = codex_pool.app_server_config()
+        with Codex(config=config) as codex:
+            response = codex._client.request(
+                "account/rateLimits/read",
+                None,
+                response_model=GetAccountRateLimitsResponse,
+            )
+    except AppServerError:
+        return False
+    except Exception:
+        logger.exception(
+            "failed to fetch account rate limits for auto-proposal quota pause"
+        )
+        return False
+
+    now = timezone.now()
+    for window in (response.rate_limits.primary, response.rate_limits.secondary):
+        if window is not None and _rate_limit_window_below_auto_proposal_quota(
+            window, now=now
+        ):
+            return True
+    return False
+
+
+def _rate_limit_window_below_auto_proposal_quota(
+    window: Any, *, now: datetime
+) -> bool:
+    used_percent = getattr(window, "used_percent", None)
+    resets_at = getattr(window, "resets_at", None)
+    duration_mins = getattr(window, "window_duration_mins", None)
+    if used_percent is None or resets_at is None or duration_mins is None:
+        return False
+
+    try:
+        used = float(used_percent)
+        reset_timestamp = float(resets_at)
+        duration_seconds = float(duration_mins) * _SECONDS_PER_MINUTE
+    except (TypeError, ValueError):
+        return False
+    if duration_seconds <= 0:
+        return False
+
+    if timezone.is_naive(now):
+        now = now.replace(tzinfo=UTC)
+    remaining_percent = 100 - max(0.0, min(100.0, used))
+    reset_at = datetime.fromtimestamp(reset_timestamp, tz=UTC)
+    seconds_until_reset = max(
+        0.0, min((reset_at - now).total_seconds(), duration_seconds)
+    )
+    expected_remaining_percent = (seconds_until_reset / duration_seconds) * 100
+    pause_threshold = (
+        expected_remaining_percent * _AUTO_PROPOSAL_QUOTA_THRESHOLD_FRACTION
+    )
+    return remaining_percent < pause_threshold
 
 
 def _maybe_start_auto_proposal_workflow(standing_order_id: int) -> bool:
