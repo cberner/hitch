@@ -37,6 +37,7 @@ from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.csrf import csrf_exempt, csrf_protect
 from django.views.decorators.http import require_http_methods
 from openai_codex import AppServerError, Codex
+from openai_codex.errors import InvalidRequestError
 from openai_codex.generated.v2_all import (
     GetAccountRateLimitsResponse,
     RateLimitSnapshot,
@@ -629,8 +630,13 @@ def _session_list_page(
     current_project: Project | None,
     system_only: bool,
 ) -> SessionListPage:
-    hidden_thread_ids = system_agents.hidden_thread_ids()
-    system_thread_ids = hidden_thread_ids | _demo_system_thread_ids() if system_only else set()
+    accepted_visible_thread_ids = system_agents.accepted_visible_system_thread_ids()
+    hidden_thread_ids = system_agents.hidden_thread_ids(
+        accepted_visible_thread_ids=accepted_visible_thread_ids
+    )
+    system_thread_ids = (
+        hidden_thread_ids | _demo_system_thread_ids() if system_only else set()
+    )
     runs_by_thread_id = (
         _system_agent_runs_by_thread_id(system_thread_ids) if system_only else {}
     )
@@ -651,6 +657,7 @@ def _session_list_page(
             project_cache=project_cache,
             include_archived=current_settings.show_archived_sessions,
             system_only=system_only,
+            accepted_visible_thread_ids=accepted_visible_thread_ids,
         )
     if current_settings.show_archived_sessions:
         return _merged_session_list_page_from_codex(
@@ -664,6 +671,7 @@ def _session_list_page(
             instances_by_thread_id=instances_by_thread_id,
             project_cache=project_cache,
             system_only=system_only,
+            accepted_visible_thread_ids=accepted_visible_thread_ids,
         )
     active = _visible_session_page_from_codex(
         codex,
@@ -678,6 +686,7 @@ def _session_list_page(
         archived=False,
         cursor_param="cursor",
         system_only=system_only,
+        accepted_visible_thread_ids=accepted_visible_thread_ids,
     )
     if active.needs_materialized_order:
         # QA runs are DB-owned activity that can reorder main sessions across
@@ -695,6 +704,7 @@ def _session_list_page(
             project_cache=project_cache,
             include_archived=False,
             system_only=system_only,
+            accepted_visible_thread_ids=accepted_visible_thread_ids,
         )
     if active.materialized_order:
         done = not bool(active.next_offset)
@@ -734,10 +744,18 @@ def _materialized_session_list_page_from_codex(
     project_cache: dict[str, Project | None],
     include_archived: bool,
     system_only: bool,
+    accepted_visible_thread_ids: set[str],
 ) -> SessionListPage:
     threads = _all_threads(codex)
     if include_archived:
         threads.extend(_all_threads(codex, archived=True))
+    _add_thread_derived_hidden_ids(
+        hidden_thread_ids,
+        system_thread_ids,
+        threads,
+        system_only=system_only,
+        accepted_visible_thread_ids=accepted_visible_thread_ids,
+    )
     metadata_by_thread = _metadata_by_thread_id(threads)
     qa_updated_at_by_main_thread = _qa_activity_updated_at_by_main_thread_id(
         threads, hidden_thread_ids
@@ -791,6 +809,7 @@ def _merged_session_list_page_from_codex(
     instances_by_thread_id: dict[str, CodexInstance],
     project_cache: dict[str, Project | None],
     system_only: bool,
+    accepted_visible_thread_ids: set[str],
 ) -> SessionListPage:
     active = _session_page_source(request, archived=False, cursor_param="cursor")
     archived = _session_page_source(
@@ -819,6 +838,7 @@ def _merged_session_list_page_from_codex(
                 instances_by_thread_id=instances_by_thread_id,
                 project_cache=project_cache,
                 system_only=system_only,
+                accepted_visible_thread_ids=accepted_visible_thread_ids,
             )
             is not None
         ]
@@ -848,6 +868,7 @@ def _merged_session_list_page_from_codex(
             project_cache=project_cache,
             include_archived=True,
             system_only=system_only,
+            accepted_visible_thread_ids=accepted_visible_thread_ids,
         )
     active_cursor, active_offset, active_done = _source_next_cursor(active)
     archived_cursor, archived_offset, archived_done = _source_next_cursor(archived)
@@ -887,6 +908,7 @@ def _peek_source_session(
     instances_by_thread_id: dict[str, CodexInstance],
     project_cache: dict[str, Project | None],
     system_only: bool,
+    accepted_visible_thread_ids: set[str],
 ) -> dict[str, Any] | None:
     if source.candidate is not None or source.exhausted:
         return source.candidate
@@ -898,6 +920,13 @@ def _peek_source_session(
             source.seen_cursors.add(source.cursor)
             source.page = _thread_list_page(
                 codex, archived=source.archived, cursor=source.cursor
+            )
+            _add_thread_derived_hidden_ids(
+                hidden_thread_ids,
+                system_thread_ids,
+                source.page.threads,
+                system_only=system_only,
+                accepted_visible_thread_ids=accepted_visible_thread_ids,
             )
             source.next_page_cursor = source.page.next_cursor
             source.metadata_by_thread = _metadata_by_thread_id(source.page.threads)
@@ -986,6 +1015,7 @@ def _visible_session_page_from_codex(
     archived: bool,
     cursor_param: str,
     system_only: bool,
+    accepted_visible_thread_ids: set[str],
 ) -> VisibleSessionPage:
     cursor = request.GET.get(cursor_param, "")
     offset = _non_negative_int(request.GET.get(_cursor_offset_param(cursor_param), ""))
@@ -1001,6 +1031,13 @@ def _visible_session_page_from_codex(
             return VisibleSessionPage(_sort_session_rows(sessions), "", 0)
         seen_cursors.add(cursor)
         page = _thread_list_page(codex, archived=archived, cursor=cursor)
+        _add_thread_derived_hidden_ids(
+            hidden_thread_ids,
+            system_thread_ids,
+            page.threads,
+            system_only=system_only,
+            accepted_visible_thread_ids=accepted_visible_thread_ids,
+        )
         can_materialize_qa_activity = (
             materialized_fallback_allowed
             and not system_only
@@ -1125,6 +1162,22 @@ def _page_has_cross_page_qa_activity(
     )
 
 
+def _add_thread_derived_hidden_ids(
+    hidden_thread_ids: set[str],
+    system_thread_ids: set[str],
+    threads: Iterable[Any],
+    *,
+    system_only: bool,
+    accepted_visible_thread_ids: set[str],
+) -> None:
+    thread_hidden_ids = system_agents.hidden_thread_ids_from_threads(
+        threads, accepted_visible_thread_ids=accepted_visible_thread_ids
+    )
+    hidden_thread_ids.update(thread_hidden_ids)
+    if system_only:
+        system_thread_ids.update(thread_hidden_ids)
+
+
 def _sort_session_rows(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(
         sessions,
@@ -1194,14 +1247,24 @@ def _session_row_for_thread(
     }
     if system_only:
         run = runs_by_thread_id.get(thread_id)
-        instance = run.instance if run is not None else instances_by_thread_id.get(thread_id)
-        if instance is None:
-            return None
+        instance = (
+            run.instance if run is not None else instances_by_thread_id.get(thread_id)
+        )
         row.update(
             {
-                "detail_url": reverse("system_session", kwargs={"session_id": thread_id}),
-                "system_kind": _system_agent_run_label(run, instance),
-                "system_status": _system_agent_status(run, instance),
+                "detail_url": reverse(
+                    "system_session", kwargs={"session_id": thread_id}
+                ),
+                "system_kind": (
+                    _system_agent_run_label(run, instance)
+                    if run is not None or instance is not None
+                    else "Hitch system"
+                ),
+                "system_status": (
+                    _system_agent_status(run, instance)
+                    if run is not None or instance is not None
+                    else "untracked"
+                ),
             }
         )
     return row
@@ -1215,7 +1278,9 @@ def _project_for_thread_cached(
 ) -> Project | None:
     thread_id = getattr(thread, "id", "")
     metadata = metadata_by_thread.get(thread_id) if isinstance(thread_id, str) else None
-    if metadata is not None and (metadata.project_id is not None or metadata.project_cleared):
+    if metadata is not None and (
+        metadata.project_id is not None or metadata.project_cleared
+    ):
         return metadata.project
     cwd = _thread_cwd(thread)
     if not cwd:
@@ -1405,7 +1470,14 @@ def system_session(request: HttpRequest, session_id: str) -> HttpResponse:
     if instance is None and run_id is None:
         instance = _system_agent_instance_for_thread(session_id)
     if instance is None:
-        raise Http404("system session not found")
+        if run_id is not None:
+            raise Http404("system session not found")
+        return _render_session_detail(
+            request,
+            session_id,
+            read_only=True,
+            require_system_agent_thread=True,
+        )
     return _render_session_detail(
         request,
         session_id,
@@ -2005,6 +2077,7 @@ def _render_session_detail(
     display_title: str | None = None,
     system_prompt: str = "",
     hide_demo_agent_entries: bool = True,
+    require_system_agent_thread: bool = False,
 ) -> HttpResponse:
     # Sweep stuck workers before reading status: a worker that died without
     # writing a terminal status would otherwise leave the page in "streaming"
@@ -2021,8 +2094,17 @@ def _render_session_detail(
         # different worker) need ``thread/resume`` to read them off disk.
         # The resume response already carries the full thread including turns,
         # so a follow-up ``thread/read`` would just be a redundant round-trip.
-        resumed = codex._client.thread_resume(session_id)
+        try:
+            resumed = codex._client.thread_resume(session_id)
+        except InvalidRequestError as exc:
+            if require_system_agent_thread and _thread_resume_missing_or_invalid(exc):
+                raise Http404("system session not found") from None
+            raise
         thread = resumed.thread
+        if require_system_agent_thread and not system_agents.hitch_system_agent_thread(
+            thread
+        ):
+            raise Http404("system session not found")
         models_data = _models_for_plan_mode_fallback(codex)
         resolved_settings = _resolved_settings(request, models_data)
         settings = resolved_settings.values
@@ -2162,6 +2244,16 @@ def _render_session_detail(
     )
     _apply_cookie_updates(response, cookie_updates)
     return response
+
+
+def _thread_resume_missing_or_invalid(exc: InvalidRequestError) -> bool:
+    message = exc.message.lower()
+    return "invalid thread id" in message or bool(
+        re.search(
+            r"\bthread(?:\s+id)?(?:\s+\S+)?\s+not found\b",
+            message,
+        )
+    )
 
 
 @require_http_methods(["GET", "POST"])
@@ -2704,7 +2796,15 @@ def _system_agent_run_detail_title(
 
 
 def _lifetime_token_usage_for(threads: list[Any]) -> dict[str, Any]:
-    hidden_thread_ids = system_agents.hidden_thread_ids()
+    accepted_visible_thread_ids = system_agents.accepted_visible_system_thread_ids()
+    hidden_thread_ids = system_agents.hidden_thread_ids(
+        accepted_visible_thread_ids=accepted_visible_thread_ids
+    )
+    hidden_thread_ids.update(
+        system_agents.hidden_thread_ids_from_threads(
+            threads, accepted_visible_thread_ids=accepted_visible_thread_ids
+        )
+    )
     cached_usage_by_thread_id = _token_usage_caches_by_thread_id(threads)
     total_usage = _empty_lifetime_token_usage()
     session_usage = _empty_lifetime_token_usage()

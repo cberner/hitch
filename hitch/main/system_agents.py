@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1104,7 +1105,19 @@ def start_spec_critic_workflow(
     return workflow
 
 
-def hidden_thread_ids() -> set[str]:
+def accepted_visible_system_thread_ids() -> set[str]:
+    return set(
+        ProposedSession.objects.filter(
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            candidate_session__isnull=False,
+            accepted_session=models.F("candidate_session"),
+        ).values_list("candidate_session__thread_id", flat=True)
+    )
+
+
+def hidden_thread_ids(
+    *, accepted_visible_thread_ids: set[str] | None = None
+) -> set[str]:
     hidden_ids = set(
         SystemAgentRun.objects.exclude(thread_id="")
         .exclude(agent_kind="demo")
@@ -1118,14 +1131,34 @@ def hidden_thread_ids() -> set[str]:
         .values_list("thread_id", flat=True)
         .distinct()
     )
-    visible_ids = set(
-        ProposedSession.objects.filter(
-            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
-            candidate_session__isnull=False,
-            accepted_session=models.F("candidate_session"),
-        ).values_list("candidate_session__thread_id", flat=True)
-    )
-    return hidden_ids - visible_ids
+    if accepted_visible_thread_ids is None:
+        accepted_visible_thread_ids = accepted_visible_system_thread_ids()
+    return hidden_ids - accepted_visible_thread_ids
+
+
+def hidden_thread_ids_from_threads(
+    threads: Iterable[Any], *, accepted_visible_thread_ids: set[str] | None = None
+) -> set[str]:
+    hidden_ids = {
+        thread_id
+        for thread in threads
+        if isinstance(thread_id := getattr(thread, "id", None), str)
+        and hitch_system_agent_thread(thread)
+    }
+    if accepted_visible_thread_ids is None:
+        accepted_visible_thread_ids = accepted_visible_system_thread_ids()
+    return hidden_ids - accepted_visible_thread_ids
+
+
+def hitch_system_agent_thread(thread: Any) -> bool:
+    thread_source = _thread_metadata_value(getattr(thread, "thread_source", None))
+    return thread_source == ThreadSource.subagent.value
+
+
+def _thread_metadata_value(value: Any) -> str:
+    root = getattr(value, "root", value)
+    raw = getattr(root, "value", root)
+    return raw if isinstance(raw, str) else ""
 
 
 def active_workflow_for_thread(main_thread_id: str) -> SystemWorkflow | None:
