@@ -62,6 +62,13 @@ class AutoMergeReviewPatch:
     base_sha: str = ""
 
 
+@dataclass(frozen=True)
+class CachedIndexEntry:
+    mode: str
+    blob_sha: str
+    skip_worktree: bool
+
+
 def local_branch_names(repo_path: str | Path) -> list[str]:
     """Return local branch names for a repo, or an empty list when unavailable."""
     try:
@@ -357,15 +364,17 @@ def _worktree_index_entry(
     if "\n" in relpath or "\r" in relpath:
         raise LocalBranchMergeError("auto merge does not support paths with newlines")
     cached_entry = _cached_index_entry(source_repo, relpath, hooks_path=hooks_path)
-    if cached_entry is not None and cached_entry[0] == "160000":
+    if cached_entry is not None and cached_entry.mode == "160000":
         return _submodule_index_entry(
             source_repo,
             relpath,
-            cached_sha=cached_entry[1],
+            cached_sha=cached_entry.blob_sha,
             hooks_path=hooks_path,
         )
     path = source_repo / relpath
     if not path.exists() and not path.is_symlink():
+        if cached_entry is not None and cached_entry.skip_worktree:
+            return cached_entry.mode, cached_entry.blob_sha
         return None
     if path.is_dir():
         return None
@@ -390,19 +399,21 @@ def _worktree_index_entry(
 
 def _cached_index_entry(
     source_repo: Path, relpath: str, *, hooks_path: Path | None
-) -> tuple[str, str] | None:
+) -> CachedIndexEntry | None:
     output = _git(
         source_repo,
-        ["ls-files", "-s", "--", relpath],
+        ["ls-files", "-s", "-t", "--", relpath],
         hooks_path=hooks_path,
     ).strip()
     if not output:
         return None
-    meta = output.splitlines()[0].split("\t", 1)[0]
+    first = output.splitlines()[0]
+    skip_worktree = first.startswith("S ")
+    meta = first.split("\t", 1)[0]
     parts = meta.split()
-    if len(parts) < 2:
+    if len(parts) < 3:
         return None
-    return parts[0], parts[1]
+    return CachedIndexEntry(parts[1], parts[2], skip_worktree)
 
 
 def _submodule_index_entry(
