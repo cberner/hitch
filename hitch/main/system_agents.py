@@ -2506,7 +2506,9 @@ def _pr_followup_monitor_prompt(
         "success for checks whose conclusion is success, neutral, or skipped; use "
         "pending for queued, running, or completed-without-conclusion checks; use "
         "failure for failed, errored, cancelled, timed-out, "
-        "or action-required checks. For unresolved_threads, failing_jobs, and "
+        "or action-required checks. Normalize review_signal to one of approved, "
+        "thumbs_up, changes_requested, commented, or none. For unresolved_threads, "
+        "failing_jobs, and "
         "pending_jobs, prefer safe structured identifier objects with path, line, "
         "url, id, name, status, or conclusion fields. For each structured list "
         "item include every safe identifier key from the schema, using null for "
@@ -3848,8 +3850,9 @@ def _merge_conflicts_gate(handoff: dict[str, Any]) -> dict[str, Any]:
 
 
 def _review_gate(handoff: dict[str, Any]) -> dict[str, Any]:
-    signal = str(handoff.get("review_signal") or "").lower()
+    signal = _normalize_review_signal(handoff.get("review_signal"))
     unresolved_count = handoff.get("unresolved_thread_count")
+    unresolved_threads = handoff.get("unresolved_threads")
     draft = handoff.get("draft")
     if signal == "changes_requested":
         return _pr_gate(
@@ -3866,6 +3869,15 @@ def _review_gate(handoff: dict[str, Any]) -> dict[str, Any]:
             "Review",
             _PR_GATE_BLOCKED,
             f"{unresolved_count} unresolved review thread(s).",
+            _review_feedback(handoff, "Address the unresolved review threads."),
+            actionable=True,
+        )
+    if _pr_list_has_items(unresolved_threads):
+        return _pr_gate(
+            _PR_GATE_REVIEW,
+            "Review",
+            _PR_GATE_BLOCKED,
+            "Unresolved review thread details were observed.",
             _review_feedback(handoff, "Address the unresolved review threads."),
             actionable=True,
         )
@@ -3908,6 +3920,23 @@ def _review_gate(handoff: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _normalize_review_signal(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    signal = value.strip().lower().replace("-", "_").replace(" ", "_")
+    if signal in {"approved", "approval", "approve", "lgtm"}:
+        return "approved"
+    if signal in {"+1", "thumbs_up", "thumbsup", "thumbs"}:
+        return "thumbs_up"
+    if signal in {"changes_requested", "change_requested", "request_changes"}:
+        return "changes_requested"
+    if signal in {"comment", "commented", "comments", "reviewed"}:
+        return "commented"
+    if signal in {"none", "no_review", "no_reviews"}:
+        return ""
+    return signal
+
+
 def _review_feedback(handoff: dict[str, Any], fallback: str) -> str:
     threads = handoff.get("unresolved_threads")
     if not isinstance(threads, list) or not threads:
@@ -3922,6 +3951,17 @@ def _review_feedback(handoff: dict[str, Any], fallback: str) -> str:
 
 def _ci_gate(handoff: dict[str, Any]) -> dict[str, Any]:
     status = _normalize_ci_status(handoff.get("ci_status"))
+    if _pr_list_has_items(handoff.get("failing_jobs")):
+        details = _ci_feedback_details(handoff)
+        return _pr_gate(
+            _PR_GATE_CI,
+            "CI",
+            _PR_GATE_BLOCKED,
+            "Failing CI jobs were observed.",
+            "Fix the failing CI checks, push the fix, and keep the PR focused."
+            + (f"\n\n{details}" if details else ""),
+            actionable=True,
+        )
     if status == "success":
         return _pr_gate(_PR_GATE_CI, "CI", _PR_GATE_PASSED, "CI is passing.")
     if status == "failure":
@@ -3968,6 +4008,10 @@ def _ci_feedback_details(handoff: dict[str, Any]) -> str:
             f"{pending}"
         )
     return "\n\n".join(parts)
+
+
+def _pr_list_has_items(value: Any) -> bool:
+    return isinstance(value, list) and any(item for item in value)
 
 
 def _format_pr_list_for_feedback(value: Any) -> str:
