@@ -19,9 +19,10 @@ from django.contrib.auth import get_user_model
 from django.core import signing
 from django.core.exceptions import SuspiciousOperation
 from django.core.files.uploadedfile import SimpleUploadedFile
-from django.db import IntegrityError
+from django.db import IntegrityError, connection
 from django.http import HttpResponse
 from django.test import Client, RequestFactory, TestCase, override_settings
+from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from openai_codex.errors import AppServerError, MethodNotFoundError
 from openai_codex.generated.v2_all import SortDirection, ThreadSortKey
@@ -463,9 +464,10 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Session 0")
         self.assertContains(response, 'href="/?cursor=page-2"')
         client.thread_list.assert_called_once_with(
-            limit=50,
+            limit=100,
             sort_key=ThreadSortKey.updated_at,
             sort_direction=SortDirection.desc,
+            use_state_db_only=True,
         )
 
     @patch("hitch.main.views.discover_repos")
@@ -508,9 +510,10 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Session 0")
         self.assertContains(response, 'href="/?cursor=page-2"')
         client.thread_list.assert_called_once_with(
-            limit=50,
+            limit=100,
             sort_key=ThreadSortKey.updated_at,
             sort_direction=SortDirection.desc,
+            use_state_db_only=True,
         )
 
     @patch("hitch.main.views.discover_repos")
@@ -713,6 +716,49 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    def test_qa_activity_can_promote_main_session_from_later_in_fetch_page(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        ordinary = [
+            _session(f"ordinary-{i}", name=f"Ordinary {i}", updated_at=1000 - i)
+            for i in range(50)
+        ]
+        hidden_qa = _session("qa-thread", name="Hidden QA", updated_at=5000)
+        main = _session("main-thread", name="Main session", updated_at=1)
+        _setup_codex(mock_codex, threads=[hidden_qa, *ordinary, main])
+        mock_discover.return_value = []
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="qa-thread",
+            cwd="/repo",
+            prompt="qa",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind="pr_qa",
+            thread_id="qa-thread",
+            instance=instance,
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, "Main session")
+        self.assertContains(response, "Ordinary 48")
+        self.assertNotContains(response, "Ordinary 49")
+        self.assertNotContains(response, "Hidden QA")
+        self.assertContains(response, "materialized_order=1")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
     def test_mid_pagination_qa_activity_keeps_cursor_order(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -838,6 +884,50 @@ class IndexViewTests(TestCase):
             return SimpleNamespace(data=[*ordinary, hidden_qa], next_cursor="page-2")
 
         client.thread_list.side_effect = thread_list
+        mock_discover.return_value = []
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="qa-thread",
+            cwd="/repo",
+            prompt="qa",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind="pr_qa",
+            thread_id="qa-thread",
+            instance=instance,
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, "Main session")
+        self.assertContains(response, "Ordinary 48")
+        self.assertNotContains(response, "Ordinary 49")
+        self.assertNotContains(response, "Hidden QA")
+        self.assertContains(response, "materialized_order=1")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_archived_merge_promotes_main_session_from_later_in_fetch_page(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _seed_cookies(self.client, **{_SHOW_ARCHIVED_COOKIE: "true"})
+        ordinary = [
+            _session(f"ordinary-{i}", name=f"Ordinary {i}", updated_at=1000 - i)
+            for i in range(50)
+        ]
+        hidden_qa = _session("qa-thread", name="Hidden QA", updated_at=5000)
+        main = _session("main-thread", name="Main session", updated_at=1)
+        _setup_codex(mock_codex, threads=[hidden_qa, *ordinary, main])
         mock_discover.return_value = []
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -1275,9 +1365,10 @@ class IndexViewTests(TestCase):
         self.assertNotContains(response, "Archived session")
         client = mock_codex.return_value.__enter__.return_value
         client.thread_list.assert_called_once_with(
-            limit=50,
+            limit=100,
             sort_key=ThreadSortKey.updated_at,
             sort_direction=SortDirection.desc,
+            use_state_db_only=True,
         )
 
     @patch("hitch.main.views.discover_repos")
@@ -1419,14 +1510,16 @@ class IndexViewTests(TestCase):
         self.assertLess(body.index("Archived session"), body.index("Active session"))
         client = mock_codex.return_value.__enter__.return_value
         client.thread_list.assert_any_call(
-            limit=50,
+            limit=100,
             sort_key=ThreadSortKey.updated_at,
             sort_direction=SortDirection.desc,
+            use_state_db_only=True,
         )
         client.thread_list.assert_any_call(
-            limit=50,
+            limit=100,
             sort_key=ThreadSortKey.updated_at,
             sort_direction=SortDirection.desc,
+            use_state_db_only=True,
             archived=True,
         )
 
@@ -1568,8 +1661,19 @@ class IndexViewTests(TestCase):
         cache = ArchivedSessionTokenUsage.objects.get(thread_id="archived")
         self.assertEqual(cache.total_tokens, 3_000)
         client = mock_codex.return_value.__enter__.return_value
-        client.thread_list.assert_any_call()
-        client.thread_list.assert_any_call(archived=True)
+        client.thread_list.assert_any_call(
+            limit=100,
+            sort_key=ThreadSortKey.updated_at,
+            sort_direction=SortDirection.desc,
+            use_state_db_only=True,
+        )
+        client.thread_list.assert_any_call(
+            limit=100,
+            sort_key=ThreadSortKey.updated_at,
+            sort_direction=SortDirection.desc,
+            use_state_db_only=True,
+            archived=True,
+        )
 
     def test_lifetime_human_token_formatter(self) -> None:
         self.assertEqual(views._format_human_token_count(-1), "0")
@@ -1704,6 +1808,37 @@ class IndexViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         latest_usage.assert_not_called()
         usage_history.assert_not_called()
+
+    def test_lifetime_usage_bulk_loads_cached_usage(self) -> None:
+        threads = [_session(f"active-{i}", name=f"Active {i}") for i in range(3)]
+        for thread in threads:
+            ArchivedSessionTokenUsage.objects.create(
+                thread_id=thread.id,
+                input_tokens=400,
+                cached_input_tokens=50,
+                output_tokens=600,
+                total_tokens=1_000,
+                daily_usage={"2025-01-05": {"input": 350, "output": 600, "cached": 50}},
+            )
+
+        with (
+            CaptureQueriesContext(connection) as queries,
+            patch("hitch.main.views.rollout.latest_token_usage") as latest_usage,
+            patch("hitch.main.views.rollout.token_usage_history") as usage_history,
+        ):
+            lifetime_usage = views._lifetime_token_usage_for(threads)
+
+        cache_queries = [
+            query
+            for query in queries.captured_queries
+            if 'FROM "main_archivedsessiontokenusage"' in query["sql"]
+        ]
+        self.assertEqual(len(cache_queries), 1)
+        latest_usage.assert_not_called()
+        usage_history.assert_not_called()
+        self.assertEqual(lifetime_usage["total"]["input"], "1.1K")
+        self.assertEqual(lifetime_usage["total"]["output"], "1.8K")
+        self.assertEqual(lifetime_usage["total"]["cached"], "150")
 
     @patch("hitch.main.views.Codex")
     def test_usage_page_marks_lifetime_unavailable_when_session_list_fails(
