@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import threading
 import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -21,7 +22,7 @@ from django.contrib.auth.forms import AuthenticationForm, UserCreationForm
 from django.core.exceptions import SuspiciousOperation
 from django.core.files.uploadedfile import UploadedFile
 from django.core.files.uploadhandler import FileUploadHandler
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, close_old_connections, transaction
 from django.db.models import QuerySet
 from django.http import (
     Http404,
@@ -83,6 +84,10 @@ from hitch.main.worktrees import (
 
 logger = logging.getLogger(__name__)
 
+_USAGE_TOKEN_REFRESH_LOCK = threading.Lock()
+_USAGE_TOKEN_REFRESH_IN_FLIGHT = False
+_USAGE_TOKEN_REFRESH_BATCH_SIZE = 25
+
 
 class SettingsValues(NamedTuple):
     model: str
@@ -101,6 +106,18 @@ class SettingsValues(NamedTuple):
     last_selected_repo: str
     selected_project_id: int | None
     enable_memories: bool
+
+
+@dataclass(frozen=True)
+class _UsageTokenRefreshItem:
+    thread_id: str
+    path: str
+
+
+@dataclass(frozen=True)
+class _UsageTokenRefreshThread:
+    id: str
+    path: str
 
 
 class ResolvedSettings(NamedTuple):
@@ -1846,12 +1863,15 @@ def usage(request: HttpRequest) -> HttpResponse:
         current_settings = resolved_settings.values
         cookie_updates = resolved_settings.cookie_updates
         rate_limits = _fetch_rate_limits(codex)
-        usage_threads = _threads_for_usage(codex)
-        lifetime_usage = (
-            _lifetime_token_usage_for(usage_threads)
-            if usage_threads is not None
-            else None
-        )
+        usage_index_available = _ensure_usage_session_index(codex)
+    usage_metadata = _metadata_rows_for_usage() if usage_index_available else []
+    lifetime_usage = (
+        _lifetime_token_usage_for_metadata(usage_metadata)
+        if usage_index_available
+        else None
+    )
+    if usage_index_available:
+        _schedule_usage_token_refresh(usage_metadata)
     settings_dialog_context = _settings_dialog_context(current_settings, models_data)
     response = render(
         request,
@@ -2767,7 +2787,10 @@ def _latest_token_usage_numbers_for(thread: Any) -> dict[str, int] | None:
 
 
 def _rollout_path_for(thread: Any) -> Path | None:
-    path = getattr(thread, "path", None)
+    return _rollout_path_from_value(getattr(thread, "path", None))
+
+
+def _rollout_path_from_value(path: object) -> Path | None:
     if not isinstance(path, str) or not path:
         return None
     rollout_path = Path(path)
@@ -2804,6 +2827,19 @@ def _cached_token_usage_has_daily_usage(
     cache: ArchivedSessionTokenUsage, rollout_path: Path | None
 ) -> bool:
     return rollout_path is None or bool(_daily_token_usage_from_cache(cache))
+
+
+def _cached_token_usage_has_counts(cache: ArchivedSessionTokenUsage) -> bool:
+    return any(
+        value > 0
+        for value in (
+            cache.input_tokens,
+            cache.cached_input_tokens,
+            cache.output_tokens,
+            cache.total_tokens,
+            cache.context_tokens,
+        )
+    )
 
 
 def _token_usage_cache_defaults(
@@ -2890,37 +2926,6 @@ def _non_cached_input_tokens(usage: Mapping[str, int]) -> int:
 
 def _display_total_tokens(usage: Mapping[str, int]) -> int:
     return max(usage.get("total_tokens", 0) - usage.get("cached_input_tokens", 0), 0)
-
-
-def _threads_for_usage(codex: Codex) -> list[Any] | None:
-    threads: list[Any] = []
-    failed = False
-    try:
-        threads.extend(_all_threads(codex))
-    except AppServerError:
-        logger.warning("failed to list active sessions for usage page")
-        failed = True
-    try:
-        threads.extend(_all_threads(codex, archived=True))
-    except AppServerError:
-        logger.warning("failed to list archived sessions for usage page")
-        failed = True
-    if failed:
-        return None
-    return _dedupe_usage_threads(threads)
-
-
-def _dedupe_usage_threads(threads: list[Any]) -> list[Any]:
-    seen: set[str] = set()
-    deduped: list[Any] = []
-    for thread in threads:
-        thread_id = getattr(thread, "id", None)
-        if isinstance(thread_id, str):
-            if thread_id in seen:
-                continue
-            seen.add(thread_id)
-        deduped.append(thread)
-    return deduped
 
 
 def _system_agent_runs_by_thread_id(
@@ -3139,6 +3144,318 @@ def _system_agent_run_detail_title(
     return f"{label} log" if label else "System session"
 
 
+def _metadata_rows_for_usage() -> list[SessionMetadata]:
+    return list(
+        SessionMetadata.objects.exclude(codex_updated_at__isnull=True).only(
+            "thread_id",
+            "codex_path",
+            "codex_thread_source",
+            "usage_last_checked_at",
+        )
+    )
+
+
+def _ensure_usage_session_index(codex: Codex) -> bool:
+    active_complete = session_index.is_complete(archived=False)
+    archived_complete = session_index.is_complete(archived=True)
+    if not active_complete or not archived_complete:
+        result = session_index.refresh_from_codex(
+            codex,
+            projects=list(Project.objects.all()),
+            include_active=not active_complete,
+            include_archived=not archived_complete,
+            use_state_db_only=False,
+            max_pages=None,
+        )
+        if result.failed:
+            return False
+        return session_index.is_complete(archived=False) and session_index.is_complete(
+            archived=True
+        )
+
+    refresh_active = session_index.should_refresh(archived=False)
+    refresh_archived = session_index.should_refresh(archived=True)
+    if not refresh_active and not refresh_archived:
+        return True
+    session_index.refresh_from_codex(
+        codex,
+        projects=list(Project.objects.all()),
+        include_active=refresh_active,
+        include_archived=refresh_archived,
+        use_state_db_only=False,
+        max_pages=None,
+    )
+    return True
+
+
+def _lifetime_token_usage_for_metadata(
+    metadata_rows: list[SessionMetadata],
+) -> dict[str, Any]:
+    accepted_visible_thread_ids = system_agents.accepted_visible_system_thread_ids()
+    hidden_thread_ids = system_agents.hidden_thread_ids(
+        accepted_visible_thread_ids=accepted_visible_thread_ids
+    )
+    hidden_thread_ids.update(
+        metadata.thread_id
+        for metadata in metadata_rows
+        if metadata.codex_thread_source == "subagent"
+        and metadata.thread_id not in accepted_visible_thread_ids
+    )
+    cached_usage_by_thread_id = _token_usage_caches_by_thread_ids(
+        metadata.thread_id for metadata in metadata_rows
+    )
+    total_usage = _empty_lifetime_token_usage()
+    session_usage = _empty_lifetime_token_usage()
+    system_usage = _empty_lifetime_token_usage()
+    total_by_date: dict[str, dict[str, int]] = {}
+    session_by_date: dict[str, dict[str, int]] = {}
+    system_by_date: dict[str, dict[str, int]] = {}
+    refresh_pending_count = 0
+    for metadata in metadata_rows:
+        cache = cached_usage_by_thread_id.get(metadata.thread_id)
+        if cache is None:
+            refresh_pending_count += 1
+            continue
+        if not _usage_cache_can_render(metadata, cache):
+            refresh_pending_count += 1
+            continue
+        usage = _token_usage_from_cache(cache)
+        daily_usage = _daily_token_usage_from_cache(cache)
+        is_system = metadata.thread_id in hidden_thread_ids
+        total_usage["input"] += _non_cached_input_tokens(usage)
+        total_usage["output"] += usage.get("output_tokens", 0)
+        total_usage["cached"] += usage.get("cached_input_tokens", 0)
+        bucket = system_usage if is_system else session_usage
+        bucket["input"] += _non_cached_input_tokens(usage)
+        bucket["output"] += usage.get("output_tokens", 0)
+        bucket["cached"] += usage.get("cached_input_tokens", 0)
+        _merge_daily_token_usage(total_by_date, daily_usage)
+        _merge_daily_token_usage(
+            system_by_date if is_system else session_by_date,
+            daily_usage,
+        )
+    lifetime_usage = _formatted_lifetime_token_usage(
+        total_usage=total_usage,
+        session_usage=session_usage,
+        system_usage=system_usage,
+        total_by_date=total_by_date,
+        session_by_date=session_by_date,
+        system_by_date=system_by_date,
+    )
+    lifetime_usage["refresh_pending"] = refresh_pending_count > 0
+    lifetime_usage["refresh_pending_count"] = refresh_pending_count
+    return lifetime_usage
+
+
+def _schedule_usage_token_refresh(metadata_rows: list[SessionMetadata]) -> None:
+    cached_usage_by_thread_id = _token_usage_caches_by_thread_ids(
+        metadata.thread_id for metadata in metadata_rows
+    )
+    items = _usage_token_refresh_items(metadata_rows, cached_usage_by_thread_id)
+    if not items:
+        return
+    transaction.on_commit(lambda: _start_usage_token_refresh_thread(items))
+
+
+def _usage_token_refresh_items(
+    metadata_rows: list[SessionMetadata],
+    cached_usage_by_thread_id: Mapping[str, ArchivedSessionTokenUsage],
+) -> list[_UsageTokenRefreshItem]:
+    path_repair_candidates: list[SessionMetadata] = []
+    file_backed_candidates: list[SessionMetadata] = []
+    for metadata in metadata_rows:
+        if not metadata.thread_id:
+            continue
+        cache = cached_usage_by_thread_id.get(metadata.thread_id)
+        if not _usage_token_refresh_needed(metadata, cache):
+            continue
+        if _usage_token_refresh_needs_path_repair(metadata):
+            path_repair_candidates.append(metadata)
+        else:
+            file_backed_candidates.append(metadata)
+    path_repair_candidates.sort(key=_usage_token_refresh_sort_key)
+    file_backed_candidates.sort(key=_usage_token_refresh_sort_key)
+    path_repair_limit = (
+        _USAGE_TOKEN_REFRESH_BATCH_SIZE
+        if not file_backed_candidates
+        else _USAGE_TOKEN_REFRESH_BATCH_SIZE // 2
+    )
+    selected = path_repair_candidates[:path_repair_limit]
+    selected.extend(
+        file_backed_candidates[: _USAGE_TOKEN_REFRESH_BATCH_SIZE - len(selected)]
+    )
+    if len(selected) < _USAGE_TOKEN_REFRESH_BATCH_SIZE:
+        extra_path_repair_count = _USAGE_TOKEN_REFRESH_BATCH_SIZE - len(selected)
+        selected.extend(
+            path_repair_candidates[
+                path_repair_limit : path_repair_limit + extra_path_repair_count
+            ]
+        )
+    return [
+        _UsageTokenRefreshItem(thread_id=metadata.thread_id, path=metadata.codex_path)
+        for metadata in selected
+    ]
+
+
+def _usage_token_refresh_sort_key(metadata: SessionMetadata) -> tuple[float, str]:
+    last_checked_at = _updated_at_seconds(metadata.usage_last_checked_at)
+    return (
+        last_checked_at if last_checked_at is not None else 0.0,
+        metadata.thread_id,
+    )
+
+
+def _usage_token_refresh_needs_path_repair(metadata: SessionMetadata) -> bool:
+    return not metadata.codex_path or _rollout_path_from_value(metadata.codex_path) is None
+
+
+def _usage_token_refresh_needed(
+    metadata: SessionMetadata, cache: ArchivedSessionTokenUsage | None
+) -> bool:
+    if not metadata.codex_path:
+        return True
+    rollout_path = _rollout_path_from_value(metadata.codex_path)
+    if rollout_path is None:
+        return True
+    if cache is None:
+        return True
+    if not _cached_token_usage_is_current(cache, rollout_path):
+        return True
+    return _cached_token_usage_has_counts(cache) and not _cached_token_usage_has_daily_usage(
+        cache, rollout_path
+    )
+
+
+def _usage_cache_can_render(
+    metadata: SessionMetadata, cache: ArchivedSessionTokenUsage
+) -> bool:
+    rollout_path = _rollout_path_from_value(metadata.codex_path)
+    if rollout_path is None:
+        return True
+    return _cached_token_usage_is_current(cache, rollout_path)
+
+
+def _start_usage_token_refresh_thread(items: list[_UsageTokenRefreshItem]) -> None:
+    global _USAGE_TOKEN_REFRESH_IN_FLIGHT
+    with _USAGE_TOKEN_REFRESH_LOCK:
+        if _USAGE_TOKEN_REFRESH_IN_FLIGHT:
+            return
+        _USAGE_TOKEN_REFRESH_IN_FLIGHT = True
+    try:
+        threading.Thread(
+            target=_refresh_usage_token_cache_best_effort,
+            args=(items,),
+            name="usage-token-refresh",
+            daemon=True,
+        ).start()
+    except Exception:
+        with _USAGE_TOKEN_REFRESH_LOCK:
+            _USAGE_TOKEN_REFRESH_IN_FLIGHT = False
+        logger.exception("failed to start usage token refresh thread")
+
+
+def _refresh_usage_token_cache_best_effort(
+    items: Iterable[_UsageTokenRefreshItem],
+) -> None:
+    global _USAGE_TOKEN_REFRESH_IN_FLIGHT
+    try:
+        close_old_connections()
+        item_list = list(items)
+        cached_usage_by_thread_id = _token_usage_caches_by_thread_ids(
+            item.thread_id for item in item_list
+        )
+        with contextlib.ExitStack() as stack:
+            codex: Codex | None = None
+            projects: list[Project] | None = None
+            for item in item_list:
+                try:
+                    path = item.path
+                    if not path or _rollout_path_from_value(path) is None:
+                        if codex is None:
+                            config = codex_pool.app_server_config(enable_memories=False)
+                            codex = stack.enter_context(Codex(config=config))
+                        if projects is None:
+                            projects = list(Project.objects.all())
+                        path = _refresh_missing_usage_metadata_path(
+                            codex, item.thread_id, projects=projects
+                        )
+                    if not path:
+                        continue
+                    rollout_path = _rollout_path_from_value(path)
+                    if rollout_path is None:
+                        continue
+                    thread = _UsageTokenRefreshThread(id=item.thread_id, path=path)
+                    snapshot = _token_usage_snapshot_for(
+                        thread,
+                        cached_usage=cached_usage_by_thread_id.get(
+                            item.thread_id, _MISSING_TOKEN_USAGE_CACHE
+                        ),
+                    )
+                    if snapshot is None and _rollout_file_parses_as_jsonl(rollout_path):
+                        _write_zero_token_usage_cache(item.thread_id, rollout_path)
+                except Exception:
+                    logger.exception("failed to refresh token usage for %s", item.thread_id)
+                finally:
+                    _mark_usage_token_refresh_checked(item.thread_id)
+    finally:
+        close_old_connections()
+        with _USAGE_TOKEN_REFRESH_LOCK:
+            _USAGE_TOKEN_REFRESH_IN_FLIGHT = False
+
+
+def _refresh_missing_usage_metadata_path(
+    codex: Codex, thread_id: str, *, projects: list[Project]
+) -> str:
+    try:
+        resumed = codex._client.thread_resume(thread_id)
+    except (AppServerError, InvalidRequestError):
+        logger.warning("failed to refresh usage metadata for %s", thread_id)
+        return ""
+    except Exception:
+        logger.exception("failed to refresh usage metadata for %s", thread_id)
+        return ""
+    thread = getattr(resumed, "thread", None)
+    metadata = session_index.upsert_thread(thread, projects=projects)
+    if metadata is not None:
+        return metadata.codex_path
+    path = getattr(thread, "path", None)
+    return path if isinstance(path, str) else ""
+
+
+def _mark_usage_token_refresh_checked(thread_id: str) -> None:
+    SessionMetadata.objects.filter(thread_id=thread_id).update(
+        usage_last_checked_at=timezone.now()
+    )
+
+
+def _rollout_file_parses_as_jsonl(rollout_path: Path) -> bool:
+    try:
+        text = rollout_path.read_text()
+    except (OSError, UnicodeDecodeError):
+        return False
+    for raw in text.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            json.loads(raw)
+        except json.JSONDecodeError:
+            return False
+    return True
+
+
+def _write_zero_token_usage_cache(thread_id: str, rollout_path: Path) -> None:
+    ArchivedSessionTokenUsage.objects.update_or_create(
+        thread_id=thread_id,
+        defaults={
+            **_token_usage_cache_defaults(
+                rollout_path, {key: 0 for key in _TOKEN_USAGE_KEYS}
+            ),
+            "daily_usage": {},
+        },
+    )
+
+
 def _lifetime_token_usage_for(threads: list[Any]) -> dict[str, Any]:
     accepted_visible_thread_ids = system_agents.accepted_visible_system_thread_ids()
     hidden_thread_ids = system_agents.hidden_thread_ids(
@@ -3182,6 +3499,25 @@ def _lifetime_token_usage_for(threads: list[Any]) -> dict[str, Any]:
             system_by_date if is_system else session_by_date,
             snapshot["daily_usage"],
         )
+    return _formatted_lifetime_token_usage(
+        total_usage=total_usage,
+        session_usage=session_usage,
+        system_usage=system_usage,
+        total_by_date=total_by_date,
+        session_by_date=session_by_date,
+        system_by_date=system_by_date,
+    )
+
+
+def _formatted_lifetime_token_usage(
+    *,
+    total_usage: Mapping[str, int],
+    session_usage: Mapping[str, int],
+    system_usage: Mapping[str, int],
+    total_by_date: Mapping[str, Mapping[str, int]],
+    session_by_date: Mapping[str, Mapping[str, int]],
+    system_by_date: Mapping[str, Mapping[str, int]],
+) -> dict[str, Any]:
     return {
         "total": {
             **_format_lifetime_token_usage(total_usage),
@@ -3204,17 +3540,26 @@ def _lifetime_token_usage_for(threads: list[Any]) -> dict[str, Any]:
 def _token_usage_caches_by_thread_id(
     threads: Iterable[Any],
 ) -> dict[str, ArchivedSessionTokenUsage]:
-    thread_ids: list[str] = []
+    return _token_usage_caches_by_thread_ids(
+        thread_id
+        for thread in threads
+        if isinstance(thread_id := getattr(thread, "id", None), str)
+    )
+
+
+def _token_usage_caches_by_thread_ids(
+    thread_ids: Iterable[str],
+) -> dict[str, ArchivedSessionTokenUsage]:
+    ids: list[str] = []
     seen: set[str] = set()
-    for thread in threads:
-        thread_id = getattr(thread, "id", None)
-        if not isinstance(thread_id, str) or not thread_id or thread_id in seen:
+    for thread_id in thread_ids:
+        if not thread_id or thread_id in seen:
             continue
         seen.add(thread_id)
-        thread_ids.append(thread_id)
-    if not thread_ids:
+        ids.append(thread_id)
+    if not ids:
         return {}
-    return ArchivedSessionTokenUsage.objects.in_bulk(thread_ids, field_name="thread_id")
+    return ArchivedSessionTokenUsage.objects.in_bulk(ids, field_name="thread_id")
 
 
 def _empty_lifetime_token_usage() -> dict[str, int]:
