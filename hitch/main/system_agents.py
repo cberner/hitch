@@ -1081,6 +1081,13 @@ def hidden_thread_ids() -> set[str]:
         .values_list("thread_id", flat=True)
         .distinct()
     )
+    hidden_ids.update(
+        CodexInstance.objects.filter(purpose=CodexInstance.PURPOSE_SYSTEM_AGENT)
+        .exclude(thread_id="")
+        .exclude(agent_kind=demo.DEMO_AGENT_KIND)
+        .values_list("thread_id", flat=True)
+        .distinct()
+    )
     visible_ids = set(
         ProposedSession.objects.filter(
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
