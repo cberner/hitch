@@ -9,6 +9,7 @@ import base64
 import json
 import os
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -463,6 +464,120 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "data-archive-undo")
         self.assertLess(body.index("Newer session"), body.index("Middle session"))
         self.assertLess(body.index("Middle session"), body.index("Older session"))
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_session_updated_at_includes_hidden_qa_agent_activity(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        active = _session("active", name="Active session", updated_at=1000)
+        other = _session("other", name="Other session", updated_at=1500)
+        qa_thread = _session("qa-thread", name="Hidden QA", updated_at=2000)
+        _setup_codex(mock_codex, threads=[active, other, qa_thread])
+        mock_discover.return_value = []
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="active",
+            cwd="/repo",
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="qa-thread",
+            cwd="/repo",
+            prompt="qa",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="qa-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        response = self.client.get(reverse("index"))
+        body = response.content.decode()
+        sessions_context = cast(list[dict[str, Any]], response.context["sessions"])
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [session["id"] for session in sessions_context], ["active", "other"]
+        )
+        self.assertEqual(sessions_context[0]["updated_at"], 2000)
+        self.assertContains(response, 'data-updated-at="2000"')
+        self.assertLess(body.index("Active session"), body.index("Other session"))
+        self.assertNotContains(response, "Hidden QA")
+
+    def test_qa_activity_lookup_is_scoped_to_current_sessions(self) -> None:
+        current_workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="active",
+            cwd="/repo",
+        )
+        current_instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="active-qa-thread",
+            cwd="/repo",
+            prompt="qa",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=current_workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+        )
+        current_run = SystemAgentRun.objects.create(
+            workflow=current_workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="active-qa-thread",
+            instance=current_instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+        old_workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="old-session",
+            cwd="/repo",
+        )
+        old_instance = CodexInstance.objects.create(
+            pid=2,
+            thread_id="old-qa-thread",
+            cwd="/repo",
+            prompt="qa",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=old_workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+        )
+        old_run = SystemAgentRun.objects.create(
+            workflow=old_workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="old-qa-thread",
+            instance=old_instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+        old_time = datetime.fromtimestamp(1900, UTC)
+        current_time = datetime.fromtimestamp(2000, UTC)
+        newer_old_time = datetime.fromtimestamp(3000, UTC)
+        SystemWorkflow.objects.filter(pk=current_workflow.pk).update(updated_at=old_time)
+        SystemAgentRun.objects.filter(pk=current_run.pk).update(
+            updated_at=current_time
+        )
+        SystemWorkflow.objects.filter(pk=old_workflow.pk).update(
+            updated_at=newer_old_time
+        )
+        SystemAgentRun.objects.filter(pk=old_run.pk).update(updated_at=newer_old_time)
+
+        updated_at_by_main_thread = views._qa_activity_updated_at_by_main_thread_id(
+            [_session("active", updated_at=1000)],
+            system_agents.hidden_thread_ids(),
+        )
+
+        self.assertEqual(updated_at_by_main_thread, {"active": 2000})
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")

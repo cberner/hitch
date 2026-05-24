@@ -470,7 +470,16 @@ def index(request: HttpRequest) -> HttpResponse:
         if current_settings.show_archived_sessions:
             threads.extend(_all_threads(codex, archived=True))
     hidden_thread_ids = system_agents.hidden_thread_ids()
-    threads = sorted(threads, key=lambda s: s.updated_at, reverse=True)
+    qa_updated_at_by_main_thread = _qa_activity_updated_at_by_main_thread_id(
+        threads, hidden_thread_ids
+    )
+    threads = sorted(
+        threads,
+        key=lambda s: _updated_at_sort_key(
+            _session_updated_at(s, qa_updated_at_by_main_thread)
+        ),
+        reverse=True,
+    )
     projects = list(Project.objects.all())
     current_project = _selected_project_for_settings(current_settings, projects)
     metadata_by_thread = _metadata_by_thread_id(threads)
@@ -488,7 +497,9 @@ def index(request: HttpRequest) -> HttpResponse:
             {
                 "id": thread.id,
                 "cwd": thread.cwd,
-                "updated_at": thread.updated_at,
+                "updated_at": _session_updated_at(
+                    thread, qa_updated_at_by_main_thread
+                ),
                 "display_title": _display_title(thread),
                 "name_value": getattr(thread, "name", None) or "",
                 "is_archived": is_archived,
@@ -1530,6 +1541,88 @@ def _system_agent_runs_by_thread_id(
     for run in runs:
         by_thread_id.setdefault(run.thread_id, run)
     return by_thread_id
+
+
+def _qa_activity_updated_at_by_main_thread_id(
+    threads: Iterable[Any], hidden_thread_ids: set[str]
+) -> dict[str, Any]:
+    current_thread_ids = {
+        thread_id
+        for thread in threads
+        if isinstance((thread_id := getattr(thread, "id", None)), str)
+    }
+    current_main_thread_ids = current_thread_ids - hidden_thread_ids
+    if not current_main_thread_ids:
+        return {}
+
+    hidden_updated_at_by_thread_id: dict[str, Any] = {}
+    for thread in threads:
+        thread_id = getattr(thread, "id", None)
+        if isinstance(thread_id, str) and thread_id in hidden_thread_ids:
+            hidden_updated_at_by_thread_id[thread_id] = getattr(
+                thread, "updated_at", None
+            )
+
+    runs = (
+        SystemAgentRun.objects.filter(
+            workflow__kind=SystemWorkflow.KIND_PR_QA,
+            workflow__main_thread_id__in=current_main_thread_ids,
+        )
+        .exclude(thread_id="")
+        .select_related("workflow")
+    )
+    updated_at_by_main_thread: dict[str, Any] = {}
+    for run in runs:
+        main_thread_id = run.workflow.main_thread_id
+        if not main_thread_id:
+            continue
+        run_updated_at = hidden_updated_at_by_thread_id.get(run.thread_id)
+        if _updated_at_seconds(run_updated_at) is None:
+            run_updated_at = _latest_updated_at(run.updated_at, run.workflow.updated_at)
+        updated_at_by_main_thread[main_thread_id] = _latest_updated_at(
+            updated_at_by_main_thread.get(main_thread_id),
+            run_updated_at,
+        )
+    return updated_at_by_main_thread
+
+
+def _session_updated_at(
+    thread: Any, qa_updated_at_by_main_thread: Mapping[str, Any]
+) -> Any:
+    return _latest_updated_at(
+        getattr(thread, "updated_at", None),
+        qa_updated_at_by_main_thread.get(getattr(thread, "id", "")),
+    )
+
+
+def _updated_at_sort_key(updated_at: Any) -> float:
+    seconds = _updated_at_seconds(updated_at)
+    return seconds if seconds is not None else 0.0
+
+
+def _updated_at_seconds(updated_at: Any) -> float | None:
+    if isinstance(updated_at, bool):
+        return None
+    if isinstance(updated_at, int | float):
+        return float(updated_at)
+    if isinstance(updated_at, datetime):
+        return updated_at.timestamp()
+    return None
+
+
+def _latest_updated_at(*values: Any) -> Any:
+    latest: Any = None
+    latest_seconds: float | None = None
+    for value in values:
+        seconds = _updated_at_seconds(value)
+        if seconds is None:
+            continue
+        if latest_seconds is None or seconds > latest_seconds:
+            latest = value
+            latest_seconds = seconds
+    if isinstance(latest, datetime):
+        return int(latest.timestamp())
+    return latest if latest is not None else 0
 
 
 def _demo_system_thread_ids() -> set[str]:
