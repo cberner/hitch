@@ -7583,6 +7583,12 @@ class StandingOrderViewTests(TestCase):
         self.assertContains(response, "Web search: Live")
         self.assertContains(response, "Auto-proposal: Off")
         self.assertContains(response, "Auto merge: main")
+        self.assertContains(response, 'class="order-menu" data-order-menu')
+        self.assertContains(response, 'role="menuitem">Run</button>')
+        self.assertContains(
+            response,
+            f'action="{reverse("run_standing_order", args=[order.pk])}"',
+        )
         self.assertContains(
             response,
             f'data-edit-url="{reverse("edit_standing_order", args=[order.pk])}"',
@@ -8290,6 +8296,48 @@ class StandingOrderViewTests(TestCase):
         order.refresh_from_db()
         self.assertEqual(order.title, "Improve tests")
         self.assertEqual(order.goal, "Find useful test coverage increments.")
+
+    @patch("hitch.main.views.system_agents.start_standing_order_workflow")
+    def test_run_single_starts_selected_project_order(
+        self, mock_start: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other_project = Project.objects.create(name="Other", repo_path="/other")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        StandingOrder.objects.create(
+            project=other_project,
+            title="Other order",
+            goal="Should not run.",
+        )
+
+        response = self.client.post(reverse("run_standing_order", args=[order.pk]))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(mock_start.call_count, 1)
+        self.assertEqual(mock_start.call_args.kwargs["standing_order"], order)
+
+    @patch("hitch.main.views.system_agents.start_standing_order_workflow")
+    def test_run_single_is_scoped_to_selected_project(
+        self, mock_start: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other_project = Project.objects.create(name="Other", repo_path="/other")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        order = StandingOrder.objects.create(
+            project=other_project,
+            title="Other order",
+            goal="Should not run.",
+        )
+
+        response = self.client.post(reverse("run_standing_order", args=[order.pk]))
+
+        self.assertEqual(response.status_code, 404)
+        mock_start.assert_not_called()
 
     @patch("hitch.main.views.system_agents.start_standing_order_workflow")
     def test_run_all_starts_each_selected_project_order(
