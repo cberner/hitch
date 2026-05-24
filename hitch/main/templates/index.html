@@ -808,11 +808,13 @@
                     <option
                         value="{{ project.pk }}"{% if project.pk == current_new_session_project_id %} selected{% endif %}
                         data-auto-pr-default="{% if project.auto_pr_mode == project_auto_pr_on %}true{% elif project.auto_pr_mode == project_auto_pr_off %}false{% elif current_auto_pr %}true{% else %}false{% endif %}"
+                        data-auto-qa-default="{% if current_auto_qa %}true{% else %}false{% endif %}"
                     >{{ project.name }}</option>
                     {% endfor %}
                     <option
                         value="{{ bare_repo_project_value }}"{% if not current_new_session_project_id %} selected{% endif %}
                         data-auto-pr-default="{% if current_auto_pr %}true{% else %}false{% endif %}"
+                        data-auto-qa-default="{% if current_auto_qa %}true{% else %}false{% endif %}"
                     >&lt;bare repo&gt;</option>
                 </select>
             </label>
@@ -851,6 +853,11 @@
                 <span>Auto-PR</span>
                 <input type="hidden" name="auto_pr" value="false">
                 <input type="checkbox" name="auto_pr" value="true" data-new-session-auto-pr {% if current_new_session_auto_pr %}checked{% endif %}>
+            </label>
+            <label class="checkbox-label">
+                <span>Auto-QA</span>
+                <input type="hidden" name="auto_qa" value="false">
+                <input type="checkbox" name="auto_qa" value="true" data-new-session-auto-qa {% if current_new_session_auto_qa %}checked{% endif %}>
             </label>
             <div class="actions">
                 <button type="button" class="button secondary" data-new-session-cancel>Cancel</button>
@@ -1257,6 +1264,7 @@
             const newSessionRepoField = newSessionForm && newSessionForm.querySelector("[data-new-session-repo-field]");
             const newSessionRepoSelect = newSessionForm && newSessionForm.querySelector("[data-new-session-repo]");
             const newSessionAutoPr = newSessionForm && newSessionForm.querySelector("[data-new-session-auto-pr]");
+            const newSessionAutoQa = newSessionForm && newSessionForm.querySelector("[data-new-session-auto-qa]");
             const newSessionSlashCommand = newSessionForm && newSessionForm.querySelector("[data-slash-command]");
             const newSessionSlashTrigger = newSessionForm && newSessionForm.querySelector("[data-slash-trigger]");
             const newSessionSlashMenu = newSessionForm && newSessionForm.querySelector("[data-slash-menu]");
@@ -1286,6 +1294,9 @@
                 if (newSessionAutoPr) {
                     const option = newSessionProjectSelect.selectedOptions && newSessionProjectSelect.selectedOptions[0];
                     newSessionAutoPr.checked = option && option.dataset.autoPrDefault === "true";
+                    if (newSessionAutoQa) {
+                        newSessionAutoQa.checked = Boolean(option && option.dataset.autoQaDefault === "true" && !newSessionAutoPr.checked);
+                    }
                 }
             }
             function setNewSessionPlanMode(enabled) {
@@ -1383,6 +1394,14 @@
             }
             if (newSessionProjectSelect) {
                 newSessionProjectSelect.addEventListener("change", syncNewSessionProjectFields);
+            }
+            if (newSessionAutoPr && newSessionAutoQa) {
+                newSessionAutoPr.addEventListener("change", () => {
+                    if (newSessionAutoPr.checked) newSessionAutoQa.checked = false;
+                });
+                newSessionAutoQa.addEventListener("change", () => {
+                    if (newSessionAutoQa.checked) newSessionAutoPr.checked = false;
+                });
             }
             if (newSessionForm) {
                 newSessionForm.addEventListener("keydown", (event) => {

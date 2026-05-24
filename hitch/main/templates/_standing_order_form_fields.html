@@ -18,9 +18,14 @@
     Autonomy
     <select name="autonomy" required>
         {% for value, label in autonomy_choices %}
-        <option value="{{ value }}"{% if value == default_autonomy %} selected{% endif %}>{{ label }}</option>
+        <option value="{{ value }}"{% if value == default_autonomy %} selected{% endif %} data-auto-qa-supported="{% if value in auto_qa_supported_autonomies %}true{% else %}false{% endif %}">{{ label }}</option>
         {% endfor %}
     </select>
+</label>
+<label class="checkbox-label" data-standing-order-auto-qa-field>
+    <span>Auto-QA</span>
+    <input type="hidden" name="auto_qa" value="false">
+    <input type="checkbox" name="auto_qa" value="true" data-standing-order-auto-qa {% if default_auto_qa %}checked{% endif %}{% if default_autonomy in auto_qa_supported_autonomies %}{% else %} disabled{% endif %}>
 </label>
 <label>
     Confidence threshold

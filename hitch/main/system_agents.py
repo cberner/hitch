@@ -54,6 +54,9 @@ PR_SLASH_PROMPT = (
     "Polish it, get it ready, and open or update the PR."
 )
 SYSTEM_AGENT_APPROVAL_MODE = "auto_review"
+# Auto-QA starts without an explicit user action; do not launch hidden QA
+# agents when the source turn requires approvals that hidden threads cannot surface.
+AUTO_QA_BLOCKED_APPROVAL_MODES = frozenset({"deny_all", "prompt_user"})
 STANDING_ORDER_IMPLEMENTATION_SANDBOX_POLICY = "workspaceWrite"
 QA_WORKFLOW_MAX_ITERATIONS = 10
 PR_QA_WORKFLOW_MAX_ITERATIONS = QA_WORKFLOW_MAX_ITERATIONS + 3
@@ -797,6 +800,7 @@ def start_spec_critic_workflow(
     web_search_mode: str | None = None,
     initial_user_message_index: int = 0,
     auto_pr_enabled: bool = False,
+    auto_qa_enabled: bool = False,
     qa_panel_enabled: bool = False,
 ) -> SystemWorkflow:
     """Start hidden Spec Critic agents before the visible implementation turn."""
@@ -821,6 +825,7 @@ def start_spec_critic_workflow(
                     "web_search_mode": web_search_mode or "",
                     "next_user_message_index": max(initial_user_message_index, 0),
                     "auto_pr_enabled": auto_pr_enabled,
+                    "auto_qa_enabled": auto_qa_enabled,
                     "qa_panel_enabled": qa_panel_enabled,
                 },
             )
@@ -915,23 +920,31 @@ def on_codex_instance_finished(instance: CodexInstance) -> bool:
     ):
         _handle_workflow_user_turn_finished(instance)
         return True
-    _maybe_start_auto_pr_workflow(instance)
+    _maybe_start_auto_review_workflow(instance)
     return False
 
 
-def _maybe_start_auto_pr_workflow(instance: CodexInstance) -> None:
+def _maybe_start_auto_review_workflow(instance: CodexInstance) -> None:
     if (
         instance.purpose != CodexInstance.PURPOSE_USER
         or instance.workflow_id is not None
-        or not instance.auto_pr_enabled
+        or not (instance.auto_pr_enabled or instance.auto_qa_enabled)
         or instance.plan_mode
         or instance.status != CodexInstance.STATUS_COMPLETED
     ):
         return
+    automation = "auto_pr" if instance.auto_pr_enabled else "auto_qa"
+    if automation == "auto_qa" and _auto_qa_requires_visible_approval(instance):
+        return
+    trigger_field = (
+        "auto_pr_triggered_at"
+        if automation == "auto_pr"
+        else "auto_qa_triggered_at"
+    )
     claimed = CodexInstance.objects.filter(
         pk=instance.pk,
-        auto_pr_triggered_at__isnull=True,
-    ).update(auto_pr_triggered_at=timezone.now())
+        **{f"{trigger_field}__isnull": True},
+    ).update(**{trigger_field: timezone.now()})
     if not claimed:
         return
     try:
@@ -950,27 +963,44 @@ def _maybe_start_auto_pr_workflow(instance: CodexInstance) -> None:
         }
         if instance.qa_panel_enabled:
             workflow_kwargs["qa_panel_enabled"] = True
+        if automation == "auto_qa":
+            workflow_kwargs["open_pr_on_lgtm"] = False
         workflow = start_pr_qa_workflow(**workflow_kwargs)
         if isinstance(workflow, SystemWorkflow):
-            _record_auto_pr_workflow_for_proposals(instance, workflow)
+            _record_auto_review_workflow_for_proposals(
+                instance, workflow, automation=automation
+            )
     except Exception:
-        CodexInstance.objects.filter(pk=instance.pk).update(auto_pr_triggered_at=None)
+        CodexInstance.objects.filter(pk=instance.pk).update(**{trigger_field: None})
         raise
 
 
-def _record_auto_pr_workflow_for_proposals(
-    instance: CodexInstance, workflow: SystemWorkflow
+def _auto_qa_requires_visible_approval(instance: CodexInstance) -> bool:
+    return (
+        instance.approval_mode or SYSTEM_AGENT_APPROVAL_MODE
+    ) in AUTO_QA_BLOCKED_APPROVAL_MODES
+
+
+def _record_auto_review_workflow_for_proposals(
+    instance: CodexInstance, workflow: SystemWorkflow, *, automation: str
 ) -> None:
     metadata = SessionMetadata.objects.filter(thread_id=instance.thread_id).first()
     if metadata is None:
         return
+    if automation == "auto_qa":
+        updates: dict[str, object] = {
+            "auto_qa_status": "started",
+            "auto_qa_workflow_id": workflow.pk,
+        }
+    else:
+        updates = {
+            "auto_pr_status": "started",
+            "auto_pr_workflow_id": workflow.pk,
+        }
     for proposal in ProposedSession.objects.filter(accepted_session=metadata):
         proposal.outcome_metadata = _proposal_outcome_metadata(
             proposal,
-            {
-                "auto_pr_status": "started",
-                "auto_pr_workflow_id": workflow.pk,
-            },
+            updates,
         )
         proposal.save(update_fields=["outcome_metadata", "updated_at"])
 
@@ -1760,6 +1790,8 @@ def _handle_standing_order_agent_finished(
     workflow.save(update_fields=["status", "step", "state", "updated_at"])
 
 
+# Hidden QA subagents do not surface approval prompts in the main workflow UI.
+# Keep their approval mode fixed; workflow approval state is for visible turns.
 def _spawn_pr_qa_run(workflow: SystemWorkflow) -> SystemAgentRun:
     diff_text = build_worktree_diff_text(workflow.cwd)
     prompt = _qa_prompt(workflow.cwd, diff_text)
@@ -2094,6 +2126,7 @@ def _spawn_spec_critic_implementation_turn(
         web_search_mode=_workflow_web_search_mode(workflow),
         user_message_index=_state_int(workflow, "next_user_message_index"),
         auto_pr_enabled=_state_bool(workflow, "auto_pr_enabled"),
+        auto_qa_enabled=_state_bool(workflow, "auto_qa_enabled"),
         qa_panel_enabled=_state_bool(workflow, "qa_panel_enabled"),
     )
 
@@ -2102,6 +2135,7 @@ def _start_standing_order_implementation_session(
     workflow: SystemWorkflow, standing_order: StandingOrder, proposal: ProposedSession
 ) -> SessionMetadata:
     auto_pr_enabled = standing_order.autonomy == StandingOrder.AUTONOMY_DRAFT_PR
+    auto_qa_enabled = standing_order.auto_qa_enabled and not auto_pr_enabled
     prompt = proposal.prompt.strip() or _fallback_proposed_session_prompt(proposal)
     instance = codex_pool.spawn_new_session(
         cwd=standing_order.project.repo_path,
@@ -2111,6 +2145,7 @@ def _start_standing_order_implementation_session(
         approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
         web_search_mode=_workflow_web_search_mode(workflow),
         auto_pr_enabled=auto_pr_enabled,
+        auto_qa_enabled=auto_qa_enabled,
         user_message_index=0,
     )
     metadata, _created = SessionMetadata.objects.update_or_create(
@@ -2120,6 +2155,7 @@ def _start_standing_order_implementation_session(
             "project": standing_order.project,
             "project_cleared": False,
             "auto_pr_enabled": auto_pr_enabled,
+            "auto_qa_enabled": auto_qa_enabled,
         },
     )
     _record_proposal_automation_success(
@@ -2127,6 +2163,7 @@ def _start_standing_order_implementation_session(
         metadata,
         autonomy=standing_order.autonomy,
         auto_pr_enabled=auto_pr_enabled,
+        auto_qa_enabled=auto_qa_enabled,
     )
     return metadata
 
@@ -2147,12 +2184,15 @@ def _record_proposal_automation_success(
     *,
     autonomy: str,
     auto_pr_enabled: bool,
+    auto_qa_enabled: bool,
 ) -> None:
     proposal.outcome_status = ProposedSession.OUTCOME_ACCEPTED
     proposal.accepted_session = implementation
     note = "Standing order autonomy started an implementation session automatically."
     if auto_pr_enabled:
         note = f"{note} Auto-PR will run after that session completes."
+    elif auto_qa_enabled:
+        note = f"{note} Auto-QA will run after that session completes."
     proposal.outcome_notes = note
     proposal.outcome_metadata = _proposal_outcome_metadata(
         proposal,
@@ -2165,6 +2205,7 @@ def _record_proposal_automation_success(
             "implementation_session_id": implementation.pk,
             "implementation_thread_id": implementation.thread_id,
             "auto_pr_enabled": auto_pr_enabled,
+            "auto_qa_enabled": auto_qa_enabled,
         },
     )
     proposal.save(

@@ -31,6 +31,7 @@ def _instance(
     status: str = CodexInstance.STATUS_COMPLETED,
     agent_kind: str = "",
     auto_pr_enabled: bool = False,
+    auto_qa_enabled: bool = False,
     qa_panel_enabled: bool = False,
     plan_mode: bool = False,
     model: str = "",
@@ -57,6 +58,7 @@ def _instance(
         web_search_mode=web_search_mode,
         plan_mode=plan_mode,
         auto_pr_enabled=auto_pr_enabled,
+        auto_qa_enabled=auto_qa_enabled,
         qa_panel_enabled=qa_panel_enabled,
         events_path=events_path,
         status=status,
@@ -883,7 +885,11 @@ class SpecCriticWorkflowTests(TestCase):
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_QA_RUNNING,
-            state={"qa_panel_enabled": True, "web_search_mode": "live"},
+            state={
+                "qa_panel_enabled": True,
+                "approval_mode": "prompt_user",
+                "web_search_mode": "live",
+            },
         )
         lane_instances: list[CodexInstance] = []
         for index, lane in enumerate(system_agents._QA_PANEL_LANES):
@@ -932,6 +938,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
         kwargs = mock_spawn.call_args.kwargs
         self.assertEqual(kwargs["agent_kind"], system_agents.PR_QA_PANEL_SYNTHESIZER_AGENT_KIND)
+        self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
         self.assertEqual(kwargs["web_search_mode"], "live")
         self.assertEqual(kwargs["output_schema"], system_agents._QA_OUTPUT_SCHEMA)
         self.assertIn("final Parallel QA Panel synthesizer", kwargs["prompt"])
@@ -1123,6 +1130,91 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
 
     @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    def test_auto_qa_starts_review_workflow_after_completed_user_turn(
+        self, mock_start: MagicMock
+    ) -> None:
+        instance = _instance(
+            thread_id="main-thread",
+            auto_qa_enabled=True,
+            qa_panel_enabled=True,
+            model="gpt-5.4",
+            reasoning_effort="high",
+            sandbox_policy="workspaceWrite",
+            approval_mode="auto_review",
+            developer_instructions="Use repo conventions.",
+            enable_memories=True,
+            user_message_index=2,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        instance.refresh_from_db()
+        self.assertIsNone(instance.auto_pr_triggered_at)
+        self.assertIsNotNone(instance.auto_qa_triggered_at)
+        mock_start.assert_called_once_with(
+            main_thread_id="main-thread",
+            cwd="/repo",
+            sandbox_policy="workspaceWrite",
+            approval_mode="auto_review",
+            model="gpt-5.4",
+            reasoning_effort="high",
+            base_instructions=None,
+            developer_instructions="Use repo conventions.",
+            enable_memories=True,
+            web_search_mode=None,
+            initial_user_message_index=3,
+            qa_panel_enabled=True,
+            open_pr_on_lgtm=False,
+        )
+
+    @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_qa_hidden_qa_worker_uses_system_agent_approval_mode(
+        self, mock_spawn: MagicMock, _mock_diff: MagicMock
+    ) -> None:
+        mock_spawn.return_value = _instance(
+            thread_id="qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            auto_qa_enabled=True,
+            sandbox_policy="workspaceWrite",
+            approval_mode="approve_all",
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        instance.refresh_from_db()
+        self.assertIsNotNone(instance.auto_qa_triggered_at)
+        workflow = SystemWorkflow.objects.get(main_thread_id="main-thread")
+        self.assertEqual(workflow.state["approval_mode"], "approve_all")
+        self.assertEqual(workflow.state["sandbox_policy"], "workspaceWrite")
+        self.assertFalse(workflow.state["open_pr_on_lgtm"])
+        mock_spawn.assert_called_once()
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
+        self.assertEqual(kwargs["sandbox_policy"], "workspaceWrite")
+
+    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    def test_auto_qa_does_not_start_when_approval_requires_visible_control(
+        self, mock_start: MagicMock
+    ) -> None:
+        for approval_mode in system_agents.AUTO_QA_BLOCKED_APPROVAL_MODES:
+            with self.subTest(approval_mode=approval_mode):
+                instance = _instance(
+                    thread_id=f"main-thread-{approval_mode}",
+                    auto_qa_enabled=True,
+                    approval_mode=approval_mode,
+                )
+
+                system_agents.on_codex_instance_finished(instance)
+
+                instance.refresh_from_db()
+                self.assertIsNone(instance.auto_qa_triggered_at)
+        mock_start.assert_not_called()
+
+    @patch("hitch.main.system_agents.start_pr_qa_workflow")
     def test_auto_pr_forwards_parallel_qa_panel_setting(
         self, mock_start: MagicMock
     ) -> None:
@@ -1131,6 +1223,17 @@ class SpecCriticWorkflowTests(TestCase):
         system_agents.on_codex_instance_finished(instance)
 
         self.assertTrue(mock_start.call_args.kwargs["qa_panel_enabled"])
+
+    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    def test_auto_pr_takes_precedence_over_auto_qa(self, mock_start: MagicMock) -> None:
+        instance = _instance(auto_pr_enabled=True, auto_qa_enabled=True)
+
+        system_agents.on_codex_instance_finished(instance)
+
+        instance.refresh_from_db()
+        self.assertIsNotNone(instance.auto_pr_triggered_at)
+        self.assertIsNone(instance.auto_qa_triggered_at)
+        self.assertNotIn("open_pr_on_lgtm", mock_start.call_args.kwargs)
 
     @patch("hitch.main.system_agents.start_pr_qa_workflow")
     def test_auto_pr_does_not_stamp_when_workflow_start_fails(
@@ -1144,6 +1247,19 @@ class SpecCriticWorkflowTests(TestCase):
 
         instance.refresh_from_db()
         self.assertIsNone(instance.auto_pr_triggered_at)
+
+    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    def test_auto_qa_does_not_stamp_when_workflow_start_fails(
+        self, mock_start: MagicMock
+    ) -> None:
+        mock_start.side_effect = RuntimeError("database unavailable")
+        instance = _instance(auto_qa_enabled=True)
+
+        with self.assertRaises(RuntimeError):
+            system_agents.on_codex_instance_finished(instance)
+
+        instance.refresh_from_db()
+        self.assertIsNone(instance.auto_qa_triggered_at)
 
     @patch("hitch.main.system_agents.start_pr_qa_workflow")
     def test_auto_pr_claims_turn_before_starting_workflow(
@@ -3734,7 +3850,9 @@ class StandingOrderWorkflowTests(TestCase):
             "implementation_started",
         )
         self.assertFalse(proposal.outcome_metadata["auto_pr_enabled"])
+        self.assertFalse(proposal.outcome_metadata["auto_qa_enabled"])
         self.assertFalse(implementation.auto_pr_enabled)
+        self.assertFalse(implementation.auto_qa_enabled)
         kwargs = mock_spawn.call_args.kwargs
         self.assertEqual(kwargs["cwd"], "/repo")
         self.assertEqual(kwargs["thread_name"], "Add parser coverage")
@@ -3745,7 +3863,76 @@ class StandingOrderWorkflowTests(TestCase):
             system_agents.STANDING_ORDER_IMPLEMENTATION_SANDBOX_POLICY,
         )
         self.assertFalse(kwargs["auto_pr_enabled"])
+        self.assertFalse(kwargs["auto_qa_enabled"])
         self.assertIn("Implementation guidance:\nAdd focused tests.", kwargs["prompt"])
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_draft_patch_auto_qa_setting_enables_auto_qa_for_implementation(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        standing_order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            auto_qa_enabled=True,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            main_thread_id=system_agents._standing_order_main_thread_id(
+                standing_order.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            state={
+                "standing_order_id": standing_order.pk,
+                "candidate": {
+                    "title": "Add parser coverage",
+                    "implementation_direction": "Add focused tests.",
+                    "relevant_files": [],
+                },
+            },
+        )
+        instance = _instance(
+            thread_id="judge-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_events_file(
+                self,
+                {
+                    "confidence": "high",
+                    "summary": "This adds focused parser coverage.",
+                    "rationale": "The files are well-scoped.",
+                },
+            ),
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            thread_id="judge-thread",
+            instance=instance,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="implementation-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+            auto_qa_enabled=True,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        proposal = ProposedSession.objects.get()
+        implementation = SessionMetadata.objects.get(thread_id="implementation-thread")
+        self.assertFalse(mock_spawn.call_args.kwargs["auto_pr_enabled"])
+        self.assertTrue(mock_spawn.call_args.kwargs["auto_qa_enabled"])
+        self.assertFalse(implementation.auto_pr_enabled)
+        self.assertTrue(implementation.auto_qa_enabled)
+        self.assertFalse(proposal.outcome_metadata["auto_pr_enabled"])
+        self.assertTrue(proposal.outcome_metadata["auto_qa_enabled"])
+        self.assertIn("Auto-QA will run", proposal.outcome_notes)
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_draft_pr_autonomy_enables_auto_pr_for_implementation(
@@ -3809,12 +3996,15 @@ class StandingOrderWorkflowTests(TestCase):
         proposal = ProposedSession.objects.get()
         implementation = SessionMetadata.objects.get(thread_id="implementation-thread")
         self.assertTrue(mock_spawn.call_args.kwargs["auto_pr_enabled"])
+        self.assertFalse(mock_spawn.call_args.kwargs["auto_qa_enabled"])
         self.assertEqual(
             mock_spawn.call_args.kwargs["web_search_mode"],
             StandingOrder.WEB_SEARCH_DISABLED,
         )
         self.assertTrue(implementation.auto_pr_enabled)
+        self.assertFalse(implementation.auto_qa_enabled)
         self.assertTrue(proposal.outcome_metadata["auto_pr_enabled"])
+        self.assertFalse(proposal.outcome_metadata["auto_qa_enabled"])
         self.assertIn("Auto-PR will run", proposal.outcome_notes)
 
     @patch("hitch.main.system_agents.start_pr_qa_workflow")
@@ -3854,6 +4044,46 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertEqual(proposal.outcome_metadata["auto_pr_status"], "started")
         self.assertEqual(
             proposal.outcome_metadata["auto_pr_workflow_id"], pr_workflow.pk
+        )
+
+    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    def test_auto_qa_implementation_completion_records_qa_workflow(
+        self, mock_start: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        implementation = SessionMetadata.objects.create(
+            thread_id="implementation-thread",
+            cwd="/repo",
+            project=project,
+            auto_qa_enabled=True,
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Add parser coverage",
+            accepted_session=implementation,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            outcome_metadata={"standing_order_autonomy": StandingOrder.AUTONOMY_DRAFT_PATCH},
+        )
+        qa_workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="implementation-thread",
+            cwd="/repo",
+        )
+        mock_start.return_value = qa_workflow
+        instance = _instance(
+            thread_id="implementation-thread",
+            auto_qa_enabled=True,
+            user_message_index=0,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        mock_start.assert_called_once()
+        self.assertFalse(mock_start.call_args.kwargs["open_pr_on_lgtm"])
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_metadata["auto_qa_status"], "started")
+        self.assertEqual(
+            proposal.outcome_metadata["auto_qa_workflow_id"], qa_workflow.pk
         )
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
