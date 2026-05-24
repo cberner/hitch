@@ -10,6 +10,8 @@ from hitch.main.diffs import build_worktree_diff_text
 from hitch.main.local_merges import (
     LocalBranchMergeError,
     LocalBranchMergeResult,
+    _auto_merge_source_base_ref,
+    _source_worktree_tree,
     build_auto_merge_review_patch,
     local_branch_names,
     merge_worktree_diff_to_branch,
@@ -357,6 +359,43 @@ class LocalMergeTests(SimpleTestCase):
                 _git(repo, "show", "release:README.md"), "hello\napproved"
             )
 
+    def test_follow_up_review_ignores_legacy_source_base_without_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            session = root / "session"
+            _init_repo(repo)
+            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
+            (session / "README.md").write_text("hello\napproved\n")
+            source_tree = _source_worktree_tree(session)
+            legacy_source_base = _git(
+                session,
+                "commit-tree",
+                source_tree,
+                "-m",
+                "legacy source base without parent",
+            )
+            _git(
+                session,
+                "update-ref",
+                _auto_merge_source_base_ref(session, "refs/heads/main"),
+                legacy_source_base,
+            )
+
+            review = build_auto_merge_review_patch(session, "main")
+            result = merge_worktree_diff_to_branch(
+                session,
+                "main",
+                review.patch,
+                review.target_sha,
+            )
+
+            self.assertIn("+approved", review.patch)
+            self.assertTrue(result.changed)
+            self.assertEqual(
+                _git(repo, "show", "main:README.md"), "hello\napproved"
+            )
+
     def test_auto_merge_patch_keeps_target_commits_added_before_review(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -591,6 +630,50 @@ class LocalMergeTests(SimpleTestCase):
             _add_submodule(repo, submodule_src)
             _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
             shutil.rmtree(session / "vendor" / "lib")
+
+            with self.assertRaisesRegex(LocalBranchMergeError, "submodule changes"):
+                build_auto_merge_review_patch(session, "main")
+
+    def test_auto_merge_review_patch_preserves_sparse_submodule_entry(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            submodule_src = root / "submodule-src"
+            session = root / "session"
+            _init_repo(repo)
+            _init_repo(submodule_src)
+            _add_submodule(repo, submodule_src)
+            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
+            _git(session, "update-index", "--skip-worktree", "vendor/lib")
+            shutil.rmtree(session / "vendor" / "lib")
+            (session / "README.md").write_text("hello\napproved\n")
+
+            review = build_auto_merge_review_patch(session, "main")
+            result = merge_worktree_diff_to_branch(
+                session,
+                "main",
+                review.patch,
+                review.target_sha,
+            )
+
+            self.assertTrue(result.changed)
+            self.assertNotIn("vendor/lib", review.patch)
+            self.assertEqual(
+                _git(repo, "show", "main:README.md"), "hello\napproved"
+            )
+
+    def test_auto_merge_review_patch_rejects_file_replacing_submodule(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            submodule_src = root / "submodule-src"
+            session = root / "session"
+            _init_repo(repo)
+            _init_repo(submodule_src)
+            _add_submodule(repo, submodule_src)
+            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
+            shutil.rmtree(session / "vendor" / "lib")
+            (session / "vendor" / "lib").write_text("not a submodule\n")
 
             with self.assertRaisesRegex(LocalBranchMergeError, "submodule changes"):
                 build_auto_merge_review_patch(session, "main")
