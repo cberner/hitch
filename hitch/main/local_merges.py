@@ -95,8 +95,9 @@ def _auto_merge_source_base(
     if source_base.returncode != 0:
         return ""
     source_base_sha = source_base.stdout.strip()
-    # A recorded source base is only valid while the target still contains
-    # the target commit that source snapshot was reviewed and merged onto.
+    # Parented source-base refs record the target commit they were reviewed
+    # onto. Legacy parentless refs remain valid source baselines, but cannot
+    # enforce target-history safety retroactively.
     target_parent = _run_git(
         source_repo,
         ["rev-parse", "--verify", f"{source_base_sha}^"],
@@ -104,7 +105,7 @@ def _auto_merge_source_base(
         check=False,
     )
     if target_parent.returncode != 0:
-        return ""
+        return source_base_sha
     contains_parent = _run_git(
         source_repo,
         ["merge-base", "--is-ancestor", target_parent.stdout.strip(), target_ref],
