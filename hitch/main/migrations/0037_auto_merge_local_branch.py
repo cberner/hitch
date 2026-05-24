@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("main", "0035_codexinstance_input_image_paths"),
+        ("main", "0036_archivedsessiontokenusage_daily_usage"),
     ]
 
     operations = [
