@@ -24,8 +24,8 @@ from django.http import HttpResponse
 from django.test import Client, RequestFactory, TestCase, override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
-from openai_codex.errors import AppServerError, MethodNotFoundError
-from openai_codex.generated.v2_all import SortDirection, ThreadSortKey
+from openai_codex.errors import AppServerError, InvalidRequestError, MethodNotFoundError
+from openai_codex.generated.v2_all import SortDirection, ThreadSortKey, ThreadSource
 
 from hitch.main import codex_pool, coding_agents, demo, streaming, system_agents, views
 from hitch.main.models import (
@@ -213,6 +213,7 @@ def _session(
     cwd: str = "/repo",
     path: str | None = None,
     updated_at: int = 1,
+    thread_source: ThreadSource | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         id=session_id,
@@ -221,6 +222,7 @@ def _session(
         cwd=cwd,
         path=path,
         updated_at=updated_at,
+        thread_source=thread_source,
     )
 
 
@@ -444,6 +446,189 @@ class IndexViewTests(TestCase):
         self.assertContains(detail_response, "standing order run log")
         self.assertContains(detail_response, "System prompt")
         self.assertContains(detail_response, "standing order")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_hides_orphan_hitch_system_prompt_threads(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        visible = _session("visible", name="Visible")
+        candidate = _session(
+            "orphan-candidate",
+            name="You are Hitch's standing order agent.",
+            preview="You are Hitch's standing order agent.\n\nAnalyze the repo.",
+            thread_source=ThreadSource.subagent,
+        )
+        judge = _session(
+            "orphan-judge",
+            name="You are Hitch's standing order confidence judge.",
+            preview="You are Hitch's standing order confidence judge.\n\nJudge it.",
+            thread_source=ThreadSource.subagent,
+        )
+        candidate.turns = []
+        judge.turns = []
+        client = _setup_codex(mock_codex, threads=[visible, candidate, judge])
+        client._client.thread_resume.return_value = SimpleNamespace(thread=candidate)
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Visible")
+        self.assertNotContains(response, "You are Hitch&#x27;s standing order agent.")
+        self.assertNotContains(
+            response, "You are Hitch&#x27;s standing order confidence judge."
+        )
+
+        system_response = self.client.get(reverse("system_sessions"))
+
+        self.assertEqual(system_response.status_code, 200)
+        self.assertNotContains(system_response, "Visible")
+        self.assertContains(system_response, "You are Hitch&#x27;s standing order agent.")
+        self.assertContains(
+            system_response, "You are Hitch&#x27;s standing order confidence judge."
+        )
+        self.assertContains(
+            system_response,
+            reverse("system_session", kwargs={"session_id": "orphan-candidate"}),
+        )
+        self.assertContains(system_response, "Hitch system", count=2)
+        self.assertContains(system_response, "untracked", count=2)
+
+        detail_response = self.client.get(
+            reverse("system_session", kwargs={"session_id": "orphan-candidate"})
+        )
+
+        self.assertEqual(detail_response.status_code, 200)
+        self.assertContains(detail_response, '<body class="read-only"')
+        self.assertContains(detail_response, "You are Hitch&#x27;s standing order agent.")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_user_prompt_with_hitch_system_text_remains_visible(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        user_thread = _session(
+            "user-prefixed",
+            name="You are Hitch's standing order agent. Please help",
+            preview="You are Hitch's standing order agent.\n\nPlease explain this.",
+        )
+        user_thread.turns = []
+        client = _setup_codex(mock_codex, threads=[user_thread])
+        client._client.thread_resume.return_value = SimpleNamespace(thread=user_thread)
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response, "You are Hitch&#x27;s standing order agent. Please help"
+        )
+
+        system_detail_response = self.client.get(
+            reverse("system_session", kwargs={"session_id": "user-prefixed"})
+        )
+
+        self.assertEqual(system_detail_response.status_code, 404)
+
+    @patch("hitch.main.views.Codex")
+    def test_untracked_system_session_resume_error_is_not_404(
+        self, mock_codex: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.side_effect = AppServerError("app server down")
+
+        with self.assertRaises(AppServerError):
+            self.client.get(
+                reverse("system_session", kwargs={"session_id": "orphan-system"})
+            )
+
+    @patch("hitch.main.views.Codex")
+    def test_untracked_system_session_missing_thread_is_404(
+        self, mock_codex: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.side_effect = InvalidRequestError(
+            -32600, "thread orphan-system not found"
+        )
+
+        response = self.client.get(
+            reverse("system_session", kwargs={"session_id": "orphan-system"})
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    @patch("hitch.main.views.Codex")
+    def test_untracked_system_session_non_thread_invalid_request_is_not_404(
+        self, mock_codex: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.side_effect = InvalidRequestError(
+            -32600, "model provider not found"
+        )
+
+        with self.assertRaises(InvalidRequestError):
+            self.client.get(
+                reverse("system_session", kwargs={"session_id": "orphan-system"})
+            )
+
+    @patch("hitch.main.system_agents.accepted_visible_system_thread_ids")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_session_list_reuses_accepted_visible_thread_ids_across_pages(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_accepted_visible: MagicMock,
+    ) -> None:
+        hidden = _session(
+            "hidden-subagent",
+            name="Hidden subagent",
+            thread_source=ThreadSource.subagent,
+        )
+        visible = _session("visible", name="Visible")
+        client = _setup_codex(mock_codex)
+        mock_discover.return_value = []
+        mock_accepted_visible.return_value = set()
+
+        def thread_list(*, cursor: str | None = None, **_: Any) -> SimpleNamespace:
+            if cursor == "page-2":
+                return SimpleNamespace(data=[visible])
+            return SimpleNamespace(data=[hidden], next_cursor="page-2")
+
+        client.thread_list.side_effect = thread_list
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Visible")
+        self.assertNotContains(response, "Hidden subagent")
+        mock_accepted_visible.assert_called_once_with()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_accepted_candidate_thread_can_remain_visible(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        accepted = _session(
+            "accepted-candidate",
+            name="Accepted candidate",
+            preview="You are Hitch's standing order agent.\n\nAnalyze the repo.",
+        )
+        _setup_codex(mock_codex, threads=[accepted])
+        mock_discover.return_value = []
+        metadata = SessionMetadata.objects.create(thread_id="accepted-candidate")
+        ProposedSession.objects.create(
+            title="Accepted proposal",
+            candidate_session=metadata,
+            accepted_session=metadata,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Accepted candidate")
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -1674,6 +1859,68 @@ class IndexViewTests(TestCase):
             use_state_db_only=True,
             archived=True,
         )
+
+    @patch("hitch.main.views.Codex")
+    def test_usage_page_buckets_orphan_hitch_system_prompt_threads(
+        self, mock_codex: MagicMock
+    ) -> None:
+        session_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=100,
+                    cached_input_tokens=10,
+                    output_tokens=200,
+                    total_tokens=300,
+                )
+            ],
+        )
+        orphan_system_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=300,
+                    cached_input_tokens=20,
+                    output_tokens=400,
+                    total_tokens=700,
+                )
+            ],
+        )
+        _setup_codex(
+            mock_codex,
+            threads=[
+                _session(
+                    "session",
+                    name="You are Hitch's standing order agent. Please help",
+                    preview=(
+                        "You are Hitch's standing order agent.\n\n"
+                        "Please explain this."
+                    ),
+                    path=str(session_path),
+                ),
+                _session(
+                    "orphan-system",
+                    name="You are Hitch's standing order agent.",
+                    preview="You are Hitch's standing order agent.\n\nAnalyze the repo.",
+                    path=str(orphan_system_path),
+                    thread_source=ThreadSource.subagent,
+                ),
+            ],
+        )
+
+        response = self.client.get(reverse("usage"))
+
+        self.assertEqual(response.status_code, 200)
+        lifetime_usage = cast(dict[str, Any], response.context["lifetime_usage"])
+        self.assertEqual(lifetime_usage["sessions"]["input"], "90")
+        self.assertEqual(lifetime_usage["sessions"]["output"], "200")
+        self.assertEqual(lifetime_usage["sessions"]["cached"], "10")
+        self.assertEqual(lifetime_usage["system"]["input"], "280")
+        self.assertEqual(lifetime_usage["system"]["output"], "400")
+        self.assertEqual(lifetime_usage["system"]["cached"], "20")
+        self.assertEqual(lifetime_usage["total"]["input"], "370")
+        self.assertEqual(lifetime_usage["total"]["output"], "600")
+        self.assertEqual(lifetime_usage["total"]["cached"], "30")
 
     def test_lifetime_human_token_formatter(self) -> None:
         self.assertEqual(views._format_human_token_count(-1), "0")
