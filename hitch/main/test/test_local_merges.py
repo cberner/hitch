@@ -359,7 +359,7 @@ class LocalMergeTests(SimpleTestCase):
                 _git(repo, "show", "release:README.md"), "hello\napproved"
             )
 
-    def test_follow_up_review_ignores_legacy_source_base_without_parent(self) -> None:
+    def test_follow_up_review_uses_legacy_source_base_without_parent(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             repo = root / "repo"
@@ -367,6 +367,7 @@ class LocalMergeTests(SimpleTestCase):
             _init_repo(repo)
             _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
             (session / "README.md").write_text("hello\napproved\n")
+            first = _merge_reviewed_patch(session, "main")
             source_tree = _source_worktree_tree(session)
             legacy_source_base = _git(
                 session,
@@ -381,6 +382,7 @@ class LocalMergeTests(SimpleTestCase):
                 _auto_merge_source_base_ref(session, "refs/heads/main"),
                 legacy_source_base,
             )
+            (session / "notes.txt").write_text("follow-up\n")
 
             review = build_auto_merge_review_patch(session, "main")
             result = merge_worktree_diff_to_branch(
@@ -390,11 +392,14 @@ class LocalMergeTests(SimpleTestCase):
                 review.target_sha,
             )
 
-            self.assertIn("+approved", review.patch)
+            self.assertTrue(first.changed)
             self.assertTrue(result.changed)
+            self.assertNotIn("README.md", review.patch)
+            self.assertIn("notes.txt", review.patch)
             self.assertEqual(
                 _git(repo, "show", "main:README.md"), "hello\napproved"
             )
+            self.assertEqual(_git(repo, "show", "main:notes.txt"), "follow-up")
 
     def test_auto_merge_patch_keeps_target_commits_added_before_review(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
