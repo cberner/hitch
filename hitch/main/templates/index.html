@@ -825,6 +825,15 @@
                     {% endfor %}
                 </select>
             </label>
+            <label>
+                Web search
+                <select name="web_search_mode">
+                    <option value="" selected>Use settings ({{ new_session_default_web_search_label }})</option>
+                    {% for option in new_session_web_search_options %}
+                    <option value="{{ option.id }}">{{ option.display_name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
             <div class="new-session-field" data-new-session-repo-field {% if current_new_session_project_id %}hidden{% endif %}>
                 <label for="new-session-cwd">Repository</label>
                 {% if repos %}

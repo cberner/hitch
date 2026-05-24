@@ -49,6 +49,7 @@ _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
 _QA_PANEL_COOKIE = "hitch_qa_panel"
 _SPEC_CRITIC_COOKIE = "hitch_spec_critic"
+_WEB_SEARCH_COOKIE = "hitch_web_search_mode"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
 _CODING_AGENT_COOKIE = "hitch_coding_agent"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
@@ -1323,7 +1324,10 @@ class NewSessionViewTests(TestCase):
         mock_create_thread: MagicMock,
         mock_start_spec_critic: MagicMock,
     ) -> None:
-        _seed_cookies(self.client, **{_SPEC_CRITIC_COOKIE: "true"})
+        _seed_cookies(
+            self.client,
+            **{_SPEC_CRITIC_COOKIE: "true", _WEB_SEARCH_COOKIE: "live"},
+        )
         mock_discover.return_value = [Path(self.REPO)]
         _setup_codex(mock_codex, models=[])
 
@@ -1344,6 +1348,7 @@ class NewSessionViewTests(TestCase):
             developer_instructions=None,
             model=None,
             enable_memories=False,
+            web_search_mode="live",
         )
         mock_start_spec_critic.assert_called_once_with(
             main_thread_id="thread-spec",
@@ -1355,6 +1360,7 @@ class NewSessionViewTests(TestCase):
             reasoning_effort=None,
             developer_instructions=None,
             enable_memories=False,
+            web_search_mode="live",
             initial_user_message_index=0,
             auto_pr_enabled=False,
         )
@@ -1733,6 +1739,11 @@ class NewSessionViewTests(TestCase):
             ),
             ("memories", {_ENABLE_MEMORIES_COOKIE: "true"}, {"enable_memories": True}),
             (
+                "web search",
+                {_WEB_SEARCH_COOKIE: "live"},
+                {"web_search_mode": "live"},
+            ),
+            (
                 "deny all approval",
                 {"hitch_approval_mode": "deny_all"},
                 {"approval_mode": "deny_all"},
@@ -1768,6 +1779,32 @@ class NewSessionViewTests(TestCase):
 
                 self.assertEqual(response.status_code, 302)
                 self._assert_new_session_spawn(mock_spawn, **expected)
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_web_search_override(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        _setup_codex(mock_codex, models=[])
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-web")
+        _seed_cookies(self.client, **{_WEB_SEARCH_COOKIE: "cached"})
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "do thing",
+                "cwd": self.REPO,
+                "web_search_mode": "disabled",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self._assert_new_session_spawn(mock_spawn, web_search_mode="disabled")
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
@@ -1833,6 +1870,30 @@ class NewSessionViewTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertContains(response, "invalid coding agent", status_code=400)
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_rejects_invalid_web_search_override(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "do thing",
+                "cwd": self.REPO,
+                "web_search_mode": "maybe",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, "invalid web search setting", status_code=400)
         mock_spawn.assert_not_called()
 
     @patch("hitch.main.views.Codex")
@@ -1924,6 +1985,7 @@ class NewSessionViewTests(TestCase):
                 {
                     _MODEL_COOKIE: "gpt-5.4",
                     "hitch_reasoning_effort": "high",
+                    _WEB_SEARCH_COOKIE: "live",
                     _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt(
                         "Use repo conventions."
                     ),
@@ -1932,26 +1994,35 @@ class NewSessionViewTests(TestCase):
                     "name": _PR_PROMPT,
                     "developer_instructions": "Use repo conventions.",
                     "model": "gpt-5.4",
+                    "web_search_mode": "live",
                 },
                 {
                     "model": "gpt-5.4",
                     "reasoning_effort": "high",
                     "developer_instructions": "Use repo conventions.",
+                    "web_search_mode": "live",
                 },
             ),
             (
                 "qa",
-                {"prompt": "/QA", "cwd": self.REPO, "plan_mode": "true"},
+                {
+                    "prompt": "/QA",
+                    "cwd": self.REPO,
+                    "plan_mode": "true",
+                    "web_search_mode": "disabled",
+                },
                 {},
                 {
                     "name": _QA_PROMPT,
                     "developer_instructions": None,
                     "model": "gpt-5.4",
+                    "web_search_mode": "disabled",
                 },
                 {
                     "model": "gpt-5.4",
                     "reasoning_effort": "medium",
                     "developer_instructions": None,
+                    "web_search_mode": "disabled",
                     "open_pr_on_lgtm": False,
                 },
             ),
@@ -2649,7 +2720,10 @@ class SendMessageViewTests(TestCase):
         mock_discover: MagicMock,
         mock_start_spec_critic: MagicMock,
     ) -> None:
-        _seed_cookies(self.client, **{_SPEC_CRITIC_COOKIE: "true"})
+        _seed_cookies(
+            self.client,
+            **{_SPEC_CRITIC_COOKIE: "true", _WEB_SEARCH_COOKIE: "cached"},
+        )
         self._patch_codex(mock_codex, model="gpt-5.4", reasoning_effort="high")
         mock_discover.return_value = [Path("/repo")]
 
@@ -2670,6 +2744,7 @@ class SendMessageViewTests(TestCase):
             reasoning_effort="high",
             developer_instructions=None,
             enable_memories=False,
+            web_search_mode="cached",
             initial_user_message_index=0,
             auto_pr_enabled=False,
         )
@@ -2799,6 +2874,15 @@ class SendMessageViewTests(TestCase):
                 },
             ),
             (
+                "web search",
+                {_WEB_SEARCH_COOKIE: "live"},
+                {
+                    "sandbox_policy": None,
+                    "approval_mode": "auto_review",
+                    "web_search_mode": "live",
+                },
+            ),
+            (
                 "deny all approval mode",
                 {"hitch_approval_mode": "deny_all"},
                 {"sandbox_policy": None, "approval_mode": "deny_all"},
@@ -2833,6 +2917,42 @@ class SendMessageViewTests(TestCase):
                     prompt="follow-up",
                     **expected_options,
                 )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_follow_up_clears_previous_web_search_when_setting_is_default(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        CodexInstance.objects.create(
+            pid=999,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="first",
+            web_search_mode="live",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="follow-up",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            web_search_mode="",
+        )
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
@@ -3275,6 +3395,58 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    def test_pr_slash_command_inherits_session_web_search_when_setting_is_default(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex, model="gpt-5.4")
+        mock_discover.return_value = [Path("/repo")]
+        CodexInstance.objects.create(
+            pid=999,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="first",
+            web_search_mode="live",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "/pr"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(mock_start_workflow.call_args.kwargs["web_search_mode"], "live")
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_qa_slash_command_forwards_web_search_setting(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex, model="gpt-5.4")
+        mock_discover.return_value = [Path("/repo")]
+        _seed_cookies(self.client, **{_WEB_SEARCH_COOKIE: "cached"})
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "/qa"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        kwargs = mock_start_workflow.call_args.kwargs
+        self.assertEqual(kwargs["web_search_mode"], "cached")
+        self.assertFalse(kwargs["open_pr_on_lgtm"])
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
     def test_qa_slash_command_clears_hitch_base_instructions_for_codex(
         self,
         mock_codex: MagicMock,
@@ -3651,6 +3823,7 @@ class StartSessionDemoViewTests(TestCase):
             return instance
 
         mock_spawn.side_effect = spawn_side_effect
+        _seed_cookies(self.client, **{_WEB_SEARCH_COOKIE: "live"})
 
         response = self.client.post(
             reverse("start_session_demo", kwargs={"session_id": "abc"})
@@ -3664,6 +3837,7 @@ class StartSessionDemoViewTests(TestCase):
         self.assertEqual(kwargs["cwd"], "/repo")
         self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_SYSTEM_AGENT)
         self.assertEqual(kwargs["agent_kind"], demo.DEMO_AGENT_KIND)
+        self.assertEqual(kwargs["web_search_mode"], "live")
         self.assertNotIn("output_schema", kwargs)
         self.assertIsNone(kwargs["user_message_index"])
         self.assertIn("Start an interactive web demo", kwargs["prompt"])
@@ -4939,6 +5113,7 @@ class StandingOrderViewTests(TestCase):
             goal="Find useful test coverage increments.",
             ambition=StandingOrder.AMBITION_HIGH,
             autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            web_search_mode=StandingOrder.WEB_SEARCH_LIVE,
         )
         StandingOrder.objects.create(
             project=other_project,
@@ -4978,12 +5153,16 @@ class StandingOrderViewTests(TestCase):
         self.assertContains(response, "Ambition: High")
         self.assertContains(response, "Autonomy")
         self.assertContains(response, "Autonomy: Draft patch")
+        self.assertContains(response, "Web search: Live")
         self.assertContains(
             response,
             f'data-edit-url="{reverse("edit_standing_order", args=[order.pk])}"',
         )
         self.assertContains(
             response, f'data-autonomy="{StandingOrder.AUTONOMY_DRAFT_PATCH}"'
+        )
+        self.assertContains(
+            response, f'data-web-search-mode="{StandingOrder.WEB_SEARCH_LIVE}"'
         )
         self.assertContains(response, 'data-standing-order-edit')
         self.assertNotContains(response, "Add parser coverage")
@@ -5187,6 +5366,7 @@ class StandingOrderViewTests(TestCase):
                 "ambition": StandingOrder.AMBITION_YOLO,
                 "autonomy": StandingOrder.AUTONOMY_DRAFT_PR,
                 "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
+                "web_search_mode": StandingOrder.WEB_SEARCH_LIVE,
             },
         )
 
@@ -5196,6 +5376,7 @@ class StandingOrderViewTests(TestCase):
         self.assertEqual(order.title, "Improve tests")
         self.assertEqual(order.ambition, StandingOrder.AMBITION_YOLO)
         self.assertEqual(order.autonomy, StandingOrder.AUTONOMY_DRAFT_PR)
+        self.assertEqual(order.web_search_mode, StandingOrder.WEB_SEARCH_LIVE)
         self.assertEqual(
             order.confidence_threshold,
             StandingOrder.CONFIDENCE_VERY_HIGH,
@@ -5211,6 +5392,7 @@ class StandingOrderViewTests(TestCase):
             ambition=StandingOrder.AMBITION_INCREMENTAL,
             autonomy=StandingOrder.AUTONOMY_PROPOSE_ONLY,
             confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+            web_search_mode=StandingOrder.WEB_SEARCH_CACHED,
         )
 
         response = self.client.post(
@@ -5221,6 +5403,7 @@ class StandingOrderViewTests(TestCase):
                 "ambition": StandingOrder.AMBITION_HIGH,
                 "autonomy": StandingOrder.AUTONOMY_DRAFT_PATCH,
                 "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
+                "web_search_mode": StandingOrder.WEB_SEARCH_DISABLED,
             },
         )
 
@@ -5230,10 +5413,40 @@ class StandingOrderViewTests(TestCase):
         self.assertEqual(order.goal, "Find useful docs increments.")
         self.assertEqual(order.ambition, StandingOrder.AMBITION_HIGH)
         self.assertEqual(order.autonomy, StandingOrder.AUTONOMY_DRAFT_PATCH)
+        self.assertEqual(order.web_search_mode, StandingOrder.WEB_SEARCH_DISABLED)
         self.assertEqual(
             order.confidence_threshold,
             StandingOrder.CONFIDENCE_VERY_HIGH,
         )
+
+    def test_edit_standing_order_can_reset_web_search_to_codex_default(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        order = StandingOrder.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            ambition=StandingOrder.AMBITION_INCREMENTAL,
+            autonomy=StandingOrder.AUTONOMY_PROPOSE_ONLY,
+            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+            web_search_mode=StandingOrder.WEB_SEARCH_LIVE,
+        )
+
+        response = self.client.post(
+            reverse("edit_standing_order", args=[order.pk]),
+            {
+                "title": "Improve tests",
+                "goal": "Find useful test coverage increments.",
+                "ambition": StandingOrder.AMBITION_INCREMENTAL,
+                "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
+                "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                "web_search_mode": StandingOrder.WEB_SEARCH_DEFAULT,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        order.refresh_from_db()
+        self.assertEqual(order.web_search_mode, StandingOrder.WEB_SEARCH_DEFAULT)
 
     def test_edit_standing_order_preserves_autonomy_when_omitted(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -5245,6 +5458,7 @@ class StandingOrderViewTests(TestCase):
             ambition=StandingOrder.AMBITION_INCREMENTAL,
             autonomy=StandingOrder.AUTONOMY_DRAFT_PR,
             confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+            web_search_mode=StandingOrder.WEB_SEARCH_CACHED,
         )
 
         response = self.client.post(
@@ -5260,6 +5474,7 @@ class StandingOrderViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         order.refresh_from_db()
         self.assertEqual(order.autonomy, StandingOrder.AUTONOMY_DRAFT_PR)
+        self.assertEqual(order.web_search_mode, StandingOrder.WEB_SEARCH_CACHED)
 
     def test_edit_standing_order_is_scoped_to_selected_project(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -5345,6 +5560,17 @@ class StandingOrderViewTests(TestCase):
                     "confidence_threshold": "absolute",
                 },
                 "confidence threshold is invalid",
+            ),
+            (
+                {
+                    "title": "Improve docs",
+                    "goal": "Find useful docs increments.",
+                    "ambition": StandingOrder.AMBITION_HIGH,
+                    "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
+                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                    "web_search_mode": "maybe",
+                },
+                "web search setting is invalid",
             ),
         ):
             with self.subTest(message=message):

@@ -210,6 +210,7 @@ class Command(BaseCommand):
         parser.add_argument("--model", type=str, default=None)
         parser.add_argument("--sandbox-policy", type=str, default=None)
         parser.add_argument("--approval-mode", type=str, default=None)
+        parser.add_argument("--web-search-mode", type=str, default=None)
         parser.add_argument("--enable-memories", action="store_true")
         parser.add_argument("--collaboration-mode", type=str, default=None)
         parser.add_argument("--plan-mode", action="store_true")
@@ -221,6 +222,7 @@ class Command(BaseCommand):
         model: str | None = options.get("model")
         sandbox_policy: str | None = options.get("sandbox_policy")
         approval_mode: str | None = options.get("approval_mode")
+        web_search_mode: str | None = options.get("web_search_mode")
         enable_memories: bool = options.get("enable_memories", False)
         collaboration_mode: str | None = options.get("collaboration_mode")
         plan_mode: bool = options.get("plan_mode", False)
@@ -245,6 +247,11 @@ class Command(BaseCommand):
                     reasoning_effort=reasoning_effort,
                     sandbox_policy=sandbox_policy,
                     approval_mode=approval_mode,
+                    web_search_mode=(
+                        web_search_mode
+                        if web_search_mode is not None
+                        else instance.web_search_mode or None
+                    ),
                     enable_memories=enable_memories or instance.enable_memories,
                     collaboration_mode=collaboration_mode,
                     plan_mode=plan_mode,
@@ -310,6 +317,7 @@ def _run_turn(
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
+    web_search_mode: str | None = None,
     enable_memories: bool = False,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
@@ -323,7 +331,10 @@ def _run_turn(
     os.environ["HITCH_MANAGE_PY"] = str(manage_py)
     os.environ["HITCH_MANAGE_COMMAND"] = "uv"
     os.environ["HITCH_PROPOSE_SESSION_COMMAND"] = "uv"
-    config = app_server_config(enable_memories=enable_memories)
+    config = app_server_config(
+        enable_memories=enable_memories,
+        web_search_mode=web_search_mode,
+    )
     effort: ReasoningEffort | None = None
     if reasoning_effort:
         # Unknown strings are ignored rather than crashing the worker — Codex

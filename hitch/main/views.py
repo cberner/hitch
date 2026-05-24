@@ -81,6 +81,7 @@ class SettingsValues(NamedTuple):
     auto_pr_enabled: bool
     qa_panel_enabled: bool
     spec_critic_enabled: bool
+    web_search_mode: str
     show_archived_sessions: bool
     last_selected_repo: str
     selected_project_id: int | None
@@ -98,6 +99,7 @@ class StandingOrderValues(NamedTuple):
     ambition: str
     autonomy: str
     confidence_threshold: str
+    web_search_mode: str
 
 
 class _MessageIntent(NamedTuple):
@@ -147,6 +149,11 @@ _VALID_APPROVAL_MODES = {value for value, _ in _APPROVAL_MODE_OPTIONS}
 # agent from ever escalating.
 _DEFAULT_APPROVAL_MODE = "auto_review"
 
+_WEB_SEARCH_MODE_OPTIONS = StandingOrder.WEB_SEARCH_CHOICES
+_VALID_WEB_SEARCH_MODES = {
+    value for value, _label in _WEB_SEARCH_MODE_OPTIONS if value
+}
+
 # Dedicated signed cookies for the settings dialog. Kept separate from
 # Django's session cookie so the (non-revocable, long-lived) settings
 # state never rides alongside an auth session — admin auth is allowed to
@@ -161,6 +168,7 @@ _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
 _QA_PANEL_COOKIE = "hitch_qa_panel"
 _SPEC_CRITIC_COOKIE = "hitch_spec_critic"
+_WEB_SEARCH_COOKIE = "hitch_web_search_mode"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
 _SELECTED_PROJECT_COOKIE = "hitch_selected_project_id"
@@ -308,6 +316,10 @@ def _settings_dialog_context(
             {"id": value, "display_name": label}
             for value, label in coding_agents.CODING_AGENT_OPTIONS
         ],
+        "web_search_options": [
+            {"id": value, "display_name": label}
+            for value, label in _WEB_SEARCH_MODE_OPTIONS
+        ],
         "current_model": current_settings.model,
         "current_effort": current_settings.reasoning_effort,
         "current_sandbox": current_settings.sandbox_policy,
@@ -319,6 +331,7 @@ def _settings_dialog_context(
         "current_auto_pr": current_settings.auto_pr_enabled,
         "current_qa_panel": current_settings.qa_panel_enabled,
         "current_spec_critic": current_settings.spec_critic_enabled,
+        "current_web_search": current_settings.web_search_mode,
         "current_enable_memories": current_settings.enable_memories,
         "projects": projects,
         "current_project": current_project,
@@ -393,6 +406,14 @@ def _new_session_dialog_context(
         ],
         "new_session_default_coding_agent_label": _option_label(
             coding_agents.CODING_AGENT_OPTIONS, current_coding_agent
+        ),
+        "new_session_web_search_options": [
+            {"id": value, "display_name": label}
+            for value, label in _WEB_SEARCH_MODE_OPTIONS
+            if value
+        ],
+        "new_session_default_web_search_label": _web_search_mode_label(
+            current_settings.web_search_mode
         ),
         "pr_slash_prompt": _PR_SLASH_PROMPT,
         "qa_slash_prompt": _QA_SLASH_PROMPT,
@@ -697,6 +718,8 @@ def standing_orders(request: HttpRequest) -> HttpResponse:
             "default_autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
             "confidence_choices": StandingOrder.CONFIDENCE_CHOICES,
             "default_confidence": StandingOrder.CONFIDENCE_HIGH,
+            "web_search_mode_choices": _WEB_SEARCH_MODE_OPTIONS,
+            "default_web_search_mode": StandingOrder.WEB_SEARCH_DEFAULT,
             "title_max_len": _STANDING_ORDER_TITLE_MAX_LEN,
             **settings_dialog_context,
         },
@@ -721,6 +744,7 @@ def create_standing_order(request: HttpRequest) -> HttpResponse:
         ambition=values.ambition,
         autonomy=values.autonomy,
         confidence_threshold=values.confidence_threshold,
+        web_search_mode=values.web_search_mode,
     )
     return redirect("standing_orders")
 
@@ -739,13 +763,21 @@ def edit_standing_order(request: HttpRequest, standing_order_id: int) -> HttpRes
     values, error = _validated_standing_order_values(
         request,
         autonomy_default=standing_order.autonomy,
+        web_search_default=standing_order.web_search_mode,
     )
     if error is not None:
         return HttpResponseBadRequest(error)
     assert values is not None
 
     updates: list[str] = []
-    for field in ("title", "goal", "ambition", "autonomy", "confidence_threshold"):
+    for field in (
+        "title",
+        "goal",
+        "ambition",
+        "autonomy",
+        "confidence_threshold",
+        "web_search_mode",
+    ):
         value = getattr(values, field)
         if getattr(standing_order, field) != value:
             setattr(standing_order, field, value)
@@ -858,6 +890,7 @@ def _validated_standing_order_values(
     request: HttpRequest,
     *,
     autonomy_default: str = StandingOrder.AUTONOMY_PROPOSE_ONLY,
+    web_search_default: str = StandingOrder.WEB_SEARCH_DEFAULT,
 ) -> tuple[StandingOrderValues | None, str | None]:
     title, error = _validated_standing_order_title(request.POST.get("title", ""))
     if error is not None:
@@ -880,12 +913,20 @@ def _validated_standing_order_values(
     valid_thresholds = {value for value, _label in StandingOrder.CONFIDENCE_CHOICES}
     if threshold not in valid_thresholds:
         return None, "confidence threshold is invalid"
+    web_search_mode = (
+        request.POST["web_search_mode"].strip()
+        if "web_search_mode" in request.POST
+        else web_search_default
+    )
+    if web_search_mode not in {"", *_VALID_WEB_SEARCH_MODES}:
+        return None, "web search setting is invalid"
     return StandingOrderValues(
         title=title,
         goal=goal,
         ambition=ambition,
         autonomy=autonomy,
         confidence_threshold=threshold,
+        web_search_mode=web_search_mode,
     ), None
 
 
@@ -1695,6 +1736,7 @@ def _next_message_config(
     approval_value = _option_label(
         _APPROVAL_MODE_OPTIONS, _effective_approval_mode(settings)
     )
+    web_search_value = _web_search_mode_label(settings.web_search_mode)
     return [
         {"label": "model", "value": model or "Unknown", "plan_value": plan_model_value},
         {
@@ -1711,6 +1753,11 @@ def _next_message_config(
             "label": "approval",
             "value": approval_value,
             "plan_value": approval_value,
+        },
+        {
+            "label": "web search",
+            "value": web_search_value,
+            "plan_value": web_search_value,
         },
     ]
 
@@ -1756,6 +1803,14 @@ def _option_label(
     if not value and default is not None:
         return default
     return next((label for option_value, label in options if option_value == value), value)
+
+
+def _web_search_mode_label(value: str) -> str:
+    return _option_label(_WEB_SEARCH_MODE_OPTIONS, value)
+
+
+def _valid_web_search_mode_or_default(value: str) -> str:
+    return value if value in _VALID_WEB_SEARCH_MODES else ""
 
 
 def _selected_repo_for_dialog(
@@ -2366,13 +2421,17 @@ def _resolved_settings(request: HttpRequest, models_data: list[Any]) -> Resolved
     saved = _stored_settings(request)
     saved_sandbox = saved.sandbox_policy
     saved_approval = saved.approval_mode
+    saved_web_search = saved.web_search_mode
     if saved_sandbox and saved_sandbox not in _VALID_SANDBOX_POLICIES:
         saved_sandbox = ""
     if saved_approval not in _VALID_APPROVAL_MODES:
         saved_approval = _DEFAULT_APPROVAL_MODE
+    if saved_web_search and saved_web_search not in _VALID_WEB_SEARCH_MODES:
+        saved_web_search = ""
     saved = saved._replace(
         sandbox_policy=saved_sandbox,
         approval_mode=saved_approval,
+        web_search_mode=saved_web_search,
     )
     if not models_data:
         return _resolved_settings_result(request, saved, {})
@@ -2430,6 +2489,7 @@ def _stored_settings(request: HttpRequest) -> SettingsValues:
         auto_pr_enabled=_read_cookie(request, _AUTO_PR_COOKIE) == "true",
         qa_panel_enabled=_read_cookie(request, _QA_PANEL_COOKIE) == "true",
         spec_critic_enabled=_read_cookie(request, _SPEC_CRITIC_COOKIE) == "true",
+        web_search_mode=_read_cookie(request, _WEB_SEARCH_COOKIE),
         show_archived_sessions=_read_cookie(request, _SHOW_ARCHIVED_COOKIE) == "true",
         last_selected_repo=_read_cookie(request, _LAST_SELECTED_REPO_COOKIE),
         selected_project_id=_read_selected_project_cookie(request),
@@ -2454,6 +2514,7 @@ def _settings_values_for_user(settings: UserSettings) -> SettingsValues:
         auto_pr_enabled=settings.auto_pr_enabled,
         qa_panel_enabled=settings.qa_panel_enabled,
         spec_critic_enabled=settings.spec_critic_enabled,
+        web_search_mode=settings.web_search_mode,
         show_archived_sessions=settings.show_archived_sessions,
         last_selected_repo=settings.last_selected_repo,
         selected_project_id=settings.selected_project_id,
@@ -2475,6 +2536,7 @@ def _save_user_settings(user: Any, values: SettingsValues) -> UserSettings:
         ("auto_pr_enabled", values.auto_pr_enabled),
         ("qa_panel_enabled", values.qa_panel_enabled),
         ("spec_critic_enabled", values.spec_critic_enabled),
+        ("web_search_mode", values.web_search_mode),
         ("show_archived_sessions", values.show_archived_sessions),
         ("last_selected_repo", values.last_selected_repo),
         ("selected_project_id", values.selected_project_id),
@@ -2502,6 +2564,7 @@ def _settings_cookie_updates(values: SettingsValues) -> dict[str, str]:
         _AUTO_PR_COOKIE: "true" if values.auto_pr_enabled else "false",
         _QA_PANEL_COOKIE: "true" if values.qa_panel_enabled else "false",
         _SPEC_CRITIC_COOKIE: "true" if values.spec_critic_enabled else "false",
+        _WEB_SEARCH_COOKIE: values.web_search_mode,
         _SHOW_ARCHIVED_COOKIE: "true" if values.show_archived_sessions else "false",
         _LAST_SELECTED_REPO_COOKIE: values.last_selected_repo,
         _SELECTED_PROJECT_COOKIE: (
@@ -2566,6 +2629,11 @@ def _valid_cookie_setting_updates(request: HttpRequest) -> dict[str, str | bool 
     spec_critic = _read_signed_cookie_if_present(request, _SPEC_CRITIC_COOKIE)
     if spec_critic in {"true", "false"}:
         updates["spec_critic_enabled"] = spec_critic == "true"
+    web_search = _read_signed_cookie_if_present(request, _WEB_SEARCH_COOKIE)
+    if web_search is not None:
+        updates["web_search_mode"] = (
+            web_search if web_search in _VALID_WEB_SEARCH_MODES else ""
+        )
     last_selected_repo = _read_signed_cookie_if_present(
         request, _LAST_SELECTED_REPO_COOKIE
     )
@@ -2764,6 +2832,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     auto_pr = request.POST.get("auto_pr", "").strip()
     qa_panel = request.POST.get("qa_panel", "").strip()
     spec_critic = request.POST.get("spec_critic", "").strip()
+    web_search_mode = request.POST.get("web_search_mode", "").strip()
     posted_show_archived = request.POST.get("show_archived_sessions")
     show_archived = (
         posted_show_archived.strip() if posted_show_archived is not None else None
@@ -2804,6 +2873,8 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     if spec_critic not in {"", "true"}:
         return HttpResponseBadRequest("invalid Spec Critic setting")
     spec_critic = "true" if spec_critic == "true" else "false"
+    if web_search_mode and web_search_mode not in _VALID_WEB_SEARCH_MODES:
+        return HttpResponseBadRequest("invalid web search setting")
     if show_archived is not None and show_archived not in {"", "true"}:
         return HttpResponseBadRequest("invalid archived sessions visibility")
     if enable_memories not in {"", "true"}:
@@ -2832,6 +2903,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         auto_pr_enabled=auto_pr == "true",
         qa_panel_enabled=qa_panel == "true",
         spec_critic_enabled=spec_critic == "true",
+        web_search_mode=web_search_mode,
         show_archived_sessions=(
             stored.show_archived_sessions
             if show_archived is None
@@ -3117,6 +3189,19 @@ def _posted_auto_pr_override(raw: str | None, *, default: bool) -> tuple[bool, s
     return False, "invalid auto-PR setting"
 
 
+def _posted_web_search_override(
+    raw: str | None, *, default: str
+) -> tuple[str, str | None]:
+    if raw is None:
+        return default, None
+    value = raw.strip()
+    if not value:
+        return default, None
+    if value in _VALID_WEB_SEARCH_MODES:
+        return value, None
+    return "", "invalid web search setting"
+
+
 def _posted_new_session_coding_agent(raw: str | None) -> tuple[str, str | None]:
     value = (raw or "").strip()
     if not value:
@@ -3242,6 +3327,10 @@ def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
             prompt=prompt,
             sandbox_policy=_effective_sandbox_policy(settings) or None,
             approval_mode=_effective_approval_mode(settings),
+            web_search_mode=_valid_web_search_mode_or_default(
+                settings.web_search_mode
+            )
+            or None,
             enable_memories=settings.enable_memories,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
@@ -3408,6 +3497,22 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     sandbox_policy = _effective_sandbox_policy(settings)
     approval_mode = _effective_approval_mode(settings)
     previous_instance = codex_pool.latest_for_thread(session_id)
+    configured_web_search_mode = _valid_web_search_mode_or_default(
+        settings.web_search_mode
+    )
+    previous_web_search_mode = (
+        _valid_web_search_mode_or_default(previous_instance.web_search_mode)
+        if previous_instance is not None
+        else ""
+    )
+    web_search_mode = (
+        previous_web_search_mode
+        if qa_workflow_activation and not configured_web_search_mode
+        else configured_web_search_mode
+    )
+    should_forward_web_search_mode = bool(web_search_mode) or bool(
+        previous_web_search_mode
+    )
     base_instructions = _base_instructions_for_settings(
         settings, explicit_default=True
     )
@@ -3434,6 +3539,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             "enable_memories": settings.enable_memories,
             "initial_user_message_index": _count_user_entries(thread_entries),
         }
+        if should_forward_web_search_mode:
+            workflow_kwargs["web_search_mode"] = web_search_mode
         if base_instructions:
             workflow_kwargs["base_instructions"] = base_instructions
         if settings.qa_panel_enabled:
@@ -3449,6 +3556,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         "sandbox_policy": sandbox_policy or None,
         "approval_mode": approval_mode,
     }
+    if should_forward_web_search_mode:
+        spawn_kwargs["web_search_mode"] = web_search_mode
     if base_instructions:
         spawn_kwargs["base_instructions"] = base_instructions
     if settings.enable_memories:
@@ -3506,6 +3615,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         }
         if base_instructions:
             spec_workflow_kwargs["base_instructions"] = base_instructions
+        if should_forward_web_search_mode:
+            spec_workflow_kwargs["web_search_mode"] = web_search_mode
         if auto_pr_enabled and settings.qa_panel_enabled:
             spec_workflow_kwargs["qa_panel_enabled"] = True
         system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
@@ -3907,6 +4018,12 @@ def new_session(request: HttpRequest) -> HttpResponse:
     )
     if auto_pr_error is not None:
         return HttpResponseBadRequest(auto_pr_error)
+    web_search_mode, web_search_error = _posted_web_search_override(
+        request.POST.get("web_search_mode"),
+        default=settings.web_search_mode,
+    )
+    if web_search_error is not None:
+        return HttpResponseBadRequest(web_search_error)
     if plan_mode and not settings.model:
         return HttpResponseBadRequest("plan mode requires a model")
 
@@ -3926,6 +4043,8 @@ def new_session(request: HttpRequest) -> HttpResponse:
             "model": settings.model or None,
             "enable_memories": settings.enable_memories,
         }
+        if web_search_mode:
+            create_thread_kwargs["web_search_mode"] = web_search_mode
         if base_instructions:
             create_thread_kwargs["base_instructions"] = base_instructions
         thread_id = codex_pool.create_session_thread(**create_thread_kwargs)
@@ -3940,6 +4059,8 @@ def new_session(request: HttpRequest) -> HttpResponse:
             "enable_memories": settings.enable_memories,
             "initial_user_message_index": 0,
         }
+        if web_search_mode:
+            workflow_kwargs["web_search_mode"] = web_search_mode
         if base_instructions:
             workflow_kwargs["base_instructions"] = base_instructions
         if settings.qa_panel_enabled:
@@ -3993,6 +4114,8 @@ def new_session(request: HttpRequest) -> HttpResponse:
         "sandbox_policy": settings.sandbox_policy or None,
         "approval_mode": settings.approval_mode,
     }
+    if web_search_mode:
+        spawn_kwargs["web_search_mode"] = web_search_mode
     if proposed_session is not None:
         spawn_kwargs["thread_name"] = proposed_session.title
     base_instructions = _base_instructions_for_settings(spawn_settings)
@@ -4022,6 +4145,8 @@ def new_session(request: HttpRequest) -> HttpResponse:
             "model": settings.model or None,
             "enable_memories": settings.enable_memories,
         }
+        if web_search_mode:
+            spec_create_thread_kwargs["web_search_mode"] = web_search_mode
         if base_instructions:
             spec_create_thread_kwargs["base_instructions"] = base_instructions
         try:
@@ -4050,6 +4175,8 @@ def new_session(request: HttpRequest) -> HttpResponse:
         }
         if base_instructions:
             spec_workflow_kwargs["base_instructions"] = base_instructions
+        if web_search_mode:
+            spec_workflow_kwargs["web_search_mode"] = web_search_mode
         if auto_pr_enabled and settings.qa_panel_enabled:
             spec_workflow_kwargs["qa_panel_enabled"] = True
         system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)

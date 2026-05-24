@@ -30,7 +30,7 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 from openai_codex import AppServerConfig, Codex
-from openai_codex.generated.v2_all import ThreadSource
+from openai_codex.generated.v2_all import ThreadSource, WebSearchMode
 
 from hitch.main.codex_tools import registered_dynamic_tool_specs
 from hitch.main.models import CodexInstance
@@ -40,6 +40,18 @@ logger = logging.getLogger(__name__)
 _TRACKED_WORKER_PROCS: dict[int, tuple[int, subprocess.Popen[bytes]]] = {}
 _REAPED_WORKERS: set[tuple[int, int]] = set()
 _TRACKED_WORKER_PROCS_LOCK = threading.Lock()
+_VALID_WEB_SEARCH_MODES = frozenset(mode.value for mode in WebSearchMode)
+
+
+def _normalized_web_search_mode(web_search_mode: str | None) -> str | None:
+    if web_search_mode is None:
+        return None
+    value = web_search_mode.strip()
+    if not value:
+        return None
+    if value not in _VALID_WEB_SEARCH_MODES:
+        raise ValueError(f"invalid web_search_mode: {web_search_mode!r}")
+    return value
 
 
 def spawn_new_session(
@@ -53,6 +65,7 @@ def spawn_new_session(
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
+    web_search_mode: str | None = None,
     enable_memories: bool = False,
     plan_mode: bool = False,
     thread_source: ThreadSource | None = None,
@@ -74,7 +87,10 @@ def spawn_new_session(
     has an id to redirect to immediately); the prompt itself is run by the
     detached worker.
     """
-    config = app_server_config(enable_memories=enable_memories)
+    config = app_server_config(
+        enable_memories=enable_memories,
+        web_search_mode=web_search_mode,
+    )
     with Codex(config=config) as codex:
         start_kwargs: dict[str, Any] = {
             "cwd": cwd,
@@ -119,6 +135,7 @@ def spawn_new_session(
         reasoning_effort=reasoning_effort,
         sandbox_policy=sandbox_policy,
         approval_mode=approval_mode,
+        web_search_mode=web_search_mode,
         enable_memories=enable_memories,
         plan_mode=plan_mode,
         purpose=purpose,
@@ -140,9 +157,13 @@ def create_session_thread(
     developer_instructions: str | None = None,
     model: str | None = None,
     enable_memories: bool = False,
+    web_search_mode: str | None = None,
 ) -> str:
     """Create and persist a visible Codex thread without starting a turn."""
-    config = app_server_config(enable_memories=enable_memories)
+    config = app_server_config(
+        enable_memories=enable_memories,
+        web_search_mode=web_search_mode,
+    )
     with Codex(config=config) as codex:
         start_kwargs: dict[str, Any] = {
             "cwd": cwd,
@@ -185,6 +206,7 @@ def spawn_turn(
     stored_reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
+    web_search_mode: str | None = None,
     enable_memories: bool = False,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
@@ -199,7 +221,12 @@ def spawn_turn(
     auto_pr_enabled: bool = False,
     qa_panel_enabled: bool = False,
 ) -> CodexInstance:
-    """Detach a worker that resumes an existing thread to run one prompt."""
+    """Detach a worker that resumes an existing thread to run one prompt.
+
+    Per-turn settings are owned by the caller. Only thread-scoped instruction
+    text is copied from prior rows; omitted tool/config values mean Codex
+    default for this turn, not "inherit the last worker row."
+    """
     if base_instructions is None:
         previous = latest_for_thread(thread_id)
         base_instructions = previous.base_instructions if previous is not None else None
@@ -220,6 +247,7 @@ def spawn_turn(
         stored_reasoning_effort=stored_reasoning_effort,
         sandbox_policy=sandbox_policy,
         approval_mode=approval_mode,
+        web_search_mode=web_search_mode,
         enable_memories=enable_memories,
         collaboration_mode=collaboration_mode,
         plan_mode=plan_mode,
@@ -811,10 +839,15 @@ def _codex_bin() -> str | None:
     return shutil.which("codex")
 
 
-def app_server_config(*, enable_memories: bool = False) -> AppServerConfig:
+def app_server_config(
+    *, enable_memories: bool = False, web_search_mode: str | None = None
+) -> AppServerConfig:
     memory_value = "true" if enable_memories else "false"
-    overrides = (f"features.memories={memory_value}",)
-    return AppServerConfig(codex_bin=_codex_bin(), config_overrides=overrides)
+    overrides = [f"features.memories={memory_value}"]
+    web_search_mode = _normalized_web_search_mode(web_search_mode)
+    if web_search_mode:
+        overrides.append(f"web_search={json.dumps(web_search_mode)}")
+    return AppServerConfig(codex_bin=_codex_bin(), config_overrides=tuple(overrides))
 
 
 def _spawn_worker(
@@ -830,6 +863,7 @@ def _spawn_worker(
     stored_reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
+    web_search_mode: str | None = None,
     enable_memories: bool = False,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
@@ -842,6 +876,7 @@ def _spawn_worker(
     auto_pr_enabled: bool = False,
     qa_panel_enabled: bool = False,
 ) -> CodexInstance:
+    web_search_mode = _normalized_web_search_mode(web_search_mode)
     target_dir = events_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -862,6 +897,7 @@ def _spawn_worker(
             or "",
             sandbox_policy=sandbox_policy or "",
             approval_mode=approval_mode or "",
+            web_search_mode=web_search_mode or "",
             plan_mode=plan_mode,
             auto_pr_enabled=auto_pr_enabled,
             qa_panel_enabled=qa_panel_enabled,
@@ -885,6 +921,8 @@ def _spawn_worker(
             "sandbox_policy": sandbox_policy,
             "approval_mode": approval_mode,
         }
+        if web_search_mode:
+            launch_kwargs["web_search_mode"] = web_search_mode
         if enable_memories:
             launch_kwargs["enable_memories"] = True
         if model or plan_mode:
@@ -916,10 +954,12 @@ def _launch_worker_process(
     reasoning_effort: str | None = None,
     sandbox_policy: str | None = None,
     approval_mode: str | None = None,
+    web_search_mode: str | None = None,
     enable_memories: bool = False,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
 ) -> subprocess.Popen[bytes]:
+    web_search_mode = _normalized_web_search_mode(web_search_mode)
     manage_py = str(Path(settings.BASE_DIR) / "manage.py")
     env = os.environ.copy()
     # Django needs an explicit settings module since hitch ships per-env
@@ -945,6 +985,8 @@ def _launch_worker_process(
         argv.extend(["--sandbox-policy", sandbox_policy])
     if approval_mode:
         argv.extend(["--approval-mode", approval_mode])
+    if web_search_mode:
+        argv.extend(["--web-search-mode", web_search_mode])
     if enable_memories:
         argv.append("--enable-memories")
     if collaboration_mode:
