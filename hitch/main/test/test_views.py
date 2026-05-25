@@ -601,6 +601,7 @@ class IndexViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Cached session")
+        mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
     @patch("hitch.main.views.discover_repos")
@@ -961,21 +962,13 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_stale_complete_session_index_refreshes_one_page_inline(
+    def test_stale_complete_session_index_schedules_background_refresh(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         now = datetime.now(UTC)
         cached = _session("cached", name="Cached session", updated_at=2000)
-        first_refresh_page = [
-            _session(f"fresh-{i}", name=f"Fresh {i}", updated_at=1000 - i)
-            for i in range(100)
-        ]
         client = _setup_codex(mock_codex)
-        client.thread_list.return_value = SimpleNamespace(
-            data=first_refresh_page,
-            next_cursor="page-2",
-        )
-        client.thread_list.side_effect = None
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
         mock_discover.return_value = []
         SessionIndexSyncState.objects.create(
             source=SessionIndexSyncState.SOURCE_ACTIVE,
@@ -984,15 +977,23 @@ class IndexViewTests(TestCase):
         )
         session_index.upsert_thread(cached, projects=[])
 
-        response = self.client.get(reverse("index"))
+        with (
+            patch("hitch.main.views._start_models_refresh_thread"),
+            patch(
+                "hitch.main.views._start_usage_session_index_refresh_thread"
+            ) as start_index_refresh,
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            response = self.client.get(reverse("index"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Cached session")
-        client.thread_list.assert_called_once_with(
-            limit=100,
-            sort_key=ThreadSortKey.updated_at,
-            sort_direction=SortDirection.desc,
-            use_state_db_only=True,
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+        start_index_refresh.assert_called_once_with(
+            enable_memories=False,
+            include_active=True,
+            include_archived=False,
         )
 
     @patch("hitch.main.views.discover_repos")
@@ -1139,6 +1140,36 @@ class IndexViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Cached 0")
         self.assertContains(response, 'href="/?cursor=page-2"')
+        mock_codex.assert_called_once()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_codex_cursor_request_uses_codex_even_when_index_complete(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        cursor_page = [_session("cursor-thread", name="Cursor session")]
+        client = _setup_codex(mock_codex)
+        client.thread_list.return_value = SimpleNamespace(data=cursor_page)
+        client.thread_list.side_effect = None
+        mock_discover.return_value = []
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=datetime.now(UTC),
+            is_complete=True,
+        )
+
+        response = self.client.get(f"{reverse('index')}?cursor=page-2")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Cursor session")
+        mock_codex.assert_called_once()
+        client.thread_list.assert_called_once_with(
+            limit=100,
+            sort_key=ThreadSortKey.updated_at,
+            sort_direction=SortDirection.desc,
+            cursor="page-2",
+            use_state_db_only=True,
+        )
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")

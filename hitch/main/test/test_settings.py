@@ -77,6 +77,22 @@ def _model(
     )
 
 
+def _clear_models_cache() -> None:
+    with views._MODELS_REFRESH_LOCK:
+        views._MODELS_CACHE_VALUE = {}
+        views._MODELS_CACHE_FETCHED_AT = {}
+        views._MODELS_REFRESH_IN_FLIGHT = set()
+
+
+def _seed_models_cache(
+    models: list[SimpleNamespace], *, enable_memories: bool = False
+) -> None:
+    with views._MODELS_REFRESH_LOCK:
+        views._MODELS_CACHE_VALUE[enable_memories] = list(models)
+        views._MODELS_CACHE_FETCHED_AT[enable_memories] = timezone.now()
+        views._MODELS_REFRESH_IN_FLIGHT.discard(enable_memories)
+
+
 def _configure_codex(
     mock_codex: MagicMock,
     *,
@@ -330,10 +346,10 @@ class SettingsPageRenderTests(TestCase):
     def test_page_lists_models_and_efforts(
         self, _mock_hash: MagicMock, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        _configure_codex(
-            mock_codex,
-            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
+        _seed_models_cache(
+            [_model("gpt-5", is_default=True, display_name="GPT-5")]
         )
+        self.addCleanup(_clear_models_cache)
         mock_discover.return_value = []
 
         response = self.client.get(
@@ -341,6 +357,7 @@ class SettingsPageRenderTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 200)
+        mock_codex.assert_not_called()
         self.assertContains(response, "data-nav-menu")
         self.assertContains(response, "data-nav-menu-open")
         self.assertContains(response, "data-nav-menu-panel")
@@ -896,13 +913,13 @@ class ReconcileSettingsTests(TestCase):
     def test_seeds_defaults_when_no_cookies(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        _configure_codex(
-            mock_codex,
-            models=[
+        _seed_models_cache(
+            [
                 _model("other"),
                 _model("gpt-5", is_default=True, default_effort="high"),
             ],
         )
+        self.addCleanup(_clear_models_cache)
         mock_discover.return_value = []
 
         response = self.client.get(reverse("update_settings"))
@@ -910,6 +927,7 @@ class ReconcileSettingsTests(TestCase):
         # Defaults are written back to the browser so the next request has
         # them in hand — the "reset on server start based on what Codex
         # provides" behavior expressed through signed cookies.
+        mock_codex.assert_not_called()
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
         self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "high")
 
@@ -924,6 +942,10 @@ class ReconcileSettingsTests(TestCase):
         _seed_cookies(
             self.client, **{_MODEL_COOKIE: "removed-model", _EFFORT_COOKIE: "minimal"}
         )
+        _seed_models_cache(
+            [_model("gpt-5", is_default=True, default_effort="medium")]
+        )
+        self.addCleanup(_clear_models_cache)
         _configure_codex(
             mock_codex,
             models=[_model("gpt-5", is_default=True, default_effort="medium")],
@@ -943,18 +965,19 @@ class ReconcileSettingsTests(TestCase):
         _seed_cookies(
             self.client, **{_MODEL_COOKIE: "gpt-5", _EFFORT_COOKIE: "low"}
         )
-        _configure_codex(
-            mock_codex,
-            models=[
+        _seed_models_cache(
+            [
                 _model("gpt-5", is_default=True, default_effort="medium"),
                 _model("other"),
             ],
         )
+        self.addCleanup(_clear_models_cache)
         mock_discover.return_value = []
 
         response = self.client.get(reverse("update_settings"))
 
         # Saved values are still valid → no Set-Cookie on this response.
+        mock_codex.assert_not_called()
         self.assertNotIn(_MODEL_COOKIE, response.cookies)
         self.assertNotIn(_EFFORT_COOKIE, response.cookies)
         self.assertContains(response, 'value="gpt-5"')
@@ -972,6 +995,17 @@ class ReconcileSettingsTests(TestCase):
         _seed_cookies(
             self.client, **{_MODEL_COOKIE: "gpt-5", _EFFORT_COOKIE: "xhigh"}
         )
+        _seed_models_cache(
+            [
+                _model(
+                    "gpt-5",
+                    is_default=True,
+                    default_effort="medium",
+                    supported_efforts=["low", "medium"],
+                )
+            ]
+        )
+        self.addCleanup(_clear_models_cache)
         _configure_codex(
             mock_codex,
             models=[
@@ -1019,19 +1053,37 @@ class ReconcileSettingsTests(TestCase):
         rotation) must not 500 the page; we treat it as absent and let
         reconcile reseed from Codex defaults."""
         self.client.cookies[_MODEL_COOKIE] = "not-a-signed-value"
-        _configure_codex(
-            mock_codex,
-            models=[_model("gpt-5", is_default=True, default_effort="medium")],
+        _seed_models_cache(
+            [_model("gpt-5", is_default=True, default_effort="medium")]
         )
+        self.addCleanup(_clear_models_cache)
         mock_discover.return_value = []
 
         response = self.client.get(reverse("update_settings"))
 
         self.assertEqual(response.status_code, 200)
+        mock_codex.assert_not_called()
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
 
 
 class UpdateSettingsViewTests(TestCase):
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_get_uses_cached_models_without_codex(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _seed_models_cache(
+            [_model("gpt-5", is_default=True, display_name="GPT-5")]
+        )
+        self.addCleanup(_clear_models_cache)
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("update_settings"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "GPT-5")
+        mock_codex.assert_not_called()
+
     @patch("hitch.main.views.Codex")
     def test_saves_model_and_effort_to_signed_cookies(
         self, mock_codex: MagicMock
@@ -1057,6 +1109,43 @@ class UpdateSettingsViewTests(TestCase):
         morsel = response.cookies[_MODEL_COOKIE]
         self.assertGreaterEqual(int(morsel["max-age"]), 30 * 24 * 60 * 60)
         self.assertEqual(morsel["samesite"], "Lax")
+
+    @patch("hitch.main.views.Codex")
+    def test_post_validates_against_cached_models_without_codex(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _seed_models_cache(
+            [_model("gpt-5", is_default=True, supported_efforts=["medium", "high"])]
+        )
+        self.addCleanup(_clear_models_cache)
+
+        response = self.client.post(
+            reverse("update_settings"),
+            data={"model": "gpt-5", "reasoning_effort": "high"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
+        self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "high")
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    def test_post_falls_back_to_codex_when_model_cache_empty(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _clear_models_cache()
+        _configure_codex(
+            mock_codex,
+            models=[_model("gpt-5", is_default=True, supported_efforts=["medium"])],
+        )
+
+        response = self.client.post(
+            reverse("update_settings"),
+            data={"model": "gpt-5", "reasoning_effort": "medium"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_codex.assert_called_once()
 
     @patch("hitch.main.views.Codex")
     def test_rejects_invalid_combinations(self, mock_codex: MagicMock) -> None:
