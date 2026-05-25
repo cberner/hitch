@@ -512,6 +512,18 @@ class IterEntriesTests(TestCase):
     def test_missing_file_returns_empty(self) -> None:
         self.assertEqual(list(rollout.iter_entries(Path("/nonexistent/rollout.jsonl"))), [])
 
+    def test_invalid_utf8_returns_empty(self) -> None:
+        with tempfile.NamedTemporaryFile(
+            prefix="rollout-",
+            suffix=".jsonl",
+            delete=False,
+        ) as tmp:
+            tmp.write(b"\xff\xfe\x00not json\n")
+            path = Path(tmp.name)
+        self._paths = [*getattr(self, "_paths", []), path]
+
+        self.assertEqual(list(rollout.iter_entries(path)), [])
+
     def test_response_item_message_does_not_duplicate_agent_text(self) -> None:
         # Both an event_msg::agent_message and a response_item::message
         # (role=assistant) are typically present for the same agent turn. Only
