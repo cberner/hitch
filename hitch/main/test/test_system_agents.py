@@ -1302,7 +1302,7 @@ class SpecCriticWorkflowTests(TestCase):
             model="gpt-5.4",
             reasoning_effort="high",
             sandbox_policy="workspaceWrite",
-            approval_mode="prompt_user",
+            approval_mode="approve_all",
             web_search_mode="live",
             developer_instructions="Use repo conventions.",
             enable_memories=True,
@@ -1315,7 +1315,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIsNotNone(instance.auto_pr_triggered_at)
         workflow = SystemWorkflow.objects.get(main_thread_id="main-thread")
         self.assertEqual(workflow.state["sandbox_policy"], "workspaceWrite")
-        self.assertEqual(workflow.state["approval_mode"], "prompt_user")
+        self.assertEqual(workflow.state["approval_mode"], "approve_all")
         self.assertEqual(workflow.state["web_search_mode"], "live")
         self.assertEqual(workflow.state["model"], "gpt-5.4")
         self.assertEqual(workflow.state["reasoning_effort"], "high")
@@ -1395,7 +1395,7 @@ class SpecCriticWorkflowTests(TestCase):
     def test_auto_qa_does_not_start_when_approval_requires_visible_control(
         self, mock_start: MagicMock
     ) -> None:
-        for approval_mode in system_agents.AUTO_QA_BLOCKED_APPROVAL_MODES:
+        for approval_mode in system_agents.AUTO_REVIEW_BLOCKED_APPROVAL_MODES:
             with self.subTest(approval_mode=approval_mode):
                 instance = _instance(
                     thread_id=f"main-thread-{approval_mode}",
@@ -1407,6 +1407,29 @@ class SpecCriticWorkflowTests(TestCase):
 
                 instance.refresh_from_db()
                 self.assertIsNone(instance.auto_qa_triggered_at)
+        mock_start.assert_not_called()
+
+    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    def test_auto_pr_does_not_start_when_approval_requires_visible_control(
+        self, mock_start: MagicMock
+    ) -> None:
+        # Auto-PR's post-QA work-agent and PR-prompt turns reuse the user's
+        # approval_mode (via _spawn_workflow_turn). Under prompt_user/deny_all
+        # those turns would either stall waiting for the user or have every
+        # action auto-denied, so the workflow must refuse to start the same
+        # way auto-QA does instead of leaving the user with a stuck PR.
+        for approval_mode in system_agents.AUTO_REVIEW_BLOCKED_APPROVAL_MODES:
+            with self.subTest(approval_mode=approval_mode):
+                instance = _instance(
+                    thread_id=f"main-thread-pr-{approval_mode}",
+                    auto_pr_enabled=True,
+                    approval_mode=approval_mode,
+                )
+
+                system_agents.on_codex_instance_finished(instance)
+
+                instance.refresh_from_db()
+                self.assertIsNone(instance.auto_pr_triggered_at)
         mock_start.assert_not_called()
 
     @patch("hitch.main.system_agents.start_pr_qa_workflow")
