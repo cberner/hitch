@@ -373,8 +373,14 @@ class SessionViewTests(TestCase):
         self.assertContains(response, "data-nav-menu-open")
         self.assertContains(response, "data-nav-menu-panel")
         self.assertContains(response, 'aria-label="Navigation menu"')
-        self.assertContains(response, f'href="{reverse("index")}#new-session"')
-        self.assertContains(response, ">new session<")
+        body = response.content.decode()
+        nav_start = body.index('<nav class="primary-nav"')
+        nav_end = body.index("</nav>", nav_start)
+        nav_html = body[nav_start:nav_end]
+        self.assertIn(f'href="{reverse("index")}#new-session"', nav_html)
+        self.assertIn('class="primary-nav-new-session"', nav_html)
+        self.assertIn('aria-label="New session"', nav_html)
+        self.assertNotIn(">new session<", nav_html)
         self.assertContains(response, f'href="{reverse("index")}"')
         self.assertNotContains(
             response, f'href="{reverse("index")}" aria-current="page"'
