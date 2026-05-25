@@ -8,7 +8,7 @@ from typing import Any
 
 from django.db import connection
 
-from hitch.main.models import StandingOrder
+from hitch.main.models import AutonomousGoal
 from hitch.main.proposed_sessions import (
     ProposedSessionError,
     ProposedSessionInput,
@@ -94,7 +94,7 @@ def _handle_propose_session(arguments: dict[str, Any], context: ToolContext) -> 
             cwd=context.cwd,
             relevant_files=[item for item in relevant_files if isinstance(item, str)],
             confidence=_string_arg(
-                arguments, "confidence", default=StandingOrder.CONFIDENCE_MEDIUM
+                arguments, "confidence", default=AutonomousGoal.CONFIDENCE_MEDIUM
             ),
             source_thread_id=context.thread_id,
         )
@@ -150,9 +150,9 @@ _TOOLS: dict[tuple[str, str], HitchTool] = {
                 "confidence": {
                     "type": "string",
                     "enum": [
-                        StandingOrder.CONFIDENCE_MEDIUM,
-                        StandingOrder.CONFIDENCE_HIGH,
-                        StandingOrder.CONFIDENCE_VERY_HIGH,
+                        AutonomousGoal.CONFIDENCE_MEDIUM,
+                        AutonomousGoal.CONFIDENCE_HIGH,
+                        AutonomousGoal.CONFIDENCE_VERY_HIGH,
                     ],
                 },
             },

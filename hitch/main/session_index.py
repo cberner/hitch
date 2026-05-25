@@ -23,9 +23,21 @@ THREAD_LIST_FETCH_LIMIT = 100
 ARCHIVED_SESSIONS_DIR = "archived_sessions"
 STALE_AFTER = timedelta(seconds=30)
 HIDDEN_SYSTEM_THREAD_SOURCE = "subagent"
-STANDING_ORDER_AGENT_PROMPT_TITLE = "You are Hitch's standing order agent."
-STANDING_ORDER_JUDGE_PROMPT_TITLE = (
+AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE = "You are Hitch's autonomous goal agent."
+AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE = (
+    "You are Hitch's autonomous goal confidence judge."
+)
+LEGACY_AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE = "You are Hitch's standing order agent."
+LEGACY_AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE = (
     "You are Hitch's standing order confidence judge."
+)
+_AUTONOMOUS_GOAL_AGENT_PROMPT_TITLES = (
+    AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE,
+    LEGACY_AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE,
+)
+_AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLES = (
+    AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE,
+    LEGACY_AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE,
 )
 
 
@@ -245,17 +257,28 @@ def hidden_system_session_from_metadata(
 ) -> bool:
     if thread_source == HIDDEN_SYSTEM_THREAD_SOURCE:
         return True
-    if name == STANDING_ORDER_AGENT_PROMPT_TITLE:
+    if name in _AUTONOMOUS_GOAL_AGENT_PROMPT_TITLES:
         return (
-            preview.startswith(f"{STANDING_ORDER_AGENT_PROMPT_TITLE}\n\n")
-            and "Standing order title:" in preview
-            and "Standing order goal:" in preview
+            preview.startswith(f"{name}\n\n")
+            and (
+                (
+                    "Autonomous goal title:" in preview
+                    and "Autonomous goal objective:" in preview
+                )
+                or (
+                    "Standing order title:" in preview
+                    and "Standing order goal:" in preview
+                )
+            )
             and "Return only JSON matching this shape:" in preview
         )
-    if name == STANDING_ORDER_JUDGE_PROMPT_TITLE:
+    if name in _AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLES:
         return (
-            preview.startswith(f"{STANDING_ORDER_JUDGE_PROMPT_TITLE}\n\n")
-            and "Standing order title:" in preview
+            preview.startswith(f"{name}\n\n")
+            and (
+                "Autonomous goal title:" in preview
+                or "Standing order title:" in preview
+            )
             and "Candidate session JSON:" in preview
             and "Return only JSON matching this shape:" in preview
         )

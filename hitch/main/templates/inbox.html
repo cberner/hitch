@@ -294,13 +294,13 @@
                         {{ proposed_session.project.name }} -
                         {% endif %}
                         {% if proposed_session.inbox_kind == "notice" %}
-                            {% if proposed_session.standing_order %}
-                            From standing order: {{ proposed_session.standing_order.title }}
+                            {% if proposed_session.autonomous_goal %}
+                            From autonomous goal: {{ proposed_session.autonomous_goal.title }}
                             {% else %}
                             Notice
                             {% endif %}
-                        {% elif proposed_session.standing_order %}
-                        {{ proposed_session.standing_order.title }} - {{ proposed_session.standing_order.get_ambition_display }} ambition - {{ proposed_session.get_confidence_display }} confidence
+                        {% elif proposed_session.autonomous_goal %}
+                        {{ proposed_session.autonomous_goal.title }} - {{ proposed_session.autonomous_goal.get_ambition_display }} ambition - {{ proposed_session.get_confidence_display }} confidence
                         {% else %}
                         From coding agent - {{ proposed_session.get_confidence_display }} confidence
                         {% endif %}

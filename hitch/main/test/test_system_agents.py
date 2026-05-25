@@ -18,12 +18,12 @@ from hitch.main.local_merges import (
     LocalBranchMergeResult,
 )
 from hitch.main.models import (
+    AutonomousGoal,
+    AutonomousGoalMemory,
     CodexInstance,
     Project,
     ProposedSession,
     SessionMetadata,
-    StandingOrder,
-    StandingOrderMemory,
     SystemAgentRun,
     SystemWorkflow,
     UserInputRequest,
@@ -3711,7 +3711,7 @@ class AutoProposalQuotaPauseTests(TestCase):
         )
 
 
-class StandingOrderWorkflowTests(TestCase):
+class AutonomousGoalWorkflowTests(TestCase):
     @override
     def setUp(self) -> None:
         super().setUp()
@@ -3722,8 +3722,8 @@ class StandingOrderWorkflowTests(TestCase):
         self.mock_auto_proposals_paused_by_quota = self.quota_patcher.start()
         self.addCleanup(self.quota_patcher.stop)
 
-    def test_standing_order_candidate_parser_accepts_wrapped_proposal(self) -> None:
-        parsed = system_agents._parse_standing_order_candidate_output(
+    def test_autonomous_goal_candidate_parser_accepts_wrapped_proposal(self) -> None:
+        parsed = system_agents._parse_autonomous_goal_candidate_output(
             json.dumps(
                 {
                     "proposal": {
@@ -3752,26 +3752,26 @@ class StandingOrderWorkflowTests(TestCase):
         )
         self.assertEqual(parsed["memory_relevant_files"], ["hitch/main/rollout.py"])
 
-    def test_standing_order_candidate_parser_rejects_invalid_wrapped_output(
+    def test_autonomous_goal_candidate_parser_rejects_invalid_wrapped_output(
         self,
     ) -> None:
         self.assertIsNone(
-            system_agents._parse_standing_order_candidate_output(
+            system_agents._parse_autonomous_goal_candidate_output(
                 json.dumps({"proposal": None, "message": "   "})
             )
         )
         self.assertIsNone(
-            system_agents._parse_standing_order_candidate_output(
+            system_agents._parse_autonomous_goal_candidate_output(
                 json.dumps({"proposal": "not an object", "message": ""})
             )
         )
         self.assertIsNone(
-            system_agents._parse_standing_order_candidate_output(
+            system_agents._parse_autonomous_goal_candidate_output(
                 json.dumps({"proposal": {"title": ""}, "message": ""})
             )
         )
         self.assertIsNone(
-            system_agents._parse_standing_order_candidate_output(
+            system_agents._parse_autonomous_goal_candidate_output(
                 json.dumps({"title": "", "summary": "", "impact": ""})
             )
         )
@@ -3781,32 +3781,32 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
             goal="Find small documentation improvements.",
-            ambition=StandingOrder.AMBITION_HIGH,
-            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
-            web_search_mode=StandingOrder.WEB_SEARCH_LIVE,
+            ambition=AutonomousGoal.AMBITION_HIGH,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            web_search_mode=AutonomousGoal.WEB_SEARCH_LIVE,
         )
         mock_spawn.return_value = _instance(
             thread_id="candidate-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        workflow = system_agents.start_standing_order_workflow(
-            standing_order=standing_order
+        workflow = system_agents.start_autonomous_goal_workflow(
+            autonomous_goal=autonomous_goal
         )
 
-        self.assertEqual(workflow.step, system_agents.STEP_STANDING_ORDER_CANDIDATE_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING)
         kwargs = mock_spawn.call_args.kwargs
         self.assertEqual(kwargs["cwd"], "/repo")
         self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
         self.assertIsNone(kwargs["sandbox_policy"])
-        self.assertEqual(kwargs["web_search_mode"], StandingOrder.WEB_SEARCH_LIVE)
-        self.assertEqual(kwargs["agent_kind"], system_agents.STANDING_ORDER_AGENT_KIND)
-        self.assertEqual(kwargs["display_author"], system_agents.STANDING_ORDER_DISPLAY_AUTHOR)
+        self.assertEqual(kwargs["web_search_mode"], AutonomousGoal.WEB_SEARCH_LIVE)
+        self.assertEqual(kwargs["agent_kind"], system_agents.AUTONOMOUS_GOAL_AGENT_KIND)
+        self.assertEqual(kwargs["display_author"], system_agents.AUTONOMOUS_GOAL_DISPLAY_AUTHOR)
         schema = kwargs["output_schema"]
         self.assertEqual(
             schema["required"],
@@ -3829,7 +3829,7 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertIn("make high progress", kwargs["prompt"])
         self.assertIn("Do not make code changes", kwargs["prompt"])
         self.assertIn('"proposal" to null', kwargs["prompt"])
-        self.assertIn("Standing order memory from previous candidate runs", kwargs["prompt"])
+        self.assertIn("Autonomous goal memory from previous candidate runs", kwargs["prompt"])
         self.assertIn("next_steps_summary", kwargs["prompt"])
         self.assertTrue(
             SessionMetadata.objects.filter(thread_id="candidate-thread").exists()
@@ -3841,7 +3841,7 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock, mock_worktree: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
             goal="Find small documentation improvements.",
@@ -3849,12 +3849,12 @@ class StandingOrderWorkflowTests(TestCase):
         mock_spawn.return_value = _instance(
             thread_id="candidate-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
         mock_worktree.return_value = MagicMock(path=Path("/repo-worktree"))
 
-        workflow = system_agents.start_standing_order_workflow(
-            standing_order=standing_order,
+        workflow = system_agents.start_autonomous_goal_workflow(
+            autonomous_goal=autonomous_goal,
             use_worktrees=True,
         )
 
@@ -3866,7 +3866,7 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertEqual(kwargs["cwd"], "/repo-worktree")
         self.assertEqual(
             kwargs["sandbox_policy"],
-            system_agents.STANDING_ORDER_IMPLEMENTATION_SANDBOX_POLICY,
+            system_agents.AUTONOMOUS_GOAL_IMPLEMENTATION_SANDBOX_POLICY,
         )
         self.assertIn("Repository cwd: /repo-worktree", kwargs["prompt"])
         self.assertIn("Make code changes", kwargs["prompt"])
@@ -3885,7 +3885,7 @@ class StandingOrderWorkflowTests(TestCase):
         mock_cleanup: MagicMock,
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
             goal="Find small documentation improvements.",
@@ -3894,8 +3894,8 @@ class StandingOrderWorkflowTests(TestCase):
         mock_worktree.return_value = managed_worktree
         mock_spawn.side_effect = RuntimeError("boom")
 
-        workflow = system_agents.start_standing_order_workflow(
-            standing_order=standing_order,
+        workflow = system_agents.start_autonomous_goal_workflow(
+            autonomous_goal=autonomous_goal,
             use_worktrees=True,
         )
 
@@ -3908,11 +3908,11 @@ class StandingOrderWorkflowTests(TestCase):
         return_value="a" * 40,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_auto_proposal_starts_enabled_order_without_pending_proposal(
+    def test_auto_proposal_starts_enabled_goal_without_pending_proposal(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
             goal="Find small documentation improvements.",
@@ -3921,7 +3921,7 @@ class StandingOrderWorkflowTests(TestCase):
         mock_spawn.return_value = _instance(
             thread_id="candidate-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
         started = system_agents.maybe_start_auto_proposal_workflows(project=project)
@@ -3930,7 +3930,7 @@ class StandingOrderWorkflowTests(TestCase):
         workflow = SystemWorkflow.objects.get()
         self.assertEqual(
             workflow.main_thread_id,
-            system_agents._standing_order_main_thread_id(standing_order.pk),
+            system_agents._autonomous_goal_main_thread_id(autonomous_goal.pk),
         )
         self.assertTrue(workflow.state["auto_proposal"])
         mock_spawn.assert_called_once()
@@ -3941,14 +3941,14 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
             goal="Find small documentation improvements.",
             auto_proposal_enabled=False,
         )
 
-        started = system_agents._maybe_start_auto_proposal_workflow(standing_order.pk)
+        started = system_agents._maybe_start_auto_proposal_workflow(autonomous_goal.pk)
 
         self.assertFalse(started)
         self.assertFalse(SystemWorkflow.objects.exists())
@@ -3962,7 +3962,7 @@ class StandingOrderWorkflowTests(TestCase):
     ) -> None:
         self.mock_auto_proposals_paused_by_quota.return_value = True
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        StandingOrder.objects.create(
+        AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
             goal="Find small documentation improvements.",
@@ -3985,31 +3985,31 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        pending_order = StandingOrder.objects.create(
+        pending_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
             auto_proposal_enabled=True,
         )
-        notice_order = StandingOrder.objects.create(
+        notice_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve docs",
             goal="Find useful documentation increments.",
             auto_proposal_enabled=True,
         )
         ProposedSession.objects.create(
-            standing_order=pending_order,
+            autonomous_goal=pending_goal,
             title="Add parser coverage",
         )
         ProposedSession.objects.create(
-            standing_order=notice_order,
+            autonomous_goal=notice_goal,
             title="No proposal from Improve docs",
             inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
         )
         mock_spawn.return_value = _instance(
             thread_id="candidate-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
         started = system_agents.maybe_start_auto_proposal_workflows(project=project)
@@ -4018,7 +4018,7 @@ class StandingOrderWorkflowTests(TestCase):
         workflow = SystemWorkflow.objects.get()
         self.assertEqual(
             workflow.main_thread_id,
-            system_agents._standing_order_main_thread_id(notice_order.pk),
+            system_agents._autonomous_goal_main_thread_id(notice_goal.pk),
         )
 
     @patch(
@@ -4031,25 +4031,25 @@ class StandingOrderWorkflowTests(TestCase):
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         other_project = Project.objects.create(name="Other", repo_path="/other")
-        accepted_order = StandingOrder.objects.create(
+        accepted_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
             auto_proposal_enabled=True,
         )
-        rejected_order = StandingOrder.objects.create(
+        rejected_goal = AutonomousGoal.objects.create(
             project=other_project,
             title="Improve docs",
             goal="Find useful documentation increments.",
             auto_proposal_enabled=True,
         )
         ProposedSession.objects.create(
-            standing_order=accepted_order,
+            autonomous_goal=accepted_goal,
             title="Accepted proposal",
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
         )
         ProposedSession.objects.create(
-            standing_order=rejected_order,
+            autonomous_goal=rejected_goal,
             title="Rejected proposal",
             outcome_status=ProposedSession.OUTCOME_REJECTED,
         )
@@ -4057,12 +4057,12 @@ class StandingOrderWorkflowTests(TestCase):
             _instance(
                 thread_id="candidate-thread-1",
                 purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-                agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+                agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             ),
             _instance(
                 thread_id="candidate-thread-2",
                 purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-                agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+                agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             ),
         ]
 
@@ -4080,13 +4080,13 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        first_order = StandingOrder.objects.create(
+        first_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
             auto_proposal_enabled=True,
         )
-        StandingOrder.objects.create(
+        AutonomousGoal.objects.create(
             project=project,
             title="Improve docs",
             goal="Find useful documentation increments.",
@@ -4095,7 +4095,7 @@ class StandingOrderWorkflowTests(TestCase):
         mock_spawn.return_value = _instance(
             thread_id="candidate-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
         started = system_agents.maybe_start_auto_proposal_workflows(project=project)
@@ -4104,7 +4104,7 @@ class StandingOrderWorkflowTests(TestCase):
         workflow = SystemWorkflow.objects.get()
         self.assertEqual(
             workflow.main_thread_id,
-            system_agents._standing_order_main_thread_id(first_order.pk),
+            system_agents._autonomous_goal_main_thread_id(first_goal.pk),
         )
 
     @patch(
@@ -4112,17 +4112,17 @@ class StandingOrderWorkflowTests(TestCase):
         return_value="a" * 40,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_auto_proposal_blocks_in_flight_standing_order_automation(
+    def test_auto_proposal_blocks_in_flight_autonomous_goal_automation(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        StandingOrder.objects.create(
+        AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
             auto_proposal_enabled=True,
         )
-        blocker_order = StandingOrder.objects.create(
+        blocker_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve docs",
             goal="Find useful documentation increments.",
@@ -4135,11 +4135,58 @@ class StandingOrderWorkflowTests(TestCase):
         )
         ProposedSession.objects.create(
             project=project,
-            standing_order=blocker_order,
+            autonomous_goal=blocker_goal,
             title="Automated proposal",
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             accepted_session=implementation,
-            outcome_metadata={"accepted_by": "standing_order_autonomy"},
+            outcome_metadata={"accepted_by": "autonomous_goal_autonomy"},
+        )
+        _instance(
+            thread_id="implementation-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+            status=CodexInstance.STATUS_RUNNING,
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 0)
+        mock_spawn.assert_not_called()
+
+    @patch(
+        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_blocks_legacy_in_flight_autonomous_goal_automation(
+        self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        blocker_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve docs",
+            goal="Find useful documentation increments.",
+            auto_proposal_enabled=True,
+        )
+        implementation = SessionMetadata.objects.create(
+            thread_id="implementation-thread",
+            cwd="/repo",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=blocker_goal,
+            title="Automated proposal",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            accepted_session=implementation,
+            outcome_metadata={
+                "accepted_by": system_agents.LEGACY_AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY
+            },
         )
         _instance(
             thread_id="implementation-thread",
@@ -4161,13 +4208,13 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
             auto_proposal_enabled=True,
         )
-        blocker_order = StandingOrder.objects.create(
+        blocker_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve docs",
             goal="Find useful documentation increments.",
@@ -4180,11 +4227,11 @@ class StandingOrderWorkflowTests(TestCase):
         )
         ProposedSession.objects.create(
             project=project,
-            standing_order=blocker_order,
+            autonomous_goal=blocker_goal,
             title="Automated proposal",
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             accepted_session=implementation,
-            outcome_metadata={"accepted_by": "standing_order_autonomy"},
+            outcome_metadata={"accepted_by": "autonomous_goal_autonomy"},
         )
         SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -4200,11 +4247,11 @@ class StandingOrderWorkflowTests(TestCase):
             )
             ProposedSession.objects.create(
                 project=project,
-                standing_order=standing_order,
+                autonomous_goal=autonomous_goal,
                 title=f"Completed automated proposal {index}",
                 outcome_status=ProposedSession.OUTCOME_ACCEPTED,
                 accepted_session=session,
-                outcome_metadata={"accepted_by": "standing_order_autonomy"},
+                outcome_metadata={"accepted_by": "autonomous_goal_autonomy"},
             )
 
         started = system_agents.maybe_start_auto_proposal_workflows(project=project)
@@ -4221,7 +4268,7 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
@@ -4229,15 +4276,15 @@ class StandingOrderWorkflowTests(TestCase):
         )
         ProposedSession.objects.create(
             project=project,
-            standing_order=standing_order,
-            title="Standing order failed: Improve tests",
+            autonomous_goal=autonomous_goal,
+            title="Autonomous goal failed: Improve tests",
             inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
             outcome_metadata={"automation_status": "failed"},
         )
         for index in range(25):
             ProposedSession.objects.create(
                 project=project,
-                standing_order=standing_order,
+                autonomous_goal=autonomous_goal,
                 title=f"No proposal from Improve tests {index}",
                 inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
             )
@@ -4256,7 +4303,7 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
@@ -4264,8 +4311,8 @@ class StandingOrderWorkflowTests(TestCase):
         )
         ProposedSession.objects.create(
             project=project,
-            standing_order=standing_order,
-            title="Standing order failed: Improve tests",
+            autonomous_goal=autonomous_goal,
+            title="Autonomous goal failed: Improve tests",
             inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
             outcome_status=ProposedSession.OUTCOME_REJECTED,
             outcome_metadata={"automation_status": "failed"},
@@ -4273,7 +4320,7 @@ class StandingOrderWorkflowTests(TestCase):
         mock_spawn.return_value = _instance(
             thread_id="candidate-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
         started = system_agents.maybe_start_auto_proposal_workflows(project=project)
@@ -4290,7 +4337,7 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        StandingOrder.objects.create(
+        AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
@@ -4312,7 +4359,7 @@ class StandingOrderWorkflowTests(TestCase):
         return_value=0,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_run_auto_proposals_command_starts_eligible_orders(
+    def test_run_auto_proposals_command_starts_eligible_goals(
         self,
         mock_spawn: MagicMock,
         mock_reconcile_dead: MagicMock,
@@ -4320,28 +4367,28 @@ class StandingOrderWorkflowTests(TestCase):
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         other_project = Project.objects.create(name="Other", repo_path="/other")
-        eligible_order = StandingOrder.objects.create(
+        eligible_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
             goal="Find small documentation improvements.",
             auto_proposal_enabled=True,
         )
-        StandingOrder.objects.create(
+        AutonomousGoal.objects.create(
             project=project,
-            title="Disabled order",
-            goal="This order should require manual runs.",
+            title="Disabled goal",
+            goal="This goal should require manual runs.",
             auto_proposal_enabled=False,
         )
-        StandingOrder.objects.create(
+        AutonomousGoal.objects.create(
             project=other_project,
-            title="Other project order",
+            title="Other project goal",
             goal="This belongs to a different project.",
             auto_proposal_enabled=True,
         )
         mock_spawn.return_value = _instance(
             thread_id="candidate-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
         output = call_command("run_auto_proposals", project_id=project.pk)
@@ -4350,7 +4397,7 @@ class StandingOrderWorkflowTests(TestCase):
         workflow = SystemWorkflow.objects.get()
         self.assertEqual(
             workflow.main_thread_id,
-            system_agents._standing_order_main_thread_id(eligible_order.pk),
+            system_agents._autonomous_goal_main_thread_id(eligible_goal.pk),
         )
         mock_reconcile_dead.assert_called_once_with()
         mock_spawn.assert_called_once()
@@ -4372,34 +4419,34 @@ class StandingOrderWorkflowTests(TestCase):
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         other_project = Project.objects.create(name="Other", repo_path="/other")
-        first_order = StandingOrder.objects.create(
+        first_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep tests current",
             goal="Find small test improvements.",
             auto_proposal_enabled=True,
         )
-        second_order = StandingOrder.objects.create(
+        second_goal = AutonomousGoal.objects.create(
             project=other_project,
             title="Keep docs current",
             goal="Find small documentation improvements.",
             auto_proposal_enabled=True,
         )
-        StandingOrder.objects.create(
+        AutonomousGoal.objects.create(
             project=other_project,
-            title="Disabled order",
-            goal="This order should require manual runs.",
+            title="Disabled goal",
+            goal="This goal should require manual runs.",
             auto_proposal_enabled=False,
         )
         mock_spawn.side_effect = [
             _instance(
                 thread_id="candidate-thread-1",
                 purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-                agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+                agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             ),
             _instance(
                 thread_id="candidate-thread-2",
                 purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-                agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+                agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             ),
         ]
 
@@ -4409,8 +4456,8 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertEqual(
             set(SystemWorkflow.objects.values_list("main_thread_id", flat=True)),
             {
-                system_agents._standing_order_main_thread_id(first_order.pk),
-                system_agents._standing_order_main_thread_id(second_order.pk),
+                system_agents._autonomous_goal_main_thread_id(first_goal.pk),
+                system_agents._autonomous_goal_main_thread_id(second_goal.pk),
             },
         )
         mock_reconcile_dead.assert_called_once_with()
@@ -4422,7 +4469,7 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        StandingOrder.objects.create(
+        AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
@@ -4440,7 +4487,7 @@ class StandingOrderWorkflowTests(TestCase):
         mock_spawn.return_value = _instance(
             thread_id="candidate-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
         started = system_agents.maybe_start_auto_proposal_workflows(project=project)
@@ -4454,7 +4501,7 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
@@ -4464,7 +4511,7 @@ class StandingOrderWorkflowTests(TestCase):
         mock_spawn.return_value = _instance(
             thread_id="candidate-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
         started = system_agents.maybe_start_auto_proposal_workflows(project=project)
@@ -4484,8 +4531,8 @@ class StandingOrderWorkflowTests(TestCase):
 
         system_agents.on_codex_instance_finished(instance)
 
-        standing_order.refresh_from_db()
-        self.assertEqual(standing_order.auto_proposal_last_no_proposal_sha, "a" * 40)
+        autonomous_goal.refresh_from_db()
+        self.assertEqual(autonomous_goal.auto_proposal_last_no_proposal_sha, "a" * 40)
 
         started = system_agents.maybe_start_auto_proposal_workflows(project=project)
 
@@ -4496,7 +4543,7 @@ class StandingOrderWorkflowTests(TestCase):
         mock_spawn.return_value = _instance(
             thread_id="candidate-thread-2",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
         started = system_agents.maybe_start_auto_proposal_workflows(project=project)
@@ -4509,19 +4556,19 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Keep docs current",
             goal="Find substantial documentation improvements.",
-            ambition=StandingOrder.AMBITION_YOLO,
+            ambition=AutonomousGoal.AMBITION_YOLO,
         )
         mock_spawn.return_value = _instance(
             thread_id="candidate-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        system_agents.start_standing_order_workflow(standing_order=standing_order)
+        system_agents.start_autonomous_goal_workflow(autonomous_goal=autonomous_goal)
 
         prompt = mock_spawn.call_args.kwargs["prompt"]
         self.assertIn("bold, high-leverage progress", prompt)
@@ -4533,7 +4580,7 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Process one test file",
             goal="Pick one test file and improve it.",
@@ -4543,8 +4590,8 @@ class StandingOrderWorkflowTests(TestCase):
             cwd="/repo",
             project=project,
         )
-        StandingOrderMemory.objects.create(
-            standing_order=standing_order,
+        AutonomousGoalMemory.objects.create(
+            autonomous_goal=autonomous_goal,
             candidate_session=candidate,
             title="Processed rollout tests",
             summary=(
@@ -4556,15 +4603,15 @@ class StandingOrderWorkflowTests(TestCase):
         mock_spawn.return_value = _instance(
             thread_id="candidate-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        workflow = system_agents.start_standing_order_workflow(
-            standing_order=standing_order
+        workflow = system_agents.start_autonomous_goal_workflow(
+            autonomous_goal=autonomous_goal
         )
 
         prompt = mock_spawn.call_args.kwargs["prompt"]
-        self.assertIn("Standing order memory from previous candidate runs", prompt)
+        self.assertIn("Autonomous goal memory from previous candidate runs", prompt)
         self.assertIn("Processed rollout tests", prompt)
         self.assertIn("hitch/main/test/test_rollout.py", prompt)
         run = SystemAgentRun.objects.get(workflow=workflow)
@@ -4572,19 +4619,19 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertFalse(run.input["memory_compacted"])
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    @patch.object(system_agents, "_STANDING_ORDER_MEMORY_CONTEXT_CHARS", 350)
+    @patch.object(system_agents, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 350)
     def test_candidate_prompt_compacts_large_prior_memory(
         self, mock_spawn: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Process one test file",
             goal="Pick one test file and improve it.",
         )
         for idx in range(4):
-            StandingOrderMemory.objects.create(
-                standing_order=standing_order,
+            AutonomousGoalMemory.objects.create(
+                autonomous_goal=autonomous_goal,
                 title=f"Processed test file {idx}",
                 summary=(
                     (
@@ -4598,36 +4645,36 @@ class StandingOrderWorkflowTests(TestCase):
         mock_spawn.return_value = _instance(
             thread_id="candidate-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        workflow = system_agents.start_standing_order_workflow(
-            standing_order=standing_order
+        workflow = system_agents.start_autonomous_goal_workflow(
+            autonomous_goal=autonomous_goal
         )
 
         prompt = mock_spawn.call_args.kwargs["prompt"]
         self.assertIn("Compacted from 4 prior candidate summaries", prompt)
         self.assertIn("Files seen across prior runs", prompt)
         self.assertIn("hitch/main/test/test_3.py", prompt)
-        memory_context = system_agents._standing_order_memory_context(standing_order)
+        memory_context = system_agents._autonomous_goal_memory_context(autonomous_goal)
         self.assertLessEqual(
-            len(memory_context.text), system_agents._STANDING_ORDER_MEMORY_CONTEXT_CHARS
+            len(memory_context.text), system_agents._AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS
         )
         run = SystemAgentRun.objects.get(workflow=workflow)
         self.assertEqual(run.input["memory_count"], 4)
         self.assertTrue(run.input["memory_compacted"])
 
-    @patch.object(system_agents, "_STANDING_ORDER_MEMORY_CONTEXT_CHARS", 240)
+    @patch.object(system_agents, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 240)
     def test_compacted_memory_context_enforces_budget_with_long_files(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Process one test file",
             goal="Pick one test file and improve it.",
         )
         for idx in range(5):
-            StandingOrderMemory.objects.create(
-                standing_order=standing_order,
+            AutonomousGoalMemory.objects.create(
+                autonomous_goal=autonomous_goal,
                 title=f"Processed file {idx}",
                 summary="Chose one file and left a long next-step summary. " * 12,
                 relevant_files=[
@@ -4637,31 +4684,31 @@ class StandingOrderWorkflowTests(TestCase):
                 ],
             )
 
-        memory_context = system_agents._standing_order_memory_context(standing_order)
+        memory_context = system_agents._autonomous_goal_memory_context(autonomous_goal)
 
         self.assertTrue(memory_context.compacted)
         self.assertIn("Compacted from 5 prior candidate summaries", memory_context.text)
         self.assertLessEqual(
-            len(memory_context.text), system_agents._STANDING_ORDER_MEMORY_CONTEXT_CHARS
+            len(memory_context.text), system_agents._AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS
         )
 
-    @patch.object(system_agents, "_STANDING_ORDER_MEMORY_MAX_ROWS", 2)
+    @patch.object(system_agents, "_AUTONOMOUS_GOAL_MEMORY_MAX_ROWS", 2)
     def test_memory_context_caps_recent_rows_before_compaction(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Process one test file",
             goal="Pick one test file and improve it.",
         )
         for idx in range(4):
-            StandingOrderMemory.objects.create(
-                standing_order=standing_order,
+            AutonomousGoalMemory.objects.create(
+                autonomous_goal=autonomous_goal,
                 title=f"Processed file {idx}",
                 summary=f"Summary for file {idx}.",
                 relevant_files=[f"hitch/main/test/test_{idx}.py"],
             )
 
-        memory_context = system_agents._standing_order_memory_context(standing_order)
+        memory_context = system_agents._autonomous_goal_memory_context(autonomous_goal)
 
         self.assertTrue(memory_context.compacted)
         self.assertEqual(memory_context.count, 4)
@@ -4675,24 +4722,24 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            web_search_mode=StandingOrder.WEB_SEARCH_LIVE,
+            web_search_mode=AutonomousGoal.WEB_SEARCH_LIVE,
             auto_proposal_last_no_proposal_sha="a" * 40,
         )
         workflow = SystemWorkflow.objects.create(
-            kind=system_agents.STANDING_ORDER_AGENT_KIND,
-            main_thread_id=system_agents._standing_order_main_thread_id(
-                standing_order.pk
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
             ),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_STANDING_ORDER_CANDIDATE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
             state={
-                "standing_order_id": standing_order.pk,
-                "web_search_mode": StandingOrder.WEB_SEARCH_LIVE,
+                "autonomous_goal_id": autonomous_goal.pk,
+                "web_search_mode": AutonomousGoal.WEB_SEARCH_LIVE,
             },
         )
         candidate_metadata = SessionMetadata.objects.create(
@@ -4727,27 +4774,27 @@ class StandingOrderWorkflowTests(TestCase):
                     ],
                 },
             ),
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             thread_id="candidate-thread",
             instance=instance,
         )
         mock_spawn.return_value = _instance(
             thread_id="judge-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
         )
 
         system_agents.on_codex_instance_finished(instance)
 
         workflow.refresh_from_db()
-        self.assertEqual(workflow.step, system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING)
         self.assertEqual(workflow.state["candidate"]["title"], "Add parser coverage")
-        memory = StandingOrderMemory.objects.get()
-        self.assertEqual(memory.standing_order, standing_order)
+        memory = AutonomousGoalMemory.objects.get()
+        self.assertEqual(memory.autonomous_goal, autonomous_goal)
         self.assertEqual(memory.candidate_session, candidate_metadata)
         self.assertEqual(memory.title, "Add parser coverage")
         self.assertEqual(
@@ -4759,8 +4806,8 @@ class StandingOrderWorkflowTests(TestCase):
             ["hitch/main/rollout.py", "hitch/main/test/test_rollout.py"],
         )
         kwargs = mock_spawn.call_args.kwargs
-        self.assertEqual(kwargs["agent_kind"], system_agents.STANDING_ORDER_JUDGE_AGENT_KIND)
-        self.assertEqual(kwargs["web_search_mode"], StandingOrder.WEB_SEARCH_LIVE)
+        self.assertEqual(kwargs["agent_kind"], system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND)
+        self.assertEqual(kwargs["web_search_mode"], AutonomousGoal.WEB_SEARCH_LIVE)
         self.assertIn("Add parser coverage", kwargs["prompt"])
         self.assertTrue(SessionMetadata.objects.filter(thread_id="judge-thread").exists())
 
@@ -4769,7 +4816,7 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
@@ -4780,15 +4827,15 @@ class StandingOrderWorkflowTests(TestCase):
             project=project,
         )
         workflow = SystemWorkflow.objects.create(
-            kind=system_agents.STANDING_ORDER_AGENT_KIND,
-            main_thread_id=system_agents._standing_order_main_thread_id(
-                standing_order.pk
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
             ),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_STANDING_ORDER_CANDIDATE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
             state={
-                "standing_order_id": standing_order.pk,
+                "autonomous_goal_id": autonomous_goal.pk,
                 "auto_proposal": True,
                 "default_branch_sha": "a" * 40,
                 "candidate_session_id": candidate_metadata.pk,
@@ -4810,11 +4857,11 @@ class StandingOrderWorkflowTests(TestCase):
                     "memory_relevant_files": ["hitch/main/test/test_rollout.py"],
                 },
             ),
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             thread_id="candidate-thread",
             instance=instance,
         )
@@ -4823,7 +4870,7 @@ class StandingOrderWorkflowTests(TestCase):
 
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
-        self.assertEqual(workflow.step, system_agents.STEP_STANDING_ORDER_SKIPPED)
+        self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_SKIPPED)
         notice = ProposedSession.objects.get()
         self.assertEqual(notice.inbox_kind, ProposedSession.INBOX_KIND_NOTICE)
         self.assertEqual(notice.title, "No proposal from Improve tests")
@@ -4831,15 +4878,15 @@ class StandingOrderWorkflowTests(TestCase):
             notice.summary, "No concrete test increment was worth proposing."
         )
         self.assertEqual(notice.candidate_session, candidate_metadata)
-        memory = StandingOrderMemory.objects.get()
+        memory = AutonomousGoalMemory.objects.get()
         self.assertEqual(memory.title, "No proposal from Improve tests")
         self.assertEqual(
             memory.summary,
             "Inspected rollout tests and found no clear increment; try settings tests next.",
         )
         self.assertEqual(memory.relevant_files, ["hitch/main/test/test_rollout.py"])
-        standing_order.refresh_from_db()
-        self.assertEqual(standing_order.auto_proposal_last_no_proposal_sha, "a" * 40)
+        autonomous_goal.refresh_from_db()
+        self.assertEqual(autonomous_goal.auto_proposal_last_no_proposal_sha, "a" * 40)
         mock_spawn.assert_not_called()
 
     @patch("hitch.main.system_agents.default_branch_checkout_commit_hash")
@@ -4848,7 +4895,7 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
@@ -4857,10 +4904,10 @@ class StandingOrderWorkflowTests(TestCase):
         mock_spawn.return_value = _instance(
             thread_id="candidate-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
-        workflow = system_agents.start_standing_order_workflow(
-            standing_order=standing_order,
+        workflow = system_agents.start_autonomous_goal_workflow(
+            autonomous_goal=autonomous_goal,
             auto_proposal=True,
         )
         instance = CodexInstance.objects.get(thread_id="candidate-thread")
@@ -4879,9 +4926,9 @@ class StandingOrderWorkflowTests(TestCase):
         system_agents.on_codex_instance_finished(instance)
 
         workflow.refresh_from_db()
-        standing_order.refresh_from_db()
+        autonomous_goal.refresh_from_db()
         self.assertEqual(workflow.state["default_branch_sha"], "a" * 40)
-        self.assertEqual(standing_order.auto_proposal_last_no_proposal_sha, "a" * 40)
+        self.assertEqual(autonomous_goal.auto_proposal_last_no_proposal_sha, "a" * 40)
         mock_default_sha.assert_called_once_with("/repo")
 
     @patch(
@@ -4893,7 +4940,7 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
@@ -4901,9 +4948,9 @@ class StandingOrderWorkflowTests(TestCase):
         mock_spawn.return_value = _instance(
             thread_id="candidate-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
-        system_agents.start_standing_order_workflow(standing_order=standing_order)
+        system_agents.start_autonomous_goal_workflow(autonomous_goal=autonomous_goal)
         instance = CodexInstance.objects.get(thread_id="candidate-thread")
         instance.events_path = _events_file(
             self,
@@ -4918,8 +4965,8 @@ class StandingOrderWorkflowTests(TestCase):
 
         system_agents.on_codex_instance_finished(instance)
 
-        standing_order.refresh_from_db()
-        self.assertEqual(standing_order.auto_proposal_last_no_proposal_sha, "")
+        autonomous_goal.refresh_from_db()
+        self.assertEqual(autonomous_goal.auto_proposal_last_no_proposal_sha, "")
         mock_default_sha.assert_not_called()
 
     @patch(
@@ -4931,7 +4978,7 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
@@ -4939,14 +4986,14 @@ class StandingOrderWorkflowTests(TestCase):
         mock_spawn.return_value = _instance(
             thread_id="candidate-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
-        system_agents.start_standing_order_workflow(
-            standing_order=standing_order,
+        system_agents.start_autonomous_goal_workflow(
+            autonomous_goal=autonomous_goal,
             auto_proposal=True,
         )
-        standing_order.goal = "Find useful coverage for edited order contents."
-        standing_order.save()
+        autonomous_goal.goal = "Find useful coverage for edited goal contents."
+        autonomous_goal.save()
         instance = CodexInstance.objects.get(thread_id="candidate-thread")
         instance.events_path = _events_file(
             self,
@@ -4961,8 +5008,8 @@ class StandingOrderWorkflowTests(TestCase):
 
         system_agents.on_codex_instance_finished(instance)
 
-        standing_order.refresh_from_db()
-        self.assertEqual(standing_order.auto_proposal_last_no_proposal_sha, "")
+        autonomous_goal.refresh_from_db()
+        self.assertEqual(autonomous_goal.auto_proposal_last_no_proposal_sha, "")
         mock_default_sha.assert_called_once_with("/repo")
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -4970,21 +5017,21 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            ambition=StandingOrder.AMBITION_YOLO,
+            ambition=AutonomousGoal.AMBITION_YOLO,
         )
         workflow = SystemWorkflow.objects.create(
-            kind=system_agents.STANDING_ORDER_AGENT_KIND,
-            main_thread_id=system_agents._standing_order_main_thread_id(
-                standing_order.pk
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
             ),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_STANDING_ORDER_CANDIDATE_RUNNING,
-            state={"standing_order_id": standing_order.pk},
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={"autonomous_goal_id": autonomous_goal.pk},
         )
         candidate_metadata = SessionMetadata.objects.create(
             thread_id="candidate-thread",
@@ -5010,18 +5057,18 @@ class StandingOrderWorkflowTests(TestCase):
                     "relevant_files": ["hitch/main/test/test_views.py"],
                 },
             ),
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             thread_id="candidate-thread",
             instance=instance,
         )
         mock_spawn.return_value = _instance(
             thread_id="judge-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
         )
 
         system_agents.on_codex_instance_finished(instance)
@@ -5033,11 +5080,11 @@ class StandingOrderWorkflowTests(TestCase):
 
     def test_judge_creates_proposal_when_confidence_meets_threshold(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
             auto_proposal_last_no_proposal_sha="a" * 40,
         )
         candidate_metadata = SessionMetadata.objects.create(
@@ -5051,15 +5098,15 @@ class StandingOrderWorkflowTests(TestCase):
             project=project,
         )
         workflow = SystemWorkflow.objects.create(
-            kind=system_agents.STANDING_ORDER_AGENT_KIND,
-            main_thread_id=system_agents._standing_order_main_thread_id(
-                standing_order.pk
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
             ),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING,
             state={
-                "standing_order_id": standing_order.pk,
+                "autonomous_goal_id": autonomous_goal.pk,
                 "candidate_session_id": candidate_metadata.pk,
                 "judge_session_id": judge_metadata.pk,
                 "candidate": {
@@ -5084,11 +5131,11 @@ class StandingOrderWorkflowTests(TestCase):
                     "rationale": "The files are well-scoped.",
                 },
             ),
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
             thread_id="judge-thread",
             instance=instance,
         )
@@ -5097,10 +5144,10 @@ class StandingOrderWorkflowTests(TestCase):
 
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
-        self.assertEqual(workflow.step, system_agents.STEP_STANDING_ORDER_PROPOSED)
+        self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED)
         proposal = ProposedSession.objects.get()
         self.assertEqual(proposal.title, "Add parser coverage")
-        self.assertEqual(proposal.confidence, StandingOrder.CONFIDENCE_HIGH)
+        self.assertEqual(proposal.confidence, AutonomousGoal.CONFIDENCE_HIGH)
         self.assertIn("Implementation guidance:", proposal.prompt)
         self.assertIn(
             "Add focused rollout parser regression tests before touching parser behavior.",
@@ -5108,21 +5155,21 @@ class StandingOrderWorkflowTests(TestCase):
         )
         self.assertEqual(proposal.candidate_session, candidate_metadata)
         self.assertEqual(proposal.judge_session, judge_metadata)
-        standing_order.refresh_from_db()
-        self.assertEqual(standing_order.auto_proposal_last_no_proposal_sha, "")
+        autonomous_goal.refresh_from_db()
+        self.assertEqual(autonomous_goal.auto_proposal_last_no_proposal_sha, "")
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_draft_patch_autonomy_starts_implementation_session(
         self, mock_spawn: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
-            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
-            web_search_mode=StandingOrder.WEB_SEARCH_CACHED,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            web_search_mode=AutonomousGoal.WEB_SEARCH_CACHED,
         )
         candidate_metadata = SessionMetadata.objects.create(
             thread_id="candidate-thread",
@@ -5135,18 +5182,18 @@ class StandingOrderWorkflowTests(TestCase):
             project=project,
         )
         workflow = SystemWorkflow.objects.create(
-            kind=system_agents.STANDING_ORDER_AGENT_KIND,
-            main_thread_id=system_agents._standing_order_main_thread_id(
-                standing_order.pk
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
             ),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING,
             state={
-                "standing_order_id": standing_order.pk,
+                "autonomous_goal_id": autonomous_goal.pk,
                 "candidate_session_id": candidate_metadata.pk,
                 "judge_session_id": judge_metadata.pk,
-                "web_search_mode": StandingOrder.WEB_SEARCH_CACHED,
+                "web_search_mode": AutonomousGoal.WEB_SEARCH_CACHED,
                 "candidate": {
                     "title": "Add parser coverage",
                     "implementation_direction": "Add focused tests.",
@@ -5166,11 +5213,11 @@ class StandingOrderWorkflowTests(TestCase):
                     "rationale": "The files are well-scoped.",
                 },
             ),
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
             thread_id="judge-thread",
             instance=instance,
         )
@@ -5178,8 +5225,8 @@ class StandingOrderWorkflowTests(TestCase):
             thread_id="implementation-thread",
             purpose=CodexInstance.PURPOSE_USER,
         )
-        StandingOrder.objects.filter(pk=standing_order.pk).update(
-            web_search_mode=StandingOrder.WEB_SEARCH_LIVE
+        AutonomousGoal.objects.filter(pk=autonomous_goal.pk).update(
+            web_search_mode=AutonomousGoal.WEB_SEARCH_LIVE
         )
 
         system_agents.on_codex_instance_finished(instance)
@@ -5187,15 +5234,15 @@ class StandingOrderWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
         self.assertEqual(
-            workflow.step, system_agents.STEP_STANDING_ORDER_DRAFT_STARTED
+            workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_DRAFT_STARTED
         )
         proposal = ProposedSession.objects.get()
         implementation = SessionMetadata.objects.get(thread_id="implementation-thread")
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
         self.assertEqual(proposal.accepted_session, implementation)
         self.assertEqual(
-            proposal.outcome_metadata["standing_order_autonomy"],
-            StandingOrder.AUTONOMY_DRAFT_PATCH,
+            proposal.outcome_metadata["autonomous_goal_autonomy"],
+            AutonomousGoal.AUTONOMY_DRAFT_PATCH,
         )
         self.assertEqual(
             proposal.outcome_metadata["automation_status"],
@@ -5209,10 +5256,10 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertEqual(kwargs["cwd"], "/repo")
         self.assertEqual(kwargs["thread_name"], "Add parser coverage")
         self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
-        self.assertEqual(kwargs["web_search_mode"], StandingOrder.WEB_SEARCH_CACHED)
+        self.assertEqual(kwargs["web_search_mode"], AutonomousGoal.WEB_SEARCH_CACHED)
         self.assertEqual(
             kwargs["sandbox_policy"],
-            system_agents.STANDING_ORDER_IMPLEMENTATION_SANDBOX_POLICY,
+            system_agents.AUTONOMOUS_GOAL_IMPLEMENTATION_SANDBOX_POLICY,
         )
         self.assertFalse(kwargs["auto_pr_enabled"])
         self.assertFalse(kwargs["auto_qa_enabled"])
@@ -5223,12 +5270,12 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
-            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
         )
         candidate_metadata = SessionMetadata.objects.create(
             thread_id="candidate-thread",
@@ -5241,15 +5288,15 @@ class StandingOrderWorkflowTests(TestCase):
             project=project,
         )
         workflow = SystemWorkflow.objects.create(
-            kind=system_agents.STANDING_ORDER_AGENT_KIND,
-            main_thread_id=system_agents._standing_order_main_thread_id(
-                standing_order.pk
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
             ),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING,
             state={
-                "standing_order_id": standing_order.pk,
+                "autonomous_goal_id": autonomous_goal.pk,
                 "candidate_session_id": candidate_metadata.pk,
                 "judge_session_id": judge_metadata.pk,
                 "candidate": {
@@ -5271,11 +5318,11 @@ class StandingOrderWorkflowTests(TestCase):
                     "rationale": "The files are well-scoped.",
                 },
             ),
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
             thread_id="judge-thread",
             instance=instance,
         )
@@ -5299,12 +5346,12 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock, mock_worktree: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
-            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
             auto_qa_enabled=True,
             auto_merge_to_local_branch=True,
             auto_merge_branch="release",
@@ -5313,7 +5360,7 @@ class StandingOrderWorkflowTests(TestCase):
         candidate_instance = _instance(
             thread_id="candidate-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
         judge_instance = _instance(
             thread_id="judge-thread",
@@ -5326,7 +5373,7 @@ class StandingOrderWorkflowTests(TestCase):
                     "rationale": "The files are focused.",
                 },
             ),
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
         )
         implementation_instance = _instance(
             thread_id="implementation-thread",
@@ -5338,8 +5385,8 @@ class StandingOrderWorkflowTests(TestCase):
             implementation_instance,
         ]
 
-        workflow = system_agents.start_standing_order_workflow(
-            standing_order=standing_order,
+        workflow = system_agents.start_autonomous_goal_workflow(
+            autonomous_goal=autonomous_goal,
             use_worktrees=True,
         )
         candidate_instance.events_path = _events_file(
@@ -5389,23 +5436,23 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
-            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
         )
         workflow = SystemWorkflow.objects.create(
-            kind=system_agents.STANDING_ORDER_AGENT_KIND,
-            main_thread_id=system_agents._standing_order_main_thread_id(
-                standing_order.pk
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
             ),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING,
             state={
-                "standing_order_id": standing_order.pk,
+                "autonomous_goal_id": autonomous_goal.pk,
                 "auto_proposal": True,
                 "default_branch_sha": "a" * 40,
                 "candidate": {
@@ -5427,11 +5474,11 @@ class StandingOrderWorkflowTests(TestCase):
                     "rationale": "The files are well-scoped.",
                 },
             ),
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
             thread_id="judge-thread",
             instance=instance,
         )
@@ -5455,24 +5502,24 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
-            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
             auto_qa_enabled=True,
         )
         workflow = SystemWorkflow.objects.create(
-            kind=system_agents.STANDING_ORDER_AGENT_KIND,
-            main_thread_id=system_agents._standing_order_main_thread_id(
-                standing_order.pk
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
             ),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING,
             state={
-                "standing_order_id": standing_order.pk,
+                "autonomous_goal_id": autonomous_goal.pk,
                 "candidate": {
                     "title": "Add parser coverage",
                     "implementation_direction": "Add focused tests.",
@@ -5492,11 +5539,11 @@ class StandingOrderWorkflowTests(TestCase):
                     "rationale": "The files are well-scoped.",
                 },
             ),
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
             thread_id="judge-thread",
             instance=instance,
         )
@@ -5523,25 +5570,25 @@ class StandingOrderWorkflowTests(TestCase):
         self, mock_spawn: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
-            autonomy=StandingOrder.AUTONOMY_DRAFT_PR,
-            web_search_mode=StandingOrder.WEB_SEARCH_DISABLED,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PR,
+            web_search_mode=AutonomousGoal.WEB_SEARCH_DISABLED,
         )
         workflow = SystemWorkflow.objects.create(
-            kind=system_agents.STANDING_ORDER_AGENT_KIND,
-            main_thread_id=system_agents._standing_order_main_thread_id(
-                standing_order.pk
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
             ),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING,
             state={
-                "standing_order_id": standing_order.pk,
-                "web_search_mode": StandingOrder.WEB_SEARCH_DISABLED,
+                "autonomous_goal_id": autonomous_goal.pk,
+                "web_search_mode": AutonomousGoal.WEB_SEARCH_DISABLED,
                 "candidate": {
                     "title": "Add parser coverage",
                     "implementation_direction": "Add focused tests.",
@@ -5561,11 +5608,11 @@ class StandingOrderWorkflowTests(TestCase):
                     "rationale": "The files are well-scoped.",
                 },
             ),
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
             thread_id="judge-thread",
             instance=instance,
         )
@@ -5583,7 +5630,7 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertFalse(mock_spawn.call_args.kwargs["auto_qa_enabled"])
         self.assertEqual(
             mock_spawn.call_args.kwargs["web_search_mode"],
-            StandingOrder.WEB_SEARCH_DISABLED,
+            AutonomousGoal.WEB_SEARCH_DISABLED,
         )
         self.assertTrue(implementation.auto_pr_enabled)
         self.assertFalse(implementation.auto_qa_enabled)
@@ -5593,30 +5640,30 @@ class StandingOrderWorkflowTests(TestCase):
 
     @patch("hitch.main.system_agents.create_worktree_for_session")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_standing_order_auto_merge_config_propagates_to_implementation(
+    def test_autonomous_goal_auto_merge_config_propagates_to_implementation(
         self, mock_spawn: MagicMock, mock_worktree: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
-            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
             auto_qa_enabled=True,
             auto_merge_to_local_branch=True,
             auto_merge_branch="main",
         )
         workflow = SystemWorkflow.objects.create(
-            kind=system_agents.STANDING_ORDER_AGENT_KIND,
-            main_thread_id=system_agents._standing_order_main_thread_id(
-                standing_order.pk
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
             ),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING,
             state={
-                "standing_order_id": standing_order.pk,
+                "autonomous_goal_id": autonomous_goal.pk,
                 "candidate": {
                     "title": "Add parser coverage",
                     "implementation_direction": "Add focused tests.",
@@ -5636,11 +5683,11 @@ class StandingOrderWorkflowTests(TestCase):
                     "rationale": "The files are well-scoped.",
                 },
             ),
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
             thread_id="judge-thread",
             instance=instance,
         )
@@ -5677,7 +5724,7 @@ class StandingOrderWorkflowTests(TestCase):
     @patch("hitch.main.system_agents.cleanup_worktree")
     @patch("hitch.main.system_agents.create_worktree_for_session")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_standing_order_auto_merge_spawn_failure_cleans_up_worktree(
+    def test_autonomous_goal_auto_merge_spawn_failure_cleans_up_worktree(
         self,
         mock_spawn: MagicMock,
         mock_worktree: MagicMock,
@@ -5687,26 +5734,26 @@ class StandingOrderWorkflowTests(TestCase):
         managed_worktree = MagicMock(path=Path("/repo-worktree"))
         mock_worktree.return_value = managed_worktree
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
-            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
             auto_qa_enabled=True,
             auto_merge_to_local_branch=True,
             auto_merge_branch="main",
         )
         workflow = SystemWorkflow.objects.create(
-            kind=system_agents.STANDING_ORDER_AGENT_KIND,
-            main_thread_id=system_agents._standing_order_main_thread_id(
-                standing_order.pk
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
             ),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING,
             state={
-                "standing_order_id": standing_order.pk,
+                "autonomous_goal_id": autonomous_goal.pk,
                 "candidate": {
                     "title": "Add parser coverage",
                     "implementation_direction": "Add focused tests.",
@@ -5726,11 +5773,11 @@ class StandingOrderWorkflowTests(TestCase):
                     "rationale": "The files are well-scoped.",
                 },
             ),
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
             thread_id="judge-thread",
             instance=instance,
         )
@@ -5768,7 +5815,7 @@ class StandingOrderWorkflowTests(TestCase):
             accepted_session=implementation,
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             outcome_metadata={
-                "standing_order_autonomy": StandingOrder.AUTONOMY_DRAFT_PR
+                "autonomous_goal_autonomy": AutonomousGoal.AUTONOMY_DRAFT_PR
             },
         )
         pr_workflow = SystemWorkflow.objects.create(
@@ -5808,7 +5855,7 @@ class StandingOrderWorkflowTests(TestCase):
             title="Add parser coverage",
             accepted_session=implementation,
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
-            outcome_metadata={"standing_order_autonomy": StandingOrder.AUTONOMY_DRAFT_PATCH},
+            outcome_metadata={"autonomous_goal_autonomy": AutonomousGoal.AUTONOMY_DRAFT_PATCH},
         )
         qa_workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -5838,23 +5885,23 @@ class StandingOrderWorkflowTests(TestCase):
     ) -> None:
         mock_spawn.side_effect = RuntimeError("app-server unavailable")
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
-            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
         )
         workflow = SystemWorkflow.objects.create(
-            kind=system_agents.STANDING_ORDER_AGENT_KIND,
-            main_thread_id=system_agents._standing_order_main_thread_id(
-                standing_order.pk
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
             ),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING,
             state={
-                "standing_order_id": standing_order.pk,
+                "autonomous_goal_id": autonomous_goal.pk,
                 "candidate": {
                     "title": "Add parser coverage",
                     "implementation_direction": "Add focused tests.",
@@ -5874,11 +5921,11 @@ class StandingOrderWorkflowTests(TestCase):
                     "rationale": "The files are well-scoped.",
                 },
             ),
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
             thread_id="judge-thread",
             instance=instance,
         )
@@ -5898,7 +5945,7 @@ class StandingOrderWorkflowTests(TestCase):
 
     def test_candidate_failure_creates_visible_notice(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
@@ -5910,15 +5957,15 @@ class StandingOrderWorkflowTests(TestCase):
             project=project,
         )
         workflow = SystemWorkflow.objects.create(
-            kind=system_agents.STANDING_ORDER_AGENT_KIND,
-            main_thread_id=system_agents._standing_order_main_thread_id(
-                standing_order.pk
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
             ),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_STANDING_ORDER_CANDIDATE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
             state={
-                "standing_order_id": standing_order.pk,
+                "autonomous_goal_id": autonomous_goal.pk,
                 "candidate_session_id": candidate_metadata.pk,
             },
         )
@@ -5941,11 +5988,11 @@ class StandingOrderWorkflowTests(TestCase):
                     }
                 ],
             ),
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             thread_id="candidate-thread",
             instance=instance,
         )
@@ -5957,29 +6004,29 @@ class StandingOrderWorkflowTests(TestCase):
         notice = ProposedSession.objects.get()
         self.assertEqual(notice.inbox_kind, ProposedSession.INBOX_KIND_NOTICE)
         self.assertEqual(notice.candidate_session, candidate_metadata)
-        self.assertIn("Standing order failed: Improve tests", notice.title)
+        self.assertIn("Autonomous goal failed: Improve tests", notice.title)
         self.assertIn("candidate output was not valid JSON", notice.summary)
-        standing_order.refresh_from_db()
-        self.assertEqual(standing_order.auto_proposal_last_no_proposal_sha, "a" * 40)
+        autonomous_goal.refresh_from_db()
+        self.assertEqual(autonomous_goal.auto_proposal_last_no_proposal_sha, "a" * 40)
 
     def test_judge_skips_proposal_below_threshold(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            confidence_threshold=StandingOrder.CONFIDENCE_VERY_HIGH,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_VERY_HIGH,
         )
         workflow = SystemWorkflow.objects.create(
-            kind=system_agents.STANDING_ORDER_AGENT_KIND,
-            main_thread_id=system_agents._standing_order_main_thread_id(
-                standing_order.pk
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
             ),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_STANDING_ORDER_JUDGE_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING,
             state={
-                "standing_order_id": standing_order.pk,
+                "autonomous_goal_id": autonomous_goal.pk,
                 "auto_proposal": True,
                 "default_branch_sha": "a" * 40,
                 "candidate": {"title": "Maybe add tests", "relevant_files": []},
@@ -5997,11 +6044,11 @@ class StandingOrderWorkflowTests(TestCase):
                     "rationale": "There is some ambiguity.",
                 },
             ),
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.STANDING_ORDER_JUDGE_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
             thread_id="judge-thread",
             instance=instance,
         )
@@ -6010,14 +6057,14 @@ class StandingOrderWorkflowTests(TestCase):
 
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
-        self.assertEqual(workflow.step, system_agents.STEP_STANDING_ORDER_SKIPPED)
+        self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_SKIPPED)
         self.assertFalse(ProposedSession.objects.exists())
-        standing_order.refresh_from_db()
-        self.assertEqual(standing_order.auto_proposal_last_no_proposal_sha, "a" * 40)
+        autonomous_goal.refresh_from_db()
+        self.assertEqual(autonomous_goal.auto_proposal_last_no_proposal_sha, "a" * 40)
 
     def test_accepted_proposed_session_unhides_candidate_thread(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
@@ -6028,9 +6075,9 @@ class StandingOrderWorkflowTests(TestCase):
             project=project,
         )
         workflow = SystemWorkflow.objects.create(
-            kind=system_agents.STANDING_ORDER_AGENT_KIND,
-            main_thread_id=system_agents._standing_order_main_thread_id(
-                standing_order.pk
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
             ),
             cwd="/repo",
         )
@@ -6038,11 +6085,11 @@ class StandingOrderWorkflowTests(TestCase):
             thread_id="candidate-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             thread_id="candidate-thread",
             instance=instance,
         )
@@ -6050,7 +6097,7 @@ class StandingOrderWorkflowTests(TestCase):
         self.assertIn("candidate-thread", system_agents.hidden_thread_ids())
 
         ProposedSession.objects.create(
-            standing_order=standing_order,
+            autonomous_goal=autonomous_goal,
             candidate_session=metadata,
             accepted_session=metadata,
             title="Add parser coverage",
@@ -6080,7 +6127,7 @@ class StandingOrderWorkflowTests(TestCase):
         self,
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        standing_order = StandingOrder.objects.create(
+        autonomous_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
@@ -6096,9 +6143,9 @@ class StandingOrderWorkflowTests(TestCase):
             project=project,
         )
         workflow = SystemWorkflow.objects.create(
-            kind=system_agents.STANDING_ORDER_AGENT_KIND,
-            main_thread_id=system_agents._standing_order_main_thread_id(
-                standing_order.pk
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
             ),
             cwd="/repo",
         )
@@ -6106,16 +6153,16 @@ class StandingOrderWorkflowTests(TestCase):
             thread_id="candidate-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             thread_id="candidate-thread",
             instance=instance,
         )
         ProposedSession.objects.create(
-            standing_order=standing_order,
+            autonomous_goal=autonomous_goal,
             candidate_session=candidate,
             accepted_session=accepted,
             title="Add parser coverage",

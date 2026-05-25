@@ -63,11 +63,11 @@ from hitch.main.local_merges import local_branch_names
 from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
+    AutonomousGoal,
     CodexInstance,
     Project,
     ProposedSession,
     SessionMetadata,
-    StandingOrder,
     SystemAgentRun,
     SystemWorkflow,
     UserInputRequest,
@@ -138,7 +138,7 @@ class ResolvedSettings(NamedTuple):
     cookie_updates: dict[str, str]
 
 
-class StandingOrderValues(NamedTuple):
+class AutonomousGoalValues(NamedTuple):
     title: str
     goal: str
     ambition: str
@@ -244,7 +244,7 @@ _VALID_APPROVAL_MODES = {value for value, _ in _APPROVAL_MODE_OPTIONS}
 # agent from ever escalating.
 _DEFAULT_APPROVAL_MODE = "auto_review"
 
-_WEB_SEARCH_MODE_OPTIONS = StandingOrder.WEB_SEARCH_CHOICES
+_WEB_SEARCH_MODE_OPTIONS = AutonomousGoal.WEB_SEARCH_CHOICES
 _VALID_WEB_SEARCH_MODES = {
     value for value, _label in _WEB_SEARCH_MODE_OPTIONS if value
 }
@@ -400,7 +400,7 @@ def _input_image_request_size_error(request: HttpRequest) -> str | None:
 # unbounded blob through.
 _NAME_MAX_LEN = 200
 _PROJECT_NAME_MAX_LEN = 200
-_STANDING_ORDER_TITLE_MAX_LEN = 200
+_AUTONOMOUS_GOAL_TITLE_MAX_LEN = 200
 _LAST_SELECTED_REPO_MAX_LEN = 4096
 _VALID_PROJECT_AUTO_PR_MODES = {value for value, _label in Project.AUTO_PR_CHOICES}
 
@@ -1920,7 +1920,7 @@ def inbox(request: HttpRequest) -> HttpResponse:
         _proposed_session_inbox_queryset(current_project)
         .select_related(
             "project",
-            "standing_order",
+            "autonomous_goal",
             "candidate_session",
             "judge_session",
             "source_workflow",
@@ -1952,7 +1952,7 @@ def inbox(request: HttpRequest) -> HttpResponse:
 
 
 @require_http_methods(["GET"])
-def standing_orders(request: HttpRequest) -> HttpResponse:
+def autonomous_goals(request: HttpRequest) -> HttpResponse:
     codex_pool.reconcile_dead()
     initial_settings = _stored_settings(request)
     config = codex_pool.app_server_config(
@@ -1965,8 +1965,8 @@ def standing_orders(request: HttpRequest) -> HttpResponse:
         cookie_updates = resolved_settings.cookie_updates
     projects = list(Project.objects.all())
     current_project = _selected_project_for_settings(current_settings, projects)
-    orders = (
-        list(StandingOrder.objects.filter(project=current_project))
+    goals = (
+        list(AutonomousGoal.objects.filter(project=current_project))
         if current_project is not None
         else []
     )
@@ -1975,31 +1975,31 @@ def standing_orders(request: HttpRequest) -> HttpResponse:
         if current_project is not None
         else []
     )
-    _attach_standing_order_run_state(orders)
+    _attach_autonomous_goal_run_state(goals)
     settings_dialog_context = _settings_dialog_context(current_settings, models_data)
     response = render(
         request,
-        "standing_orders.html",
+        "autonomous_goals.html",
         {
             "login_url": reverse("login"),
             "register_url": reverse("register"),
             "current_project": current_project,
-            "standing_orders": orders,
-            "standing_order_create_url": reverse("create_standing_order"),
-            "standing_order_run_all_url": reverse("run_standing_orders"),
-            "ambition_choices": StandingOrder.AMBITION_CHOICES,
-            "default_ambition": StandingOrder.AMBITION_INCREMENTAL,
-            "autonomy_choices": StandingOrder.AUTONOMY_CHOICES,
-            "default_autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
+            "autonomous_goals": goals,
+            "autonomous_goal_create_url": reverse("create_autonomous_goal"),
+            "autonomous_goal_run_all_url": reverse("run_autonomous_goals"),
+            "ambition_choices": AutonomousGoal.AMBITION_CHOICES,
+            "default_ambition": AutonomousGoal.AMBITION_INCREMENTAL,
+            "autonomy_choices": AutonomousGoal.AUTONOMY_CHOICES,
+            "default_autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
             "default_auto_qa": False,
-            "auto_qa_supported_autonomies": tuple(StandingOrder.AUTO_QA_AUTONOMIES),
+            "auto_qa_supported_autonomies": tuple(AutonomousGoal.AUTO_QA_AUTONOMIES),
             "default_auto_proposal": False,
-            "confidence_choices": StandingOrder.CONFIDENCE_CHOICES,
-            "default_confidence": StandingOrder.CONFIDENCE_HIGH,
+            "confidence_choices": AutonomousGoal.CONFIDENCE_CHOICES,
+            "default_confidence": AutonomousGoal.CONFIDENCE_HIGH,
             "web_search_mode_choices": _WEB_SEARCH_MODE_OPTIONS,
-            "default_web_search_mode": StandingOrder.WEB_SEARCH_DEFAULT,
+            "default_web_search_mode": AutonomousGoal.WEB_SEARCH_DEFAULT,
             "local_branch_choices": local_branch_choices,
-            "title_max_len": _STANDING_ORDER_TITLE_MAX_LEN,
+            "title_max_len": _AUTONOMOUS_GOAL_TITLE_MAX_LEN,
             **settings_dialog_context,
         },
     )
@@ -2008,18 +2008,18 @@ def standing_orders(request: HttpRequest) -> HttpResponse:
 
 
 @require_http_methods(["POST"])
-def create_standing_order(request: HttpRequest) -> HttpResponse:
+def create_autonomous_goal(request: HttpRequest) -> HttpResponse:
     project = _active_project_from_request(request)
     if project is None:
         return HttpResponseBadRequest("active project is required")
-    values, error = _validated_standing_order_values(
+    values, error = _validated_autonomous_goal_values(
         request,
         local_branches=local_branch_names(project.repo_path),
     )
     if error is not None:
         return HttpResponseBadRequest(error)
     assert values is not None
-    StandingOrder.objects.create(
+    AutonomousGoal.objects.create(
         project=project,
         title=values.title,
         goal=values.goal,
@@ -2032,26 +2032,26 @@ def create_standing_order(request: HttpRequest) -> HttpResponse:
         auto_merge_to_local_branch=values.auto_merge_to_local_branch,
         auto_merge_branch=values.auto_merge_branch,
     )
-    return redirect("standing_orders")
+    return redirect("autonomous_goals")
 
 
 @require_http_methods(["POST"])
-def edit_standing_order(request: HttpRequest, standing_order_id: int) -> HttpResponse:
+def edit_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpResponse:
     project = _active_project_from_request(request)
     if project is None:
         return HttpResponseBadRequest("active project is required")
-    standing_order = StandingOrder.objects.filter(
-        pk=standing_order_id,
+    autonomous_goal = AutonomousGoal.objects.filter(
+        pk=autonomous_goal_id,
         project=project,
     ).first()
-    if standing_order is None:
-        raise Http404("standing order not found")
-    values, error = _validated_standing_order_values(
+    if autonomous_goal is None:
+        raise Http404("autonomous goal not found")
+    values, error = _validated_autonomous_goal_values(
         request,
-        autonomy_default=standing_order.autonomy,
-        auto_qa_default=standing_order.auto_qa_enabled,
-        web_search_default=standing_order.web_search_mode,
-        auto_proposal_default=standing_order.auto_proposal_enabled,
+        autonomy_default=autonomous_goal.autonomy,
+        auto_qa_default=autonomous_goal.auto_qa_enabled,
+        web_search_default=autonomous_goal.web_search_mode,
+        auto_proposal_default=autonomous_goal.auto_proposal_enabled,
         local_branches=local_branch_names(project.repo_path),
     )
     if error is not None:
@@ -2072,61 +2072,61 @@ def edit_standing_order(request: HttpRequest, standing_order_id: int) -> HttpRes
         "auto_merge_branch",
     ):
         value = getattr(values, field)
-        if getattr(standing_order, field) != value:
-            setattr(standing_order, field, value)
+        if getattr(autonomous_goal, field) != value:
+            setattr(autonomous_goal, field, value)
             updates.append(field)
     if updates:
-        if standing_order.auto_proposal_last_no_proposal_sha:
-            standing_order.auto_proposal_last_no_proposal_sha = ""
+        if autonomous_goal.auto_proposal_last_no_proposal_sha:
+            autonomous_goal.auto_proposal_last_no_proposal_sha = ""
             updates.append("auto_proposal_last_no_proposal_sha")
-        standing_order.save(update_fields=[*updates, "updated_at"])
-    return redirect("standing_orders")
+        autonomous_goal.save(update_fields=[*updates, "updated_at"])
+    return redirect("autonomous_goals")
 
 
 @require_http_methods(["POST"])
-def run_standing_order(request: HttpRequest, standing_order_id: int) -> HttpResponse:
+def run_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpResponse:
     project = _active_project_from_request(request)
     if project is None:
         return HttpResponseBadRequest("active project is required")
-    standing_order = StandingOrder.objects.filter(
-        pk=standing_order_id,
+    autonomous_goal = AutonomousGoal.objects.filter(
+        pk=autonomous_goal_id,
         project=project,
     ).first()
-    if standing_order is None:
-        raise Http404("standing order not found")
+    if autonomous_goal is None:
+        raise Http404("autonomous goal not found")
     use_worktrees = _stored_settings(request).use_worktrees
-    system_agents.start_standing_order_workflow(
-        standing_order=standing_order,
+    system_agents.start_autonomous_goal_workflow(
+        autonomous_goal=autonomous_goal,
         use_worktrees=use_worktrees,
     )
-    return redirect("standing_orders")
+    return redirect("autonomous_goals")
 
 
 @require_http_methods(["POST"])
-def run_standing_orders(request: HttpRequest) -> HttpResponse:
+def run_autonomous_goals(request: HttpRequest) -> HttpResponse:
     project = _active_project_from_request(request)
     if project is None:
         return HttpResponseBadRequest("active project is required")
     use_worktrees = _stored_settings(request).use_worktrees
-    for standing_order in StandingOrder.objects.filter(project=project):
-        system_agents.start_standing_order_workflow(
-            standing_order=standing_order,
+    for autonomous_goal in AutonomousGoal.objects.filter(project=project):
+        system_agents.start_autonomous_goal_workflow(
+            autonomous_goal=autonomous_goal,
             use_worktrees=use_worktrees,
         )
-    return redirect("standing_orders")
+    return redirect("autonomous_goals")
 
 
 @require_http_methods(["GET"])
-def standing_order_run_log(request: HttpRequest, workflow_id: int) -> HttpResponse:
-    workflow = _standing_order_workflow_for_log(request, workflow_id)
+def autonomous_goal_run_log(request: HttpRequest, workflow_id: int) -> HttpResponse:
+    workflow = _autonomous_goal_workflow_for_log(request, workflow_id)
     run = workflow.agent_runs.exclude(thread_id="").order_by("-created_at").first()
     if run is None:
-        raise Http404("standing order run log not found")
+        raise Http404("autonomous goal run log not found")
     return _render_session_detail(
         request,
         run.thread_id,
         read_only=True,
-        display_title="Standing order run log",
+        display_title="Autonomous goal run log",
     )
 
 
@@ -2139,7 +2139,7 @@ def update_proposed_session_outcome(
         return HttpResponseBadRequest("proposed session is required")
     proposed_session_query = ProposedSession.objects.select_related(
         "project",
-        "standing_order__project",
+        "autonomous_goal__project",
         "candidate_session",
     ).filter(pk=proposed_session_id)
     if project is not None:
@@ -2196,42 +2196,42 @@ def update_proposed_session_outcome(
     return redirect("inbox")
 
 
-def _validated_standing_order_title(raw_title: str) -> tuple[str, str | None]:
+def _validated_autonomous_goal_title(raw_title: str) -> tuple[str, str | None]:
     title = raw_title.strip()
     if not title:
         return "", "title is required"
-    if len(title) > _STANDING_ORDER_TITLE_MAX_LEN:
+    if len(title) > _AUTONOMOUS_GOAL_TITLE_MAX_LEN:
         return "", "title is too long"
     return title, None
 
 
-def _validated_standing_order_values(
+def _validated_autonomous_goal_values(
     request: HttpRequest,
     *,
-    autonomy_default: str = StandingOrder.AUTONOMY_PROPOSE_ONLY,
+    autonomy_default: str = AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
     auto_qa_default: bool = False,
-    web_search_default: str = StandingOrder.WEB_SEARCH_DEFAULT,
+    web_search_default: str = AutonomousGoal.WEB_SEARCH_DEFAULT,
     auto_proposal_default: bool = False,
     local_branches: list[str] | None = None,
-) -> tuple[StandingOrderValues | None, str | None]:
-    title, error = _validated_standing_order_title(request.POST.get("title", ""))
+) -> tuple[AutonomousGoalValues | None, str | None]:
+    title, error = _validated_autonomous_goal_title(request.POST.get("title", ""))
     if error is not None:
         return None, error
     goal = request.POST.get("goal", "").strip()
     if not goal:
         return None, "goal is required"
     ambition = request.POST.get("ambition", "").strip()
-    valid_ambitions = {value for value, _label in StandingOrder.AMBITION_CHOICES}
+    valid_ambitions = {value for value, _label in AutonomousGoal.AMBITION_CHOICES}
     if ambition not in valid_ambitions:
         return None, "ambition is invalid"
     autonomy = (
         request.POST.get("autonomy", autonomy_default).strip()
         or autonomy_default
     )
-    valid_autonomies = {value for value, _label in StandingOrder.AUTONOMY_CHOICES}
+    valid_autonomies = {value for value, _label in AutonomousGoal.AUTONOMY_CHOICES}
     if autonomy not in valid_autonomies:
         return None, "autonomy is invalid"
-    supported_auto_qa = StandingOrder.auto_qa_supported_for_autonomy(autonomy)
+    supported_auto_qa = AutonomousGoal.auto_qa_supported_for_autonomy(autonomy)
     auto_qa_values = [value.strip() for value in request.POST.getlist("auto_qa")]
     if any(value not in {"", "false", "true"} for value in auto_qa_values):
         return None, "auto-QA setting is invalid"
@@ -2239,7 +2239,7 @@ def _validated_standing_order_values(
         auto_qa_enabled = auto_qa_values[-1] == "true" and supported_auto_qa
     else:
         auto_qa_enabled = auto_qa_default and supported_auto_qa
-    auto_proposal_enabled, auto_proposal_error = _posted_standing_order_bool(
+    auto_proposal_enabled, auto_proposal_error = _posted_autonomous_goal_bool(
         request.POST.get("auto_proposal"),
         default=auto_proposal_default,
         setting_name="auto-proposal",
@@ -2247,7 +2247,7 @@ def _validated_standing_order_values(
     if auto_proposal_error is not None:
         return None, auto_proposal_error
     threshold = request.POST.get("confidence_threshold", "").strip()
-    valid_thresholds = {value for value, _label in StandingOrder.CONFIDENCE_CHOICES}
+    valid_thresholds = {value for value, _label in AutonomousGoal.CONFIDENCE_CHOICES}
     if threshold not in valid_thresholds:
         return None, "confidence threshold is invalid"
     web_search_mode = (
@@ -2272,7 +2272,7 @@ def _validated_standing_order_values(
             return None, "auto merge branch is invalid"
     else:
         auto_merge_branch = ""
-    return StandingOrderValues(
+    return AutonomousGoalValues(
         title=title,
         goal=goal,
         ambition=ambition,
@@ -2286,7 +2286,7 @@ def _validated_standing_order_values(
     ), None
 
 
-def _posted_standing_order_bool(
+def _posted_autonomous_goal_bool(
     raw: str | None, *, default: bool, setting_name: str
 ) -> tuple[bool, str | None]:
     if raw is None:
@@ -2299,16 +2299,16 @@ def _posted_standing_order_bool(
     return False, f"{setting_name} is invalid"
 
 
-def _attach_standing_order_run_state(orders: list[StandingOrder]) -> None:
-    order_ids = [order.pk for order in orders]
-    if not order_ids:
+def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
+    goal_ids = [goal.pk for goal in goals]
+    if not goal_ids:
         return
     workflows = (
         SystemWorkflow.objects.filter(
-            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             main_thread_id__in=[
-                system_agents._standing_order_main_thread_id(order_id)
-                for order_id in order_ids
+                system_agents._autonomous_goal_main_thread_id(goal_id)
+                for goal_id in goal_ids
             ],
         )
         .order_by("main_thread_id", "-created_at")
@@ -2316,17 +2316,17 @@ def _attach_standing_order_run_state(orders: list[StandingOrder]) -> None:
     workflows_by_thread: dict[str, SystemWorkflow] = {}
     for workflow in workflows:
         workflows_by_thread.setdefault(workflow.main_thread_id, workflow)
-    log_urls_by_workflow_id = _standing_order_log_urls(workflows_by_thread.values())
-    for order in orders:
+    log_urls_by_workflow_id = _autonomous_goal_log_urls(workflows_by_thread.values())
+    for goal in goals:
         latest_workflow = workflows_by_thread.get(
-            system_agents._standing_order_main_thread_id(order.pk)
+            system_agents._autonomous_goal_main_thread_id(goal.pk)
         )
-        order.latest_workflow = latest_workflow  # type: ignore[attr-defined]
-        order.run_running = (  # type: ignore[attr-defined]
+        goal.latest_workflow = latest_workflow  # type: ignore[attr-defined]
+        goal.run_running = (  # type: ignore[attr-defined]
             latest_workflow is not None
             and latest_workflow.status == SystemWorkflow.STATUS_RUNNING
         )
-        order.run_log_url = (  # type: ignore[attr-defined]
+        goal.run_log_url = (  # type: ignore[attr-defined]
             log_urls_by_workflow_id.get(latest_workflow.pk)
             if latest_workflow is not None
             else ""
@@ -2368,15 +2368,17 @@ def _proposed_session_prompt(proposed_session: ProposedSession) -> str:
     parts = [
         "Go ahead and implement this proposed session.",
         "",
-        f"Standing order: {proposed_session.standing_order.title}"
-        if proposed_session.standing_order is not None
+        f"Autonomous goal: {proposed_session.autonomous_goal.title}"
+        if proposed_session.autonomous_goal is not None
         else "Source: Coding agent proposal",
     ]
     if (
-        proposed_session.standing_order is not None
-        and proposed_session.standing_order.goal
+        proposed_session.autonomous_goal is not None
+        and proposed_session.autonomous_goal.goal
     ):
-        parts.extend(["", f"Standing order goal:\n{proposed_session.standing_order.goal}"])
+        parts.extend(
+            ["", f"Autonomous goal objective:\n{proposed_session.autonomous_goal.goal}"]
+        )
     parts.extend(["", f"Proposed session: {proposed_session.title}"])
     if proposed_session.summary:
         parts.extend(["", f"Summary:\n{proposed_session.summary}"])
@@ -2386,7 +2388,7 @@ def _proposed_session_prompt(proposed_session: ProposedSession) -> str:
     return "\n".join(parts)
 
 
-def _standing_order_log_urls(workflows: Iterable[SystemWorkflow]) -> dict[int, str]:
+def _autonomous_goal_log_urls(workflows: Iterable[SystemWorkflow]) -> dict[int, str]:
     workflow_ids = [workflow.pk for workflow in workflows]
     if not workflow_ids:
         return {}
@@ -2399,35 +2401,35 @@ def _standing_order_log_urls(workflows: Iterable[SystemWorkflow]) -> dict[int, s
     for run in runs:
         urls.setdefault(
             run.workflow_id,
-            reverse("standing_order_run_log", kwargs={"workflow_id": run.workflow_id}),
+            reverse("autonomous_goal_run_log", kwargs={"workflow_id": run.workflow_id}),
         )
     return urls
 
 
-def _standing_order_workflow_for_log(
+def _autonomous_goal_workflow_for_log(
     request: HttpRequest, workflow_id: int
 ) -> SystemWorkflow:
     if workflow_id < 1 or workflow_id > _MAX_BIGAUTOFIELD:
-        raise Http404("standing order run log not found")
+        raise Http404("autonomous goal run log not found")
     project = _active_project_from_request(request)
     if project is None:
-        raise Http404("standing order run log not found")
+        raise Http404("autonomous goal run log not found")
     workflow = (
         SystemWorkflow.objects.filter(
             pk=workflow_id,
-            kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
         .first()
     )
     if workflow is None:
-        raise Http404("standing order run log not found")
-    standing_order_id = _workflow_state_int(workflow, "standing_order_id")
-    standing_order = StandingOrder.objects.filter(
-        pk=standing_order_id,
+        raise Http404("autonomous goal run log not found")
+    autonomous_goal_id = _workflow_state_int(workflow, "autonomous_goal_id")
+    autonomous_goal = AutonomousGoal.objects.filter(
+        pk=autonomous_goal_id,
         project=project,
     ).first()
-    if standing_order is None:
-        raise Http404("standing order run log not found")
+    if autonomous_goal is None:
+        raise Http404("autonomous goal run log not found")
     return workflow
 
 
@@ -5270,7 +5272,7 @@ def _posted_proposed_session_for_new_session(
         return None, "proposed session is required"
     proposed_session = (
         ProposedSession.objects.select_related(
-            "project", "standing_order__project", "candidate_session"
+            "project", "autonomous_goal__project", "candidate_session"
         )
         .filter(
             pk=session_id,
@@ -5282,8 +5284,8 @@ def _posted_proposed_session_for_new_session(
     if proposed_session is None:
         return None, "proposed session is required"
     session_project = proposed_session.project
-    if session_project is None and proposed_session.standing_order is not None:
-        session_project = proposed_session.standing_order.project
+    if session_project is None and proposed_session.autonomous_goal is not None:
+        session_project = proposed_session.autonomous_goal.project
     if session_project is None:
         return None, "proposed session is required"
     if target.project is not None and target.project != session_project:
@@ -5302,8 +5304,8 @@ def _candidate_session_to_continue_from_proposal(
     if not candidate_session.cwd:
         return None
     project = proposed_session.project
-    if project is None and proposed_session.standing_order is not None:
-        project = proposed_session.standing_order.project
+    if project is None and proposed_session.autonomous_goal is not None:
+        project = proposed_session.autonomous_goal.project
     if project is not None and candidate_session.cwd == project.repo_path:
         return None
     return candidate_session

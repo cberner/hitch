@@ -17,7 +17,7 @@
             {% if inbox_count %}<span class="primary-nav-badge" aria-label="{{ inbox_count }} inbox message{{ inbox_count|pluralize }}">{{ inbox_count }}</span>{% endif %}
         </a>
         {% if current_project %}
-        <a href="{% url 'standing_orders' %}"{% if current_route == "standing_orders" %} aria-current="page"{% endif %}>standing orders</a>
+        <a href="{% url 'autonomous_goals' %}"{% if current_route == "autonomous_goals" %} aria-current="page"{% endif %}>auto goals</a>
         {% endif %}
         <a href="{% url 'usage' %}"{% if current_route == "usage" %} aria-current="page"{% endif %}>usage</a>
         <button type="button" data-settings-open>settings</button>
