@@ -9500,6 +9500,14 @@ class AutonomousGoalViewTests(TestCase):
             response,
             f'action="{reverse("update_proposed_session_outcome", args=[proposal.pk])}"',
         )
+        proposal_header_start = body.index('<div class="proposal-header">')
+        proposal_actions_start = body.index(
+            '<div class="proposal-actions">', proposal_header_start
+        )
+        proposal_menu_start = body.index(
+            '<div class="proposal-menu"', proposal_header_start
+        )
+        self.assertLess(proposal_menu_start, proposal_actions_start)
         self.assertContains(
             response, f'value="{ProposedSession.OUTCOME_DISMISSED}"'
         )
