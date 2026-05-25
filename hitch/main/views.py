@@ -13,6 +13,7 @@ from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from functools import wraps
 from pathlib import Path
+from stat import S_ISREG
 from typing import Any, NamedTuple, override
 from urllib.parse import urlencode
 
@@ -162,6 +163,16 @@ class UsageSessionIndexState(NamedTuple):
     refresh_active: bool
     refresh_archived: bool
     totals_available: bool
+
+
+class _RolloutFileState(NamedTuple):
+    path: Path
+    mtime_ns: int
+
+
+class _UsageTokenCacheState(NamedTuple):
+    refresh_pending: bool
+    cache_usable: bool
 
 
 class AutonomousGoalValues(NamedTuple):
@@ -3007,21 +3018,32 @@ def _rollout_path_for(thread: Any) -> Path | None:
 
 
 def _rollout_path_from_value(path: object) -> Path | None:
+    rollout_state = _rollout_file_state_from_value(path)
+    return rollout_state.path if rollout_state is not None else None
+
+
+def _rollout_file_state_from_value(path: object) -> _RolloutFileState | None:
     if not isinstance(path, str) or not path:
         return None
     rollout_path = Path(path)
-    if not rollout_path.is_file():
+    return _rollout_file_state_for_path(rollout_path)
+
+
+def _rollout_file_state_for_path(rollout_path: Path) -> _RolloutFileState | None:
+    try:
+        stat_result = rollout_path.stat()
+    except OSError:
         return None
-    return rollout_path
+    if not S_ISREG(stat_result.st_mode):
+        return None
+    return _RolloutFileState(path=rollout_path, mtime_ns=stat_result.st_mtime_ns)
 
 
 def _rollout_mtime_ns(rollout_path: Path | None) -> int:
     if rollout_path is None:
         return 0
-    try:
-        return rollout_path.stat().st_mtime_ns
-    except OSError:
-        return 0
+    rollout_state = _rollout_file_state_for_path(rollout_path)
+    return rollout_state.mtime_ns if rollout_state is not None else 0
 
 
 def _archived_token_usage_numbers_for(thread: Any) -> dict[str, int] | None:
@@ -3033,9 +3055,19 @@ def _cached_token_usage_is_current(
 ) -> bool:
     if rollout_path is None:
         return True
+    rollout_state = _rollout_file_state_for_path(rollout_path)
     return (
-        cache.rollout_path == str(rollout_path)
-        and cache.rollout_mtime_ns == _rollout_mtime_ns(rollout_path)
+        rollout_state is not None
+        and _cached_token_usage_matches_rollout_state(cache, rollout_state)
+    )
+
+
+def _cached_token_usage_matches_rollout_state(
+    cache: ArchivedSessionTokenUsage, rollout_state: _RolloutFileState
+) -> bool:
+    return (
+        cache.rollout_path == str(rollout_state.path)
+        and cache.rollout_mtime_ns == rollout_state.mtime_ns
     )
 
 
@@ -3520,9 +3552,10 @@ def _lifetime_token_usage_for_metadata(
     refresh_pending_count = 0
     for metadata in metadata_rows:
         cache = cached_usage_by_thread_id.get(metadata.thread_id)
-        if _usage_token_refresh_may_be_pending(metadata, cache):
+        cache_state = _usage_token_cache_state(metadata, cache)
+        if cache_state.refresh_pending:
             refresh_pending_count += 1
-        if cache is None:
+        if cache is None or not cache_state.cache_usable:
             continue
         daily_usage = _daily_token_usage_from_cache(cache)
         usage = _token_usage_from_cache(cache)
@@ -3577,17 +3610,40 @@ def _usage_token_refresh_candidates(
 def _usage_token_refresh_may_be_pending(
     metadata: _UsageTokenRefreshSource, cache: ArchivedSessionTokenUsage | None
 ) -> bool:
+    return _usage_token_cache_state(metadata, cache).refresh_pending
+
+
+def _usage_token_cache_state(
+    metadata: _UsageTokenRefreshSource, cache: ArchivedSessionTokenUsage | None
+) -> _UsageTokenCacheState:
     if not metadata.thread_id:
-        return False
+        return _UsageTokenCacheState(refresh_pending=False, cache_usable=False)
     if not metadata.codex_path:
-        return True
+        return _UsageTokenCacheState(
+            refresh_pending=True,
+            cache_usable=cache is not None and cache.rollout_path == "",
+        )
     if cache is None:
-        return True
-    if cache.rollout_path != metadata.codex_path:
-        return True
+        return _UsageTokenCacheState(refresh_pending=True, cache_usable=False)
+    rollout_state = _rollout_file_state_from_value(metadata.codex_path)
+    if rollout_state is None:
+        return _UsageTokenCacheState(
+            refresh_pending=True,
+            cache_usable=cache.rollout_path == metadata.codex_path,
+        )
+    cache_is_current = _cached_token_usage_matches_rollout_state(cache, rollout_state)
     if _cached_token_usage_has_counts(cache) and not _daily_token_usage_from_cache(cache):
-        return True
-    return _usage_token_refresh_check_is_stale(metadata.usage_last_checked_at)
+        return _UsageTokenCacheState(
+            refresh_pending=True,
+            cache_usable=cache_is_current,
+        )
+    return _UsageTokenCacheState(
+        refresh_pending=(
+            not cache_is_current
+            or _usage_token_refresh_check_is_stale(metadata.usage_last_checked_at)
+        ),
+        cache_usable=cache_is_current,
+    )
 
 
 def _usage_token_refresh_check_is_stale(checked_at: datetime | None) -> bool:
@@ -3649,7 +3705,9 @@ def _usage_token_refresh_sort_key(
 def _usage_token_refresh_needs_path_repair(
     metadata: _UsageTokenRefreshSource,
 ) -> bool:
-    return not metadata.codex_path or _rollout_path_from_value(metadata.codex_path) is None
+    return not metadata.codex_path or _rollout_file_state_from_value(
+        metadata.codex_path
+    ) is None
 
 
 def _usage_token_refresh_needed(
@@ -3657,15 +3715,15 @@ def _usage_token_refresh_needed(
 ) -> bool:
     if not metadata.codex_path:
         return True
-    rollout_path = _rollout_path_from_value(metadata.codex_path)
-    if rollout_path is None:
+    rollout_state = _rollout_file_state_from_value(metadata.codex_path)
+    if rollout_state is None:
         return True
     if cache is None:
         return True
-    if not _cached_token_usage_is_current(cache, rollout_path):
+    if not _cached_token_usage_matches_rollout_state(cache, rollout_state):
         return True
     return _cached_token_usage_has_counts(cache) and not _cached_token_usage_has_daily_usage(
-        cache, rollout_path
+        cache, rollout_state.path
     )
 
 
@@ -3709,7 +3767,8 @@ def _refresh_usage_token_cache_best_effort(
                 for item in batch:
                     try:
                         path = item.path
-                        if not path or _rollout_path_from_value(path) is None:
+                        rollout_state = _rollout_file_state_from_value(path)
+                        if rollout_state is None:
                             if codex is None:
                                 config = codex_pool.app_server_config(
                                     enable_memories=False
@@ -3720,11 +3779,10 @@ def _refresh_usage_token_cache_best_effort(
                             path = _refresh_missing_usage_metadata_path(
                                 codex, item.thread_id, projects=projects
                             )
-                        if not path:
+                            rollout_state = _rollout_file_state_from_value(path)
+                        if rollout_state is None:
                             continue
-                        rollout_path = _rollout_path_from_value(path)
-                        if rollout_path is None:
-                            continue
+                        rollout_path = rollout_state.path
                         thread = _UsageTokenRefreshThread(id=item.thread_id, path=path)
                         snapshot = _token_usage_snapshot_for(
                             thread,
