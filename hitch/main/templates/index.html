@@ -286,6 +286,7 @@
         }
         .session.pending-archive {
             opacity: 0;
+            visibility: hidden;
             max-height: 0;
             pointer-events: none;
         }
@@ -919,26 +920,6 @@
                 row.remove();
             }
 
-            function settlePendingArchives() {
-                for (const row of Array.from(pendingArchives.keys())) {
-                    finalizeArchive(row);
-                }
-                undoRow = null;
-                if (archiveToast) archiveToast.hidden = true;
-            }
-
-            function settlePendingArchivesBeforeNavigation(event) {
-                if (event.defaultPrevented || event.button !== 0) return;
-                if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-                const link = event.target.closest("a[href]");
-                if (!link || !pendingArchives.size) return;
-                const target = (link.getAttribute("target") || "").toLowerCase();
-                if (target && target !== "_self") return;
-                const href = link.getAttribute("href") || "";
-                if (!href || href.startsWith("#")) return;
-                settlePendingArchives();
-            }
-
             function archiveRow(row) {
                 if (!row.dataset.sessionArchiveUrl || row.dataset.pendingArchive === "true") return;
                 closeSessionMenus();
@@ -975,8 +956,6 @@
             }
 
             if (archiveUndo) archiveUndo.addEventListener("click", undoArchive);
-            document.addEventListener("click", settlePendingArchivesBeforeNavigation, true);
-            window.addEventListener("pagehide", settlePendingArchives);
 
             function bindSwipe(row) {
                 if (swipableRows.has(row) || row.dataset.sessionArchived === "true") return;
