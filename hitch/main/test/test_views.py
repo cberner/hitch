@@ -474,6 +474,59 @@ class IndexViewTests(TestCase):
         self.assertContains(system_response, "Hitch system")
         self.assertContains(system_response, "untracked")
 
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_system_sessions_demo_upsert_keeps_main_session_visible(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=demo.DEMO_WORKFLOW_KIND,
+            main_thread_id="demo-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_FAILED,
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="demo-thread",
+            cwd="/repo",
+            prompt="Start an interactive web demo",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            display_author=demo.DEMO_DISPLAY_AUTHOR,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            thread_id="demo-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_FAILED,
+        )
+
+        system_response = self.client.get(reverse("system_sessions"))
+
+        self.assertEqual(system_response.status_code, 200)
+        self.assertContains(system_response, demo.DEMO_DISPLAY_AUTHOR)
+        metadata = SessionMetadata.objects.get(thread_id="demo-thread")
+        self.assertFalse(metadata.is_hidden_system_session)
+
+        index_response = self.client.get(reverse("index"))
+
+        self.assertEqual(index_response.status_code, 200)
+        self.assertContains(index_response, demo.DEMO_DISPLAY_AUTHOR)
+        client.thread_list.assert_not_called()
+
     def test_update_cached_name_preserves_activity_timestamp(self) -> None:
         old_updated_at = datetime.fromtimestamp(1000, UTC)
         SessionMetadata.objects.create(

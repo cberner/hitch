@@ -963,7 +963,7 @@ def _ensure_indexed_system_threads(
             projects=projects,
             name=instance.display_author or instance.agent_kind,
             preview=instance.prompt,
-            is_hidden_system_session=True,
+            is_hidden_system_session=instance.agent_kind != demo.DEMO_AGENT_KIND,
         )
 
 
