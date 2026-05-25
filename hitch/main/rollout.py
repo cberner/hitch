@@ -76,12 +76,10 @@ def iter_entries(rollout_path: Path) -> Iterator[dict[str, Any]]:
     without changes. Entries are emitted in rollout-file order, which is the
     same chronological order codex used when writing them.
     """
-    try:
-        text = rollout_path.read_text()
-    except OSError as exc:
-        logger.warning("failed to read rollout %s: %s", rollout_path, exc)
+    lines = _load_rollout_lines(rollout_path)
+    if lines is None:
         return
-    yield from _entries_from_text(text, rollout_path)
+    yield from _entries_from_lines(lines)
 
 
 def latest_token_usage(rollout_path: Path) -> dict[str, int] | None:
@@ -94,22 +92,13 @@ def latest_token_usage(rollout_path: Path) -> dict[str, int] | None:
     Returns None when the rollout is unreadable or contains no parseable
     token_count event (e.g. a session that has yet to receive a response).
     """
-    try:
-        text = rollout_path.read_text()
-    except (OSError, UnicodeDecodeError) as exc:
-        logger.warning("failed to read rollout %s: %s", rollout_path, exc)
+    lines = _load_rollout_lines(rollout_path)
+    if lines is None:
         return None
     latest: dict[str, Any] | None = None
     latest_context: dict[str, Any] = {}
     latest_context_window: int = 0
-    for raw in text.splitlines():
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            entry = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
+    for entry in lines:
         if entry.get("type") != "event_msg":
             continue
         payload = entry.get("payload") or {}
@@ -138,20 +127,11 @@ def latest_token_usage(rollout_path: Path) -> dict[str, int] | None:
 
 def token_usage_history(rollout_path: Path) -> list[dict[str, int]]:
     """Return cumulative token counts for every timestamped token_count event."""
-    try:
-        text = rollout_path.read_text()
-    except (OSError, UnicodeDecodeError) as exc:
-        logger.warning("failed to read rollout %s: %s", rollout_path, exc)
+    lines = _load_rollout_lines(rollout_path)
+    if lines is None:
         return []
     history: list[dict[str, int]] = []
-    for raw in text.splitlines():
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            entry = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
+    for entry in lines:
         timestamp = _iso_to_unix_seconds(entry.get("timestamp"))
         if timestamp is None or entry.get("type") != "event_msg":
             continue
@@ -178,20 +158,9 @@ def token_usage_history(rollout_path: Path) -> list[dict[str, int]]:
 
 def latest_pr_url(rollout_path: Path) -> str | None:
     """Return the last GitHub PR URL produced by a completed /pr turn."""
-    try:
-        text = rollout_path.read_text()
-    except (OSError, UnicodeDecodeError) as exc:
-        logger.warning("failed to read rollout %s: %s", rollout_path, exc)
+    lines = _load_rollout_lines(rollout_path)
+    if lines is None:
         return None
-    lines: list[dict[str, Any]] = []
-    for raw in text.splitlines():
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            lines.append(json.loads(raw))
-        except json.JSONDecodeError:
-            continue
     function_calls_by_id = _function_calls_by_id(lines)
     latest: str | None = None
     for _, turn_lines in _lines_by_turn(lines):
@@ -209,6 +178,29 @@ def latest_pr_url(rollout_path: Path) -> str | None:
             )
         latest = urls[-1] if urls else None
     return latest
+
+
+def _load_rollout_lines(rollout_path: Path) -> list[dict[str, Any]] | None:
+    try:
+        text = rollout_path.read_text()
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning("failed to read rollout %s: %s", rollout_path, exc)
+        return None
+    lines: list[dict[str, Any]] = []
+    for raw in text.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.debug("skipping malformed rollout line in %s", rollout_path)
+            continue
+        if isinstance(entry, dict):
+            lines.append(entry)
+        else:
+            logger.debug("skipping malformed rollout line in %s", rollout_path)
+    return lines
 
 
 def _coerce_int(value: Any) -> int:
@@ -229,17 +221,7 @@ _MEMORY_CITATION_OPEN_TAG = "<oai-mem-citation>"
 _MEMORY_CITATION_CLOSE_TAG = "</oai-mem-citation>"
 
 
-def _entries_from_text(text: str, rollout_path: Path) -> Iterator[dict[str, Any]]:
-    lines: list[dict[str, Any]] = []
-    for raw in text.splitlines():
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            lines.append(json.loads(raw))
-        except json.JSONDecodeError:
-            logger.debug("skipping malformed rollout line in %s", rollout_path)
-
+def _entries_from_lines(lines: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
     # Index function_call_output by call_id so each command entry can show
     # whether the call actually succeeded without a second file pass.
     outputs: dict[str, dict[str, Any]] = {}
