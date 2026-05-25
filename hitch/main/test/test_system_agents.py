@@ -6059,6 +6059,23 @@ class StandingOrderWorkflowTests(TestCase):
 
         self.assertNotIn("candidate-thread", system_agents.hidden_thread_ids())
 
+    def test_hidden_session_metadata_marks_system_thread(self) -> None:
+        metadata = SessionMetadata.objects.create(
+            thread_id="metadata-hidden-thread",
+            is_hidden_system_session=True,
+        )
+
+        self.assertIn("metadata-hidden-thread", system_agents.hidden_thread_ids())
+
+        ProposedSession.objects.create(
+            candidate_session=metadata,
+            accepted_session=metadata,
+            title="Accepted metadata-backed candidate",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        )
+
+        self.assertNotIn("metadata-hidden-thread", system_agents.hidden_thread_ids())
+
     def test_proposed_session_accepted_into_new_thread_keeps_candidate_hidden(
         self,
     ) -> None:

@@ -427,6 +427,53 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Cached session")
         client.thread_list.assert_not_called()
 
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cached_hidden_system_flag_drives_main_and_system_lists(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="visible",
+            cwd="/repo",
+            codex_display_title="Visible session",
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+        )
+        SessionMetadata.objects.create(
+            thread_id="legacy-system",
+            cwd="/repo",
+            codex_display_title="Legacy system",
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+            is_hidden_system_session=True,
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Visible session")
+        self.assertNotContains(response, "Legacy system")
+        client.thread_list.assert_not_called()
+
+        system_response = self.client.get(reverse("system_sessions"))
+
+        self.assertEqual(system_response.status_code, 200)
+        self.assertNotContains(system_response, "Visible session")
+        self.assertContains(system_response, "Legacy system")
+        self.assertContains(system_response, "Hitch system")
+        self.assertContains(system_response, "untracked")
+
     def test_update_cached_name_preserves_activity_timestamp(self) -> None:
         old_updated_at = datetime.fromtimestamp(1000, UTC)
         SessionMetadata.objects.create(
@@ -603,6 +650,34 @@ class IndexViewTests(TestCase):
         self.assertTrue(
             session_index.indexed_sessions().filter(thread_id="fresh-active").exists()
         )
+
+    @patch("hitch.main.views.Codex")
+    def test_refresh_marks_legacy_standing_order_prompt_hidden(
+        self, mock_codex: MagicMock
+    ) -> None:
+        candidate = _session(
+            "legacy-candidate",
+            name=system_agents.STANDING_ORDER_AGENT_PROMPT_TITLE,
+            preview=(
+                f"{system_agents.STANDING_ORDER_AGENT_PROMPT_TITLE}\n\n"
+                "Analyze the repo.\n\n"
+                "Standing order title: Docs\n\n"
+                "Standing order goal:\nKeep documentation tidy.\n\n"
+                "Return only JSON matching this shape: {}"
+            ),
+        )
+        client = _setup_codex(mock_codex, threads=[candidate])
+
+        session_index.refresh_from_codex(
+            client,
+            projects=[],
+            include_active=True,
+            max_pages=None,
+            use_state_db_only=True,
+        )
+
+        metadata = SessionMetadata.objects.get(thread_id="legacy-candidate")
+        self.assertTrue(metadata.is_hidden_system_session)
 
     @patch("hitch.main.views.Codex")
     def test_state_db_refresh_does_not_invalidate_absent_active_rows(
@@ -1060,6 +1135,55 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    def test_hides_legacy_standing_order_prompt_threads_without_source(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        visible = _session("visible", name="Visible")
+        candidate = _session(
+            "legacy-candidate",
+            name=system_agents.STANDING_ORDER_AGENT_PROMPT_TITLE,
+            preview=(
+                f"{system_agents.STANDING_ORDER_AGENT_PROMPT_TITLE}\n\n"
+                "Analyze the repo.\n\n"
+                "Standing order title: Docs\n\n"
+                "Standing order goal:\nKeep documentation tidy.\n\n"
+                "Return only JSON matching this shape: {}"
+            ),
+        )
+        judge = _session(
+            "legacy-judge",
+            name=system_agents.STANDING_ORDER_JUDGE_PROMPT_TITLE,
+            preview=(
+                f"{system_agents.STANDING_ORDER_JUDGE_PROMPT_TITLE}\n\n"
+                "Judge it.\n\n"
+                "Standing order title: Docs\n\n"
+                "Candidate session JSON:\n{}\n\n"
+                "Return only JSON matching this shape: {}"
+            ),
+        )
+        _setup_codex(mock_codex, threads=[visible, candidate, judge])
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Visible")
+        self.assertNotContains(response, "You are Hitch&#x27;s standing order agent.")
+        self.assertNotContains(
+            response, "You are Hitch&#x27;s standing order confidence judge."
+        )
+
+        system_response = self.client.get(reverse("system_sessions"))
+
+        self.assertEqual(system_response.status_code, 200)
+        self.assertNotContains(system_response, "Visible")
+        self.assertContains(system_response, "You are Hitch&#x27;s standing order agent.")
+        self.assertContains(
+            system_response, "You are Hitch&#x27;s standing order confidence judge."
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
     def test_user_prompt_with_hitch_system_text_remains_visible(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -1085,6 +1209,32 @@ class IndexViewTests(TestCase):
         )
 
         self.assertEqual(system_detail_response.status_code, 404)
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_user_prompt_with_legacy_standing_order_title_remains_visible(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        user_thread = _session(
+            "user-exact-title",
+            name=system_agents.STANDING_ORDER_AGENT_PROMPT_TITLE,
+            preview=(
+                f"{system_agents.STANDING_ORDER_AGENT_PROMPT_TITLE}\n\n"
+                "Please explain this."
+            ),
+        )
+        _setup_codex(mock_codex, threads=[user_thread])
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "You are Hitch&#x27;s standing order agent.")
+
+        system_response = self.client.get(reverse("system_sessions"))
+
+        self.assertEqual(system_response.status_code, 200)
+        self.assertNotContains(system_response, "You are Hitch&#x27;s standing order agent.")
 
     @patch("hitch.main.views.Codex")
     def test_untracked_system_session_resume_error_is_not_404(

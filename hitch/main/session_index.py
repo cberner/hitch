@@ -22,6 +22,11 @@ DISPLAY_TITLE_MAX_LEN = 80
 THREAD_LIST_FETCH_LIMIT = 100
 ARCHIVED_SESSIONS_DIR = "archived_sessions"
 STALE_AFTER = timedelta(seconds=30)
+HIDDEN_SYSTEM_THREAD_SOURCE = "subagent"
+STANDING_ORDER_AGENT_PROMPT_TITLE = "You are Hitch's standing order agent."
+STANDING_ORDER_JUDGE_PROMPT_TITLE = (
+    "You are Hitch's standing order confidence judge."
+)
 
 
 class RefreshResult(NamedTuple):
@@ -163,6 +168,7 @@ def upsert_local_session(
     auto_qa_enabled: bool | None = None,
     auto_merge_to_local_branch: bool | None = None,
     auto_merge_branch: str | None = None,
+    is_hidden_system_session: bool = False,
 ) -> SessionMetadata:
     now = timezone.now()
     defaults = _codex_defaults(
@@ -188,6 +194,7 @@ def upsert_local_session(
         defaults["auto_merge_to_local_branch"] = auto_merge_to_local_branch
     if auto_merge_branch is not None:
         defaults["auto_merge_branch"] = auto_merge_branch
+    defaults["is_hidden_system_session"] = is_hidden_system_session
     metadata, _created = SessionMetadata.objects.update_or_create(
         thread_id=thread_id,
         defaults=defaults,
@@ -231,6 +238,28 @@ def display_title_for(*, thread_id: str, name: object, preview: object) -> str:
     if len(candidate) > DISPLAY_TITLE_MAX_LEN:
         return candidate[:DISPLAY_TITLE_MAX_LEN].rstrip() + "..."
     return candidate
+
+
+def hidden_system_session_from_metadata(
+    *, name: str, preview: str, thread_source: str
+) -> bool:
+    if thread_source == HIDDEN_SYSTEM_THREAD_SOURCE:
+        return True
+    if name == STANDING_ORDER_AGENT_PROMPT_TITLE:
+        return (
+            preview.startswith(f"{STANDING_ORDER_AGENT_PROMPT_TITLE}\n\n")
+            and "Standing order title:" in preview
+            and "Standing order goal:" in preview
+            and "Return only JSON matching this shape:" in preview
+        )
+    if name == STANDING_ORDER_JUDGE_PROMPT_TITLE:
+        return (
+            preview.startswith(f"{STANDING_ORDER_JUDGE_PROMPT_TITLE}\n\n")
+            and "Standing order title:" in preview
+            and "Candidate session JSON:" in preview
+            and "Return only JSON matching this shape:" in preview
+        )
+    return False
 
 
 def updated_at_seconds(value: Any) -> float:
@@ -342,6 +371,11 @@ def _codex_defaults(
         "codex_path": path if isinstance(path, str) else "",
         "codex_thread_source": thread_source,
         "codex_last_synced_at": now,
+        "is_hidden_system_session": hidden_system_session_from_metadata(
+            name=name_value,
+            preview=preview_value,
+            thread_source=thread_source,
+        ),
     }
 
 
