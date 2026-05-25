@@ -448,11 +448,16 @@ class AuthenticatedSettingsTests(TestCase):
                 _ENABLE_MEMORIES_COOKIE: "false",
             },
         )
-        _setup_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
+        models = [_model("gpt-5", is_default=True)]
+        _setup_codex(mock_codex, models=models)
         mock_discover.return_value = [Path("/home/user/account"), Path("/home/user/cookie")]
 
-        new_session_response = self.client.get(reverse("new_session"))
-        settings_response = self.client.get(reverse("update_settings"))
+        with (
+            patch("hitch.main.views._cached_models_data", return_value=models),
+            patch("hitch.main.views._start_models_refresh_thread"),
+        ):
+            new_session_response = self.client.get(reverse("new_session"))
+            settings_response = self.client.get(reverse("update_settings"))
 
         self.assertContains(settings_response, 'value="gpt-5" selected')
         self.assertContains(settings_response, 'value="high" selected')

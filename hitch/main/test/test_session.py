@@ -419,8 +419,7 @@ class SessionViewTests(TestCase):
     def test_settings_page_uses_resolved_settings(
         self, mock_codex: MagicMock
     ) -> None:
-        client = mock_codex.return_value.__enter__.return_value
-        client.models.return_value.data = [
+        models = [
             SimpleNamespace(
                 id="gpt-current",
                 display_name="GPT Current",
@@ -435,9 +434,14 @@ class SessionViewTests(TestCase):
             hitch_reasoning_effort="high",
         )
 
-        response = cast(HttpResponse, self.client.get(reverse("update_settings")))
+        with (
+            patch("hitch.main.views._cached_models_data", return_value=models),
+            patch("hitch.main.views._start_models_refresh_thread"),
+        ):
+            response = cast(HttpResponse, self.client.get(reverse("update_settings")))
 
         self.assertEqual(response.status_code, 200)
+        mock_codex.assert_not_called()
         self.assertContains(response, 'value="gpt-current" selected')
         self.assertEqual(_cookie_value(response, "hitch_model"), "gpt-current")
         self.assertEqual(_cookie_value(response, "hitch_reasoning_effort"), "medium")

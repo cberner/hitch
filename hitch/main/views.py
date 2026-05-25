@@ -928,6 +928,61 @@ def _session_list_page_from_codex(
     )
 
 
+def _session_list_page_from_warm_index(
+    request: HttpRequest,
+    *,
+    current_settings: SettingsValues,
+    projects: list[Project],
+    current_project: Project | None,
+    system_only: bool,
+) -> SessionListPage | None:
+    required_archived = current_settings.show_archived_sessions
+    if _request_uses_codex_cursor(request) or not _session_index_sources_complete(
+        include_archived=required_archived
+    ):
+        return None
+
+    accepted_visible_thread_ids = system_agents.accepted_visible_system_thread_ids()
+    hidden_thread_ids = system_agents.hidden_thread_ids(
+        accepted_visible_thread_ids=accepted_visible_thread_ids
+    )
+    system_thread_ids = (
+        hidden_thread_ids | _demo_system_thread_ids() if system_only else set()
+    )
+    runs_by_thread_id = (
+        _system_agent_runs_by_thread_id(system_thread_ids) if system_only else {}
+    )
+    instances_by_thread_id = (
+        _system_agent_instances_by_thread_id(system_thread_ids) if system_only else {}
+    )
+    request_uses_index_cursor = _request_uses_index_cursor(request)
+    refresh_active = (
+        not request_uses_index_cursor and session_index.should_refresh(archived=False)
+    )
+    refresh_archived = (
+        not request_uses_index_cursor
+        and required_archived
+        and session_index.should_refresh(archived=True)
+    )
+    _schedule_session_index_refresh(
+        enable_memories=current_settings.enable_memories,
+        include_active=refresh_active,
+        include_archived=refresh_archived,
+    )
+    return _session_list_page_from_index(
+        request,
+        current_project=current_project,
+        show_archived=current_settings.show_archived_sessions,
+        hidden_thread_ids=hidden_thread_ids,
+        system_thread_ids=system_thread_ids,
+        runs_by_thread_id=runs_by_thread_id,
+        instances_by_thread_id=instances_by_thread_id,
+        projects=projects,
+        system_only=system_only,
+        accepted_visible_thread_ids=accepted_visible_thread_ids,
+    )
+
+
 def _session_list_page_from_index(
     request: HttpRequest,
     *,
@@ -1813,25 +1868,31 @@ def index(request: HttpRequest) -> HttpResponse:
     # could record its terminal status (or a row stuck in ``starting``)
     # otherwise stays pending forever, since we don't run a periodic task.
     codex_pool.reconcile_dead()
-    initial_settings = _stored_settings(request)
-    config = codex_pool.app_server_config(
-        enable_memories=initial_settings.enable_memories
-    )
+    models_data, resolved_settings = _cached_models_and_settings(request)
+    current_settings = resolved_settings.values
+    cookie_updates = resolved_settings.cookie_updates
     projects = list(Project.objects.all())
-    with Codex(config=config) as codex:
-        models_data = list(codex.models().data)
-        resolved_settings = _resolved_settings(request, models_data)
-        current_settings = resolved_settings.values
-        cookie_updates = resolved_settings.cookie_updates
-        current_project = _selected_project_for_settings(current_settings, projects)
-        session_page = _session_list_page(
-            codex,
-            request,
-            current_settings=current_settings,
-            projects=projects,
-            current_project=current_project,
-            system_only=False,
+    current_project = _selected_project_for_settings(current_settings, projects)
+    session_page = _session_list_page_from_warm_index(
+        request,
+        current_settings=current_settings,
+        projects=projects,
+        current_project=current_project,
+        system_only=False,
+    )
+    if session_page is None:
+        config = codex_pool.app_server_config(
+            enable_memories=current_settings.enable_memories
         )
+        with Codex(config=config) as codex:
+            session_page = _session_list_page(
+                codex,
+                request,
+                current_settings=current_settings,
+                projects=projects,
+                current_project=current_project,
+                system_only=False,
+            )
     settings_context = _settings_context(current_settings, models_data)
     response = render(
         request,
@@ -1857,25 +1918,31 @@ def index(request: HttpRequest) -> HttpResponse:
 @require_http_methods(["GET"])
 def system_sessions(request: HttpRequest) -> HttpResponse:
     codex_pool.reconcile_dead()
-    initial_settings = _stored_settings(request)
-    config = codex_pool.app_server_config(
-        enable_memories=initial_settings.enable_memories
-    )
+    models_data, resolved_settings = _cached_models_and_settings(request)
+    current_settings = resolved_settings.values
+    cookie_updates = resolved_settings.cookie_updates
     projects = list(Project.objects.all())
-    with Codex(config=config) as codex:
-        models_data = list(codex.models().data)
-        resolved_settings = _resolved_settings(request, models_data)
-        current_settings = resolved_settings.values
-        cookie_updates = resolved_settings.cookie_updates
-        current_project = _selected_project_for_settings(current_settings, projects)
-        session_page = _session_list_page(
-            codex,
-            request,
-            current_settings=current_settings,
-            projects=projects,
-            current_project=current_project,
-            system_only=True,
+    current_project = _selected_project_for_settings(current_settings, projects)
+    session_page = _session_list_page_from_warm_index(
+        request,
+        current_settings=current_settings,
+        projects=projects,
+        current_project=current_project,
+        system_only=True,
+    )
+    if session_page is None:
+        config = codex_pool.app_server_config(
+            enable_memories=current_settings.enable_memories
         )
+        with Codex(config=config) as codex:
+            session_page = _session_list_page(
+                codex,
+                request,
+                current_settings=current_settings,
+                projects=projects,
+                current_project=current_project,
+                system_only=True,
+            )
     settings_context = _settings_context(current_settings, models_data)
     response = render(
         request,
@@ -1974,15 +2041,9 @@ def _usage_context(request: HttpRequest) -> UsageContext:
 @require_http_methods(["GET"])
 def inbox(request: HttpRequest) -> HttpResponse:
     codex_pool.reconcile_dead()
-    initial_settings = _stored_settings(request)
-    config = codex_pool.app_server_config(
-        enable_memories=initial_settings.enable_memories
-    )
-    with Codex(config=config) as codex:
-        models_data = list(codex.models().data)
-        resolved_settings = _resolved_settings(request, models_data)
-        current_settings = resolved_settings.values
-        cookie_updates = resolved_settings.cookie_updates
+    models_data, resolved_settings = _cached_models_and_settings(request)
+    current_settings = resolved_settings.values
+    cookie_updates = resolved_settings.cookie_updates
     projects = list(Project.objects.all())
     current_project = _selected_project_for_settings(current_settings, projects)
     proposed_sessions = list(
@@ -2019,15 +2080,9 @@ def inbox(request: HttpRequest) -> HttpResponse:
 @require_http_methods(["GET"])
 def autonomous_goals(request: HttpRequest) -> HttpResponse:
     codex_pool.reconcile_dead()
-    initial_settings = _stored_settings(request)
-    config = codex_pool.app_server_config(
-        enable_memories=initial_settings.enable_memories
-    )
-    with Codex(config=config) as codex:
-        models_data = list(codex.models().data)
-        resolved_settings = _resolved_settings(request, models_data)
-        current_settings = resolved_settings.values
-        cookie_updates = resolved_settings.cookie_updates
+    models_data, resolved_settings = _cached_models_and_settings(request)
+    current_settings = resolved_settings.values
+    cookie_updates = resolved_settings.cookie_updates
     projects = list(Project.objects.all())
     current_project = _selected_project_for_settings(current_settings, projects)
     goals = (
@@ -3423,11 +3478,23 @@ def _schedule_usage_session_index_refresh_if_needed(
     refresh_archived = index_state.refresh_archived
     if not refresh_active and not refresh_archived:
         return
+    _schedule_session_index_refresh(
+        enable_memories=enable_memories,
+        include_active=refresh_active,
+        include_archived=refresh_archived,
+    )
+
+
+def _schedule_session_index_refresh(
+    *, enable_memories: bool, include_active: bool, include_archived: bool
+) -> None:
+    if not include_active and not include_archived:
+        return
     transaction.on_commit(
         lambda: _start_usage_session_index_refresh_thread(
             enable_memories=enable_memories,
-            include_active=refresh_active,
-            include_archived=refresh_archived,
+            include_active=include_active,
+            include_archived=include_archived,
         )
     )
 
@@ -5160,10 +5227,22 @@ def _cached_models_data(*, enable_memories: bool) -> list[Any]:
         return list(_MODELS_CACHE_VALUE.get(enable_memories, []))
 
 
+def _models_cache_has_value(*, enable_memories: bool) -> bool:
+    with _MODELS_REFRESH_LOCK:
+        return enable_memories in _MODELS_CACHE_FETCHED_AT
+
+
 def _cached_models_for_session_detail(*, enable_memories: bool) -> list[Any]:
     models_data = _cached_models_data(enable_memories=enable_memories)
     _schedule_models_refresh(enable_memories=enable_memories)
     return models_data
+
+
+def _cached_models_and_settings(request: HttpRequest) -> tuple[list[Any], ResolvedSettings]:
+    stored_settings = _stored_settings(request)
+    models_data = _cached_models_data(enable_memories=stored_settings.enable_memories)
+    _schedule_models_refresh(enable_memories=stored_settings.enable_memories)
+    return models_data, _resolved_settings(request, models_data)
 
 
 def _schedule_models_refresh(*, enable_memories: bool) -> None:
@@ -5376,13 +5455,7 @@ def _model_default_effort(model_obj: Any) -> str:
 @require_http_methods(["GET", "POST"])
 def update_settings(request: HttpRequest) -> HttpResponse:
     if request.method == "GET":
-        initial_settings = _stored_settings(request)
-        config = codex_pool.app_server_config(
-            enable_memories=initial_settings.enable_memories
-        )
-        with Codex(config=config) as codex:
-            models_data = list(codex.models().data)
-        resolved_settings = _resolved_settings(request, models_data)
+        models_data, resolved_settings = _cached_models_and_settings(request)
         next_url = _safe_next_url(request) or reverse("index")
         response = render(
             request,
@@ -5412,7 +5485,9 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     show_archived = (
         posted_show_archived.strip() if posted_show_archived is not None else None
     )
-    selected_project, selected_project_error = _posted_project(request.POST.get("selected_project", ""))
+    selected_project, selected_project_error = _posted_project(
+        request.POST.get("selected_project", "")
+    )
     if selected_project_error is not None:
         return HttpResponseBadRequest(selected_project_error)
     enable_memories = request.POST.get("enable_memories", "").strip()
@@ -5463,9 +5538,17 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         # actually offers so a malformed POST (typo, stale model id, effort
         # the chosen model doesn't support) gets a clean 400 instead of
         # quietly poisoning every subsequent turn at runtime.
-        config = codex_pool.app_server_config(enable_memories=enable_memories == "true")
-        with Codex(config=config) as codex:
-            models_data = list(codex.models().data)
+        enable_memories_value = enable_memories == "true"
+        cache_has_value = _models_cache_has_value(enable_memories=enable_memories_value)
+        models_data = _cached_models_data(enable_memories=enable_memories_value)
+        if cache_has_value:
+            _schedule_models_refresh(enable_memories=enable_memories_value)
+        else:
+            config = codex_pool.app_server_config(
+                enable_memories=enable_memories_value
+            )
+            with Codex(config=config) as codex:
+                models_data = list(codex.models().data)
         compat_error = _validate_settings_against_models(model, effort, models_data)
         if compat_error:
             return HttpResponseBadRequest(compat_error)
@@ -7086,15 +7169,9 @@ def _render_new_session_page(request: HttpRequest) -> HttpResponse:
     proposed_session = _proposed_session_for_new_session_page(
         request, repo_set=set(repos)
     )
-    initial_settings = _stored_settings(request)
-    config = codex_pool.app_server_config(
-        enable_memories=initial_settings.enable_memories
-    )
-    with Codex(config=config) as codex:
-        models_data = list(codex.models().data)
-        resolved_settings = _resolved_settings(request, models_data)
-        current_settings = resolved_settings.values
-        cookie_updates = resolved_settings.cookie_updates
+    models_data, resolved_settings = _cached_models_and_settings(request)
+    current_settings = resolved_settings.values
+    cookie_updates = resolved_settings.cookie_updates
     projects = list(Project.objects.all())
     current_project = _selected_project_for_settings(current_settings, projects)
     settings_context = _settings_context(current_settings, models_data)
