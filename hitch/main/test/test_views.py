@@ -1963,6 +1963,91 @@ class IndexViewTests(TestCase):
             response, '<dialog class="new-session" data-new-session-dialog', html=False
         )
 
+    def test_system_session_helpers_defer_large_payload_fields(self) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="visible",
+            cwd="/repo",
+        )
+        run_instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="qa-thread",
+            cwd="/repo",
+            prompt="prompt " * 2000,
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+            developer_instructions="developer " * 2000,
+            base_instructions="base " * 2000,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="qa-thread",
+            instance=run_instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+            input={"prompt": "input " * 2000},
+            output={"result": "output " * 2000},
+            raw_output="raw " * 2000,
+            error="error " * 2000,
+        )
+        CodexInstance.objects.create(
+            pid=2,
+            thread_id="instance-only-thread",
+            cwd="/repo",
+            prompt="prompt " * 2000,
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            display_author=system_agents.STANDING_ORDER_DISPLAY_AUTHOR,
+            developer_instructions="developer " * 2000,
+            base_instructions="base " * 2000,
+        )
+
+        with CaptureQueriesContext(connection) as captured:
+            runs_by_thread_id = views._system_agent_runs_by_thread_id(["qa-thread"])
+            instances_by_thread_id = views._system_agent_instances_by_thread_id(
+                ["instance-only-thread"]
+            )
+            run = runs_by_thread_id["qa-thread"]
+            instance = instances_by_thread_id["instance-only-thread"]
+            self.assertEqual(
+                views._system_agent_run_label(run), system_agents.QA_DISPLAY_AUTHOR
+            )
+            self.assertEqual(
+                views._system_agent_status(run), SystemAgentRun.STATUS_COMPLETED
+            )
+            self.assertEqual(
+                views._system_agent_run_label(None, instance),
+                system_agents.STANDING_ORDER_DISPLAY_AUTHOR,
+            )
+            self.assertEqual(
+                views._system_agent_status(None, instance),
+                CodexInstance.STATUS_RUNNING,
+            )
+
+        self.assertEqual(len(captured), 2)
+        self.assertNotIn("main_systemworkflow", captured[0]["sql"])
+        self.assertTrue(
+            {"input", "output", "raw_output", "error"}.issubset(
+                run.get_deferred_fields()
+            )
+        )
+        self.assertTrue(
+            {"prompt", "developer_instructions", "base_instructions"}.issubset(
+                run.instance.get_deferred_fields()
+            )
+        )
+        self.assertTrue(
+            {"prompt", "developer_instructions", "base_instructions"}.issubset(
+                instance.get_deferred_fields()
+            )
+        )
+
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_new_session_dialog_adjusts_for_mobile_keyboard(
