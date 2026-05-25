@@ -7832,7 +7832,10 @@ def _memory_citation_from_item(item: Any) -> dict[str, Any] | None:
         )
         if (thread_id := _string_value(raw_id))
     ]
-    count = len(entries) if entries else len(thread_ids)
+    # See _memory_citation_from_bodies in rollout.py: ``count`` covers both
+    # citation kinds because the popover renders entries and thread_ids
+    # together; counting only one half would silently underreport.
+    count = len(entries) + len(thread_ids)
     if count == 0:
         return None
     return {"count": count, "entries": entries, "thread_ids": thread_ids}
