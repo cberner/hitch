@@ -5709,7 +5709,12 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
         else:
             codex.thread_unarchive(session_id)
     session_index.update_cached_archived(session_id, archived=archived == "true")
-    ArchivedSessionTokenUsage.objects.all().delete()
+    # Codex moves this thread's rollout in/out of ``archived_sessions/`` when
+    # the archive bit flips, which invalidates *this* thread's cached usage
+    # row. Other threads' caches still match their rollouts, so leave them
+    # alone — a blanket wipe forces /profile and /usage to re-parse every
+    # archived rollout file the next time they render.
+    ArchivedSessionTokenUsage.objects.filter(thread_id=session_id).delete()
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return HttpResponse(status=204)
     if request.POST.get("next", "").strip() == "index":

@@ -8637,7 +8637,51 @@ class SetSessionArchivedViewTests(TestCase):
                     client.thread_unarchive.assert_called_once_with("abc")
                     client.thread_archive.assert_not_called()
                 if seed_cache:
-                    self.assertEqual(ArchivedSessionTokenUsage.objects.count(), 0)
+                    # The toggled session's cache is dropped because its
+                    # rollout path moves when codex archives/unarchives it,
+                    # but every other session's cache must survive — wiping
+                    # the whole table forces /profile and /usage to re-parse
+                    # every archived rollout file the next time they render.
+                    self.assertFalse(
+                        ArchivedSessionTokenUsage.objects.filter(
+                            thread_id="abc"
+                        ).exists()
+                    )
+                    self.assertTrue(
+                        ArchivedSessionTokenUsage.objects.filter(
+                            thread_id="abc-child"
+                        ).exists()
+                    )
+
+    @patch("hitch.main.views.Codex")
+    def test_archive_keeps_cached_usage_for_unrelated_sessions(
+        self, mock_codex: MagicMock
+    ) -> None:
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="abc", total_tokens=100
+        )
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="other-1", total_tokens=200
+        )
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="other-2", total_tokens=300
+        )
+
+        response = self.client.post(
+            reverse("set_session_archived", kwargs={"session_id": "abc"}),
+            data={"archived": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(
+            ArchivedSessionTokenUsage.objects.filter(thread_id="abc").exists()
+        )
+        other_totals = dict(
+            ArchivedSessionTokenUsage.objects.filter(
+                thread_id__in=["other-1", "other-2"]
+            ).values_list("thread_id", "total_tokens")
+        )
+        self.assertEqual(other_totals, {"other-1": 200, "other-2": 300})
 
     @patch("hitch.main.demo.subprocess.run")
     @patch("hitch.main.views.Codex")
