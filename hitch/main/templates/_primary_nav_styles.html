@@ -133,6 +133,52 @@
             color: var(--text);
             padding: 0.5rem 0.65rem;
         }
+        .primary-nav-session-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.2rem;
+        }
+        .primary-nav.primary-nav-js .primary-nav-session-item {
+            width: 100%;
+            display: flex;
+            gap: 0.35rem;
+        }
+        .primary-nav-panel a.primary-nav-session-link {
+            padding-right: 0.45rem;
+        }
+        .primary-nav.primary-nav-js .primary-nav-panel a.primary-nav-session-link {
+            flex: 1 1 auto;
+            width: auto;
+        }
+        .primary-nav-panel a.primary-nav-new-session {
+            align-items: center;
+            justify-content: center;
+            width: 1.45rem;
+            min-width: 1.45rem;
+            height: 1.45rem;
+            min-height: 1.45rem;
+            padding: 0;
+            border-radius: 999px;
+            background: var(--accent);
+            color: var(--accent-fg);
+            font-size: 1rem;
+            font-weight: 700;
+            line-height: 1;
+            overflow-wrap: normal;
+        }
+        .primary-nav.primary-nav-js .primary-nav-panel a.primary-nav-new-session {
+            flex: 0 0 1.75rem;
+            width: 1.75rem;
+            min-width: 1.75rem;
+            height: 1.75rem;
+            min-height: 1.75rem;
+            padding: 0;
+        }
+        .primary-nav-panel a.primary-nav-new-session:hover,
+        .primary-nav-panel a.primary-nav-new-session:focus {
+            background: var(--accent-hover);
+            color: var(--accent-fg);
+        }
         .primary-nav-panel a.primary-nav-with-badge {
             gap: 0.45rem;
         }
