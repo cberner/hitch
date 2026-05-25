@@ -288,6 +288,182 @@ def _session(
     )
 
 
+class SessionDetailFastPathTests(TestCase):
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_inactive_session_detail_renders_indexed_rollout_without_resume(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        pr_url = "https://github.com/cberner/hitch/pull/94"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Read from rollout"},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Rollout answer"}],
+                        "phase": "final_answer",
+                    },
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_create_pull_request",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps({"url": pr_url}),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Opened the PR."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="indexed",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Indexed session",
+            codex_preview="Read from rollout",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+        CodexInstance.objects.create(
+            pid=1,
+            thread_id="indexed",
+            cwd="/repo",
+            prompt="done",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            model="gpt-5.4",
+            reasoning_effort="high",
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "indexed"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Read from rollout")
+        self.assertContains(response, "Rollout answer")
+        self.assertContains(response, "Indexed session")
+        self.assertContains(response, "gpt-5.4")
+        self.assertContains(response, "high")
+        self.assertContains(response, f'href="{pr_url}"')
+        self.assertContains(response, f'data-ts="{now.timestamp()}"')
+        self.assertNotContains(response, "Jan. 5, 2025")
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    def test_session_detail_falls_back_when_indexed_rollout_has_no_transcript(
+        self, mock_codex: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=10,
+                    cached_input_tokens=2,
+                    output_tokens=3,
+                    total_tokens=13,
+                )
+            ],
+        )
+        SessionMetadata.objects.create(
+            thread_id="indexed-empty",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_updated_at=datetime(2025, 1, 5, tzinfo=UTC),
+        )
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=_session("indexed-empty", name="Resumed session")
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "indexed-empty"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Resumed session")
+        client._client.thread_resume.assert_called_once_with("indexed-empty")
+
+    @patch("hitch.main.views.Codex")
+    def test_session_detail_falls_back_when_metadata_missing(
+        self, mock_codex: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=_session("missing", name="Missing metadata")
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "missing"}))
+
+        self.assertEqual(response.status_code, 200)
+        client._client.thread_resume.assert_called_once_with("missing")
+
+    @patch("hitch.main.views.Codex")
+    def test_session_detail_falls_back_for_active_session(
+        self, mock_codex: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Indexed active"},
+                )
+            ],
+        )
+        SessionMetadata.objects.create(
+            thread_id="active",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_updated_at=datetime(2025, 1, 5, tzinfo=UTC),
+        )
+        CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="active",
+            cwd="/repo",
+            prompt="still running",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=_session("active", name="Active session")
+        )
+
+        with patch("hitch.main.codex_pool.worker_is_alive", return_value=True):
+            response = self.client.get(reverse("session", kwargs={"session_id": "active"}))
+
+        self.assertEqual(response.status_code, 200)
+        client._client.thread_resume.assert_called_once_with("active")
+
+
 class PendingPlanStateTests(TestCase):
     def test_approval_declined_does_not_clear_pending_plan(self) -> None:
         entries = [

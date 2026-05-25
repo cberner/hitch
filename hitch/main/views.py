@@ -236,6 +236,28 @@ class _NewSessionTarget(NamedTuple):
     project_cleared: bool
 
 
+@dataclass(frozen=True)
+class _MetadataThread:
+    id: str
+    cwd: str
+    path: str
+    name: str
+    preview: str
+    created_at: float | None
+    updated_at: float | None
+    archived: bool
+    thread_source: str
+    turns: tuple[Any, ...] = ()
+
+
+@dataclass(frozen=True)
+class _MetadataResume:
+    thread: _MetadataThread
+    entries: tuple[dict[str, Any], ...]
+    model: str = ""
+    reasoning_effort: str = ""
+
+
 # Sandbox-policy variants offered in the settings dialog. Stored as the
 # SandboxPolicy ``type`` discriminator string so the cookie value can map
 # 1:1 onto a constructed SandboxPolicy in the worker without any further
@@ -2510,48 +2532,74 @@ def _render_session_detail(
     # mode forever, since the EventSource wouldn't reach an end event.
     codex_pool.reconcile_dead()
     initial_settings = _stored_settings(request)
-    config = codex_pool.app_server_config(
-        enable_memories=initial_settings.enable_memories
+    active_instance = _active_instance_for(session_id)
+    active_system_workflow = system_agents.active_workflow_for_thread(session_id)
+    metadata = _session_detail_metadata(session_id)
+    metadata_resume = _metadata_resume_for_inactive_session(
+        session_id,
+        metadata,
+        active_instance=active_instance,
+        active_system_workflow=active_system_workflow,
+        require_system_agent_thread=require_system_agent_thread,
     )
-    with Codex(config=config) as codex:
-        # ``thread/read`` only works for threads already loaded into the
-        # app-server's in-memory map. Each request spawns a fresh app-server
-        # subprocess, so newly-created threads (or any thread persisted by a
-        # different worker) need ``thread/resume`` to read them off disk.
-        # The resume response already carries the full thread including turns,
-        # so a follow-up ``thread/read`` would just be a redundant round-trip.
-        try:
-            resumed = codex._client.thread_resume(session_id)
-        except InvalidRequestError as exc:
-            if require_system_agent_thread and _thread_resume_missing_or_invalid(exc):
-                raise Http404("system session not found") from None
-            raise
-        thread = resumed.thread
-        if require_system_agent_thread and not system_agents.hitch_system_agent_thread(
-            thread
-        ):
-            raise Http404("system session not found")
-        models_data = _models_for_plan_mode_fallback(codex)
+    resumed: Any
+    thread: Any
+
+    if metadata_resume is not None:
+        resumed = metadata_resume
+        thread = metadata_resume.thread
+        raw_entries = list(metadata_resume.entries)
+        models_data = _cached_models_for_session_detail(
+            enable_memories=initial_settings.enable_memories
+        )
         resolved_settings = _resolved_settings(request, models_data)
         settings = resolved_settings.values
         cookie_updates = resolved_settings.cookie_updates
         plan_model = _plan_mode_model_from_models(resumed, settings, models_data)
+    else:
+        config = codex_pool.app_server_config(
+            enable_memories=initial_settings.enable_memories
+        )
+        with Codex(config=config) as codex:
+            # ``thread/read`` only works for threads already loaded into the
+            # app-server's in-memory map. Each request spawns a fresh app-server
+            # subprocess, so newly-created threads (or any thread persisted by a
+            # different worker) need ``thread/resume`` to read them off disk.
+            # The resume response already carries the full thread including turns,
+            # so a follow-up ``thread/read`` would just be a redundant round-trip.
+            try:
+                resumed = codex._client.thread_resume(session_id)
+            except InvalidRequestError as exc:
+                if require_system_agent_thread and _thread_resume_missing_or_invalid(exc):
+                    raise Http404("system session not found") from None
+                raise
+            thread = resumed.thread
+            if require_system_agent_thread and not system_agents.hitch_system_agent_thread(
+                thread
+            ):
+                raise Http404("system session not found")
+            models_data = _models_for_plan_mode_fallback(codex)
+            resolved_settings = _resolved_settings(request, models_data)
+            settings = resolved_settings.values
+            cookie_updates = resolved_settings.cookie_updates
+            plan_model = _plan_mode_model_from_models(resumed, settings, models_data)
+        raw_entries = list(_entries_for(thread))
     is_archived = _thread_is_archived(thread)
-    entries = _apply_system_authors(list(_entries_for(thread)), session_id)
+    entries = _apply_system_authors(raw_entries, session_id)
     entries = _apply_qa_approval_messages(entries, session_id)
     if hide_demo_agent_entries:
         entries = _filter_demo_agent_entries(entries, session_id)
     name_value = getattr(thread, "name", None) or ""
     projects = list(Project.objects.all())
     metadata_by_thread = _metadata_by_thread_id([thread])
+    if metadata is not None:
+        metadata_by_thread[session_id] = metadata
     session_project = _project_for_thread(thread, metadata_by_thread, projects)
     pr_url = _pr_url_for_thread(thread)
-    active_instance = _active_instance_for(session_id)
     show_active_worker_transcript = _show_active_worker_transcript(active_instance)
     active_demo_worker = (
         active_instance is not None and active_instance.agent_kind == demo.DEMO_AGENT_KIND
     )
-    active_system_workflow = system_agents.active_workflow_for_thread(session_id)
     # While a worker is running, drop the entries that belong to its
     # in-progress turn — the SSE stream replays them from byte 0 of the
     # events file, so leaving the rollout-rendered copy in place would
@@ -2786,10 +2834,79 @@ def logout(request: HttpRequest) -> HttpResponse:
 
 def _thread_is_archived(thread: Any) -> bool:
     """Return whether Codex resumed this thread from archived rollout storage."""
+    archived = getattr(thread, "archived", None)
+    if isinstance(archived, bool):
+        return archived
     path = getattr(thread, "path", None)
     if not isinstance(path, str) or not path:
         return False
     return _ARCHIVED_SESSIONS_DIR in Path(path).parts
+
+
+def _session_detail_metadata(session_id: str) -> SessionMetadata | None:
+    return (
+        SessionMetadata.objects.select_related("project")
+        .filter(thread_id=session_id)
+        .first()
+    )
+
+
+def _metadata_resume_for_inactive_session(
+    session_id: str,
+    metadata: SessionMetadata | None,
+    *,
+    active_instance: CodexInstance | None,
+    active_system_workflow: SystemWorkflow | None,
+    require_system_agent_thread: bool,
+) -> _MetadataResume | None:
+    if (
+        metadata is None
+        or active_instance is not None
+        or active_system_workflow is not None
+        or require_system_agent_thread
+    ):
+        return None
+    if _rollout_path_from_value(metadata.codex_path) is None:
+        return None
+    thread = _metadata_thread(metadata)
+    entries = tuple(_entries_for(thread))
+    if not _entries_include_transcript(entries):
+        return None
+    latest_instance = _latest_instance_for_next_message(session_id)
+    return _MetadataResume(
+        thread=thread,
+        entries=entries,
+        model=latest_instance.model if latest_instance is not None else "",
+        reasoning_effort=(
+            latest_instance.reasoning_effort if latest_instance is not None else ""
+        ),
+    )
+
+
+def _metadata_thread(metadata: SessionMetadata) -> _MetadataThread:
+    return _MetadataThread(
+        id=metadata.thread_id,
+        cwd=metadata.cwd,
+        path=metadata.codex_path,
+        name=metadata.codex_name,
+        preview=metadata.codex_preview,
+        created_at=_updated_at_seconds(metadata.codex_created_at),
+        updated_at=_updated_at_seconds(metadata.codex_updated_at),
+        archived=metadata.codex_archived,
+        thread_source=metadata.codex_thread_source,
+    )
+
+
+def _entries_include_transcript(entries: Iterable[Mapping[str, Any]]) -> bool:
+    return any(entry.get("kind") in {"user", "agent"} for entry in entries)
+
+
+def _latest_instance_for_next_message(session_id: str) -> CodexInstance | None:
+    return (
+        CodexInstance.objects.filter(thread_id=session_id)
+        .order_by("-started_at", "-pk")
+        .first()
+    )
 
 
 def _token_usage_for(thread: Any) -> dict[str, str] | None:
@@ -5014,6 +5131,12 @@ def _cached_models_data(*, enable_memories: bool) -> list[Any]:
         return list(_MODELS_CACHE_VALUE.get(enable_memories, []))
 
 
+def _cached_models_for_session_detail(*, enable_memories: bool) -> list[Any]:
+    models_data = _cached_models_data(enable_memories=enable_memories)
+    _schedule_models_refresh(enable_memories=enable_memories)
+    return models_data
+
+
 def _schedule_models_refresh(*, enable_memories: bool) -> None:
     if not _models_refresh_needed(enable_memories=enable_memories):
         return
@@ -5442,11 +5565,14 @@ def set_session_project(request: HttpRequest, session_id: str) -> HttpResponse:
     project, error = _posted_project(request.POST.get("project", ""))
     if error is not None:
         return HttpResponseBadRequest(error)
-    settings = _stored_settings(request)
-    config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
-    with Codex(config=config) as codex:
-        resumed = codex._client.thread_resume(session_id)
-        cwd = _thread_cwd(resumed.thread) or ""
+    metadata = SessionMetadata.objects.filter(thread_id=session_id).first()
+    cwd = metadata.cwd if metadata is not None and metadata.cwd else ""
+    if not cwd:
+        settings = _stored_settings(request)
+        config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
+        with Codex(config=config) as codex:
+            resumed = codex._client.thread_resume(session_id)
+            cwd = _thread_cwd(resumed.thread) or ""
     SessionMetadata.objects.update_or_create(
         thread_id=session_id,
         defaults={
@@ -6180,7 +6306,8 @@ def _thread_awaits_plan_approval(thread: Any) -> bool:
 
 def _pr_url_for_thread(thread: Any) -> str | None:
     """Return the PR opened by the latest completed /pr turn, if any."""
-    for turn in reversed(getattr(thread, "turns", []) or []):
+    turns = getattr(thread, "turns", []) or []
+    for turn in reversed(turns):
         items = [thread_item.root for thread_item in getattr(turn, "items", []) or []]
         if not _is_pr_prompt_turn(items):
             continue
@@ -6192,7 +6319,10 @@ def _pr_url_for_thread(thread: Any) -> str | None:
             if _github_pr_tool_call_used(item):
                 urls.extend(_pr_urls_from_value(_value_for(item, "result")))
         return urls[-1] if urls else None
-    return None
+    if turns:
+        return None
+    rollout_path = _rollout_path_for(thread)
+    return rollout.latest_pr_url(rollout_path) if rollout_path is not None else None
 
 
 def _is_pr_prompt_turn(items: list[Any]) -> bool:
