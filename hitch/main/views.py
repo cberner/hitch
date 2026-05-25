@@ -3557,13 +3557,18 @@ def _start_usage_token_refresh_thread(items: Iterable[_UsageTokenRefreshWork]) -
     with _USAGE_TOKEN_REFRESH_LOCK:
         if _USAGE_TOKEN_REFRESH_IN_FLIGHT:
             return
+        work_items = tuple(items)
+        if not work_items:
+            return
         _USAGE_TOKEN_REFRESH_IN_FLIGHT = True
     try:
+        # Django's threaded dev server runs request handlers as daemon threads,
+        # so make the refresh worker explicitly non-daemon.
         threading.Thread(
             target=_refresh_usage_token_cache_best_effort,
-            args=(items,),
+            args=(work_items,),
             name="usage-token-refresh",
-            daemon=True,
+            daemon=False,
         ).start()
     except Exception:
         with _USAGE_TOKEN_REFRESH_LOCK:
@@ -3577,52 +3582,58 @@ def _refresh_usage_token_cache_best_effort(
     global _USAGE_TOKEN_REFRESH_IN_FLIGHT
     try:
         close_old_connections()
-        item_list = _usage_token_refresh_items_from_work(items)
-        cached_usage_by_thread_id = _token_usage_caches_by_thread_ids(
-            item.thread_id for item in item_list
-        )
         with contextlib.ExitStack() as stack:
             codex: Codex | None = None
             projects: list[Project] | None = None
-            for item in item_list:
-                try:
-                    path = item.path
-                    if not path or _rollout_path_from_value(path) is None:
-                        if codex is None:
-                            config = codex_pool.app_server_config(enable_memories=False)
-                            codex = stack.enter_context(Codex(config=config))
-                        if projects is None:
-                            projects = list(Project.objects.all())
-                        path = _refresh_missing_usage_metadata_path(
-                            codex, item.thread_id, projects=projects
+            for batch in _usage_token_refresh_work_batches(items):
+                cached_usage_by_thread_id = _token_usage_caches_by_thread_ids(
+                    item.thread_id for item in batch
+                )
+                for item in batch:
+                    try:
+                        path = item.path
+                        if not path or _rollout_path_from_value(path) is None:
+                            if codex is None:
+                                config = codex_pool.app_server_config(
+                                    enable_memories=False
+                                )
+                                codex = stack.enter_context(Codex(config=config))
+                            if projects is None:
+                                projects = list(Project.objects.all())
+                            path = _refresh_missing_usage_metadata_path(
+                                codex, item.thread_id, projects=projects
+                            )
+                        if not path:
+                            continue
+                        rollout_path = _rollout_path_from_value(path)
+                        if rollout_path is None:
+                            continue
+                        thread = _UsageTokenRefreshThread(id=item.thread_id, path=path)
+                        snapshot = _token_usage_snapshot_for(
+                            thread,
+                            cached_usage=cached_usage_by_thread_id.get(
+                                item.thread_id, _MISSING_TOKEN_USAGE_CACHE
+                            ),
                         )
-                    if not path:
-                        continue
-                    rollout_path = _rollout_path_from_value(path)
-                    if rollout_path is None:
-                        continue
-                    thread = _UsageTokenRefreshThread(id=item.thread_id, path=path)
-                    snapshot = _token_usage_snapshot_for(
-                        thread,
-                        cached_usage=cached_usage_by_thread_id.get(
-                            item.thread_id, _MISSING_TOKEN_USAGE_CACHE
-                        ),
-                    )
-                    if snapshot is None and _rollout_file_parses_as_jsonl(rollout_path):
-                        _write_zero_token_usage_cache(item.thread_id, rollout_path)
-                except Exception:
-                    logger.exception("failed to refresh token usage for %s", item.thread_id)
-                finally:
-                    _mark_usage_token_refresh_checked(item.thread_id)
+                        if snapshot is None and _rollout_file_parses_as_jsonl(
+                            rollout_path
+                        ):
+                            _write_zero_token_usage_cache(item.thread_id, rollout_path)
+                    except Exception:
+                        logger.exception(
+                            "failed to refresh token usage for %s", item.thread_id
+                        )
+                    finally:
+                        _mark_usage_token_refresh_checked(item.thread_id)
     finally:
         close_old_connections()
         with _USAGE_TOKEN_REFRESH_LOCK:
             _USAGE_TOKEN_REFRESH_IN_FLIGHT = False
 
 
-def _usage_token_refresh_items_from_work(
+def _usage_token_refresh_work_batches(
     items: Iterable[_UsageTokenRefreshWork],
-) -> list[_UsageTokenRefreshItem]:
+) -> Iterator[list[_UsageTokenRefreshItem]]:
     refresh_items: list[_UsageTokenRefreshItem] = []
     candidates: list[_UsageTokenRefreshCandidate] = []
     for item in items:
@@ -3630,22 +3641,40 @@ def _usage_token_refresh_items_from_work(
             refresh_items.append(item)
         else:
             candidates.append(item)
-    if not candidates:
-        return refresh_items
-    cached_usage_by_thread_id = _token_usage_caches_by_thread_ids(
-        candidate.thread_id for candidate in candidates
-    )
-    refresh_items.extend(_usage_token_refresh_items(candidates, cached_usage_by_thread_id))
-    selected_thread_ids = {item.thread_id for item in refresh_items}
-    _mark_usage_token_refresh_checked_many(
-        candidate.thread_id
-        for candidate in candidates
-        if candidate.thread_id not in selected_thread_ids
-        and not _usage_token_refresh_needed(
-            candidate, cached_usage_by_thread_id.get(candidate.thread_id)
+    if refresh_items:
+        yield refresh_items
+    remaining_candidates = candidates
+    while remaining_candidates:
+        cached_usage_by_thread_id = _token_usage_caches_by_thread_ids(
+            candidate.thread_id for candidate in remaining_candidates
         )
-    )
-    return refresh_items
+        selected_items = _usage_token_refresh_items(
+            remaining_candidates, cached_usage_by_thread_id
+        )
+        selected_thread_ids = {item.thread_id for item in selected_items}
+        checked_thread_ids = {
+            candidate.thread_id
+            for candidate in remaining_candidates
+            if candidate.thread_id not in selected_thread_ids
+            and not _usage_token_refresh_needed(
+                candidate, cached_usage_by_thread_id.get(candidate.thread_id)
+            )
+        }
+        _mark_usage_token_refresh_checked_many(checked_thread_ids)
+        remaining_candidates = [
+            candidate
+            for candidate in remaining_candidates
+            if candidate.thread_id not in selected_thread_ids
+            and candidate.thread_id not in checked_thread_ids
+        ]
+        if selected_items:
+            yield selected_items
+            continue
+        if remaining_candidates:
+            _mark_usage_token_refresh_checked_many(
+                candidate.thread_id for candidate in remaining_candidates
+            )
+        return
 
 
 def _refresh_missing_usage_metadata_path(

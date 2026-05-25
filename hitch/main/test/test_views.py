@@ -3486,6 +3486,63 @@ class IndexViewTests(TestCase):
 
         self.assertFalse(views._USAGE_TOKEN_REFRESH_IN_FLIGHT)
 
+    def test_usage_refresh_thread_is_non_daemon_and_materializes_work(self) -> None:
+        views._USAGE_TOKEN_REFRESH_IN_FLIGHT = False
+        self.addCleanup(setattr, views, "_USAGE_TOKEN_REFRESH_IN_FLIGHT", False)
+        thread = MagicMock()
+        items = [
+            views._UsageTokenRefreshItem("thread-a", ""),
+            views._UsageTokenRefreshItem("thread-b", ""),
+        ]
+
+        with patch(
+            "hitch.main.views.threading.Thread", return_value=thread
+        ) as thread_cls:
+            views._start_usage_token_refresh_thread(iter(items))
+
+        thread_cls.assert_called_once()
+        self.assertEqual(thread_cls.call_args.kwargs["args"], (tuple(items),))
+        self.assertEqual(thread_cls.call_args.kwargs["name"], "usage-token-refresh")
+        self.assertFalse(thread_cls.call_args.kwargs["daemon"])
+        thread.start.assert_called_once()
+
+    def test_usage_refresh_drains_all_candidate_batches(self) -> None:
+        for index in range(5):
+            rollout_path = _make_rollout(
+                self,
+                [
+                    _token_count_line(
+                        input_tokens=100 + index,
+                        cached_input_tokens=10,
+                        output_tokens=20,
+                        total_tokens=120 + index,
+                    )
+                ],
+            )
+            _seed_usage_metadata(
+                f"batch-{index}",
+                path=rollout_path,
+                mark_index_complete=False,
+            )
+        rows = SessionMetadata.objects.order_by("thread_id")
+        candidates = views._usage_token_refresh_candidates(rows)
+
+        with patch("hitch.main.views._USAGE_TOKEN_REFRESH_BATCH_SIZE", 2):
+            views._refresh_usage_token_cache_best_effort(candidates)
+
+        caches = ArchivedSessionTokenUsage.objects.order_by("thread_id")
+        self.assertEqual(
+            [cache.total_tokens for cache in caches],
+            [120, 121, 122, 123, 124],
+        )
+        self.assertEqual(
+            SessionMetadata.objects.filter(
+                thread_id__startswith="batch-",
+                usage_last_checked_at__isnull=False,
+            ).count(),
+            5,
+        )
+
     def test_usage_refresh_queue_rotates_checked_missing_cache_rows(self) -> None:
         for index in range(30):
             _seed_usage_metadata(f"session-{index:02d}", mark_index_complete=False)
