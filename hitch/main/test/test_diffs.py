@@ -396,3 +396,29 @@ class WorktreeDiffTests(SimpleTestCase):
         self.assertEqual(diff.files[0].status, "Renamed")
         self.assertEqual(diff.files[0].old_path, old_name)
         self.assertEqual(diff.files[0].path, new_name)
+
+    def test_rename_preserves_a_prefixed_directory_segment(self) -> None:
+        # git's ``rename from``/``rename to`` headers carry the actual file
+        # paths -- unlike ``--- a/...``/``+++ b/...``, they are never tagged
+        # with ``--src-prefix``/``--dst-prefix``. Files that legitimately live
+        # in a directory whose name starts with ``a/`` or ``b/`` therefore look
+        # like prefixed paths and must not have their leading directory
+        # stripped.
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            (repo / "a").mkdir()
+            old_name = "a/old.txt"
+            new_name = "a/new.txt"
+            (repo / old_name).write_text("same\n")
+            _git(repo, "add", old_name)
+            _git(repo, "commit", "-m", "initial")
+
+            (repo / old_name).rename(repo / new_name)
+            _git(repo, "add", "-A")
+
+            diff = build_worktree_diff(str(repo))
+
+        self.assertEqual(diff.files[0].status, "Renamed")
+        self.assertEqual(diff.files[0].old_path, old_name)
+        self.assertEqual(diff.files[0].path, new_name)
