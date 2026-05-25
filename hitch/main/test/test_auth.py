@@ -231,7 +231,10 @@ class AuthViewTests(TestCase):
             response.headers["Location"], f"{reverse('login')}?next=%2Fprofile%2F"
         )
 
-    def test_profile_renders_logout_form_for_authenticated_user(self) -> None:
+    @patch("hitch.main.context_processors.server_git_hash", return_value="abc123")
+    def test_profile_renders_logout_form_for_authenticated_user(
+        self, _mock_hash: MagicMock
+    ) -> None:
         user = _make_user()
         self.client.force_login(user)
 
@@ -241,9 +244,15 @@ class AuthViewTests(TestCase):
         self.assertContains(response, "dev@example.com")
         self.assertContains(response, f'action="{reverse("logout")}"')
         self.assertContains(response, ">Log out</button>")
+        self.assertContains(response, "Server git hash")
+        self.assertContains(response, ">abc123</code>")
         self.assertLess(
             body.index('<section class="profile-panel"'),
             body.index('<form class="profile-logout-form"'),
+        )
+        self.assertLess(
+            body.index('<form class="profile-logout-form"'),
+            body.index('<p class="profile-revision"'),
         )
 
 
@@ -269,6 +278,7 @@ class AuthenticatedSettingsTests(TestCase):
         self.assertIn('class="primary-nav-account"', nav_html)
         self.assertIn(">dev@example.com</a>", nav_html)
         self.assertNotIn(reverse("logout"), nav_html)
+        self.assertNotIn("Server git hash", nav_html)
         self.assertNotIn("account-label", body)
 
     def test_update_settings_writes_database_and_cookie_mirror(self) -> None:

@@ -161,8 +161,25 @@
             color: var(--text-muted);
             font-size: 0.9rem;
         }
-        .profile-logout-form {
+        .profile-revision {
+            margin: 0;
+            color: var(--text-muted);
+            font-size: 0.78rem;
+            line-height: 1.4;
+            text-align: right;
+        }
+        .profile-revision code {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            color: var(--text);
+        }
+        .profile-footer {
             margin: auto 0 0;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        .profile-logout-form {
+            margin: 0;
             padding-top: 1.25rem;
             border-top: 1px solid var(--border);
             display: flex;
@@ -190,10 +207,15 @@
             <h2 id="profile-title">{{ user.get_username }}</h2>
             <p class="profile-meta">Signed in</p>
         </section>
-        <form class="profile-logout-form" method="post" action="{{ logout_url }}">
-            {% csrf_token %}
-            <button class="button danger" type="submit">Log out</button>
-        </form>
+        <div class="profile-footer">
+            <form class="profile-logout-form" method="post" action="{{ logout_url }}">
+                {% csrf_token %}
+                <button class="button danger" type="submit">Log out</button>
+            </form>
+            {% if server_git_hash %}
+            <p class="profile-revision">Server git hash: <code>{{ server_git_hash }}</code></p>
+            {% endif %}
+        </div>
     </main>
     {% include "_settings_dialog.html" %}
     <script>
