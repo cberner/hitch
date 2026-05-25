@@ -880,8 +880,13 @@ def _memory_citation_from_bodies(citations: list[str]) -> MemoryCitation | None:
 
     if not entries and not thread_ids:
         return None
+    # ``count`` drives the "Memories used: N" summary in the session view,
+    # which expands to a popover listing BOTH ``entries`` and ``thread_ids``.
+    # A single citation block can carry both kinds (file-line refs and
+    # prior-session refs) at once, so the summary must sum across them or
+    # the count will silently undershoot what the popover actually shows.
     return {
-        "count": len(entries) if entries else len(thread_ids),
+        "count": len(entries) + len(thread_ids),
         "entries": entries,
         "thread_ids": thread_ids,
     }

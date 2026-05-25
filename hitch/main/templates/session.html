@@ -3375,7 +3375,7 @@
             function memoryCitationCount(citation) {
                 const entries = memoryEntries(citation);
                 const threadIds = memoryThreadIds(citation);
-                return entries.length || threadIds.length;
+                return entries.length + threadIds.length;
             }
 
             function memoryLine(entry) {

@@ -1446,7 +1446,9 @@ class SessionViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Applied the remembered convention.")
-        self.assertContains(response, "Memories used: 1")
+        # 1 file-line entry + 1 prior-session id; both render in the popover,
+        # so the summary count must include both kinds.
+        self.assertContains(response, "Memories used: 2")
         self.assertContains(response, "MEMORY.md:1-2")
         self.assertContains(response, "project convention")
         self.assertContains(response, "019cc2ea-1dff-7902-8d40-c8f6e5d83cc4")
@@ -1622,7 +1624,9 @@ class RolloutFileViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Used prior context.")
-        self.assertContains(response, "Memories used: 1")
+        # 1 file-line entry + 1 prior-session id; both render in the popover,
+        # so the summary count must include both kinds.
+        self.assertContains(response, "Memories used: 2")
         self.assertContains(response, "MEMORY.md:3-4")
         self.assertContains(response, "repo preference")
         self.assertNotContains(response, "oai-mem-citation")

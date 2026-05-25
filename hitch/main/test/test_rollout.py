@@ -581,7 +581,7 @@ class IterEntriesTests(TestCase):
         self.assertEqual(
             entries[0]["memory_citation"],
             {
-                "count": 1,
+                "count": 3,
                 "entries": [
                     {
                         "path": "MEMORY.md",
@@ -595,6 +595,50 @@ class IterEntriesTests(TestCase):
                     "019cc2ea-1dff-7902-8d40-c8f6e5d83cc5",
                 ],
             },
+        )
+
+    def test_memory_citation_count_sums_entries_and_thread_ids(self) -> None:
+        # The popover in _session_entry.html renders both ``entries`` and
+        # ``thread_ids`` under a single "Memories used: N" summary, so the
+        # count has to cover both kinds. A citation that mixes specific
+        # file-line entries with prior-session ids previously rendered as
+        # "Memories used: 2" while the popover expanded to five rows.
+        text = (
+            "answer"
+            "<oai-mem-citation>"
+            "<citation_entries>\n"
+            "MEMORY.md:1-2|note=[a]\n"
+            "MEMORY.md:5-9|note=[b]\n"
+            "</citation_entries>\n"
+            "<rollout_ids>\n"
+            "thread-aaa\n"
+            "thread-bbb\n"
+            "thread-ccc\n"
+            "</rollout_ids>"
+            "</oai-mem-citation>"
+        )
+        path = self._make(
+            [
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": text}],
+                    },
+                ),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+
+        self.assertEqual(len(entries), 1)
+        citation = entries[0]["memory_citation"]
+        self.assertEqual(len(citation["entries"]), 2)
+        self.assertEqual(len(citation["thread_ids"]), 3)
+        self.assertEqual(
+            citation["count"],
+            len(citation["entries"]) + len(citation["thread_ids"]),
         )
 
     def test_deduped_response_item_memory_citation_attaches_to_event(self) -> None:
