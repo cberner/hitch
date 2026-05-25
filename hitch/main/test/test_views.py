@@ -5811,6 +5811,9 @@ class NewSessionViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Start a new session")
         self.assertContains(response, 'class="new-session-form"')
+        self.assertContains(response, 'class="new-session-close"')
+        self.assertContains(response, 'aria-label="Cancel new session"')
+        self.assertContains(response, ">Cancel</a>", count=1)
 
 
 class SendMessageViewTests(TestCase):
