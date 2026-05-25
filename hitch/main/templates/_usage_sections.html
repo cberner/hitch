@@ -1,0 +1,110 @@
+        <section class="usage-section" aria-labelledby="lifetime-title">
+            <p class="section-label">Token usage</p>
+            <div class="usage-header">
+                <h2 id="lifetime-title">
+                    {% if lifetime_usage and lifetime_usage.total.chart %}
+                    <button type="button"
+                            class="usage-title-button"
+                            aria-expanded="false"
+                            aria-controls="lifetime-total-chart"
+                            data-lifetime-total-toggle>
+                        All sessions
+                    </button>
+                    {% else %}
+                    All sessions
+                    {% endif %}
+                </h2>
+                {% if lifetime_usage.refresh_pending %}
+                <p class="usage-plan">Refreshing session token usage...</p>
+                {% endif %}
+            </div>
+            {% if lifetime_usage %}
+            {% if lifetime_usage.total.chart %}
+            {% include "_lifetime_token_chart.html" with chart=lifetime_usage.total.chart chart_axis=lifetime_usage.total.chart_axis chart_label="All sessions token usage by date" chart_class="usage-total-chart" chart_id="lifetime-total-chart" only %}
+            {% endif %}
+            <div class="lifetime-stats" aria-label="All sessions token usage">
+                <div class="lifetime-stat" role="button" tabindex="0" aria-expanded="false">
+                    <span class="lifetime-label">Sessions</span>
+                    <div class="lifetime-breakdown">
+                        <span class="lifetime-metric">
+                            <span class="lifetime-metric-label">Input</span>
+                            <span class="lifetime-value">{{ lifetime_usage.sessions.input }}</span>
+                        </span>
+                        <span class="lifetime-metric">
+                            <span class="lifetime-metric-label">Output</span>
+                            <span class="lifetime-value">{{ lifetime_usage.sessions.output }}</span>
+                        </span>
+                        <span class="lifetime-metric">
+                            <span class="lifetime-metric-label">Cached</span>
+                            <span class="lifetime-value">{{ lifetime_usage.sessions.cached }}</span>
+                        </span>
+                    </div>
+                    {% if lifetime_usage.sessions.chart %}
+                    {% include "_lifetime_token_chart.html" with chart=lifetime_usage.sessions.chart chart_axis=lifetime_usage.sessions.chart_axis chart_label="Sessions token usage by date" chart_class="lifetime-chart" only %}
+                    {% endif %}
+                </div>
+                <div class="lifetime-stat" role="button" tabindex="0" aria-expanded="false">
+                    <span class="lifetime-label">HITCH system</span>
+                    <div class="lifetime-breakdown">
+                        <span class="lifetime-metric">
+                            <span class="lifetime-metric-label">Input</span>
+                            <span class="lifetime-value">{{ lifetime_usage.system.input }}</span>
+                        </span>
+                        <span class="lifetime-metric">
+                            <span class="lifetime-metric-label">Output</span>
+                            <span class="lifetime-value">{{ lifetime_usage.system.output }}</span>
+                        </span>
+                        <span class="lifetime-metric">
+                            <span class="lifetime-metric-label">Cached</span>
+                            <span class="lifetime-value">{{ lifetime_usage.system.cached }}</span>
+                        </span>
+                    </div>
+                    {% if lifetime_usage.system.chart %}
+                    {% include "_lifetime_token_chart.html" with chart=lifetime_usage.system.chart chart_axis=lifetime_usage.system.chart_axis chart_label="HITCH system token usage by date" chart_class="lifetime-chart" only %}
+                    {% endif %}
+                </div>
+            </div>
+            {% else %}
+            <div class="empty">
+                <p>All sessions usage unavailable.</p>
+                <p class="hint">Session token usage is not available right now.</p>
+            </div>
+            {% endif %}
+        </section>
+        <section class="usage-section" aria-labelledby="quota-title">
+            <p class="section-label">Quota usage</p>
+            <div class="usage-header">
+                <h2 id="quota-title">{% if rate_limits and rate_limits.limit_name %}{{ rate_limits.limit_name }} rate limits{% else %}Rate limits{% endif %}</h2>
+                {% if rate_limits and rate_limits.plan_type %}
+                <p class="usage-plan">Plan: {{ rate_limits.plan_type }}</p>
+                {% endif %}
+            </div>
+            {% if rate_limits %}
+            <div class="rate-limit-list" aria-label="Quota usage">
+                {% for window in rate_limits.windows %}
+                <section class="rate-limit-row" aria-labelledby="rate-limit-{{ forloop.counter }}-title">
+                    <div class="rate-limit-row-head">
+                        <h3 id="rate-limit-{{ forloop.counter }}-title">{{ window.label }}</h3>
+                        <span class="rate-limit-remaining">{{ window.remaining_percent }}% remaining</span>
+                    </div>
+                    <div class="rate-limit-bar" role="progressbar"
+                         aria-valuenow="{{ window.remaining_percent }}"
+                         aria-valuemin="0" aria-valuemax="100"
+                         aria-label="{{ window.label }} remaining">
+                        <div class="rate-limit-bar-fill" style="width: {{ window.remaining_percent }}%"></div>
+                    </div>
+                    <div class="rate-limit-meta">
+                        {% if window.window_duration_label %}{{ window.window_duration_label }} window{% endif %}
+                        {% if window.window_duration_label and window.resets_at %} &middot; {% endif %}
+                        {% if window.resets_at %}resets <time data-resets-at="{{ window.resets_at }}">{{ window.resets_at }}</time>{% endif %}
+                    </div>
+                </section>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty">
+                <p>Usage unavailable.</p>
+                <p class="hint">Quota usage is not available for this Codex configuration.</p>
+            </div>
+            {% endif %}
+        </section>

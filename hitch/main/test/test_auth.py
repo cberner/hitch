@@ -223,37 +223,92 @@ class AuthViewTests(TestCase):
         )
         self.assertEqual(_cookie_value(response, _ENABLE_MEMORIES_COOKIE), "false")
 
-    def test_profile_redirects_anonymous_users_to_login(self) -> None:
+    @patch("hitch.main.views.Codex")
+    def test_profile_renders_anonymous_user_with_usage(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex)
+
         response = self.client.get(reverse("profile"))
 
-        self.assertEqual(response.status_code, 302)
-        self.assertEqual(
-            response.headers["Location"], f"{reverse('login')}?next=%2Fprofile%2F"
-        )
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode()
+        nav_start = body.index('<nav class="primary-nav"')
+        nav_end = body.index("</nav>", nav_start)
+        nav_html = body[nav_start:nav_end]
+        self.assertIn(f'href="{reverse("profile")}"', nav_html)
+        self.assertIn('aria-current="page"', nav_html)
+        self.assertIn(">anonymous</a>", nav_html)
+        self.assertContains(response, "anonymous")
+        self.assertContains(response, "Signed out")
+        self.assertContains(response, "Token usage")
+        self.assertContains(response, "Quota usage")
+        self.assertContains(response, f'href="{reverse("login")}"')
+        self.assertContains(response, f'href="{reverse("register")}"')
+        self.assertNotContains(response, f'action="{reverse("logout")}"')
 
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.context_processors.server_git_hash", return_value="abc123")
+    def test_profile_hides_server_git_hash_for_anonymous_user(
+        self, _mock_hash: MagicMock, mock_codex: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex)
+
+        response = self.client.get(reverse("profile"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "anonymous")
+        self.assertNotContains(response, "Server git hash")
+        self.assertNotContains(response, "abc123")
+
+    @patch("hitch.main.views.Codex")
     @patch("hitch.main.context_processors.server_git_hash", return_value="abc123")
     def test_profile_renders_logout_form_for_authenticated_user(
-        self, _mock_hash: MagicMock
+        self, _mock_hash: MagicMock, mock_codex: MagicMock
     ) -> None:
         user = _make_user()
         self.client.force_login(user)
+        _setup_codex(mock_codex)
 
         response = self.client.get(reverse("profile"))
 
         body = response.content.decode()
         self.assertContains(response, "dev@example.com")
+        self.assertContains(response, "Signed in")
+        self.assertContains(response, "Token usage")
+        self.assertContains(response, "Quota usage")
         self.assertContains(response, f'action="{reverse("logout")}"')
         self.assertContains(response, ">Log out</button>")
         self.assertContains(response, "Server git hash")
         self.assertContains(response, ">abc123</code>")
         self.assertLess(
             body.index('<section class="profile-panel"'),
+            body.index('<section class="usage-section"'),
+        )
+        self.assertLess(
+            body.index('<section class="usage-section"'),
             body.index('<form class="profile-logout-form"'),
         )
         self.assertLess(
             body.index('<form class="profile-logout-form"'),
             body.index('<p class="profile-revision"'),
         )
+
+    @patch("hitch.main.views._usage_context", side_effect=RuntimeError("codex down"))
+    def test_profile_renders_account_controls_when_usage_context_fails(
+        self, mock_usage_context: MagicMock
+    ) -> None:
+        user = _make_user()
+        self.client.force_login(user)
+
+        response = self.client.get(reverse("profile"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "dev@example.com")
+        self.assertContains(response, f'action="{reverse("logout")}"')
+        self.assertContains(response, "All sessions usage unavailable.")
+        self.assertContains(response, "Usage unavailable.")
+        mock_usage_context.assert_called_once()
 
 
 class AuthenticatedSettingsTests(TestCase):
@@ -277,6 +332,7 @@ class AuthenticatedSettingsTests(TestCase):
         self.assertLess(nav_html.index(">settings</a>"), profile_pos)
         self.assertIn('class="primary-nav-account"', nav_html)
         self.assertIn(">dev@example.com</a>", nav_html)
+        self.assertNotIn(f'href="{reverse("usage")}"', nav_html)
         self.assertNotIn(reverse("logout"), nav_html)
         self.assertNotIn("Server git hash", nav_html)
         self.assertNotIn("account-label", body)

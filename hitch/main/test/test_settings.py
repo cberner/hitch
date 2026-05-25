@@ -261,8 +261,9 @@ class SettingsPageRenderTests(TestCase):
         )
         self.assertNotIn("Server git hash", primary_nav)
         self.assertNotIn("abc123", primary_nav)
-        self.assertContains(response, f'href="{reverse("usage")}"')
-        self.assertContains(response, ">usage<")
+        self.assertNotIn(f'href="{reverse("usage")}"', primary_nav)
+        self.assertIn(f'href="{reverse("profile")}"', primary_nav)
+        self.assertIn(">anonymous</a>", primary_nav)
         self.assertContains(response, f'action="{reverse("update_settings")}"')
         self.assertContains(response, f'name="next" value="{reverse("usage")}"')
         self.assertContains(response, "GPT-5")
@@ -340,7 +341,13 @@ class SettingsPageRenderTests(TestCase):
         self.assertNotContains(response, "data-settings-dialog")
         self.assertContains(response, 'aria-label="Navigation menu"')
         self.assertContains(response, f'href="{reverse("index")}"')
-        self.assertContains(response, f'href="{reverse("usage")}" aria-current="page"')
+        body = response.content.decode()
+        nav_start = body.index('<nav class="primary-nav"')
+        nav_end = body.index("</nav>", nav_start)
+        nav_html = body[nav_start:nav_end]
+        self.assertNotIn(f'href="{reverse("usage")}"', nav_html)
+        self.assertIn(f'href="{reverse("profile")}"', nav_html)
+        self.assertIn(">anonymous</a>", nav_html)
         self.assertContains(response, ">settings<")
         self.assertContains(response, 'classList.add("primary-nav-js")')
         self.assertNotContains(response, "html:not(.js) .primary-nav-toggle")
@@ -653,6 +660,8 @@ class SettingsPageRenderTests(TestCase):
         response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'aria-labelledby="quota-title"')
+        self.assertContains(response, 'id="quota-title">Rate limits</h2>')
         self.assertContains(response, "Usage unavailable.")
         self.assertNotContains(response, "% remaining")
 
@@ -672,6 +681,8 @@ class SettingsPageRenderTests(TestCase):
         response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'aria-labelledby="quota-title"')
+        self.assertContains(response, 'id="quota-title">Rate limits</h2>')
         self.assertContains(response, "Usage unavailable.")
         self.assertNotContains(response, "% remaining")
 
@@ -680,8 +691,7 @@ class SettingsPageRenderTests(TestCase):
         self, mock_codex: MagicMock
     ) -> None:
         """An account that has no metered usage at all returns a snapshot
-        with both windows unset; show the empty state rather than render an
-        empty header."""
+        with both windows unset; show the empty state under a valid heading."""
         _configure_codex(
             mock_codex,
             models=[],
@@ -691,6 +701,8 @@ class SettingsPageRenderTests(TestCase):
         response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'aria-labelledby="quota-title"')
+        self.assertContains(response, 'id="quota-title">Rate limits</h2>')
         self.assertContains(response, "Usage unavailable.")
         self.assertNotContains(response, "% remaining")
 

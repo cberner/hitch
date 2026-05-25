@@ -385,7 +385,9 @@ class SessionViewTests(TestCase):
         self.assertNotContains(
             response, f'href="{reverse("index")}" aria-current="page"'
         )
-        self.assertContains(response, f'href="{reverse("usage")}"')
+        self.assertNotIn(f'href="{reverse("usage")}"', nav_html)
+        self.assertIn(f'href="{reverse("profile")}"', nav_html)
+        self.assertIn(">anonymous</a>", nav_html)
         self.assertContains(response, ">settings<")
         self.assertIn(reverse("update_settings"), nav_html)
         self.assertNotContains(response, "data-settings-dialog")

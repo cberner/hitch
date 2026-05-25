@@ -1,0 +1,51 @@
+            const totalToggle = document.querySelector("[data-lifetime-total-toggle]");
+            if (totalToggle) {
+                const chartId = totalToggle.getAttribute("aria-controls");
+                const totalChart = chartId ? document.getElementById(chartId) : null;
+                if (totalChart) {
+                    totalToggle.addEventListener("click", () => {
+                        const expanded = totalChart.classList.toggle("is-expanded");
+                        totalToggle.setAttribute("aria-expanded", expanded ? "true" : "false");
+                    });
+                }
+            }
+
+            document.querySelectorAll(".lifetime-stat").forEach((tile) => {
+                function toggleTile() {
+                    const expanded = tile.classList.toggle("is-expanded");
+                    tile.setAttribute("aria-expanded", expanded ? "true" : "false");
+                }
+                tile.addEventListener("click", toggleTile);
+                tile.addEventListener("keydown", (event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return;
+                    event.preventDefault();
+                    toggleTile();
+                });
+            });
+
+            const relative = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+            const units = [
+                ["year", 31536000],
+                ["month", 2592000],
+                ["week", 604800],
+                ["day", 86400],
+                ["hour", 3600],
+                ["minute", 60],
+            ];
+            function relativeFromNow(date) {
+                const diff = (date.getTime() - Date.now()) / 1000;
+                for (const [unit, secs] of units) {
+                    if (Math.abs(diff) >= secs) {
+                        return relative.format(Math.round(diff / secs), unit);
+                    }
+                }
+                return "just now";
+            }
+            for (const el of document.querySelectorAll("time[data-resets-at]")) {
+                const seconds = Number(el.dataset.resetsAt);
+                if (!Number.isFinite(seconds) || seconds <= 0) continue;
+                const date = new Date(seconds * 1000);
+                el.dateTime = date.toISOString();
+                el.title = date.toString();
+                el.textContent = relativeFromNow(date);
+            }
