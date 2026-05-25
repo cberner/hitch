@@ -317,12 +317,19 @@ def _parse_unified_diff(text: str, *, truncated: bool = False) -> DiffView:
             continue
         if raw_line.startswith("rename from "):
             current.status = "Renamed"
-            current.old_path = _clean_diff_path(raw_line.removeprefix("rename from ").strip())
+            # git's ``rename from``/``rename to`` headers carry the raw file
+            # paths -- the ``--src-prefix``/``--dst-prefix`` tags only apply to
+            # the ``diff --git`` and ``---``/``+++`` lines. Decode any C-quoted
+            # escapes but do NOT strip a leading ``a/``/``b/`` segment, which
+            # could be a real directory name.
+            current.old_path = _decode_git_path(
+                raw_line.removeprefix("rename from ").strip()
+            )
             current.add_meta(raw_line)
             continue
         if raw_line.startswith("rename to "):
             current.status = "Renamed"
-            new_path = _clean_diff_path(raw_line.removeprefix("rename to ").strip())
+            new_path = _decode_git_path(raw_line.removeprefix("rename to ").strip())
             if new_path:
                 current.path = new_path
             current.add_meta(raw_line)
