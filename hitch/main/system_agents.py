@@ -77,9 +77,14 @@ PR_SLASH_PROMPT = (
     "Polish it, get it ready, and open or update the PR."
 )
 SYSTEM_AGENT_APPROVAL_MODE = "auto_review"
-# Auto-QA starts without an explicit user action; do not launch hidden QA
-# agents when the source turn requires approvals that hidden threads cannot surface.
-AUTO_QA_BLOCKED_APPROVAL_MODES = frozenset({"deny_all", "prompt_user"})
+# Auto-review workflows (auto-QA and auto-PR) start without an explicit
+# user action and spawn hidden QA subagents pinned to ``auto_review``.
+# Bypassing the user's approval-control intent that way is only acceptable
+# when the source turn itself runs under a non-interactive mode; with
+# ``prompt_user`` or ``deny_all`` the user has asked to gate every action,
+# and the follow-up PR-prompt turn would also stall (prompt_user) or have
+# every action denied (deny_all), so refuse to start either workflow.
+AUTO_REVIEW_BLOCKED_APPROVAL_MODES = frozenset({"deny_all", "prompt_user"})
 AUTONOMOUS_GOAL_IMPLEMENTATION_SANDBOX_POLICY = "workspaceWrite"
 QA_WORKFLOW_MAX_ITERATIONS = 10
 PR_QA_WORKFLOW_MAX_ITERATIONS = QA_WORKFLOW_MAX_ITERATIONS + 3
@@ -1255,9 +1260,13 @@ def _maybe_start_auto_review_workflow(instance: CodexInstance) -> None:
         or instance.status != CodexInstance.STATUS_COMPLETED
     ):
         return
-    automation = "auto_pr" if instance.auto_pr_enabled else "auto_qa"
-    if automation == "auto_qa" and _auto_qa_requires_visible_approval(instance):
+    # The post-QA work-agent and PR-prompt turns reuse the instance's
+    # approval_mode (see _spawn_workflow_turn), so prompt_user/deny_all would
+    # stall the workflow or have every action auto-denied regardless of which
+    # automation triggered it.
+    if _auto_review_requires_visible_approval(instance):
         return
+    automation = "auto_pr" if instance.auto_pr_enabled else "auto_qa"
     trigger_field = (
         "auto_pr_triggered_at"
         if automation == "auto_pr"
@@ -1305,10 +1314,10 @@ def _maybe_start_auto_review_workflow(instance: CodexInstance) -> None:
         raise
 
 
-def _auto_qa_requires_visible_approval(instance: CodexInstance) -> bool:
+def _auto_review_requires_visible_approval(instance: CodexInstance) -> bool:
     return (
         instance.approval_mode or SYSTEM_AGENT_APPROVAL_MODE
-    ) in AUTO_QA_BLOCKED_APPROVAL_MODES
+    ) in AUTO_REVIEW_BLOCKED_APPROVAL_MODES
 
 
 def _record_auto_review_workflow_for_proposals(
