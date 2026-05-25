@@ -2255,6 +2255,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "90K")
         self.assertContains(response, "23K")
         self.assertContains(response, "10K")
+        self.assertContains(response, "Refreshing session token usage...")
         self.assertNotContains(response, "113,456")
         self.assertNotContains(response, "123,456")
         cache = ArchivedSessionTokenUsage.objects.get(thread_id="archived")
@@ -2272,19 +2273,34 @@ class IndexViewTests(TestCase):
             encoding="utf-8",
         )
         os.utime(rollout_path, ns=(2_000_000_000, 2_000_000_000))
+        SessionMetadata.objects.filter(thread_id="archived").update(
+            usage_last_checked_at=datetime.now(UTC)
+        )
 
         with (
             patch("hitch.main.views.rollout.latest_token_usage") as latest_usage,
             patch("hitch.main.views.rollout.token_usage_history") as usage_history,
+            patch(
+                "hitch.main.views._rollout_path_from_value",
+                side_effect=AssertionError("usage render touched rollout path"),
+            ) as rollout_path_from_value,
+            patch("hitch.main.views._start_usage_token_refresh_thread") as start_refresh,
+            self.captureOnCommitCallbacks(execute=True),
         ):
             response = self.client.get(reverse("usage"))
 
         latest_usage.assert_not_called()
         usage_history.assert_not_called()
-        self.assertContains(response, "Refreshing session token usage...")
-        self.assertNotContains(response, "90K")
-        self.assertNotContains(response, "23K")
-        self.assertNotContains(response, "10K")
+        rollout_path_from_value.assert_not_called()
+        start_refresh.assert_called_once()
+        refresh_items = start_refresh.call_args.args[0]
+        self.assertEqual(len(refresh_items), 1)
+        self.assertEqual(refresh_items[0].thread_id, "archived")
+        self.assertEqual(refresh_items[0].codex_path, str(rollout_path))
+        self.assertNotContains(response, "Refreshing session token usage...")
+        self.assertContains(response, "90K")
+        self.assertContains(response, "23K")
+        self.assertContains(response, "10K")
         self.assertNotContains(response, "810K")
         self.assertNotContains(response, "909,999")
         self.assertNotContains(response, "999,999")
@@ -2930,6 +2946,9 @@ class IndexViewTests(TestCase):
             total_tokens=1_000,
             path=rollout_path,
         )
+        SessionMetadata.objects.filter(thread_id="active").update(
+            usage_last_checked_at=datetime.now(UTC)
+        )
         client = _setup_codex(mock_codex)
 
         with (
@@ -2939,6 +2958,7 @@ class IndexViewTests(TestCase):
             response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "Refreshing session token usage...")
         cache = ArchivedSessionTokenUsage.objects.get(thread_id="active")
         self.assertEqual(cache.total_tokens, 1_000)
         self.assertEqual(
@@ -2959,6 +2979,42 @@ class IndexViewTests(TestCase):
         latest_usage.assert_not_called()
         usage_history.assert_not_called()
         client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    def test_usage_page_schedules_recent_invalid_path_for_repair(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _seed_usage_metadata("missing", path="/nonexistent/rollout.jsonl")
+        SessionMetadata.objects.filter(thread_id="missing").update(
+            usage_last_checked_at=datetime.now(UTC)
+        )
+        _cache_token_usage(
+            "missing",
+            input_tokens=400,
+            cached_input_tokens=50,
+            output_tokens=600,
+            total_tokens=1_000,
+        )
+        _setup_codex(mock_codex)
+
+        with (
+            patch("hitch.main.views._start_usage_token_refresh_thread") as start_refresh,
+            patch(
+                "hitch.main.views._rollout_path_from_value",
+                side_effect=AssertionError("usage render touched rollout path"),
+            ) as rollout_path_from_value,
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            response = self.client.get(reverse("usage"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Refreshing session token usage...")
+        rollout_path_from_value.assert_not_called()
+        start_refresh.assert_called_once()
+        refresh_items = start_refresh.call_args.args[0]
+        self.assertEqual(len(refresh_items), 1)
+        self.assertEqual(refresh_items[0].thread_id, "missing")
+        self.assertEqual(refresh_items[0].codex_path, "/nonexistent/rollout.jsonl")
 
     def test_lifetime_usage_bulk_loads_cached_usage(self) -> None:
         threads = [_session(f"active-{i}", name=f"Active {i}") for i in range(3)]
@@ -3064,7 +3120,7 @@ class IndexViewTests(TestCase):
         refresh_items = start_refresh.call_args.args[0]
         self.assertEqual(len(refresh_items), 1)
         self.assertEqual(refresh_items[0].thread_id, "local-session")
-        self.assertEqual(refresh_items[0].path, "")
+        self.assertEqual(refresh_items[0].codex_path, "")
 
         client._client.thread_resume.return_value = SimpleNamespace(
             thread=_session("local-session", path=str(rollout_path), cwd="/repo")
@@ -3126,6 +3182,43 @@ class IndexViewTests(TestCase):
         self.assertEqual(cache.total_tokens, 1_000)
         metadata = SessionMetadata.objects.get(thread_id="missing")
         self.assertIsNotNone(metadata.usage_last_checked_at)
+
+    def test_usage_refresh_marks_checked_rows_in_chunks(self) -> None:
+        for index in range(5):
+            _seed_usage_metadata(
+                f"checked-{index}",
+                mark_index_complete=False,
+            )
+
+        with (
+            patch("hitch.main.views._USAGE_TOKEN_REFRESH_CHECKED_UPDATE_BATCH_SIZE", 2),
+            CaptureQueriesContext(connection) as queries,
+        ):
+            views._mark_usage_token_refresh_checked_many(
+                [
+                    "checked-0",
+                    "",
+                    "checked-1",
+                    "checked-1",
+                    "checked-2",
+                    "checked-3",
+                    "checked-4",
+                ]
+            )
+
+        update_queries = [
+            query
+            for query in queries.captured_queries
+            if 'UPDATE "main_sessionmetadata"' in query["sql"]
+        ]
+        self.assertEqual(len(update_queries), 3)
+        self.assertEqual(
+            SessionMetadata.objects.filter(
+                thread_id__startswith="checked-",
+                usage_last_checked_at__isnull=False,
+            ).count(),
+            5,
+        )
 
     def test_usage_refresh_thread_start_failure_clears_in_flight(self) -> None:
         views._USAGE_TOKEN_REFRESH_IN_FLIGHT = False

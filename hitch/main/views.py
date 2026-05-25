@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import wraps
 from pathlib import Path
 from typing import Any, NamedTuple, override
@@ -87,6 +87,8 @@ logger = logging.getLogger(__name__)
 _USAGE_TOKEN_REFRESH_LOCK = threading.Lock()
 _USAGE_TOKEN_REFRESH_IN_FLIGHT = False
 _USAGE_TOKEN_REFRESH_BATCH_SIZE = 25
+_USAGE_TOKEN_REFRESH_CHECKED_UPDATE_BATCH_SIZE = 500
+_USAGE_TOKEN_REFRESH_CHECK_INTERVAL = timedelta(seconds=30)
 
 
 class SettingsValues(NamedTuple):
@@ -109,6 +111,13 @@ class SettingsValues(NamedTuple):
 
 
 @dataclass(frozen=True)
+class _UsageTokenRefreshCandidate:
+    thread_id: str
+    codex_path: str
+    usage_last_checked_at: datetime | None
+
+
+@dataclass(frozen=True)
 class _UsageTokenRefreshItem:
     thread_id: str
     path: str
@@ -118,6 +127,10 @@ class _UsageTokenRefreshItem:
 class _UsageTokenRefreshThread:
     id: str
     path: str
+
+
+type _UsageTokenRefreshSource = SessionMetadata | _UsageTokenRefreshCandidate
+type _UsageTokenRefreshWork = _UsageTokenRefreshCandidate | _UsageTokenRefreshItem
 
 
 class ResolvedSettings(NamedTuple):
@@ -1871,8 +1884,6 @@ def usage(request: HttpRequest) -> HttpResponse:
         if usage_index_available
         else None
     )
-    if usage_index_available:
-        _schedule_usage_token_refresh(usage_metadata)
     settings_dialog_context = _settings_dialog_context(current_settings, models_data)
     response = render(
         request,
@@ -1886,6 +1897,8 @@ def usage(request: HttpRequest) -> HttpResponse:
         },
     )
     _apply_cookie_updates(response, cookie_updates)
+    if usage_index_available:
+        _schedule_usage_token_refresh(usage_metadata)
     return response
 
 
@@ -3244,14 +3257,12 @@ def _lifetime_token_usage_for_metadata(
     refresh_pending_count = 0
     for metadata in metadata_rows:
         cache = cached_usage_by_thread_id.get(metadata.thread_id)
+        if _usage_token_refresh_may_be_pending(metadata, cache):
+            refresh_pending_count += 1
         if cache is None:
-            refresh_pending_count += 1
             continue
-        if not _usage_cache_can_render(metadata, cache):
-            refresh_pending_count += 1
-            continue
-        usage = _token_usage_from_cache(cache)
         daily_usage = _daily_token_usage_from_cache(cache)
+        usage = _token_usage_from_cache(cache)
         is_system = metadata.thread_id in hidden_thread_ids
         total_usage["input"] += _non_cached_input_tokens(usage)
         total_usage["output"] += usage.get("output_tokens", 0)
@@ -3279,21 +3290,55 @@ def _lifetime_token_usage_for_metadata(
 
 
 def _schedule_usage_token_refresh(metadata_rows: list[SessionMetadata]) -> None:
-    cached_usage_by_thread_id = _token_usage_caches_by_thread_ids(
-        metadata.thread_id for metadata in metadata_rows
-    )
-    items = _usage_token_refresh_items(metadata_rows, cached_usage_by_thread_id)
-    if not items:
+    # Refresh filtering checks rollout files, so let the worker filter candidates.
+    candidates = _usage_token_refresh_candidates(metadata_rows)
+    if not candidates:
         return
-    transaction.on_commit(lambda: _start_usage_token_refresh_thread(items))
+    transaction.on_commit(lambda: _start_usage_token_refresh_thread(candidates))
+
+
+def _usage_token_refresh_candidates(
+    metadata_rows: Iterable[SessionMetadata],
+) -> list[_UsageTokenRefreshCandidate]:
+    return [
+        _UsageTokenRefreshCandidate(
+            thread_id=metadata.thread_id,
+            codex_path=metadata.codex_path,
+            usage_last_checked_at=metadata.usage_last_checked_at,
+        )
+        for metadata in metadata_rows
+        if metadata.thread_id
+    ]
+
+
+def _usage_token_refresh_may_be_pending(
+    metadata: _UsageTokenRefreshSource, cache: ArchivedSessionTokenUsage | None
+) -> bool:
+    if not metadata.thread_id:
+        return False
+    if not metadata.codex_path:
+        return True
+    if cache is None:
+        return True
+    if cache.rollout_path != metadata.codex_path:
+        return True
+    if _cached_token_usage_has_counts(cache) and not _daily_token_usage_from_cache(cache):
+        return True
+    return _usage_token_refresh_check_is_stale(metadata.usage_last_checked_at)
+
+
+def _usage_token_refresh_check_is_stale(checked_at: datetime | None) -> bool:
+    if checked_at is None:
+        return True
+    return checked_at <= timezone.now() - _USAGE_TOKEN_REFRESH_CHECK_INTERVAL
 
 
 def _usage_token_refresh_items(
-    metadata_rows: list[SessionMetadata],
+    metadata_rows: Iterable[_UsageTokenRefreshSource],
     cached_usage_by_thread_id: Mapping[str, ArchivedSessionTokenUsage],
 ) -> list[_UsageTokenRefreshItem]:
-    path_repair_candidates: list[SessionMetadata] = []
-    file_backed_candidates: list[SessionMetadata] = []
+    path_repair_candidates: list[_UsageTokenRefreshSource] = []
+    file_backed_candidates: list[_UsageTokenRefreshSource] = []
     for metadata in metadata_rows:
         if not metadata.thread_id:
             continue
@@ -3328,7 +3373,9 @@ def _usage_token_refresh_items(
     ]
 
 
-def _usage_token_refresh_sort_key(metadata: SessionMetadata) -> tuple[float, str]:
+def _usage_token_refresh_sort_key(
+    metadata: _UsageTokenRefreshSource,
+) -> tuple[float, str]:
     last_checked_at = _updated_at_seconds(metadata.usage_last_checked_at)
     return (
         last_checked_at if last_checked_at is not None else 0.0,
@@ -3336,12 +3383,14 @@ def _usage_token_refresh_sort_key(metadata: SessionMetadata) -> tuple[float, str
     )
 
 
-def _usage_token_refresh_needs_path_repair(metadata: SessionMetadata) -> bool:
+def _usage_token_refresh_needs_path_repair(
+    metadata: _UsageTokenRefreshSource,
+) -> bool:
     return not metadata.codex_path or _rollout_path_from_value(metadata.codex_path) is None
 
 
 def _usage_token_refresh_needed(
-    metadata: SessionMetadata, cache: ArchivedSessionTokenUsage | None
+    metadata: _UsageTokenRefreshSource, cache: ArchivedSessionTokenUsage | None
 ) -> bool:
     if not metadata.codex_path:
         return True
@@ -3357,16 +3406,7 @@ def _usage_token_refresh_needed(
     )
 
 
-def _usage_cache_can_render(
-    metadata: SessionMetadata, cache: ArchivedSessionTokenUsage
-) -> bool:
-    rollout_path = _rollout_path_from_value(metadata.codex_path)
-    if rollout_path is None:
-        return True
-    return _cached_token_usage_is_current(cache, rollout_path)
-
-
-def _start_usage_token_refresh_thread(items: list[_UsageTokenRefreshItem]) -> None:
+def _start_usage_token_refresh_thread(items: Iterable[_UsageTokenRefreshWork]) -> None:
     global _USAGE_TOKEN_REFRESH_IN_FLIGHT
     with _USAGE_TOKEN_REFRESH_LOCK:
         if _USAGE_TOKEN_REFRESH_IN_FLIGHT:
@@ -3386,12 +3426,12 @@ def _start_usage_token_refresh_thread(items: list[_UsageTokenRefreshItem]) -> No
 
 
 def _refresh_usage_token_cache_best_effort(
-    items: Iterable[_UsageTokenRefreshItem],
+    items: Iterable[_UsageTokenRefreshWork],
 ) -> None:
     global _USAGE_TOKEN_REFRESH_IN_FLIGHT
     try:
         close_old_connections()
-        item_list = list(items)
+        item_list = _usage_token_refresh_items_from_work(items)
         cached_usage_by_thread_id = _token_usage_caches_by_thread_ids(
             item.thread_id for item in item_list
         )
@@ -3434,6 +3474,34 @@ def _refresh_usage_token_cache_best_effort(
             _USAGE_TOKEN_REFRESH_IN_FLIGHT = False
 
 
+def _usage_token_refresh_items_from_work(
+    items: Iterable[_UsageTokenRefreshWork],
+) -> list[_UsageTokenRefreshItem]:
+    refresh_items: list[_UsageTokenRefreshItem] = []
+    candidates: list[_UsageTokenRefreshCandidate] = []
+    for item in items:
+        if isinstance(item, _UsageTokenRefreshItem):
+            refresh_items.append(item)
+        else:
+            candidates.append(item)
+    if not candidates:
+        return refresh_items
+    cached_usage_by_thread_id = _token_usage_caches_by_thread_ids(
+        candidate.thread_id for candidate in candidates
+    )
+    refresh_items.extend(_usage_token_refresh_items(candidates, cached_usage_by_thread_id))
+    selected_thread_ids = {item.thread_id for item in refresh_items}
+    _mark_usage_token_refresh_checked_many(
+        candidate.thread_id
+        for candidate in candidates
+        if candidate.thread_id not in selected_thread_ids
+        and not _usage_token_refresh_needed(
+            candidate, cached_usage_by_thread_id.get(candidate.thread_id)
+        )
+    )
+    return refresh_items
+
+
 def _refresh_missing_usage_metadata_path(
     codex: Codex, thread_id: str, *, projects: list[Project]
 ) -> str:
@@ -3457,6 +3525,25 @@ def _mark_usage_token_refresh_checked(thread_id: str) -> None:
     SessionMetadata.objects.filter(thread_id=thread_id).update(
         usage_last_checked_at=timezone.now()
     )
+
+
+def _mark_usage_token_refresh_checked_many(thread_ids: Iterable[str]) -> None:
+    ids: list[str] = []
+    seen: set[str] = set()
+    for thread_id in thread_ids:
+        if not thread_id or thread_id in seen:
+            continue
+        seen.add(thread_id)
+        ids.append(thread_id)
+    if not ids:
+        return
+    checked_at = timezone.now()
+    for start in range(0, len(ids), _USAGE_TOKEN_REFRESH_CHECKED_UPDATE_BATCH_SIZE):
+        SessionMetadata.objects.filter(
+            thread_id__in=ids[
+                start : start + _USAGE_TOKEN_REFRESH_CHECKED_UPDATE_BATCH_SIZE
+            ]
+        ).update(usage_last_checked_at=checked_at)
 
 
 def _rollout_file_parses_as_jsonl(rollout_path: Path) -> bool:
