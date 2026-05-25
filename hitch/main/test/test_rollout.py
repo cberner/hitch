@@ -5,7 +5,7 @@ from typing import Any, override
 
 from django.test import TestCase
 
-from hitch.main import rollout
+from hitch.main import rollout, system_agents
 
 
 def _line(line_type: str, payload: dict[str, Any], *, timestamp: str = "2025-01-05T12:00:00Z") -> str:
@@ -37,6 +37,149 @@ def _write_rollout(lines: list[str]) -> Path:
         if lines:
             tmp.write("\n")
         return Path(tmp.name)
+
+
+class LatestPrUrlTests(TestCase):
+    @override
+    def tearDown(self) -> None:
+        for path in getattr(self, "_paths", []):
+            path.unlink(missing_ok=True)
+
+    def _make(self, lines: list[str]) -> Path:
+        path = _write_rollout(lines)
+        self._paths = [*getattr(self, "_paths", []), path]
+        return path
+
+    def test_detects_pr_url_from_github_function_call_output(self) -> None:
+        url = "https://github.com/cberner/hitch/pull/94"
+        path = self._make(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_create_pull_request",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps({"url": url}),
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Opened."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+        self.assertEqual(rollout.latest_pr_url(path), url)
+
+    def test_completed_pr_turn_without_url_clears_earlier_url(self) -> None:
+        stale_url = "https://github.com/cberner/hitch/pull/93"
+        path = self._make(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "mcp_tool_call_end",
+                        "invocation": {
+                            "server": "github",
+                            "tool": "_create_pull_request",
+                        },
+                        "result": {"url": stale_url},
+                    },
+                ),
+                _line("event_msg", {"type": "agent_message", "message": "Opened."}),
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_create_pull_request",
+                        "arguments": "{}",
+                        "call_id": "call-empty",
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-empty",
+                        "output": json.dumps({"content": []}),
+                    },
+                ),
+                _line("event_msg", {"type": "agent_message", "message": "No PR."}),
+            ]
+        )
+
+        self.assertIsNone(rollout.latest_pr_url(path))
+
+    def test_ignores_non_github_pr_mcp_output_with_pr_url(self) -> None:
+        url = "https://github.com/cberner/hitch/pull/94"
+        path = self._make(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "mcp_tool_call_end",
+                        "invocation": {"server": "linear", "tool": "create_issue"},
+                        "result": {"url": url},
+                    },
+                ),
+                _line("event_msg", {"type": "agent_message", "message": "Done."}),
+            ]
+        )
+
+        self.assertIsNone(rollout.latest_pr_url(path))
+
+    def test_ignores_shell_output_with_pr_url(self) -> None:
+        url = "https://github.com/cberner/hitch/pull/94"
+        path = self._make(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _func_call("call-gh-view", "gh pr view"),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-gh-view",
+                        "output": url,
+                    },
+                ),
+                _line("event_msg", {"type": "agent_message", "message": "Done."}),
+            ]
+        )
+
+        self.assertIsNone(rollout.latest_pr_url(path))
 
 
 class IterEntriesTests(TestCase):

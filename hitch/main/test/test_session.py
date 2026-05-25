@@ -516,6 +516,46 @@ class SessionViewTests(TestCase):
         self.assertTrue(metadata.project_cleared)
 
     @patch("hitch.main.views.Codex")
+    def test_set_session_project_uses_metadata_cwd_without_resume(
+        self, mock_codex: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/tmp/demo")
+        SessionMetadata.objects.create(thread_id="thread-1", cwd="/tmp/demo")
+
+        response = self.client.post(
+            reverse("set_session_project", kwargs={"session_id": "thread-1"}),
+            data={"project": str(project.pk)},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        metadata = SessionMetadata.objects.get(thread_id="thread-1")
+        self.assertEqual(metadata.cwd, "/tmp/demo")
+        self.assertEqual(metadata.project, project)
+        self.assertFalse(metadata.project_cleared)
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    def test_set_session_project_falls_back_without_metadata_cwd(
+        self, mock_codex: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/tmp/demo")
+        SessionMetadata.objects.create(thread_id="thread-1")
+        thread = _thread([_turn([_user_message("hi")])])
+        _patch_thread(self, mock_codex, thread)
+
+        response = self.client.post(
+            reverse("set_session_project", kwargs={"session_id": "thread-1"}),
+            data={"project": str(project.pk)},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        metadata = SessionMetadata.objects.get(thread_id="thread-1")
+        self.assertEqual(metadata.cwd, "/tmp/demo")
+        self.assertEqual(metadata.project, project)
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.assert_called_once_with("thread-1")
+
+    @patch("hitch.main.views.Codex")
     def test_renders_open_pr_menu_link_when_detected(
         self, mock_codex: MagicMock
     ) -> None:

@@ -16,6 +16,7 @@ the SDK-built turns when the path is missing or the file can't be read.
 
 import json
 import logging
+import re
 from collections import Counter
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -37,6 +38,35 @@ _SHELL_TOOL_NAMES = frozenset(
     }
 )
 _SHELL_FAILURE_PREFIXES = tuple(f"{name} failed for `" for name in sorted(_SHELL_TOOL_NAMES))
+_GITHUB_PR_TOOL_RE = re.compile(
+    r"(?i)(?:^|[/:\s._-])(?:github|mcp__codex_apps__github)(?:$|[/:\s._-]).*"
+    r"(?:_?create[_\s-]?(?:pr|pull[_\s-]?request)|open[_\s-]?(?:pr|pull[_\s-]?request))"
+)
+_GITHUB_PR_URL_RE = re.compile(
+    r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+"
+)
+_PR_PROMPT_ALIASES = frozenset(
+    {
+        "/pr",
+        "Rebase on master, clean it up, and then open a PR",
+        "Polish it, get it ready, and open or update the PR.",
+        (
+            "Do a thorough review of the diff. Rebase on master, clean it up, "
+            "and then open a PR"
+        ),
+        (
+            "Do a thorough review of the diff. Rebase on master, clean it up, "
+            "and then open a PR. After opening it, poll the PR every 2 minutes "
+            "until you have CI status and at least one review signal: code review "
+            "comments, a thumbs up emoji on the PR, or an explicit review approval. "
+            "On each poll, check whether the PR has merge conflicts. Address CI "
+            "failures, review comments, merge conflicts, and any other blocking issues; "
+            "push fixes and keep looping until CI, review, and mergeability are all clean. "
+            "Stop and report back if any single polling iteration has no results after "
+            "30 minutes."
+        ),
+    }
+)
 
 
 def iter_entries(rollout_path: Path) -> Iterator[dict[str, Any]]:
@@ -144,6 +174,41 @@ def token_usage_history(rollout_path: Path) -> list[dict[str, int]]:
             }
         )
     return history
+
+
+def latest_pr_url(rollout_path: Path) -> str | None:
+    """Return the last GitHub PR URL produced by a completed /pr turn."""
+    try:
+        text = rollout_path.read_text()
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning("failed to read rollout %s: %s", rollout_path, exc)
+        return None
+    lines: list[dict[str, Any]] = []
+    for raw in text.splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            lines.append(json.loads(raw))
+        except json.JSONDecodeError:
+            continue
+    function_calls_by_id = _function_calls_by_id(lines)
+    latest: str | None = None
+    for _, turn_lines in _lines_by_turn(lines):
+        if not _turn_is_pr_prompt(turn_lines):
+            continue
+        final_idx = _find_final_agent_line_idx(turn_lines)
+        if final_idx == -1:
+            continue
+        urls: list[str] = []
+        for entry in turn_lines[:final_idx]:
+            urls.extend(
+                _github_pr_urls_from_value(
+                    _github_pr_tool_result_value(entry, function_calls_by_id)
+                )
+            )
+        latest = urls[-1] if urls else None
+    return latest
 
 
 def _coerce_int(value: Any) -> int:
@@ -419,6 +484,106 @@ def _is_user_message_line(entry: dict[str, Any]) -> bool:
         return False
     payload = entry.get("payload") or {}
     return payload.get("type") == "user_message"
+
+
+def _is_pr_prompt(text: str) -> bool:
+    return text in _PR_PROMPT_ALIASES
+
+
+def _function_calls_by_id(lines: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    calls: dict[str, dict[str, Any]] = {}
+    for entry in lines:
+        if entry.get("type") != "response_item":
+            continue
+        payload = entry.get("payload") or {}
+        if payload.get("type") != "function_call":
+            continue
+        call_id = payload.get("call_id")
+        if isinstance(call_id, str):
+            calls[call_id] = payload
+    return calls
+
+
+def _turn_is_pr_prompt(turn_lines: list[dict[str, Any]]) -> bool:
+    for entry in turn_lines:
+        if not _is_user_message_line(entry):
+            continue
+        payload = entry.get("payload") or {}
+        return _is_pr_prompt(_user_message_text(payload).strip())
+    return False
+
+
+def _find_final_agent_line_idx(turn_lines: list[dict[str, Any]]) -> int:
+    for idx in range(len(turn_lines) - 1, -1, -1):
+        if _is_agent_response_line(turn_lines[idx]) and _agent_response_phase(
+            turn_lines[idx]
+        ) == "final_answer":
+            return idx
+    for idx in range(len(turn_lines) - 1, -1, -1):
+        if _is_agent_response_line(turn_lines[idx]):
+            return idx
+    return -1
+
+
+def _github_pr_tool_result_value(
+    entry: dict[str, Any], function_calls_by_id: dict[str, dict[str, Any]]
+) -> Any:
+    payload = entry.get("payload") or {}
+    if entry.get("type") == "event_msg" and payload.get("type") == "mcp_tool_call_end":
+        invocation = payload.get("invocation") or {}
+        if not isinstance(invocation, dict):
+            return None
+        if _github_pr_tool_used(invocation.get("server"), invocation.get("tool")):
+            return payload.get("result")
+        return None
+    if entry.get("type") == "response_item" and payload.get("type") == "function_call_output":
+        call_id = payload.get("call_id")
+        call = function_calls_by_id.get(call_id) if isinstance(call_id, str) else None
+        if call is not None and _github_pr_tool_used(call.get("name")):
+            return payload.get("output")
+    return None
+
+
+def _github_pr_tool_used(*parts: Any) -> bool:
+    detail = " / ".join(part for part in parts if isinstance(part, str))
+    return _GITHUB_PR_TOOL_RE.search(detail) is not None
+
+
+def _github_pr_urls_from_value(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return _GITHUB_PR_URL_RE.findall(value)
+    if isinstance(value, dict):
+        urls: list[str] = []
+        for child in value.values():
+            urls.extend(_github_pr_urls_from_value(child))
+        return urls
+    if isinstance(value, list | tuple):
+        urls = []
+        for child in value:
+            urls.extend(_github_pr_urls_from_value(child))
+        return urls
+    return []
+
+
+def _is_agent_response_line(entry: dict[str, Any]) -> bool:
+    payload = entry.get("payload") or {}
+    if _agent_response_phase(entry) == "commentary":
+        return False
+    if entry.get("type") == "event_msg" and payload.get("type") == "agent_message":
+        return True
+    return (
+        entry.get("type") == "response_item"
+        and payload.get("type") == "message"
+        and payload.get("role") == "assistant"
+    )
+
+
+def _agent_response_phase(entry: dict[str, Any]) -> str | None:
+    payload = entry.get("payload") or {}
+    phase = payload.get("phase")
+    return phase if isinstance(phase, str) else None
 
 
 def _plan_mode_turns(lines: list[dict[str, Any]]) -> set[int]:
