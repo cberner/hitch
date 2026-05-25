@@ -3200,12 +3200,15 @@ class SessionViewActiveWorkerTests(TestCase):
         response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
 
         self.assertContains(response, "--composer-keyboard-offset")
+        self.assertContains(response, "--composer-height")
         self.assertContains(response, "window.visualViewport")
         self.assertContains(response, 'window.matchMedia("(max-width: 640px)")')
         self.assertContains(response, "viewport.scale")
         self.assertContains(response, "font-size: 16px;")
         self.assertContains(response, "interactive-widget=resizes-content")
         self.assertContains(response, "composerKeyboardSettleDelays")
+        self.assertContains(response, "syncComposerHeight")
+        self.assertContains(response, "new ResizeObserver")
         self.assertContains(response, "document.documentElement.style.setProperty")
         self.assertContains(response, "scheduleComposerKeyboardOffset")
 
