@@ -260,8 +260,8 @@ class SettingsDialogRenderTests(TestCase):
         ]
         self.assertNotIn(reverse("system_sessions"), primary_nav)
         self.assertContains(response, ">settings<")
-        self.assertContains(response, "Server git revision")
-        self.assertContains(response, ">abc123<")
+        self.assertNotIn("Server git hash", primary_nav)
+        self.assertNotIn("abc123", primary_nav)
         self.assertContains(response, f'href="{reverse("usage")}"')
         self.assertContains(response, ">usage<")
         self.assertContains(response, "GPT-5")
