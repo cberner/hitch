@@ -53,7 +53,8 @@ class Project(models.Model):
         return self.name
 
 
-class StandingOrder(models.Model):
+# Autonomous goals are commonly abbreviated as AGs in short-form UI and notes.
+class AutonomousGoal(models.Model):
     """A project-scoped recurring goal that can propose Codex sessions."""
 
     AMBITION_INCREMENTAL = "incremental"
@@ -99,7 +100,7 @@ class StandingOrder(models.Model):
     project = models.ForeignKey(
         Project,
         on_delete=models.CASCADE,
-        related_name="standing_orders",
+        related_name="autonomous_goals",
     )
     title = models.CharField(max_length=200)
     goal = models.TextField()
@@ -179,8 +180,8 @@ class ProposedSession(models.Model):
         null=True,
         blank=True,
     )
-    standing_order = models.ForeignKey(
-        StandingOrder,
+    autonomous_goal = models.ForeignKey(
+        AutonomousGoal,
         null=True,
         blank=True,
         on_delete=models.CASCADE,
@@ -203,8 +204,8 @@ class ProposedSession(models.Model):
     prompt = models.TextField(blank=True, default="")
     confidence = models.CharField(
         max_length=32,
-        choices=StandingOrder.CONFIDENCE_CHOICES,
-        default=StandingOrder.CONFIDENCE_MEDIUM,
+        choices=AutonomousGoal.CONFIDENCE_CHOICES,
+        default=AutonomousGoal.CONFIDENCE_MEDIUM,
     )
     relevant_files = models.JSONField(default=list, blank=True)
     candidate_session = models.ForeignKey(
@@ -212,14 +213,14 @@ class ProposedSession(models.Model):
         null=True,
         blank=True,
         on_delete=models.SET_NULL,
-        related_name="standing_order_candidate_proposals",
+        related_name="autonomous_goal_candidate_proposals",
     )
     judge_session = models.ForeignKey(
         "SessionMetadata",
         null=True,
         blank=True,
         on_delete=models.SET_NULL,
-        related_name="standing_order_judge_proposals",
+        related_name="autonomous_goal_judge_proposals",
     )
     source_session = models.ForeignKey(
         "SessionMetadata",
@@ -233,7 +234,7 @@ class ProposedSession(models.Model):
         null=True,
         blank=True,
         on_delete=models.SET_NULL,
-        related_name="accepted_standing_order_proposals",
+        related_name="accepted_autonomous_goal_proposals",
     )
     outcome_status = models.CharField(
         max_length=32,
@@ -250,7 +251,7 @@ class ProposedSession(models.Model):
         ordering = ["created_at", "id"]
         indexes = [
             models.Index(fields=["project", "created_at"]),
-            models.Index(fields=["standing_order", "created_at"]),
+            models.Index(fields=["autonomous_goal", "created_at"]),
             models.Index(fields=["outcome_status", "created_at"]),
         ]
 
@@ -260,18 +261,18 @@ class ProposedSession(models.Model):
 
     @override
     def save(self, *args: Any, **kwargs: Any) -> None:
-        if self.project_id is None and self.standing_order_id is not None:
-            self.project_id = StandingOrder.objects.values_list(
+        if self.project_id is None and self.autonomous_goal_id is not None:
+            self.project_id = AutonomousGoal.objects.values_list(
                 "project_id", flat=True
-            ).get(pk=self.standing_order_id)
+            ).get(pk=self.autonomous_goal_id)
         super().save(*args, **kwargs)
 
 
-class StandingOrderMemory(models.Model):
-    """Durable memory from a standing-order candidate run."""
+class AutonomousGoalMemory(models.Model):
+    """Durable memory from an autonomous goal candidate run."""
 
-    standing_order = models.ForeignKey(
-        StandingOrder,
+    autonomous_goal = models.ForeignKey(
+        AutonomousGoal,
         on_delete=models.CASCADE,
         related_name="memories",
     )
@@ -280,14 +281,14 @@ class StandingOrderMemory(models.Model):
         null=True,
         blank=True,
         on_delete=models.SET_NULL,
-        related_name="standing_order_memories",
+        related_name="autonomous_goal_memories",
     )
     candidate_session = models.ForeignKey(
         "SessionMetadata",
         null=True,
         blank=True,
         on_delete=models.SET_NULL,
-        related_name="standing_order_memories",
+        related_name="autonomous_goal_memories",
     )
     title = models.CharField(max_length=200, blank=True, default="")
     summary = models.TextField(blank=True, default="")
@@ -298,19 +299,19 @@ class StandingOrderMemory(models.Model):
     class Meta:
         ordering = ["created_at", "id"]
         indexes = [
-            models.Index(fields=["standing_order", "-created_at"]),
+            models.Index(fields=["autonomous_goal", "-created_at"]),
         ]
         constraints = [
             models.UniqueConstraint(
                 fields=["source_workflow"],
                 condition=models.Q(source_workflow__isnull=False),
-                name="uniq_standing_order_memory_workflow",
+                name="uniq_autonomous_goal_memory_workflow",
             ),
         ]
 
     @override
     def __str__(self) -> str:
-        return self.title or f"StandingOrderMemory({self.pk})"
+        return self.title or f"AutonomousGoalMemory({self.pk})"
 
 
 class SessionMetadata(models.Model):
@@ -517,7 +518,7 @@ class SystemWorkflow(models.Model):
     """Durable state for Hitch-managed system-agent workflows."""
 
     KIND_PR_QA = "pr_qa"
-    KIND_STANDING_ORDER_RUN = "standing_order_run"
+    KIND_AUTONOMOUS_GOAL_RUN = "autonomous_goal_run"
 
     STATUS_RUNNING = "running"
     STATUS_BLOCKED = "blocked"

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#f7f2e8" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#161c1a" media="(prefers-color-scheme: dark)">
-    <title>Standing Orders - HITCH</title>
+    <title>Autonomous Goals - HITCH</title>
     <style>
         :root {
             color-scheme: light dark;
@@ -80,8 +80,8 @@
         .topbar-actions,
         .page-header,
         .proposal-actions,
-        .order-header,
-        .order-meta {
+        .goal-header,
+        .goal-meta {
             display: flex;
             align-items: center;
             gap: 0.75rem;
@@ -92,12 +92,12 @@
             position: relative;
             flex: 0 0 auto;
         }
-        .order-menu {
+        .goal-menu {
             position: relative;
             flex: 0 0 auto;
         }
         .page-menu-toggle,
-        .order-menu-toggle {
+        .goal-menu-toggle {
             font: inherit;
             display: inline-flex;
             align-items: center;
@@ -114,20 +114,20 @@
             cursor: pointer;
             font-weight: 500;
         }
-        .order-menu-toggle {
+        .goal-menu-toggle {
             width: 2rem;
             height: 2rem;
             font-size: 1.05rem;
         }
         .page-menu-toggle:hover,
-        .order-menu-toggle:hover { background: var(--surface-2); }
+        .goal-menu-toggle:hover { background: var(--surface-2); }
         .page-menu-toggle[aria-expanded="true"],
-        .order-menu-toggle[aria-expanded="true"] {
+        .goal-menu-toggle[aria-expanded="true"] {
             background: var(--surface-2);
             color: var(--text);
         }
         .page-menu-panel,
-        .order-menu-panel {
+        .goal-menu-panel {
             position: absolute;
             right: 0;
             top: calc(100% + 0.35rem);
@@ -139,13 +139,13 @@
             background: var(--surface);
             box-shadow: var(--shadow-lg);
         }
-        .order-menu-panel { min-width: 8rem; }
+        .goal-menu-panel { min-width: 8rem; }
         .page-menu-panel[hidden],
-        .order-menu-panel[hidden] { display: none; }
+        .goal-menu-panel[hidden] { display: none; }
         .page-menu-panel form,
-        .order-menu-panel form { margin: 0; }
+        .goal-menu-panel form { margin: 0; }
         .page-menu-panel button,
-        .order-menu-panel button {
+        .goal-menu-panel button {
             width: 100%;
             display: flex;
             align-items: center;
@@ -163,21 +163,21 @@
         }
         .page-menu-panel button:hover,
         .page-menu-panel button:focus,
-        .order-menu-panel button:hover,
-        .order-menu-panel button:focus {
+        .goal-menu-panel button:hover,
+        .goal-menu-panel button:focus {
             outline: none;
             background: var(--surface-2);
         }
         .page-menu-panel button:disabled,
-        .order-menu-panel button:disabled {
+        .goal-menu-panel button:disabled {
             color: var(--text-muted);
             cursor: not-allowed;
             opacity: 0.65;
         }
         .page-menu-panel button:disabled:hover,
         .page-menu-panel button:disabled:focus,
-        .order-menu-panel button:disabled:hover,
-        .order-menu-panel button:disabled:focus {
+        .goal-menu-panel button:disabled:hover,
+        .goal-menu-panel button:disabled:focus {
             background: transparent;
         }
         .brand {
@@ -250,7 +250,7 @@
         }
         .form,
         .proposal,
-        .order,
+        .goal,
         .empty {
             border: 1px solid var(--border);
             border-radius: var(--radius);
@@ -304,7 +304,7 @@
             accent-color: var(--accent);
         }
         .proposal-list,
-        .order-list {
+        .goal-list {
             list-style: none;
             display: grid;
             gap: 0.85rem;
@@ -312,32 +312,32 @@
             padding: 0;
         }
         .proposal,
-        .order,
+        .goal,
         .empty {
             padding: 1rem;
         }
         .proposal h3,
-        .order h3 {
+        .goal h3 {
             margin: 0;
             font-size: 1.05rem;
         }
-        .order-header {
+        .goal-header {
             justify-content: space-between;
             align-items: flex-start;
             margin-bottom: 0.35rem;
         }
-        .order-header h3 {
+        .goal-header h3 {
             min-width: 0;
             padding-right: 0.5rem;
         }
         .proposal p,
-        .order p,
+        .goal p,
         .empty p {
             margin: 0.35rem 0 0;
             color: var(--text-muted);
         }
         .proposal-actions,
-        .order-meta {
+        .goal-meta {
             flex-wrap: wrap;
             margin-top: 0.85rem;
         }
@@ -410,14 +410,14 @@
                 {% endif %}
                 {% if current_project %}
                 <div class="page-menu" data-page-menu data-context-menu>
-                    <button type="button" class="page-menu-toggle" aria-label="Standing order actions" aria-haspopup="menu" aria-expanded="false" data-page-menu-open data-context-menu-open>...</button>
+                    <button type="button" class="page-menu-toggle" aria-label="Autonomous goal actions" aria-haspopup="menu" aria-expanded="false" data-page-menu-open data-context-menu-open>...</button>
                     <div class="page-menu-panel" role="menu" data-page-menu-panel data-context-menu-panel hidden>
-                        {% if standing_orders %}
-                        <button type="button" role="menuitem" data-create-standing-order-open>New order</button>
+                        {% if autonomous_goals %}
+                        <button type="button" role="menuitem" data-create-autonomous-goal-open>New goal</button>
                         {% endif %}
-                        <form method="post" action="{{ standing_order_run_all_url }}" role="none">
+                        <form method="post" action="{{ autonomous_goal_run_all_url }}" role="none">
                             {% csrf_token %}
-                            <button type="submit" role="menuitem"{% if not standing_orders %} disabled{% endif %}>Run all</button>
+                            <button type="submit" role="menuitem"{% if not autonomous_goals %} disabled{% endif %}>Run all</button>
                         </form>
                     </div>
                 </div>
@@ -427,11 +427,11 @@
         </div>
     </header>
     <main>
-        <section class="section" aria-labelledby="standing-orders-title">
-            <p class="section-label">Standing orders</p>
+        <section class="section" aria-labelledby="autonomous-goals-title">
+            <p class="section-label">Autonomous goals</p>
             <div class="page-header">
                 <div>
-                    <h2 id="standing-orders-title">Standing orders</h2>
+                    <h2 id="autonomous-goals-title">Autonomous goals</h2>
                     {% if current_project %}
                     <p class="project-name">{{ current_project.name }}</p>
                     {% endif %}
@@ -440,65 +440,65 @@
             {% if not current_project %}
             <div class="empty">
                 <p>No active project selected.</p>
-                <p>Select a project in settings to manage standing orders.</p>
+                <p>Select a project in settings to manage autonomous goals.</p>
             </div>
             {% endif %}
         </section>
 
         {% if current_project %}
-        <section class="section" aria-labelledby="standing-order-list-title">
-            <p class="section-label">Orders</p>
-            <h2 id="standing-order-list-title" hidden>Orders</h2>
-            {% if standing_orders %}
-            <ul class="order-list">
-                {% for order in standing_orders %}
-                <li class="order">
-                    <div class="order-header">
-                        <h3>{{ order.title }}</h3>
-                        <div class="order-menu" data-order-menu data-context-menu>
-                            <button type="button" class="order-menu-toggle" aria-label="Actions for {{ order.title }}" aria-haspopup="menu" aria-expanded="false" data-context-menu-open>...</button>
-                            <div class="order-menu-panel" role="menu" data-context-menu-panel hidden>
-                                <form method="post" action="{% url 'run_standing_order' order.pk %}" role="none">
+        <section class="section" aria-labelledby="autonomous-goal-list-title">
+            <p class="section-label">Goals</p>
+            <h2 id="autonomous-goal-list-title" hidden>Goals</h2>
+            {% if autonomous_goals %}
+            <ul class="goal-list">
+                {% for goal in autonomous_goals %}
+                <li class="goal">
+                    <div class="goal-header">
+                        <h3>{{ goal.title }}</h3>
+                        <div class="goal-menu" data-goal-menu data-context-menu>
+                            <button type="button" class="goal-menu-toggle" aria-label="Actions for {{ goal.title }}" aria-haspopup="menu" aria-expanded="false" data-context-menu-open>...</button>
+                            <div class="goal-menu-panel" role="menu" data-context-menu-panel hidden>
+                                <form method="post" action="{% url 'run_autonomous_goal' goal.pk %}" role="none">
                                     {% csrf_token %}
                                     <button type="submit" role="menuitem">Run</button>
                                 </form>
                                 <button
                                     type="button"
                                     role="menuitem"
-                                    data-standing-order-edit
-                                    data-edit-url="{% url 'edit_standing_order' order.pk %}"
-                                    data-title="{{ order.title }}"
-                                    data-goal="{{ order.goal }}"
-                                    data-ambition="{{ order.ambition }}"
-                                    data-autonomy="{{ order.autonomy }}"
-                                    data-auto-qa="{% if order.auto_qa_enabled %}true{% else %}false{% endif %}"
-                                    data-auto-proposal-enabled="{% if order.auto_proposal_enabled %}true{% else %}false{% endif %}"
-                                    data-confidence-threshold="{{ order.confidence_threshold }}"
-                                    data-web-search-mode="{{ order.web_search_mode }}"
-                                    data-auto-merge-to-local-branch="{% if order.auto_merge_to_local_branch %}true{% else %}false{% endif %}"
-                                    data-auto-merge-branch="{{ order.auto_merge_branch }}"
+                                    data-autonomous-goal-edit
+                                    data-edit-url="{% url 'edit_autonomous_goal' goal.pk %}"
+                                    data-title="{{ goal.title }}"
+                                    data-goal="{{ goal.goal }}"
+                                    data-ambition="{{ goal.ambition }}"
+                                    data-autonomy="{{ goal.autonomy }}"
+                                    data-auto-qa="{% if goal.auto_qa_enabled %}true{% else %}false{% endif %}"
+                                    data-auto-proposal-enabled="{% if goal.auto_proposal_enabled %}true{% else %}false{% endif %}"
+                                    data-confidence-threshold="{{ goal.confidence_threshold }}"
+                                    data-web-search-mode="{{ goal.web_search_mode }}"
+                                    data-auto-merge-to-local-branch="{% if goal.auto_merge_to_local_branch %}true{% else %}false{% endif %}"
+                                    data-auto-merge-branch="{{ goal.auto_merge_branch }}"
                                 >Edit</button>
                             </div>
                         </div>
                     </div>
-                    <p>{{ order.goal }}</p>
-                    <div class="order-meta">
-                        <span class="meta">Ambition: {{ order.get_ambition_display }}</span>
-                        <span class="meta">Autonomy: {{ order.get_autonomy_display }}</span>
-                        <span class="meta">Auto-QA: {% if order.auto_qa_enabled %}On{% else %}Off{% endif %}</span>
-                        <span class="meta">Auto-proposal: {% if order.auto_proposal_enabled %}On{% else %}Off{% endif %}</span>
-                        <span class="meta">Threshold: {{ order.get_confidence_threshold_display }}</span>
-                        <span class="meta">Web search: {{ order.get_web_search_mode_display }}</span>
-                        {% if order.auto_merge_to_local_branch %}
-                        <span class="meta">Auto merge: {{ order.auto_merge_branch }}</span>
+                    <p>{{ goal.goal }}</p>
+                    <div class="goal-meta">
+                        <span class="meta">Ambition: {{ goal.get_ambition_display }}</span>
+                        <span class="meta">Autonomy: {{ goal.get_autonomy_display }}</span>
+                        <span class="meta">Auto-QA: {% if goal.auto_qa_enabled %}On{% else %}Off{% endif %}</span>
+                        <span class="meta">Auto-proposal: {% if goal.auto_proposal_enabled %}On{% else %}Off{% endif %}</span>
+                        <span class="meta">Threshold: {{ goal.get_confidence_threshold_display }}</span>
+                        <span class="meta">Web search: {{ goal.get_web_search_mode_display }}</span>
+                        {% if goal.auto_merge_to_local_branch %}
+                        <span class="meta">Auto merge: {{ goal.auto_merge_branch }}</span>
                         {% endif %}
-                        {% if order.latest_workflow %}
-                        <span class="meta">Last run: {{ order.latest_workflow.get_status_display }}</span>
-                        {% if order.run_log_url %}
-                        <a href="{{ order.run_log_url }}">View log</a>
+                        {% if goal.latest_workflow %}
+                        <span class="meta">Last run: {{ goal.latest_workflow.get_status_display }}</span>
+                        {% if goal.run_log_url %}
+                        <a href="{{ goal.run_log_url }}">View log</a>
                         {% endif %}
                         {% endif %}
-                        {% if order.run_running %}
+                        {% if goal.run_running %}
                         <span class="meta">Running</span>
                         {% endif %}
                     </div>
@@ -506,11 +506,11 @@
                 {% endfor %}
             </ul>
             {% else %}
-            <form class="form" method="post" action="{{ standing_order_create_url }}" data-standing-order-create-form>
+            <form class="form" method="post" action="{{ autonomous_goal_create_url }}" data-autonomous-goal-create-form>
                 {% csrf_token %}
-                {% include "_standing_order_form_fields.html" %}
+                {% include "_autonomous_goal_form_fields.html" %}
                 <div class="actions">
-                    <button type="submit" class="button">Create standing order</button>
+                    <button type="submit" class="button">Create autonomous goal</button>
                 </div>
             </form>
             {% endif %}
@@ -518,34 +518,34 @@
         {% endif %}
     </main>
     {% include "_settings_dialog.html" %}
-    {% if current_project and standing_orders %}
-    <dialog class="new-session" data-create-standing-order-dialog aria-labelledby="create-standing-order-dialog-title">
-        <form method="post" action="{{ standing_order_create_url }}" data-standing-order-create-form>
+    {% if current_project and autonomous_goals %}
+    <dialog class="new-session" data-create-autonomous-goal-dialog aria-labelledby="create-autonomous-goal-dialog-title">
+        <form method="post" action="{{ autonomous_goal_create_url }}" data-autonomous-goal-create-form>
             {% csrf_token %}
-            <h2 id="create-standing-order-dialog-title">Create standing order</h2>
-            {% include "_standing_order_form_fields.html" with title_input_attrs="data-create-standing-order-title" %}
+            <h2 id="create-autonomous-goal-dialog-title">Create autonomous goal</h2>
+            {% include "_autonomous_goal_form_fields.html" with title_input_attrs="data-create-autonomous-goal-title" %}
             <div class="actions">
-                <button type="button" class="button secondary" data-create-standing-order-cancel>Cancel</button>
-                <button type="submit" class="button">Create standing order</button>
+                <button type="button" class="button secondary" data-create-autonomous-goal-cancel>Cancel</button>
+                <button type="submit" class="button">Create autonomous goal</button>
             </div>
         </form>
     </dialog>
     {% endif %}
-    <dialog class="new-session" data-edit-standing-order-dialog aria-labelledby="edit-standing-order-title">
-        <form method="post" data-edit-standing-order-form>
+    <dialog class="new-session" data-edit-autonomous-goal-dialog aria-labelledby="edit-autonomous-goal-title">
+        <form method="post" data-edit-autonomous-goal-form>
             {% csrf_token %}
-            <h2 id="edit-standing-order-title">Edit standing order</h2>
+            <h2 id="edit-autonomous-goal-title">Edit autonomous goal</h2>
             <label>
                 Title
-                <input type="text" name="title" maxlength="{{ title_max_len }}" required autocomplete="off" data-edit-standing-order-title>
+                <input type="text" name="title" maxlength="{{ title_max_len }}" required autocomplete="off" data-edit-autonomous-goal-title>
             </label>
             <label>
                 Goal
-                <textarea name="goal" required data-edit-standing-order-goal></textarea>
+                <textarea name="goal" required data-edit-autonomous-goal-goal></textarea>
             </label>
             <label>
                 Ambition
-                <select name="ambition" required data-edit-standing-order-ambition>
+                <select name="ambition" required data-edit-autonomous-goal-ambition>
                     {% for value, label in ambition_choices %}
                     <option value="{{ value }}">{{ label }}</option>
                     {% endfor %}
@@ -553,25 +553,25 @@
             </label>
             <label>
                 Autonomy
-                <select name="autonomy" required data-edit-standing-order-autonomy data-standing-order-autonomy>
+                <select name="autonomy" required data-edit-autonomous-goal-autonomy data-autonomous-goal-autonomy>
                     {% for value, label in autonomy_choices %}
                     <option value="{{ value }}" data-auto-qa-supported="{% if value in auto_qa_supported_autonomies %}true{% else %}false{% endif %}">{{ label }}</option>
                     {% endfor %}
                 </select>
             </label>
-            <label class="checkbox-label" data-standing-order-auto-qa-field>
+            <label class="checkbox-label" data-autonomous-goal-auto-qa-field>
                 <span>Auto-QA</span>
                 <input type="hidden" name="auto_qa" value="false">
-                <input type="checkbox" name="auto_qa" value="true" data-edit-standing-order-auto-qa data-standing-order-auto-qa>
+                <input type="checkbox" name="auto_qa" value="true" data-edit-autonomous-goal-auto-qa data-autonomous-goal-auto-qa>
             </label>
             <label class="checkbox-label">
                 Auto-proposal
                 <input type="hidden" name="auto_proposal" value="false">
-                <input type="checkbox" name="auto_proposal" value="true" data-edit-standing-order-auto-proposal>
+                <input type="checkbox" name="auto_proposal" value="true" data-edit-autonomous-goal-auto-proposal>
             </label>
             <label>
                 Confidence threshold
-                <select name="confidence_threshold" required data-edit-standing-order-confidence-threshold>
+                <select name="confidence_threshold" required data-edit-autonomous-goal-confidence-threshold>
                     {% for value, label in confidence_choices %}
                     <option value="{{ value }}">{{ label }}</option>
                     {% endfor %}
@@ -579,7 +579,7 @@
             </label>
             <label>
                 Web search
-                <select name="web_search_mode" data-edit-standing-order-web-search-mode>
+                <select name="web_search_mode" data-edit-autonomous-goal-web-search-mode>
                     {% for value, label in web_search_mode_choices %}
                     <option value="{{ value }}">{{ label }}</option>
                     {% endfor %}
@@ -588,11 +588,11 @@
             <label class="checkbox-label">
                 <span>Auto merge to local branch</span>
                 <input type="hidden" name="auto_merge_to_local_branch" value="false">
-                <input type="checkbox" name="auto_merge_to_local_branch" value="true" data-edit-standing-order-auto-merge data-standing-order-auto-merge>
+                <input type="checkbox" name="auto_merge_to_local_branch" value="true" data-edit-autonomous-goal-auto-merge data-autonomous-goal-auto-merge>
             </label>
             <label>
                 Local branch
-                <select name="auto_merge_branch" data-edit-standing-order-auto-merge-branch data-standing-order-auto-merge-branch>
+                <select name="auto_merge_branch" data-edit-autonomous-goal-auto-merge-branch data-autonomous-goal-auto-merge-branch>
                     <option value="">Select branch</option>
                     {% for branch in local_branch_choices %}
                     <option value="{{ branch }}">{{ branch }}</option>
@@ -600,7 +600,7 @@
                 </select>
             </label>
             <div class="actions">
-                <button type="button" class="button secondary" data-edit-standing-order-cancel>Cancel</button>
+                <button type="button" class="button secondary" data-edit-autonomous-goal-cancel>Cancel</button>
                 <button type="submit" class="button">Save</button>
             </div>
         </form>
@@ -634,33 +634,33 @@
             for (const dialog of document.querySelectorAll("dialog")) {
                 dialog.addEventListener("close", syncModalScrollLock);
             }
-            const editOrderDialog = document.querySelector("[data-edit-standing-order-dialog]");
-            const editOrderForm = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-form]");
-            const editOrderTitle = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-title]");
-            const editOrderGoal = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-goal]");
-            const editOrderAmbition = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-ambition]");
-            const editOrderAutonomy = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-autonomy]");
-            const editOrderAutoQa = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-auto-qa]");
-            const editOrderAutoProposal = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-auto-proposal]");
-            const editOrderConfidence = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-confidence-threshold]");
-            const editOrderWebSearch = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-web-search-mode]");
-            const editOrderAutoMerge = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-auto-merge]");
-            const editOrderAutoMergeBranch = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-auto-merge-branch]");
-            const editOrderCancel = editOrderDialog && editOrderDialog.querySelector("[data-edit-standing-order-cancel]");
-            const createOrderDialog = document.querySelector("[data-create-standing-order-dialog]");
-            const createOrderOpen = document.querySelector("[data-create-standing-order-open]");
-            const createOrderTitle = createOrderDialog && createOrderDialog.querySelector("[data-create-standing-order-title]");
-            const createOrderCancel = createOrderDialog && createOrderDialog.querySelector("[data-create-standing-order-cancel]");
+            const editGoalDialog = document.querySelector("[data-edit-autonomous-goal-dialog]");
+            const editGoalForm = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-form]");
+            const editGoalTitle = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-title]");
+            const editGoalGoal = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-goal]");
+            const editGoalAmbition = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-ambition]");
+            const editGoalAutonomy = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-autonomy]");
+            const editGoalAutoQa = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-auto-qa]");
+            const editGoalAutoProposal = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-auto-proposal]");
+            const editGoalConfidence = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-confidence-threshold]");
+            const editGoalWebSearch = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-web-search-mode]");
+            const editGoalAutoMerge = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-auto-merge]");
+            const editGoalAutoMergeBranch = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-auto-merge-branch]");
+            const editGoalCancel = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-cancel]");
+            const createGoalDialog = document.querySelector("[data-create-autonomous-goal-dialog]");
+            const createGoalOpen = document.querySelector("[data-create-autonomous-goal-open]");
+            const createGoalTitle = createGoalDialog && createGoalDialog.querySelector("[data-create-autonomous-goal-title]");
+            const createGoalCancel = createGoalDialog && createGoalDialog.querySelector("[data-create-autonomous-goal-cancel]");
             const pageMenu = document.querySelector("[data-page-menu]");
             const contextMenus = Array.from(document.querySelectorAll("[data-context-menu]"));
             function selectedAutoQaSupported(autonomySelect) {
                 const option = autonomySelect && autonomySelect.selectedOptions && autonomySelect.selectedOptions[0];
                 return Boolean(option && option.dataset.autoQaSupported === "true");
             }
-            function syncStandingOrderAutoQa(form) {
+            function syncAutonomousGoalAutoQa(form) {
                 if (!form) return;
                 const autonomySelect = form.querySelector("select[name='autonomy']");
-                const autoQa = form.querySelector("[data-standing-order-auto-qa]");
+                const autoQa = form.querySelector("[data-autonomous-goal-auto-qa]");
                 if (!autonomySelect || !autoQa) return;
                 const supported = selectedAutoQaSupported(autonomySelect);
                 autoQa.disabled = !supported;
@@ -710,19 +710,19 @@
                 if (!openMenu) return;
                 closeContextMenu(openMenu, true);
             });
-            if (createOrderOpen) {
-                createOrderOpen.addEventListener("click", () => {
+            if (createGoalOpen) {
+                createGoalOpen.addEventListener("click", () => {
                     closePageMenu();
-                    showDialog(createOrderDialog);
-                    if (createOrderTitle) createOrderTitle.focus();
+                    showDialog(createGoalDialog);
+                    if (createGoalTitle) createGoalTitle.focus();
                 });
             }
-            if (createOrderCancel) createOrderCancel.addEventListener("click", () => hideDialog(createOrderDialog));
+            if (createGoalCancel) createGoalCancel.addEventListener("click", () => hideDialog(createGoalDialog));
             function syncAutoMergeControls(form) {
                 if (!form) return;
-                const autoQa = form.querySelector("[data-standing-order-auto-qa]");
-                const autoMerge = form.querySelector("[data-standing-order-auto-merge]");
-                const branch = form.querySelector("[data-standing-order-auto-merge-branch]");
+                const autoQa = form.querySelector("[data-autonomous-goal-auto-qa]");
+                const autoMerge = form.querySelector("[data-autonomous-goal-auto-merge]");
+                const branch = form.querySelector("[data-autonomous-goal-auto-merge-branch]");
                 if (!autoQa || !autoMerge || !branch) return;
                 const autoQaEnabled = autoQa.checked && !autoQa.disabled;
                 autoMerge.disabled = !autoQaEnabled;
@@ -731,46 +731,46 @@
                 branch.required = autoQaEnabled && autoMerge.checked;
                 if (!autoMerge.checked) branch.value = "";
             }
-            function syncStandingOrderAutomation(form) {
-                syncStandingOrderAutoQa(form);
+            function syncAutonomousGoalAutomation(form) {
+                syncAutonomousGoalAutoQa(form);
                 syncAutoMergeControls(form);
             }
-            for (const form of document.querySelectorAll("[data-standing-order-create-form], [data-edit-standing-order-form]")) {
-                const autonomy = form.querySelector("[data-standing-order-autonomy]");
-                const autoQa = form.querySelector("[data-standing-order-auto-qa]");
-                const autoMerge = form.querySelector("[data-standing-order-auto-merge]");
-                if (autonomy) autonomy.addEventListener("change", () => syncStandingOrderAutomation(form));
+            for (const form of document.querySelectorAll("[data-autonomous-goal-create-form], [data-edit-autonomous-goal-form]")) {
+                const autonomy = form.querySelector("[data-autonomous-goal-autonomy]");
+                const autoQa = form.querySelector("[data-autonomous-goal-auto-qa]");
+                const autoMerge = form.querySelector("[data-autonomous-goal-auto-merge]");
+                if (autonomy) autonomy.addEventListener("change", () => syncAutonomousGoalAutomation(form));
                 if (autoQa) autoQa.addEventListener("change", () => syncAutoMergeControls(form));
                 if (autoMerge) autoMerge.addEventListener("change", () => syncAutoMergeControls(form));
-                syncStandingOrderAutomation(form);
+                syncAutonomousGoalAutomation(form);
             }
-            for (const button of document.querySelectorAll("[data-standing-order-edit]")) {
+            for (const button of document.querySelectorAll("[data-autonomous-goal-edit]")) {
                 button.addEventListener("click", () => {
-                    if (!editOrderForm) return;
+                    if (!editGoalForm) return;
                     closeContextMenus();
-                    editOrderForm.action = button.dataset.editUrl || "";
-                    if (editOrderTitle) editOrderTitle.value = button.dataset.title || "";
-                    if (editOrderGoal) editOrderGoal.value = button.dataset.goal || "";
-                    if (editOrderAmbition) editOrderAmbition.value = button.dataset.ambition || "";
-                    if (editOrderAutonomy) editOrderAutonomy.value = button.dataset.autonomy || "";
-                    if (editOrderAutoQa) {
-                        editOrderAutoQa.checked = button.dataset.autoQa === "true";
+                    editGoalForm.action = button.dataset.editUrl || "";
+                    if (editGoalTitle) editGoalTitle.value = button.dataset.title || "";
+                    if (editGoalGoal) editGoalGoal.value = button.dataset.goal || "";
+                    if (editGoalAmbition) editGoalAmbition.value = button.dataset.ambition || "";
+                    if (editGoalAutonomy) editGoalAutonomy.value = button.dataset.autonomy || "";
+                    if (editGoalAutoQa) {
+                        editGoalAutoQa.checked = button.dataset.autoQa === "true";
                     }
-                    syncStandingOrderAutoQa(editOrderForm);
-                    if (editOrderAutoProposal) editOrderAutoProposal.checked = button.dataset.autoProposalEnabled === "true";
-                    if (editOrderConfidence) editOrderConfidence.value = button.dataset.confidenceThreshold || "";
-                    if (editOrderWebSearch) editOrderWebSearch.value = button.dataset.webSearchMode || "";
-                    if (editOrderAutoMerge) editOrderAutoMerge.checked = button.dataset.autoMergeToLocalBranch === "true";
-                    if (editOrderAutoMergeBranch) editOrderAutoMergeBranch.value = button.dataset.autoMergeBranch || "";
-                    syncAutoMergeControls(editOrderForm);
-                    showDialog(editOrderDialog);
-                    if (editOrderTitle) editOrderTitle.focus();
+                    syncAutonomousGoalAutoQa(editGoalForm);
+                    if (editGoalAutoProposal) editGoalAutoProposal.checked = button.dataset.autoProposalEnabled === "true";
+                    if (editGoalConfidence) editGoalConfidence.value = button.dataset.confidenceThreshold || "";
+                    if (editGoalWebSearch) editGoalWebSearch.value = button.dataset.webSearchMode || "";
+                    if (editGoalAutoMerge) editGoalAutoMerge.checked = button.dataset.autoMergeToLocalBranch === "true";
+                    if (editGoalAutoMergeBranch) editGoalAutoMergeBranch.value = button.dataset.autoMergeBranch || "";
+                    syncAutoMergeControls(editGoalForm);
+                    showDialog(editGoalDialog);
+                    if (editGoalTitle) editGoalTitle.focus();
                 });
             }
-            if (editOrderAutonomy) {
-                editOrderAutonomy.addEventListener("change", () => syncStandingOrderAutomation(editOrderForm));
+            if (editGoalAutonomy) {
+                editGoalAutonomy.addEventListener("change", () => syncAutonomousGoalAutomation(editGoalForm));
             }
-            if (editOrderCancel) editOrderCancel.addEventListener("click", () => hideDialog(editOrderDialog));
+            if (editGoalCancel) editGoalCancel.addEventListener("click", () => hideDialog(editGoalDialog));
             {% include "_primary_nav_script.html" %}
         })();
     </script>

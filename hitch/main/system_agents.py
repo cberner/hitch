@@ -26,12 +26,12 @@ from hitch.main.local_merges import (
     merge_worktree_diff_to_branch,
 )
 from hitch.main.models import (
+    AutonomousGoal,
+    AutonomousGoalMemory,
     CodexInstance,
     Project,
     ProposedSession,
     SessionMetadata,
-    StandingOrder,
-    StandingOrderMemory,
     SystemAgentRun,
     SystemWorkflow,
     UserInputRequest,
@@ -50,8 +50,10 @@ logger = logging.getLogger(__name__)
 PR_QA_AGENT_KIND = "pr_qa"
 PR_FOLLOWUP_MONITOR_AGENT_KIND = "pr_followup_monitor"
 PR_QA_PANEL_SYNTHESIZER_AGENT_KIND = "pr_qa_panel_synthesizer"
-STANDING_ORDER_AGENT_KIND = SystemWorkflow.KIND_STANDING_ORDER_RUN
-STANDING_ORDER_JUDGE_AGENT_KIND = "standing_order_judge"
+AUTONOMOUS_GOAL_AGENT_KIND = SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN
+AUTONOMOUS_GOAL_JUDGE_AGENT_KIND = "autonomous_goal_judge"
+AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY = "autonomous_goal_autonomy"
+LEGACY_AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY = "standing_order_autonomy"
 SPEC_CRITIC_WORKFLOW_KIND = "spec_critic"
 SPEC_REQUIREMENTS_AGENT_KIND = "spec_critic_requirements"
 SPEC_RISK_AGENT_KIND = "spec_critic_risks"
@@ -60,10 +62,10 @@ SPEC_SYNTHESIZER_AGENT_KIND = "spec_critic_synthesizer"
 QA_DISPLAY_AUTHOR = "QA agent"
 PR_MONITOR_DISPLAY_AUTHOR = "PR monitor"
 QA_PANEL_DISPLAY_AUTHOR = "QA panel"
-STANDING_ORDER_DISPLAY_AUTHOR = "Standing order agent"
-STANDING_ORDER_JUDGE_DISPLAY_AUTHOR = "Standing order judge"
-STANDING_ORDER_AGENT_PROMPT_TITLE = session_index.STANDING_ORDER_AGENT_PROMPT_TITLE
-STANDING_ORDER_JUDGE_PROMPT_TITLE = session_index.STANDING_ORDER_JUDGE_PROMPT_TITLE
+AUTONOMOUS_GOAL_DISPLAY_AUTHOR = "Autonomous goal agent"
+AUTONOMOUS_GOAL_JUDGE_DISPLAY_AUTHOR = "Autonomous goal judge"
+AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE
+AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE
 SPEC_CRITIC_DISPLAY_AUTHOR = "Spec Critic"
 PR_SLASH_DISPLAY_PROMPT = (
     "Rebase on master, clean it up, and then open a PR"
@@ -78,7 +80,7 @@ SYSTEM_AGENT_APPROVAL_MODE = "auto_review"
 # Auto-QA starts without an explicit user action; do not launch hidden QA
 # agents when the source turn requires approvals that hidden threads cannot surface.
 AUTO_QA_BLOCKED_APPROVAL_MODES = frozenset({"deny_all", "prompt_user"})
-STANDING_ORDER_IMPLEMENTATION_SANDBOX_POLICY = "workspaceWrite"
+AUTONOMOUS_GOAL_IMPLEMENTATION_SANDBOX_POLICY = "workspaceWrite"
 QA_WORKFLOW_MAX_ITERATIONS = 10
 PR_QA_WORKFLOW_MAX_ITERATIONS = QA_WORKFLOW_MAX_ITERATIONS + 3
 STEP_QA_RUNNING = "qa_running"
@@ -93,11 +95,11 @@ STEP_PR_FEEDBACK_RUNNING = "pr_feedback_running"
 STEP_PR_READY = "pr_ready"
 STEP_PR_CLOSED = "pr_closed"
 STEP_LOCAL_BRANCH_MERGED = "local_branch_merged"
-STEP_STANDING_ORDER_CANDIDATE_RUNNING = "standing_order_candidate_running"
-STEP_STANDING_ORDER_JUDGE_RUNNING = "standing_order_judge_running"
-STEP_STANDING_ORDER_PROPOSED = "standing_order_proposed"
-STEP_STANDING_ORDER_DRAFT_STARTED = "standing_order_draft_started"
-STEP_STANDING_ORDER_SKIPPED = "standing_order_skipped"
+STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING = "autonomous_goal_candidate_running"
+STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING = "autonomous_goal_judge_running"
+STEP_AUTONOMOUS_GOAL_PROPOSED = "autonomous_goal_proposed"
+STEP_AUTONOMOUS_GOAL_DRAFT_STARTED = "autonomous_goal_draft_started"
+STEP_AUTONOMOUS_GOAL_SKIPPED = "autonomous_goal_skipped"
 STEP_SPEC_CRITIC_ANALYZING = "spec_critic_analyzing"
 STEP_SPEC_CRITIC_CLARIFYING = "spec_critic_clarifying"
 STEP_SPEC_CRITIC_SYNTHESIZING = "spec_critic_synthesizing"
@@ -105,8 +107,8 @@ STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED = "spec_critic_implementation_spawned"
 SPEC_CRITIC_CLARIFICATION_METHOD = "hitch/spec_critic/clarification"
 
 _AUTO_PROPOSAL_UNKNOWN_DEFAULT_BRANCH_SHA = "__unknown__"
-_STANDING_ORDER_USE_WORKTREES_STATE_KEY = "use_worktrees"
-_STANDING_ORDER_SESSION_CWD_STATE_KEY = "session_cwd"
+_AUTONOMOUS_GOAL_USE_WORKTREES_STATE_KEY = "use_worktrees"
+_AUTONOMOUS_GOAL_SESSION_CWD_STATE_KEY = "session_cwd"
 _QA_DESIGN_SYNTHESIS_STATE_KEY = "qa_design_synthesis_gate"
 _QA_DESIGN_SYNTHESIS_MIN_CATEGORY_OVERLAP = 2
 _QA_DESIGN_SYNTHESIS_RECENT_RUN_LIMIT = 50
@@ -287,18 +289,18 @@ _QA_DESIGN_KEYWORDS_BY_CATEGORY: dict[str, tuple[str, ...]] = {
         "ui",
     ),
 }
-_STANDING_ORDER_INLINE_HISTORY_CHARS = 10_000
-_STANDING_ORDER_MEMORY_CONTEXT_CHARS = 10_000
-_STANDING_ORDER_MEMORY_MAX_ROWS = 200
-_STANDING_ORDER_MEMORY_COMPACT_RECENT_COUNT = 8
-_STANDING_ORDER_MEMORY_FULL_SUMMARY_CHARS = 700
-_STANDING_ORDER_MEMORY_COMPACT_SUMMARY_CHARS = 180
-_STANDING_ORDER_MEMORY_FILE_LIMIT = 80
-_STANDING_ORDER_TITLE_MAX_LEN = 200
+_AUTONOMOUS_GOAL_INLINE_HISTORY_CHARS = 10_000
+_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS = 10_000
+_AUTONOMOUS_GOAL_MEMORY_MAX_ROWS = 200
+_AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT = 8
+_AUTONOMOUS_GOAL_MEMORY_FULL_SUMMARY_CHARS = 700
+_AUTONOMOUS_GOAL_MEMORY_COMPACT_SUMMARY_CHARS = 180
+_AUTONOMOUS_GOAL_MEMORY_FILE_LIMIT = 80
+_AUTONOMOUS_GOAL_TITLE_MAX_LEN = 200
 _CONFIDENCE_RANK = {
-    StandingOrder.CONFIDENCE_MEDIUM: 1,
-    StandingOrder.CONFIDENCE_HIGH: 2,
-    StandingOrder.CONFIDENCE_VERY_HIGH: 3,
+    AutonomousGoal.CONFIDENCE_MEDIUM: 1,
+    AutonomousGoal.CONFIDENCE_HIGH: 2,
+    AutonomousGoal.CONFIDENCE_VERY_HIGH: 3,
 }
 _SPEC_CRITIC_ANALYSIS_AGENT_KINDS = (
     SPEC_REQUIREMENTS_AGENT_KIND,
@@ -448,7 +450,7 @@ _QA_PANEL_LANE_OUTPUT_SCHEMA: dict[str, Any] = {
     },
 }
 
-_STANDING_ORDER_CANDIDATE_OUTPUT_SCHEMA: dict[str, Any] = {
+_AUTONOMOUS_GOAL_CANDIDATE_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
@@ -482,7 +484,7 @@ _STANDING_ORDER_CANDIDATE_OUTPUT_SCHEMA: dict[str, Any] = {
     },
 }
 
-_STANDING_ORDER_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
+_AUTONOMOUS_GOAL_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "required": ["confidence", "summary", "rationale"],
@@ -490,9 +492,9 @@ _STANDING_ORDER_JUDGE_OUTPUT_SCHEMA: dict[str, Any] = {
         "confidence": {
             "type": "string",
             "enum": [
-                StandingOrder.CONFIDENCE_MEDIUM,
-                StandingOrder.CONFIDENCE_HIGH,
-                StandingOrder.CONFIDENCE_VERY_HIGH,
+                AutonomousGoal.CONFIDENCE_MEDIUM,
+                AutonomousGoal.CONFIDENCE_HIGH,
+                AutonomousGoal.CONFIDENCE_VERY_HIGH,
             ],
         },
         "summary": {"type": "string"},
@@ -758,19 +760,19 @@ def start_pr_qa_workflow(
 
 
 def maybe_start_auto_proposal_workflows(*, project: Project | None = None) -> int:
-    orders = StandingOrder.objects.select_related("project").filter(
+    goals = AutonomousGoal.objects.select_related("project").filter(
         auto_proposal_enabled=True
     )
     if project is not None:
-        orders = orders.filter(project=project)
-    if orders.exists() and _auto_proposals_paused_by_usage_quota():
+        goals = goals.filter(project=project)
+    if goals.exists() and _auto_proposals_paused_by_usage_quota():
         return 0
 
     started = 0
-    for standing_order_id in orders.order_by("created_at", "id").values_list(
+    for autonomous_goal_id in goals.order_by("created_at", "id").values_list(
         "id", flat=True
     ):
-        if _maybe_start_auto_proposal_workflow(standing_order_id):
+        if _maybe_start_auto_proposal_workflow(autonomous_goal_id):
             started += 1
     return started
 
@@ -833,48 +835,48 @@ def _rate_limit_window_below_auto_proposal_quota(
     return remaining_percent < pause_threshold
 
 
-def _maybe_start_auto_proposal_workflow(standing_order_id: int) -> bool:
+def _maybe_start_auto_proposal_workflow(autonomous_goal_id: int) -> bool:
     with transaction.atomic():
-        standing_order = (
-            StandingOrder.objects.select_related("project")
+        autonomous_goal = (
+            AutonomousGoal.objects.select_related("project")
             .select_for_update()
-            .get(pk=standing_order_id)
+            .get(pk=autonomous_goal_id)
         )
-        Project.objects.select_for_update().get(pk=standing_order.project_id)
-        if not standing_order.auto_proposal_enabled:
+        Project.objects.select_for_update().get(pk=autonomous_goal.project_id)
+        if not autonomous_goal.auto_proposal_enabled:
             return False
-        default_branch_sha = _standing_order_auto_proposal_start_sha(standing_order)
+        default_branch_sha = _autonomous_goal_auto_proposal_start_sha(autonomous_goal)
         if default_branch_sha is None:
             return False
-        workflow, created = _create_standing_order_workflow_record(
-            standing_order=standing_order,
+        workflow, created = _create_autonomous_goal_workflow_record(
+            autonomous_goal=autonomous_goal,
             auto_proposal=True,
             default_branch_sha=default_branch_sha,
             use_worktrees=False,
         )
     if created:
-        _spawn_standing_order_candidate_or_block(workflow, standing_order)
+        _spawn_autonomous_goal_candidate_or_block(workflow, autonomous_goal)
     return workflow.status == SystemWorkflow.STATUS_RUNNING
 
 
-def _standing_order_auto_proposal_start_sha(
-    standing_order: StandingOrder,
+def _autonomous_goal_auto_proposal_start_sha(
+    autonomous_goal: AutonomousGoal,
 ) -> str | None:
-    if _standing_order_pending_proposal_exists(standing_order):
+    if _autonomous_goal_pending_proposal_exists(autonomous_goal):
         return None
-    if _standing_order_unresolved_failure_notice_exists(standing_order):
+    if _autonomous_goal_unresolved_failure_notice_exists(autonomous_goal):
         return None
-    if _standing_order_in_flight_automation_exists(standing_order):
+    if _autonomous_goal_in_flight_automation_exists(autonomous_goal):
         return None
-    if _project_running_auto_proposal_workflow_exists(standing_order):
+    if _project_running_auto_proposal_workflow_exists(autonomous_goal):
         return None
-    if _standing_order_running_workflow_exists(standing_order):
+    if _autonomous_goal_running_workflow_exists(autonomous_goal):
         return None
 
-    current_sha = default_branch_checkout_commit_hash(standing_order.project.repo_path)
+    current_sha = default_branch_checkout_commit_hash(autonomous_goal.project.repo_path)
     if not current_sha:
         return None
-    last_no_proposal_sha = standing_order.auto_proposal_last_no_proposal_sha.strip()
+    last_no_proposal_sha = autonomous_goal.auto_proposal_last_no_proposal_sha.strip()
     if not last_no_proposal_sha:
         return current_sha
     if current_sha == last_no_proposal_sha:
@@ -882,30 +884,35 @@ def _standing_order_auto_proposal_start_sha(
     return current_sha
 
 
-def _standing_order_pending_proposal_exists(standing_order: StandingOrder) -> bool:
-    return standing_order.proposed_sessions.filter(
+def _autonomous_goal_pending_proposal_exists(autonomous_goal: AutonomousGoal) -> bool:
+    return autonomous_goal.proposed_sessions.filter(
         inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL,
         outcome_status=ProposedSession.OUTCOME_UNSET,
     ).exists()
 
 
-def _standing_order_unresolved_failure_notice_exists(
-    standing_order: StandingOrder,
+def _autonomous_goal_unresolved_failure_notice_exists(
+    autonomous_goal: AutonomousGoal,
 ) -> bool:
-    return standing_order.proposed_sessions.filter(
+    return autonomous_goal.proposed_sessions.filter(
         inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
         outcome_status=ProposedSession.OUTCOME_UNSET,
         outcome_metadata__automation_status="failed",
     ).exists()
 
 
-def _standing_order_in_flight_automation_exists(standing_order: StandingOrder) -> bool:
+def _autonomous_goal_in_flight_automation_exists(autonomous_goal: AutonomousGoal) -> bool:
     accepted_thread_ids = (
         ProposedSession.objects.filter(
-            project=standing_order.project,
+            project=autonomous_goal.project,
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
-            outcome_metadata__accepted_by="standing_order_autonomy",
             accepted_session__isnull=False,
+        )
+        .filter(
+            models.Q(outcome_metadata__accepted_by=AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY)
+            | models.Q(
+                outcome_metadata__accepted_by=LEGACY_AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY
+            )
         )
         .exclude(accepted_session__thread_id="")
         .values_list("accepted_session__thread_id", flat=True)
@@ -923,81 +930,81 @@ def _standing_order_in_flight_automation_exists(standing_order: StandingOrder) -
 
 
 def _project_running_auto_proposal_workflow_exists(
-    standing_order: StandingOrder,
+    autonomous_goal: AutonomousGoal,
 ) -> bool:
     return SystemWorkflow.objects.filter(
-        kind=STANDING_ORDER_AGENT_KIND,
-        cwd=standing_order.project.repo_path,
+        kind=AUTONOMOUS_GOAL_AGENT_KIND,
+        cwd=autonomous_goal.project.repo_path,
         status=SystemWorkflow.STATUS_RUNNING,
         state__auto_proposal=True,
     ).exists()
 
 
-def _standing_order_running_workflow_exists(standing_order: StandingOrder) -> bool:
+def _autonomous_goal_running_workflow_exists(autonomous_goal: AutonomousGoal) -> bool:
     return SystemWorkflow.objects.filter(
-        kind=STANDING_ORDER_AGENT_KIND,
-        main_thread_id=_standing_order_main_thread_id(standing_order.pk),
+        kind=AUTONOMOUS_GOAL_AGENT_KIND,
+        main_thread_id=_autonomous_goal_main_thread_id(autonomous_goal.pk),
         status=SystemWorkflow.STATUS_RUNNING,
     ).exists()
 
 
-def start_standing_order_workflow(
+def start_autonomous_goal_workflow(
     *,
-    standing_order: StandingOrder,
+    autonomous_goal: AutonomousGoal,
     auto_proposal: bool = False,
     default_branch_sha: str | None = None,
     use_worktrees: bool = False,
 ) -> SystemWorkflow:
-    standing_order = (
-        StandingOrder.objects.select_related("project")
-        .filter(pk=standing_order.pk)
+    autonomous_goal = (
+        AutonomousGoal.objects.select_related("project")
+        .filter(pk=autonomous_goal.pk)
         .get()
     )
-    workflow, created = _create_standing_order_workflow_record(
-        standing_order=standing_order,
+    workflow, created = _create_autonomous_goal_workflow_record(
+        autonomous_goal=autonomous_goal,
         auto_proposal=auto_proposal,
         default_branch_sha=default_branch_sha,
         use_worktrees=use_worktrees,
     )
     if created:
-        _spawn_standing_order_candidate_or_block(workflow, standing_order)
+        _spawn_autonomous_goal_candidate_or_block(workflow, autonomous_goal)
     return workflow
 
 
-def _create_standing_order_workflow_record(
+def _create_autonomous_goal_workflow_record(
     *,
-    standing_order: StandingOrder,
+    autonomous_goal: AutonomousGoal,
     auto_proposal: bool,
     default_branch_sha: str | None,
     use_worktrees: bool,
 ) -> tuple[SystemWorkflow, bool]:
-    main_thread_id = _standing_order_main_thread_id(standing_order.pk)
+    main_thread_id = _autonomous_goal_main_thread_id(autonomous_goal.pk)
     state: dict[str, Any] = {
-        "standing_order_id": standing_order.pk,
+        "autonomous_goal_id": autonomous_goal.pk,
         "auto_proposal": auto_proposal,
-        _STANDING_ORDER_USE_WORKTREES_STATE_KEY: use_worktrees,
-        "standing_order_updated_at": standing_order.updated_at.isoformat(),
-        "web_search_mode": standing_order.web_search_mode,
+        _AUTONOMOUS_GOAL_USE_WORKTREES_STATE_KEY: use_worktrees,
+        "autonomous_goal_updated_at": autonomous_goal.updated_at.isoformat(),
+        "web_search_mode": autonomous_goal.web_search_mode,
     }
     if auto_proposal:
         default_branch_sha = default_branch_sha or (
-            default_branch_checkout_commit_hash(standing_order.project.repo_path)
+            default_branch_checkout_commit_hash(autonomous_goal.project.repo_path)
             or _AUTO_PROPOSAL_UNKNOWN_DEFAULT_BRANCH_SHA
         )
         state["default_branch_sha"] = default_branch_sha
     try:
         with transaction.atomic():
             workflow = SystemWorkflow.objects.create(
-                kind=STANDING_ORDER_AGENT_KIND,
+                kind=AUTONOMOUS_GOAL_AGENT_KIND,
                 main_thread_id=main_thread_id,
-                cwd=standing_order.project.repo_path,
+                cwd=autonomous_goal.project.repo_path,
                 status=SystemWorkflow.STATUS_RUNNING,
-                step=STEP_STANDING_ORDER_CANDIDATE_RUNNING,
+                step=STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
                 state=state,
             )
     except IntegrityError:
         existing_workflow = SystemWorkflow.objects.filter(
-            kind=STANDING_ORDER_AGENT_KIND,
+            kind=AUTONOMOUS_GOAL_AGENT_KIND,
             main_thread_id=main_thread_id,
             status=SystemWorkflow.STATUS_RUNNING,
         ).first()
@@ -1008,16 +1015,16 @@ def _create_standing_order_workflow_record(
     return workflow, True
 
 
-def _spawn_standing_order_candidate_or_block(
-    workflow: SystemWorkflow, standing_order: StandingOrder
+def _spawn_autonomous_goal_candidate_or_block(
+    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
 ) -> None:
     try:
-        _spawn_standing_order_candidate_run(workflow, standing_order)
+        _spawn_autonomous_goal_candidate_run(workflow, autonomous_goal)
     except Exception as exc:
-        _block_standing_order_workflow(
+        _block_autonomous_goal_workflow(
             workflow,
-            standing_order,
-            f"failed to start standing order agent: {exc!r}",
+            autonomous_goal,
+            f"failed to start autonomous goal agent: {exc!r}",
         )
 
 
@@ -1355,8 +1362,8 @@ def _handle_system_agent_finished(instance: CodexInstance) -> bool:
     if run.status in (SystemAgentRun.STATUS_COMPLETED, SystemAgentRun.STATUS_FAILED):
         return True
     workflow = run.workflow
-    if workflow.kind == STANDING_ORDER_AGENT_KIND:
-        _handle_standing_order_agent_finished(instance, run, workflow)
+    if workflow.kind == AUTONOMOUS_GOAL_AGENT_KIND:
+        _handle_autonomous_goal_agent_finished(instance, run, workflow)
         return True
     if (
         workflow.kind == demo.DEMO_WORKFLOW_KIND
@@ -2049,39 +2056,39 @@ def _fail_unsupported_system_agent_run(
     run.save(update_fields=["status", "error", "updated_at"])
 
 
-def _handle_standing_order_agent_finished(
+def _handle_autonomous_goal_agent_finished(
     instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
 ) -> None:
     if workflow.status != SystemWorkflow.STATUS_RUNNING:
         return
-    standing_order = (
-        StandingOrder.objects.select_related("project")
-        .filter(pk=_state_int(workflow, "standing_order_id"))
+    autonomous_goal = (
+        AutonomousGoal.objects.select_related("project")
+        .filter(pk=_state_int(workflow, "autonomous_goal_id"))
         .first()
     )
-    if standing_order is None:
+    if autonomous_goal is None:
         _fail_run_and_block_workflow(
             run,
-            "standing order no longer exists",
+            "autonomous goal no longer exists",
             surface_to_thread=False,
         )
         return
     if instance.status != CodexInstance.STATUS_COMPLETED:
-        _fail_standing_order_run_and_block_workflow(
+        _fail_autonomous_goal_run_and_block_workflow(
             run,
-            standing_order,
-            f"standing order worker failed: {instance.error}",
+            autonomous_goal,
+            f"autonomous goal worker failed: {instance.error}",
         )
         return
 
     raw_output = _final_agent_text(instance.events_path)
-    if workflow.step == STEP_STANDING_ORDER_CANDIDATE_RUNNING:
-        candidate_output = _parse_standing_order_candidate_output(raw_output)
+    if workflow.step == STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING:
+        candidate_output = _parse_autonomous_goal_candidate_output(raw_output)
         if candidate_output is None:
-            _fail_standing_order_run_and_block_workflow(
+            _fail_autonomous_goal_run_and_block_workflow(
                 run,
-                standing_order,
-                "standing order candidate output was not valid JSON",
+                autonomous_goal,
+                "autonomous goal candidate output was not valid JSON",
                 raw_output,
             )
             return
@@ -2089,15 +2096,15 @@ def _handle_standing_order_agent_finished(
         run.output = candidate_output
         run.raw_output = raw_output
         run.save(update_fields=["status", "output", "raw_output", "updated_at"])
-        _store_standing_order_memory(standing_order, workflow, candidate_output)
+        _store_autonomous_goal_memory(autonomous_goal, workflow, candidate_output)
         if candidate_output["proposal"] is None:
             message = str(candidate_output["message"])
             ProposedSession.objects.create(
-                project=standing_order.project,
-                standing_order=standing_order,
+                project=autonomous_goal.project,
+                autonomous_goal=autonomous_goal,
                 source_workflow=workflow,
-                title=f"No proposal from {standing_order.title}"[
-                    :_STANDING_ORDER_TITLE_MAX_LEN
+                title=f"No proposal from {autonomous_goal.title}"[
+                    :_AUTONOMOUS_GOAL_TITLE_MAX_LEN
                 ],
                 inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
                 summary=message,
@@ -2105,34 +2112,34 @@ def _handle_standing_order_agent_finished(
                     workflow, "candidate_session_id"
                 ),
             )
-            _record_standing_order_no_proposal(standing_order, workflow)
-            workflow.step = STEP_STANDING_ORDER_SKIPPED
+            _record_autonomous_goal_no_proposal(autonomous_goal, workflow)
+            workflow.step = STEP_AUTONOMOUS_GOAL_SKIPPED
             workflow.status = SystemWorkflow.STATUS_COMPLETED
             workflow.state = {**workflow.state, "candidate": candidate_output}
             workflow.save(update_fields=["status", "step", "state", "updated_at"])
             return
         candidate = candidate_output["proposal"]
-        workflow.step = STEP_STANDING_ORDER_JUDGE_RUNNING
+        workflow.step = STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING
         workflow.state = {**workflow.state, "candidate": candidate}
         workflow.save(update_fields=["step", "state", "updated_at"])
         try:
-            _spawn_standing_order_judge_run(workflow, standing_order, candidate)
+            _spawn_autonomous_goal_judge_run(workflow, autonomous_goal, candidate)
         except Exception as exc:
-            _block_standing_order_workflow(
+            _block_autonomous_goal_workflow(
                 workflow,
-                standing_order,
-                f"failed to start standing order judge: {exc!r}",
+                autonomous_goal,
+                f"failed to start autonomous goal judge: {exc!r}",
             )
         return
 
-    if workflow.step != STEP_STANDING_ORDER_JUDGE_RUNNING:
+    if workflow.step != STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING:
         return
-    judgment = _parse_standing_order_judge_output(raw_output)
+    judgment = _parse_autonomous_goal_judge_output(raw_output)
     if judgment is None:
-        _fail_standing_order_run_and_block_workflow(
+        _fail_autonomous_goal_run_and_block_workflow(
             run,
-            standing_order,
-            "standing order judge output was not valid JSON",
+            autonomous_goal,
+            "autonomous goal judge output was not valid JSON",
             raw_output,
         )
         return
@@ -2145,18 +2152,18 @@ def _handle_standing_order_agent_finished(
     if not isinstance(candidate, dict):
         candidate = {}
     if _confidence_meets_threshold(
-        judgment["confidence"], standing_order.confidence_threshold
+        judgment["confidence"], autonomous_goal.confidence_threshold
     ):
         proposal = ProposedSession.objects.create(
-            project=standing_order.project,
-            standing_order=standing_order,
+            project=autonomous_goal.project,
+            autonomous_goal=autonomous_goal,
             source_workflow=workflow,
-            title=str(candidate.get("title", standing_order.title))[
-                :_STANDING_ORDER_TITLE_MAX_LEN
+            title=str(candidate.get("title", autonomous_goal.title))[
+                :_AUTONOMOUS_GOAL_TITLE_MAX_LEN
             ],
             summary=judgment["summary"],
-            prompt=_standing_order_proposed_session_prompt(
-                standing_order, candidate, judgment
+            prompt=_autonomous_goal_proposed_session_prompt(
+                autonomous_goal, candidate, judgment
             ),
             confidence=judgment["confidence"],
             relevant_files=_string_list(candidate.get("relevant_files")),
@@ -2165,25 +2172,25 @@ def _handle_standing_order_agent_finished(
             ),
             judge_session=_session_metadata_from_state(workflow, "judge_session_id"),
             outcome_metadata={
-                "standing_order_autonomy": standing_order.autonomy,
+                "autonomous_goal_autonomy": autonomous_goal.autonomy,
                 "automation_status": "proposed",
             },
         )
-        _record_standing_order_proposal_created(standing_order)
+        _record_autonomous_goal_proposal_created(autonomous_goal)
         workflow.state = {
             **workflow.state,
             "judgment": judgment,
             "proposal_id": proposal.pk,
-            "autonomy": standing_order.autonomy,
+            "autonomy": autonomous_goal.autonomy,
         }
-        if standing_order.autonomy != StandingOrder.AUTONOMY_PROPOSE_ONLY:
-            automation_error = _standing_order_implementation_automation_error(
-                workflow, standing_order
+        if autonomous_goal.autonomy != AutonomousGoal.AUTONOMY_PROPOSE_ONLY:
+            automation_error = _autonomous_goal_implementation_automation_error(
+                workflow, autonomous_goal
             )
             if automation_error:
                 _record_proposal_automation_failure(
                     proposal,
-                    standing_order.autonomy,
+                    autonomous_goal.autonomy,
                     automation_error,
                 )
                 _block_workflow(
@@ -2193,22 +2200,22 @@ def _handle_standing_order_agent_finished(
                 )
                 return
             try:
-                implementation = _start_standing_order_implementation_session(
-                    workflow, standing_order, proposal
+                implementation = _start_autonomous_goal_implementation_session(
+                    workflow, autonomous_goal, proposal
                 )
             except Exception as exc:
                 _record_proposal_automation_failure(
                     proposal,
-                    standing_order.autonomy,
+                    autonomous_goal.autonomy,
                     f"failed to start implementation session: {exc!r}",
                 )
                 _block_workflow(
                     workflow,
-                    f"failed to start standing order implementation: {exc!r}",
+                    f"failed to start autonomous goal implementation: {exc!r}",
                     surface_to_thread=False,
                 )
                 return
-            workflow.step = STEP_STANDING_ORDER_DRAFT_STARTED
+            workflow.step = STEP_AUTONOMOUS_GOAL_DRAFT_STARTED
             workflow.status = SystemWorkflow.STATUS_COMPLETED
             workflow.state = {
                 **workflow.state,
@@ -2217,10 +2224,10 @@ def _handle_standing_order_agent_finished(
             }
             workflow.save(update_fields=["status", "step", "state", "updated_at"])
             return
-        workflow.step = STEP_STANDING_ORDER_PROPOSED
+        workflow.step = STEP_AUTONOMOUS_GOAL_PROPOSED
     else:
-        _record_standing_order_no_proposal(standing_order, workflow)
-        workflow.step = STEP_STANDING_ORDER_SKIPPED
+        _record_autonomous_goal_no_proposal(autonomous_goal, workflow)
+        workflow.step = STEP_AUTONOMOUS_GOAL_SKIPPED
     workflow.status = SystemWorkflow.STATUS_COMPLETED
     workflow.state = {**workflow.state, "judgment": judgment}
     workflow.save(update_fields=["status", "step", "state", "updated_at"])
@@ -2364,93 +2371,93 @@ def _spawn_qa_panel_synthesizer_run(workflow: SystemWorkflow) -> SystemAgentRun:
     return run
 
 
-def _prepare_standing_order_candidate_cwd(
-    workflow: SystemWorkflow, standing_order: StandingOrder
+def _prepare_autonomous_goal_candidate_cwd(
+    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
 ) -> tuple[str, ManagedWorktree | None]:
-    session_cwd = _standing_order_session_cwd(workflow)
+    session_cwd = _autonomous_goal_session_cwd(workflow)
     if session_cwd != workflow.cwd:
         return session_cwd, None
-    if not _state_bool(workflow, _STANDING_ORDER_USE_WORKTREES_STATE_KEY):
+    if not _state_bool(workflow, _AUTONOMOUS_GOAL_USE_WORKTREES_STATE_KEY):
         return workflow.cwd, None
 
-    auto_merge_branch = _standing_order_auto_merge_branch_for_implementation(
-        standing_order
+    auto_merge_branch = _autonomous_goal_auto_merge_branch_for_implementation(
+        autonomous_goal
     )
     if auto_merge_branch:
         managed_worktree = create_worktree_for_session(
-            standing_order.project.repo_path,
+            autonomous_goal.project.repo_path,
             base_ref=f"refs/heads/{auto_merge_branch}",
             disable_hooks=True,
         )
     else:
-        managed_worktree = create_worktree_for_session(standing_order.project.repo_path)
+        managed_worktree = create_worktree_for_session(autonomous_goal.project.repo_path)
     session_cwd = str(managed_worktree.path)
     workflow.state = {
         **workflow.state,
-        _STANDING_ORDER_SESSION_CWD_STATE_KEY: session_cwd,
+        _AUTONOMOUS_GOAL_SESSION_CWD_STATE_KEY: session_cwd,
     }
     try:
         workflow.save(update_fields=["state", "updated_at"])
     except Exception:
-        _cleanup_new_standing_order_worktree(managed_worktree)
+        _cleanup_new_autonomous_goal_worktree(managed_worktree)
         raise
     return session_cwd, managed_worktree
 
 
-def _standing_order_session_cwd(workflow: SystemWorkflow) -> str:
-    return _state_string(workflow, _STANDING_ORDER_SESSION_CWD_STATE_KEY) or workflow.cwd
+def _autonomous_goal_session_cwd(workflow: SystemWorkflow) -> str:
+    return _state_string(workflow, _AUTONOMOUS_GOAL_SESSION_CWD_STATE_KEY) or workflow.cwd
 
 
-def _standing_order_candidate_allows_code_changes(workflow: SystemWorkflow) -> bool:
-    return _standing_order_session_cwd(workflow) != workflow.cwd
+def _autonomous_goal_candidate_allows_code_changes(workflow: SystemWorkflow) -> bool:
+    return _autonomous_goal_session_cwd(workflow) != workflow.cwd
 
 
-def _cleanup_new_standing_order_worktree(worktree: ManagedWorktree | None) -> None:
+def _cleanup_new_autonomous_goal_worktree(worktree: ManagedWorktree | None) -> None:
     if worktree is None:
         return
     try:
         cleanup_worktree(worktree)
     except WorktreeCleanupError:
         logger.exception(
-            "failed to clean up standing order candidate worktree %s",
+            "failed to clean up autonomous goal candidate worktree %s",
             worktree.path,
         )
 
 
-def _spawn_standing_order_candidate_run(
-    workflow: SystemWorkflow, standing_order: StandingOrder
+def _spawn_autonomous_goal_candidate_run(
+    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
 ) -> SystemAgentRun:
-    session_cwd, managed_worktree = _prepare_standing_order_candidate_cwd(
-        workflow, standing_order
+    session_cwd, managed_worktree = _prepare_autonomous_goal_candidate_cwd(
+        workflow, autonomous_goal
     )
     try:
-        prompt, memory_context = _standing_order_candidate_prompt(
-            workflow, standing_order
+        prompt, memory_context = _autonomous_goal_candidate_prompt(
+            workflow, autonomous_goal
         )
         instance = codex_pool.spawn_new_session(
             cwd=session_cwd,
             prompt=prompt,
             approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
             sandbox_policy=(
-                STANDING_ORDER_IMPLEMENTATION_SANDBOX_POLICY
-                if _standing_order_candidate_allows_code_changes(workflow)
+                AUTONOMOUS_GOAL_IMPLEMENTATION_SANDBOX_POLICY
+                if _autonomous_goal_candidate_allows_code_changes(workflow)
                 else None
             ),
             web_search_mode=_workflow_web_search_mode(workflow),
             thread_source=ThreadSource.subagent,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
-            agent_kind=STANDING_ORDER_AGENT_KIND,
-            display_author=STANDING_ORDER_DISPLAY_AUTHOR,
-            output_schema=_STANDING_ORDER_CANDIDATE_OUTPUT_SCHEMA,
+            agent_kind=AUTONOMOUS_GOAL_AGENT_KIND,
+            display_author=AUTONOMOUS_GOAL_DISPLAY_AUTHOR,
+            output_schema=_AUTONOMOUS_GOAL_CANDIDATE_OUTPUT_SCHEMA,
         )
     except Exception:
-        _cleanup_new_standing_order_worktree(managed_worktree)
+        _cleanup_new_autonomous_goal_worktree(managed_worktree)
         raise
     metadata = session_index.upsert_local_session(
         thread_id=instance.thread_id,
         cwd=session_cwd,
-        project=standing_order.project,
+        project=autonomous_goal.project,
         preview=prompt,
         auto_pr_enabled=False,
         auto_qa_enabled=False,
@@ -2464,12 +2471,12 @@ def _spawn_standing_order_candidate_run(
         instance=instance,
         defaults={
             "workflow": workflow,
-            "agent_kind": STANDING_ORDER_AGENT_KIND,
+            "agent_kind": AUTONOMOUS_GOAL_AGENT_KIND,
             "thread_id": instance.thread_id,
             "status": SystemAgentRun.STATUS_RUNNING,
             "input": {
                 "cwd": session_cwd,
-                "standing_order_id": standing_order.pk,
+                "autonomous_goal_id": autonomous_goal.pk,
                 "memory_count": memory_context.count,
                 "memory_compacted": memory_context.compacted,
             },
@@ -2478,12 +2485,12 @@ def _spawn_standing_order_candidate_run(
     return run
 
 
-def _spawn_standing_order_judge_run(
-    workflow: SystemWorkflow, standing_order: StandingOrder, candidate: dict[str, Any]
+def _spawn_autonomous_goal_judge_run(
+    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal, candidate: dict[str, Any]
 ) -> SystemAgentRun:
-    session_cwd = _standing_order_session_cwd(workflow)
-    prompt, history_files = _standing_order_judge_prompt(
-        workflow, standing_order, candidate
+    session_cwd = _autonomous_goal_session_cwd(workflow)
+    prompt, history_files = _autonomous_goal_judge_prompt(
+        workflow, autonomous_goal, candidate
     )
     if history_files:
         workflow.state = {**workflow.state, "history_files": history_files}
@@ -2496,14 +2503,14 @@ def _spawn_standing_order_judge_run(
         thread_source=ThreadSource.subagent,
         purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
         workflow_id=workflow.pk,
-        agent_kind=STANDING_ORDER_JUDGE_AGENT_KIND,
-        display_author=STANDING_ORDER_JUDGE_DISPLAY_AUTHOR,
-        output_schema=_STANDING_ORDER_JUDGE_OUTPUT_SCHEMA,
+        agent_kind=AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
+        display_author=AUTONOMOUS_GOAL_JUDGE_DISPLAY_AUTHOR,
+        output_schema=_AUTONOMOUS_GOAL_JUDGE_OUTPUT_SCHEMA,
     )
     metadata = session_index.upsert_local_session(
         thread_id=instance.thread_id,
         cwd=session_cwd,
-        project=standing_order.project,
+        project=autonomous_goal.project,
         preview=prompt,
         auto_pr_enabled=False,
         auto_qa_enabled=False,
@@ -2517,12 +2524,12 @@ def _spawn_standing_order_judge_run(
         instance=instance,
         defaults={
             "workflow": workflow,
-            "agent_kind": STANDING_ORDER_JUDGE_AGENT_KIND,
+            "agent_kind": AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
             "thread_id": instance.thread_id,
             "status": SystemAgentRun.STATUS_RUNNING,
             "input": {
                 "cwd": session_cwd,
-                "standing_order_id": standing_order.pk,
+                "autonomous_goal_id": autonomous_goal.pk,
                 "candidate": candidate,
                 "history_files": history_files,
             },
@@ -2663,13 +2670,13 @@ def _spawn_spec_critic_implementation_turn(
     )
 
 
-def _standing_order_implementation_automation_error(
-    workflow: SystemWorkflow, standing_order: StandingOrder
+def _autonomous_goal_implementation_automation_error(
+    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
 ) -> str:
     if workflow.state.get("auto_proposal") is not True:
         return ""
-    if _standing_order_in_flight_automation_exists(standing_order):
-        return "another automated standing order implementation is already running for this project"
+    if _autonomous_goal_in_flight_automation_exists(autonomous_goal):
+        return "another automated autonomous goal implementation is already running for this project"
     expected_sha = _state_string(workflow, "default_branch_sha")
     if not expected_sha:
         return "auto-proposal workflow is missing its default branch snapshot"
@@ -2679,47 +2686,47 @@ def _standing_order_implementation_automation_error(
     return ""
 
 
-def _standing_order_candidate_checkout_cwd(
-    workflow: SystemWorkflow, standing_order: StandingOrder
+def _autonomous_goal_candidate_checkout_cwd(
+    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
 ) -> str:
     candidate_session = _session_metadata_from_state(workflow, "candidate_session_id")
     if candidate_session is None or not candidate_session.cwd:
         return ""
-    if candidate_session.cwd == standing_order.project.repo_path:
+    if candidate_session.cwd == autonomous_goal.project.repo_path:
         return ""
     return candidate_session.cwd
 
 
-def _standing_order_auto_merge_branch_for_implementation(
-    standing_order: StandingOrder,
+def _autonomous_goal_auto_merge_branch_for_implementation(
+    autonomous_goal: AutonomousGoal,
 ) -> str:
-    if standing_order.autonomy == StandingOrder.AUTONOMY_DRAFT_PR:
+    if autonomous_goal.autonomy == AutonomousGoal.AUTONOMY_DRAFT_PR:
         return ""
-    if not standing_order.auto_qa_enabled:
+    if not autonomous_goal.auto_qa_enabled:
         return ""
-    if not standing_order.auto_merge_to_local_branch:
+    if not autonomous_goal.auto_merge_to_local_branch:
         return ""
-    return standing_order.auto_merge_branch.strip()
+    return autonomous_goal.auto_merge_branch.strip()
 
 
-def _start_standing_order_implementation_session(
-    workflow: SystemWorkflow, standing_order: StandingOrder, proposal: ProposedSession
+def _start_autonomous_goal_implementation_session(
+    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal, proposal: ProposedSession
 ) -> SessionMetadata:
-    auto_pr_enabled = standing_order.autonomy == StandingOrder.AUTONOMY_DRAFT_PR
-    auto_qa_enabled = standing_order.auto_qa_enabled and not auto_pr_enabled
-    auto_merge_branch = _standing_order_auto_merge_branch_for_implementation(
-        standing_order
+    auto_pr_enabled = autonomous_goal.autonomy == AutonomousGoal.AUTONOMY_DRAFT_PR
+    auto_qa_enabled = autonomous_goal.auto_qa_enabled and not auto_pr_enabled
+    auto_merge_branch = _autonomous_goal_auto_merge_branch_for_implementation(
+        autonomous_goal
     )
     auto_merge_to_local_branch = bool(auto_merge_branch)
-    candidate_checkout_cwd = _standing_order_candidate_checkout_cwd(
-        workflow, standing_order
+    candidate_checkout_cwd = _autonomous_goal_candidate_checkout_cwd(
+        workflow, autonomous_goal
     )
-    implementation_cwd = candidate_checkout_cwd or standing_order.project.repo_path
+    implementation_cwd = candidate_checkout_cwd or autonomous_goal.project.repo_path
     managed_worktree = None
     if auto_merge_to_local_branch and not candidate_checkout_cwd:
         try:
             managed_worktree = create_worktree_for_session(
-                standing_order.project.repo_path,
+                autonomous_goal.project.repo_path,
                 base_ref=f"refs/heads/{auto_merge_branch}",
                 disable_hooks=True,
             )
@@ -2732,7 +2739,7 @@ def _start_standing_order_implementation_session(
             cwd=implementation_cwd,
             prompt=prompt,
             thread_name=proposal.title,
-            sandbox_policy=STANDING_ORDER_IMPLEMENTATION_SANDBOX_POLICY,
+            sandbox_policy=AUTONOMOUS_GOAL_IMPLEMENTATION_SANDBOX_POLICY,
             approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
             web_search_mode=_workflow_web_search_mode(workflow),
             auto_pr_enabled=auto_pr_enabled,
@@ -2754,7 +2761,7 @@ def _start_standing_order_implementation_session(
     metadata = session_index.upsert_local_session(
         thread_id=instance.thread_id,
         cwd=implementation_cwd,
-        project=standing_order.project,
+        project=autonomous_goal.project,
         name=proposal.title,
         preview=prompt,
         auto_pr_enabled=auto_pr_enabled,
@@ -2765,7 +2772,7 @@ def _start_standing_order_implementation_session(
     _record_proposal_automation_success(
         proposal,
         metadata,
-        autonomy=standing_order.autonomy,
+        autonomy=autonomous_goal.autonomy,
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
         auto_merge_to_local_branch=auto_merge_to_local_branch,
@@ -2796,7 +2803,7 @@ def _record_proposal_automation_success(
 ) -> None:
     proposal.outcome_status = ProposedSession.OUTCOME_ACCEPTED
     proposal.accepted_session = implementation
-    note = "Standing order autonomy started an implementation session automatically."
+    note = "Autonomous goal autonomy started an implementation session automatically."
     if auto_merge_to_local_branch:
         note = (
             f"{note} Auto-QA will merge approved changes into "
@@ -2810,8 +2817,8 @@ def _record_proposal_automation_success(
     proposal.outcome_metadata = _proposal_outcome_metadata(
         proposal,
         {
-            "accepted_by": "standing_order_autonomy",
-            "standing_order_autonomy": autonomy,
+            "accepted_by": AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY,
+            "autonomous_goal_autonomy": autonomy,
             "automation_status": "implementation_started",
             "accepted_session_id": implementation.pk,
             "accepted_thread_id": implementation.thread_id,
@@ -2841,7 +2848,7 @@ def _record_proposal_automation_failure(
     proposal.outcome_metadata = _proposal_outcome_metadata(
         proposal,
         {
-            "standing_order_autonomy": autonomy,
+            "autonomous_goal_autonomy": autonomy,
             "automation_status": "implementation_start_failed",
             "automation_error": error,
         },
@@ -2865,31 +2872,31 @@ def _proposal_outcome_metadata(
     return metadata
 
 
-def _record_standing_order_no_proposal(
-    standing_order: StandingOrder, workflow: SystemWorkflow
+def _record_autonomous_goal_no_proposal(
+    autonomous_goal: AutonomousGoal, workflow: SystemWorkflow
 ) -> None:
     if workflow.state.get("auto_proposal") is not True:
         return
     sha = _state_string(workflow, "default_branch_sha")
     if not sha:
         return
-    filters: dict[str, Any] = {"pk": standing_order.pk}
-    snapshot = _state_string(workflow, "standing_order_updated_at")
+    filters: dict[str, Any] = {"pk": autonomous_goal.pk}
+    snapshot = _state_string(workflow, "autonomous_goal_updated_at")
     if snapshot:
         snapshot_datetime = parse_datetime(snapshot)
         if snapshot_datetime is None:
             return
         filters["updated_at"] = snapshot_datetime
-    StandingOrder.objects.filter(**filters).update(
+    AutonomousGoal.objects.filter(**filters).update(
         auto_proposal_last_no_proposal_sha=sha,
         updated_at=timezone.now(),
     )
 
 
-def _record_standing_order_proposal_created(standing_order: StandingOrder) -> None:
-    if not standing_order.auto_proposal_last_no_proposal_sha:
+def _record_autonomous_goal_proposal_created(autonomous_goal: AutonomousGoal) -> None:
+    if not autonomous_goal.auto_proposal_last_no_proposal_sha:
         return
-    StandingOrder.objects.filter(pk=standing_order.pk).update(
+    AutonomousGoal.objects.filter(pk=autonomous_goal.pk).update(
         auto_proposal_last_no_proposal_sha="",
         updated_at=timezone.now(),
     )
@@ -3547,32 +3554,32 @@ def _qa_design_synthesis_feedback_prompt(
     )
 
 
-def _standing_order_candidate_prompt(
-    workflow: SystemWorkflow, standing_order: StandingOrder
-) -> tuple[str, _StandingOrderMemoryPromptContext]:
-    ambition = _standing_order_ambition_guidance(standing_order)
-    memory_context = _standing_order_memory_context(standing_order)
-    session_cwd = _standing_order_session_cwd(workflow)
+def _autonomous_goal_candidate_prompt(
+    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
+) -> tuple[str, _AutonomousGoalMemoryPromptContext]:
+    ambition = _autonomous_goal_ambition_guidance(autonomous_goal)
+    memory_context = _autonomous_goal_memory_context(autonomous_goal)
+    session_cwd = _autonomous_goal_session_cwd(workflow)
     code_change_guidance = (
         "Make code changes when they help turn the proposal into real, "
         "reviewable progress; leave any changes in this session checkout so "
         "the user can accept and continue from them. "
-        if _standing_order_candidate_allows_code_changes(workflow)
+        if _autonomous_goal_candidate_allows_code_changes(workflow)
         else "Do not make code changes. "
     )
     prompt = (
-        "You are Hitch's standing order agent.\n\n"
+        "You are Hitch's autonomous goal agent.\n\n"
         "Thoroughly analyze the codebase and find one way to make "
-        f"{ambition.candidate_progress} toward the standing order goal. "
+        f"{ambition.candidate_progress} toward the autonomous goal. "
         f"{code_change_guidance}"
         "Focus on a concrete session that a user could accept and continue from. "
-        "Use standing-order memory to avoid repeating recently proposed, skipped, "
+        "Use autonomous-goal memory to avoid repeating recently proposed, skipped, "
         "or processed files unless repeating one is clearly the best next step.\n\n"
         f"Repository cwd: {session_cwd}\n"
-        f"Standing order title: {standing_order.title}\n\n"
-        "Standing order goal:\n"
-        f"{standing_order.goal}\n\n"
-        "Standing order memory from previous candidate runs:\n"
+        f"Autonomous goal title: {autonomous_goal.title}\n\n"
+        "Autonomous goal objective:\n"
+        f"{autonomous_goal.goal}\n\n"
+        "Autonomous goal memory from previous candidate runs:\n"
         f"{memory_context.text}\n\n"
         "Return only JSON matching this shape: "
         '{"proposal": {"title": string, "summary": string, "impact": string, '
@@ -3585,7 +3592,7 @@ def _standing_order_candidate_prompt(
         "should explain the proposed session. Impact should describe the likely "
         "user-visible or engineering benefit. Implementation direction should "
         "be specific enough for the user to continue the work in this session. "
-        "The next_steps_summary is durable memory for future standing-order runs: "
+        "The next_steps_summary is durable memory for future autonomous-goal runs: "
         "mention what you inspected or selected, specific files or areas involved, "
         "what you proposed or skipped, and what a future run should try next. "
         "memory_relevant_files should list repo-relative files this run selected, "
@@ -3597,23 +3604,23 @@ def _standing_order_candidate_prompt(
 
 
 @dataclass(frozen=True)
-class _StandingOrderMemoryPromptContext:
+class _AutonomousGoalMemoryPromptContext:
     text: str
     count: int
     compacted: bool
 
 
-def _standing_order_proposed_session_prompt(
-    standing_order: StandingOrder, candidate: dict[str, Any], judgment: dict[str, str]
+def _autonomous_goal_proposed_session_prompt(
+    autonomous_goal: AutonomousGoal, candidate: dict[str, Any], judgment: dict[str, str]
 ) -> str:
     parts = [
         "Go ahead and implement this proposed session.",
         "",
-        f"Standing order: {standing_order.title}",
+        f"Autonomous goal: {autonomous_goal.title}",
     ]
-    if standing_order.goal:
-        parts.extend(["", f"Standing order goal:\n{standing_order.goal}"])
-    title = str(candidate.get("title", standing_order.title)).strip()
+    if autonomous_goal.goal:
+        parts.extend(["", f"Autonomous goal objective:\n{autonomous_goal.goal}"])
+    title = str(candidate.get("title", autonomous_goal.title)).strip()
     if title:
         parts.extend(["", f"Proposed session: {title}"])
     summary = judgment.get("summary", "").strip()
@@ -3634,24 +3641,24 @@ def _standing_order_proposed_session_prompt(
 
 
 @dataclass(frozen=True)
-class _StandingOrderAmbitionGuidance:
+class _AutonomousGoalAmbitionGuidance:
     candidate_progress: str
     candidate_instruction: str
     judge_progress: str
     judge_instruction: str
 
 
-def _standing_order_ambition_guidance(
-    standing_order: StandingOrder,
-) -> _StandingOrderAmbitionGuidance:
-    ambitions = {value for value, _label in StandingOrder.AMBITION_CHOICES}
+def _autonomous_goal_ambition_guidance(
+    autonomous_goal: AutonomousGoal,
+) -> _AutonomousGoalAmbitionGuidance:
+    ambitions = {value for value, _label in AutonomousGoal.AMBITION_CHOICES}
     ambition = (
-        standing_order.ambition
-        if standing_order.ambition in ambitions
-        else StandingOrder.AMBITION_INCREMENTAL
+        autonomous_goal.ambition
+        if autonomous_goal.ambition in ambitions
+        else AutonomousGoal.AMBITION_INCREMENTAL
     )
-    if ambition == StandingOrder.AMBITION_YOLO:
-        return _StandingOrderAmbitionGuidance(
+    if ambition == AutonomousGoal.AMBITION_YOLO:
+        return _AutonomousGoalAmbitionGuidance(
             candidate_progress="bold, high-leverage progress",
             candidate_instruction=(
                 "For YOLO ambition, prefer a substantial session with clear "
@@ -3664,7 +3671,7 @@ def _standing_order_ambition_guidance(
                 "a small cleanup."
             ),
         )
-    return _StandingOrderAmbitionGuidance(
+    return _AutonomousGoalAmbitionGuidance(
         candidate_progress=f"{ambition} progress",
         candidate_instruction="",
         judge_progress=f"{ambition} progress",
@@ -3675,35 +3682,35 @@ def _standing_order_ambition_guidance(
     )
 
 
-def _standing_order_judge_prompt(
-    workflow: SystemWorkflow, standing_order: StandingOrder, candidate: dict[str, Any]
+def _autonomous_goal_judge_prompt(
+    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal, candidate: dict[str, Any]
 ) -> tuple[str, list[str]]:
-    history_sections = _standing_order_history_sections(standing_order)
-    inline_history, overflow_history = _split_standing_order_history(history_sections)
-    history_files = _write_standing_order_history_files(workflow, overflow_history)
+    history_sections = _autonomous_goal_history_sections(autonomous_goal)
+    inline_history, overflow_history = _split_autonomous_goal_history(history_sections)
+    history_files = _write_autonomous_goal_history_files(workflow, overflow_history)
     history_file_text = (
         "\n".join(f"- {path}" for path in history_files) if history_files else "(none)"
     )
-    ambition = _standing_order_ambition_guidance(standing_order)
+    ambition = _autonomous_goal_ambition_guidance(autonomous_goal)
     candidate_text = json.dumps(candidate, indent=2, sort_keys=True)
     candidate_session = _session_metadata_from_state(workflow, "candidate_session_id")
     candidate_thread_id = (
         candidate_session.thread_id if candidate_session is not None else "(unknown)"
     )
-    session_cwd = _standing_order_session_cwd(workflow)
+    session_cwd = _autonomous_goal_session_cwd(workflow)
     return (
-        "You are Hitch's standing order confidence judge.\n\n"
+        "You are Hitch's autonomous goal confidence judge.\n\n"
         "Judge whether the candidate session is likely to make meaningful "
-        f"{ambition.judge_progress} toward the standing order goal. "
-        "Use the standing order's "
+        f"{ambition.judge_progress} toward the autonomous goal. "
+        "Use the autonomous goal's "
         "accepted and rejected proposal history to calibrate your judgment. "
         "Do not reward broad or vague ideas; confidence should reflect whether "
         f"the proposal is concrete and well-scoped. {ambition.judge_instruction}\n\n"
         f"Repository cwd: {session_cwd}\n"
-        f"Standing order title: {standing_order.title}\n"
-        f"Confidence threshold: {standing_order.confidence_threshold}\n\n"
-        "Standing order goal:\n"
-        f"{standing_order.goal}\n\n"
+        f"Autonomous goal title: {autonomous_goal.title}\n"
+        f"Confidence threshold: {autonomous_goal.confidence_threshold}\n\n"
+        "Autonomous goal objective:\n"
+        f"{autonomous_goal.goal}\n\n"
         "Candidate session JSON:\n"
         f"Candidate session ID: {candidate_thread_id}\n"
         f"{candidate_text}\n\n"
@@ -3717,11 +3724,11 @@ def _standing_order_judge_prompt(
         "in the inbox and should explain the expected impact."
     ), history_files
 
-def _store_standing_order_memory(
-    standing_order: StandingOrder,
+def _store_autonomous_goal_memory(
+    autonomous_goal: AutonomousGoal,
     workflow: SystemWorkflow,
     candidate_output: dict[str, Any],
-) -> StandingOrderMemory:
+) -> AutonomousGoalMemory:
     proposal = candidate_output.get("proposal")
     title = ""
     proposal_files: list[str] = []
@@ -3729,7 +3736,7 @@ def _store_standing_order_memory(
         title = str(proposal.get("title") or "").strip()
         proposal_files = _string_list(proposal.get("relevant_files"))
     if not title:
-        title = f"No proposal from {standing_order.title}"
+        title = f"No proposal from {autonomous_goal.title}"
     summary = str(candidate_output.get("next_steps_summary") or "").strip()
     if not summary:
         summary = str(candidate_output.get("message") or "").strip()
@@ -3737,14 +3744,14 @@ def _store_standing_order_memory(
         _string_list(candidate_output.get("memory_relevant_files")),
         proposal_files,
     )
-    memory, _created = StandingOrderMemory.objects.update_or_create(
+    memory, _created = AutonomousGoalMemory.objects.update_or_create(
         source_workflow=workflow,
         defaults={
-            "standing_order": standing_order,
+            "autonomous_goal": autonomous_goal,
             "candidate_session": _session_metadata_from_state(
                 workflow, "candidate_session_id"
             ),
-            "title": title[:_STANDING_ORDER_TITLE_MAX_LEN],
+            "title": title[:_AUTONOMOUS_GOAL_TITLE_MAX_LEN],
             "summary": summary,
             "relevant_files": memory_files,
         },
@@ -3752,45 +3759,45 @@ def _store_standing_order_memory(
     return memory
 
 
-def _standing_order_memory_context(
-    standing_order: StandingOrder,
-) -> _StandingOrderMemoryPromptContext:
-    memory_queryset = standing_order.memories.select_related(
+def _autonomous_goal_memory_context(
+    autonomous_goal: AutonomousGoal,
+) -> _AutonomousGoalMemoryPromptContext:
+    memory_queryset = autonomous_goal.memories.select_related(
         "candidate_session"
     ).order_by("-created_at", "-id")
     total_count = memory_queryset.count()
     if total_count == 0:
-        return _StandingOrderMemoryPromptContext("(none)", 0, False)
+        return _AutonomousGoalMemoryPromptContext("(none)", 0, False)
 
-    memories = list(memory_queryset[:_STANDING_ORDER_MEMORY_MAX_ROWS])
+    memories = list(memory_queryset[:_AUTONOMOUS_GOAL_MEMORY_MAX_ROWS])
     omitted_count = max(total_count - len(memories), 0)
     full_parts: list[str] = []
     used_chars = 0
     full_context_fits = omitted_count == 0
     for memory in memories:
-        section = _format_standing_order_memory(
-            memory, summary_chars=_STANDING_ORDER_MEMORY_FULL_SUMMARY_CHARS
+        section = _format_autonomous_goal_memory(
+            memory, summary_chars=_AUTONOMOUS_GOAL_MEMORY_FULL_SUMMARY_CHARS
         )
         section_chars = len(section) + (2 if full_parts else 0)
-        if used_chars + section_chars > _STANDING_ORDER_MEMORY_CONTEXT_CHARS:
+        if used_chars + section_chars > _AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS:
             full_context_fits = False
             break
         full_parts.append(section)
         used_chars += section_chars
 
     if full_context_fits:
-        return _StandingOrderMemoryPromptContext(
+        return _AutonomousGoalMemoryPromptContext(
             "\n\n".join(full_parts), total_count, False
         )
-    return _StandingOrderMemoryPromptContext(
-        _compact_standing_order_memories(memories, omitted_count=omitted_count),
+    return _AutonomousGoalMemoryPromptContext(
+        _compact_autonomous_goal_memories(memories, omitted_count=omitted_count),
         total_count,
         True,
     )
 
 
-def _format_standing_order_memory(
-    memory: StandingOrderMemory, *, summary_chars: int
+def _format_autonomous_goal_memory(
+    memory: AutonomousGoalMemory, *, summary_chars: int
 ) -> str:
     candidate_id = (
         memory.candidate_session.thread_id if memory.candidate_session else "(none)"
@@ -3806,27 +3813,27 @@ def _format_standing_order_memory(
     )
 
 
-def _compact_standing_order_memories(
-    memories: list[StandingOrderMemory], *, omitted_count: int = 0
+def _compact_autonomous_goal_memories(
+    memories: list[AutonomousGoalMemory], *, omitted_count: int = 0
 ) -> str:
     total_count = len(memories) + omitted_count
-    recent = memories[:_STANDING_ORDER_MEMORY_COMPACT_RECENT_COUNT]
-    older = memories[_STANDING_ORDER_MEMORY_COMPACT_RECENT_COUNT:]
+    recent = memories[:_AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT]
+    older = memories[_AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT:]
     files = _format_limited_strings(
-        _standing_order_memory_files(memories),
-        limit=_STANDING_ORDER_MEMORY_FILE_LIMIT,
-        max_chars=max(80, _STANDING_ORDER_MEMORY_CONTEXT_CHARS // 4),
+        _autonomous_goal_memory_files(memories),
+        limit=_AUTONOMOUS_GOAL_MEMORY_FILE_LIMIT,
+        max_chars=max(80, _AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS // 4),
     )
     sections = [
         (
             f"Compacted from {total_count} prior candidate summaries because "
-            "the full standing-order memory would consume too much context."
+            "the full autonomous-goal memory would consume too much context."
         ),
         f"Files seen across prior runs: {files or '(none)'}",
         "Recent detailed summaries:",
         "\n\n".join(
-            _format_standing_order_memory(
-                memory, summary_chars=_STANDING_ORDER_MEMORY_COMPACT_SUMMARY_CHARS
+            _format_autonomous_goal_memory(
+                memory, summary_chars=_AUTONOMOUS_GOAL_MEMORY_COMPACT_SUMMARY_CHARS
             )
             for memory in recent
         ),
@@ -3836,9 +3843,9 @@ def _compact_standing_order_memories(
             [
                 "Older compacted summaries:",
                 "\n".join(
-                    _format_standing_order_memory_line(
+                    _format_autonomous_goal_memory_line(
                         memory,
-                        summary_chars=_STANDING_ORDER_MEMORY_COMPACT_SUMMARY_CHARS,
+                        summary_chars=_AUTONOMOUS_GOAL_MEMORY_COMPACT_SUMMARY_CHARS,
                     )
                     for memory in older
                 ),
@@ -3849,24 +3856,24 @@ def _compact_standing_order_memories(
             f"{omitted_count} older memory rows are outside this prompt cap."
         )
     compacted = "\n\n".join(section for section in sections if section)
-    if len(compacted) <= _STANDING_ORDER_MEMORY_CONTEXT_CHARS:
-        return _cap_standing_order_memory_context(compacted)
-    return _fit_standing_order_memory_context(
+    if len(compacted) <= _AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS:
+        return _cap_autonomous_goal_memory_context(compacted)
+    return _fit_autonomous_goal_memory_context(
         memories, files, omitted_count=omitted_count
     )
 
 
-def _fit_standing_order_memory_context(
-    memories: list[StandingOrderMemory], file_summary: str, *, omitted_count: int = 0
+def _fit_autonomous_goal_memory_context(
+    memories: list[AutonomousGoalMemory], file_summary: str, *, omitted_count: int = 0
 ) -> str:
     header = (
         f"Compacted from {len(memories) + omitted_count} prior candidate summaries.\n"
         f"Files seen across prior runs: {file_summary or '(none)'}\n"
         "Summaries:"
     )
-    budget = max(_STANDING_ORDER_MEMORY_CONTEXT_CHARS - len(header) - 1, 0)
+    budget = max(_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS - len(header) - 1, 0)
     lines = [
-        _format_standing_order_memory_line(memory, summary_chars=80)
+        _format_autonomous_goal_memory_line(memory, summary_chars=80)
         for memory in memories
     ]
     selected: list[str] = []
@@ -3884,11 +3891,11 @@ def _fit_standing_order_memory_context(
     omitted = len(lines) - len(selected) + omitted_count
     if omitted > 0:
         selected.append(f"- {omitted} older summaries omitted after compaction.")
-    return _cap_standing_order_memory_context(f"{header}\n" + "\n".join(selected))
+    return _cap_autonomous_goal_memory_context(f"{header}\n" + "\n".join(selected))
 
 
-def _format_standing_order_memory_line(
-    memory: StandingOrderMemory, *, summary_chars: int
+def _format_autonomous_goal_memory_line(
+    memory: AutonomousGoalMemory, *, summary_chars: int
 ) -> str:
     files = _format_limited_strings(_string_list(memory.relevant_files), limit=8)
     return (
@@ -3898,14 +3905,14 @@ def _format_standing_order_memory_line(
     )
 
 
-def _standing_order_memory_files(memories: list[StandingOrderMemory]) -> list[str]:
+def _autonomous_goal_memory_files(memories: list[AutonomousGoalMemory]) -> list[str]:
     files: list[str] = []
     for memory in memories:
         files = _merge_string_lists(files, _string_list(memory.relevant_files))
     return files
 
 
-def _memory_created_date(memory: StandingOrderMemory) -> str:
+def _memory_created_date(memory: AutonomousGoalMemory) -> str:
     return timezone.localtime(memory.created_at).date().isoformat()
 
 
@@ -3922,14 +3929,14 @@ def _format_limited_strings(
     return _truncate_for_prompt(formatted, max_chars)
 
 
-def _cap_standing_order_memory_context(text: str) -> str:
-    if len(text) <= _STANDING_ORDER_MEMORY_CONTEXT_CHARS:
+def _cap_autonomous_goal_memory_context(text: str) -> str:
+    if len(text) <= _AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS:
         return text
-    marker = "\n... (standing-order memory truncated to fit context budget)"
-    if len(marker) >= _STANDING_ORDER_MEMORY_CONTEXT_CHARS:
-        return _truncate_for_prompt(text, _STANDING_ORDER_MEMORY_CONTEXT_CHARS)
+    marker = "\n... (autonomous-goal memory truncated to fit context budget)"
+    if len(marker) >= _AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS:
+        return _truncate_for_prompt(text, _AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS)
     return (
-        text[: _STANDING_ORDER_MEMORY_CONTEXT_CHARS - len(marker)].rstrip()
+        text[: _AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS - len(marker)].rstrip()
         + marker
     )
 
@@ -3943,9 +3950,9 @@ def _truncate_for_prompt(text: str, max_chars: int) -> str:
     return f"{normalized[: max_chars - 3].rstrip()}..."
 
 
-def _standing_order_history_sections(standing_order: StandingOrder) -> list[str]:
+def _autonomous_goal_history_sections(autonomous_goal: AutonomousGoal) -> list[str]:
     proposals = (
-        standing_order.proposed_sessions.filter(
+        autonomous_goal.proposed_sessions.filter(
             inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL
         )
         .exclude(outcome_status=ProposedSession.OUTCOME_UNSET)
@@ -3989,13 +3996,13 @@ def _format_proposed_session_context(proposal: ProposedSession) -> str:
     )
 
 
-def _split_standing_order_history(sections: list[str]) -> tuple[str, list[str]]:
+def _split_autonomous_goal_history(sections: list[str]) -> tuple[str, list[str]]:
     inline_parts: list[str] = []
     overflow: list[str] = []
     used_chars = 0
     for section in sections:
         section_chars = len(section) + 2
-        if used_chars + section_chars <= _STANDING_ORDER_INLINE_HISTORY_CHARS:
+        if used_chars + section_chars <= _AUTONOMOUS_GOAL_INLINE_HISTORY_CHARS:
             inline_parts.append(section)
             used_chars += section_chars
         else:
@@ -4003,12 +4010,12 @@ def _split_standing_order_history(sections: list[str]) -> tuple[str, list[str]]:
     return "\n\n".join(inline_parts), overflow
 
 
-def _write_standing_order_history_files(
+def _write_autonomous_goal_history_files(
     workflow: SystemWorkflow, sections: list[str]
 ) -> list[str]:
     if not sections:
         return []
-    directory = codex_pool.events_dir() / "standing_order_history" / str(workflow.pk)
+    directory = codex_pool.events_dir() / "autonomous_goal_history" / str(workflow.pk)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / "proposal_history.txt"
     path.write_text("\n\n---\n\n".join(sections), encoding="utf-8")
@@ -4163,7 +4170,7 @@ def _parse_qa_panel_lane_output(raw_output: str) -> dict[str, Any] | None:
     }
 
 
-def _parse_standing_order_candidate_output(raw_output: str) -> dict[str, Any] | None:
+def _parse_autonomous_goal_candidate_output(raw_output: str) -> dict[str, Any] | None:
     text = _strip_json_markdown_fence(raw_output)
     try:
         parsed = json.loads(text)
@@ -4188,7 +4195,7 @@ def _parse_standing_order_candidate_output(raw_output: str) -> dict[str, Any] | 
             }
         if not isinstance(proposal, dict):
             return None
-        normalized = _parse_standing_order_candidate_proposal(proposal)
+        normalized = _parse_autonomous_goal_candidate_proposal(proposal)
         if normalized is None:
             return None
         return {
@@ -4202,7 +4209,7 @@ def _parse_standing_order_candidate_output(raw_output: str) -> dict[str, Any] | 
                 _string_list(normalized.get("relevant_files")),
             ),
         }
-    normalized = _parse_standing_order_candidate_proposal(parsed)
+    normalized = _parse_autonomous_goal_candidate_proposal(parsed)
     if normalized is None:
         return None
     return {
@@ -4229,7 +4236,7 @@ def _candidate_memory_summary(
     return message.strip()
 
 
-def _parse_standing_order_candidate_proposal(
+def _parse_autonomous_goal_candidate_proposal(
     parsed: dict[str, Any],
 ) -> dict[str, Any] | None:
     title = parsed.get("title")
@@ -4256,7 +4263,7 @@ def _parse_standing_order_candidate_proposal(
     }
 
 
-def _parse_standing_order_judge_output(raw_output: str) -> dict[str, str] | None:
+def _parse_autonomous_goal_judge_output(raw_output: str) -> dict[str, str] | None:
     text = _strip_json_markdown_fence(raw_output)
     try:
         parsed = json.loads(text)
@@ -4886,9 +4893,9 @@ def _fail_run(
     _block_workflow(workflow, error, surface_to_thread=surface_to_thread)
 
 
-def _fail_standing_order_run_and_block_workflow(
+def _fail_autonomous_goal_run_and_block_workflow(
     run: SystemAgentRun,
-    standing_order: StandingOrder,
+    autonomous_goal: AutonomousGoal,
     error: str,
     raw_output: str = "",
 ) -> None:
@@ -4896,18 +4903,18 @@ def _fail_standing_order_run_and_block_workflow(
     run.error = error
     run.raw_output = raw_output
     run.save(update_fields=["status", "error", "raw_output", "updated_at"])
-    _block_standing_order_workflow(run.workflow, standing_order, error)
+    _block_autonomous_goal_workflow(run.workflow, autonomous_goal, error)
 
 
-def _block_standing_order_workflow(
-    workflow: SystemWorkflow, standing_order: StandingOrder, error: str
+def _block_autonomous_goal_workflow(
+    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal, error: str
 ) -> None:
-    _create_standing_order_failure_notice(workflow, standing_order, error)
+    _create_autonomous_goal_failure_notice(workflow, autonomous_goal, error)
     _block_workflow(workflow, error, surface_to_thread=False)
 
 
-def _create_standing_order_failure_notice(
-    workflow: SystemWorkflow, standing_order: StandingOrder, error: str
+def _create_autonomous_goal_failure_notice(
+    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal, error: str
 ) -> None:
     if ProposedSession.objects.filter(
         source_workflow=workflow,
@@ -4915,18 +4922,18 @@ def _create_standing_order_failure_notice(
     ).exists():
         return
     ProposedSession.objects.create(
-        project=standing_order.project,
-        standing_order=standing_order,
+        project=autonomous_goal.project,
+        autonomous_goal=autonomous_goal,
         source_workflow=workflow,
-        title=f"Standing order failed: {standing_order.title}"[
-            :_STANDING_ORDER_TITLE_MAX_LEN
+        title=f"Autonomous goal failed: {autonomous_goal.title}"[
+            :_AUTONOMOUS_GOAL_TITLE_MAX_LEN
         ],
         inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
-        summary=f"Hitch could not finish this standing order run: {error}",
+        summary=f"Hitch could not finish this autonomous goal run: {error}",
         candidate_session=_session_metadata_from_state(workflow, "candidate_session_id"),
         judge_session=_session_metadata_from_state(workflow, "judge_session_id"),
         outcome_metadata={
-            "standing_order_autonomy": standing_order.autonomy,
+            "autonomous_goal_autonomy": autonomous_goal.autonomy,
             "automation_status": "failed",
             "automation_error": error,
         },
@@ -5292,8 +5299,8 @@ def _session_metadata_from_state(
     return SessionMetadata.objects.filter(pk=session_id).first()
 
 
-def _standing_order_main_thread_id(standing_order_id: int) -> str:
-    return f"standing-order:{standing_order_id}"
+def _autonomous_goal_main_thread_id(autonomous_goal_id: int) -> str:
+    return f"autonomous-goal:{autonomous_goal_id}"
 
 
 def _workflow_for_instance(instance: CodexInstance) -> SystemWorkflow | None:

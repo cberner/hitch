@@ -9,7 +9,7 @@ from hitch.main.models import Project
 
 
 class Command(BaseCommand):
-    help = "Start eligible auto-proposal standing order workflows."
+    help = "Start eligible auto-proposal autonomous goal workflows."
 
     @override
     def add_arguments(self, parser: CommandParser) -> None:

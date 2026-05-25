@@ -14,7 +14,7 @@ from hitch.main.codex_tools import (
     handle_dynamic_tool_call,
     registered_dynamic_tool_specs,
 )
-from hitch.main.models import Project, ProposedSession, SessionMetadata, StandingOrder
+from hitch.main.models import AutonomousGoal, Project, ProposedSession, SessionMetadata
 from hitch.main.proposed_sessions import (
     ProposedSessionError,
     ProposedSessionInput,
@@ -38,13 +38,13 @@ class ProposedSessionServiceTests(TestCase):
                 prompt="Add tests for proposed sessions.",
                 cwd="/repo",
                 relevant_files=["hitch/main/proposed_sessions.py", ""],
-                confidence=StandingOrder.CONFIDENCE_HIGH,
+                confidence=AutonomousGoal.CONFIDENCE_HIGH,
                 source_thread_id=source.thread_id,
             )
         )
 
         self.assertEqual(proposal.project, project)
-        self.assertIsNone(proposal.standing_order)
+        self.assertIsNone(proposal.autonomous_goal)
         self.assertEqual(proposal.source_session, source)
         self.assertEqual(proposal.relevant_files, ["hitch/main/proposed_sessions.py"])
 
@@ -156,7 +156,7 @@ class CodexToolTests(TestCase):
                     "summary": "This would cover the proposal service.",
                     "prompt": "Add tests for proposed sessions.",
                     "relevant_files": ["hitch/main/proposed_sessions.py"],
-                    "confidence": StandingOrder.CONFIDENCE_VERY_HIGH,
+                    "confidence": AutonomousGoal.CONFIDENCE_VERY_HIGH,
                 },
             },
             ToolContext(cwd="/repo", thread_id=source.thread_id),
@@ -166,7 +166,7 @@ class CodexToolTests(TestCase):
         proposal = ProposedSession.objects.get()
         self.assertEqual(proposal.project, project)
         self.assertEqual(proposal.source_session, source)
-        self.assertEqual(proposal.confidence, StandingOrder.CONFIDENCE_VERY_HIGH)
+        self.assertEqual(proposal.confidence, AutonomousGoal.CONFIDENCE_VERY_HIGH)
 
     def test_dynamic_tool_call_reports_invalid_input(self) -> None:
         response = handle_dynamic_tool_call(

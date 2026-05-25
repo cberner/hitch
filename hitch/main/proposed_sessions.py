@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from hitch.main.models import Project, ProposedSession, SessionMetadata, StandingOrder
+from hitch.main.models import AutonomousGoal, Project, ProposedSession, SessionMetadata
 from hitch.main.repos import same_repo_or_worktree
 
 _TITLE_MAX_LEN = 200
@@ -22,7 +22,7 @@ class ProposedSessionInput:
     prompt: str
     cwd: str
     relevant_files: list[str]
-    confidence: str = StandingOrder.CONFIDENCE_MEDIUM
+    confidence: str = AutonomousGoal.CONFIDENCE_MEDIUM
     source_thread_id: str = ""
 
 
@@ -31,7 +31,7 @@ def create_proposed_session(values: ProposedSessionInput) -> ProposedSession:
     summary = values.summary.strip()
     prompt = values.prompt.strip()
     cwd = str(Path(values.cwd).expanduser()) if values.cwd.strip() else ""
-    confidence = values.confidence.strip() or StandingOrder.CONFIDENCE_MEDIUM
+    confidence = values.confidence.strip() or AutonomousGoal.CONFIDENCE_MEDIUM
     if not title:
         raise ProposedSessionError("title is required")
     if len(title) > _TITLE_MAX_LEN:
@@ -42,7 +42,7 @@ def create_proposed_session(values: ProposedSessionInput) -> ProposedSession:
         raise ProposedSessionError("prompt is required")
     if not cwd:
         raise ProposedSessionError("cwd is required")
-    if confidence not in {choice[0] for choice in StandingOrder.CONFIDENCE_CHOICES}:
+    if confidence not in {choice[0] for choice in AutonomousGoal.CONFIDENCE_CHOICES}:
         raise ProposedSessionError("confidence is invalid")
     project = project_for_cwd(cwd)
     if project is None:

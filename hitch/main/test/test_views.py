@@ -41,13 +41,13 @@ from hitch.main import (
 from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
+    AutonomousGoal,
     CodexInstance,
     Project,
     ProposedSession,
     SessionDemo,
     SessionIndexSyncState,
     SessionMetadata,
-    StandingOrder,
     SystemAgentRun,
     SystemWorkflow,
     UserInputRequest,
@@ -705,17 +705,17 @@ class IndexViewTests(TestCase):
         )
 
     @patch("hitch.main.views.Codex")
-    def test_refresh_marks_legacy_standing_order_prompt_hidden(
+    def test_refresh_marks_legacy_autonomous_goal_prompt_hidden(
         self, mock_codex: MagicMock
     ) -> None:
         candidate = _session(
             "legacy-candidate",
-            name=system_agents.STANDING_ORDER_AGENT_PROMPT_TITLE,
+            name=system_agents.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE,
             preview=(
-                f"{system_agents.STANDING_ORDER_AGENT_PROMPT_TITLE}\n\n"
+                f"{system_agents.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE}\n\n"
                 "Analyze the repo.\n\n"
-                "Standing order title: Docs\n\n"
-                "Standing order goal:\nKeep documentation tidy.\n\n"
+                "Autonomous goal title: Docs\n\n"
+                "Autonomous goal objective:\nKeep documentation tidy.\n\n"
                 "Return only JSON matching this shape: {}"
             ),
         )
@@ -1076,59 +1076,59 @@ class IndexViewTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         visible = _session("visible", preview="Visible")
-        hidden = _session("standing-order-thread", preview="Hidden standing order")
+        hidden = _session("autonomous-goal-thread", preview="Hidden autonomous goal")
         hidden.turns = []
         client = _setup_codex(mock_codex, threads=[visible, hidden])
         client._client.thread_resume.return_value = SimpleNamespace(thread=hidden)
         mock_discover.return_value = []
         workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_STANDING_ORDER_RUN,
-            main_thread_id="standing-order:1",
+            kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
+            main_thread_id="autonomous-goal:1",
             cwd="/repo",
         )
         CodexInstance.objects.create(
             pid=1,
-            thread_id="standing-order-thread",
+            thread_id="autonomous-goal-thread",
             cwd="/repo",
-            prompt="standing order",
+            prompt="autonomous goal",
             events_path="/dev/null",
             status=CodexInstance.STATUS_COMPLETED,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
         response = self.client.get(reverse("index"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Visible")
-        self.assertNotContains(response, "Hidden standing order")
+        self.assertNotContains(response, "Hidden autonomous goal")
 
         system_response = self.client.get(reverse("system_sessions"))
 
         self.assertEqual(system_response.status_code, 200)
-        self.assertContains(system_response, "Hidden standing order")
-        self.assertContains(system_response, "standing order run")
+        self.assertContains(system_response, "Hidden autonomous goal")
+        self.assertContains(system_response, "autonomous goal run")
         self.assertContains(system_response, "completed")
         self.assertContains(
             system_response,
             reverse(
                 "system_session",
-                kwargs={"session_id": "standing-order-thread"},
+                kwargs={"session_id": "autonomous-goal-thread"},
             ),
         )
 
         detail_response = self.client.get(
             reverse(
                 "system_session",
-                kwargs={"session_id": "standing-order-thread"},
+                kwargs={"session_id": "autonomous-goal-thread"},
             )
         )
 
         self.assertEqual(detail_response.status_code, 200)
-        self.assertContains(detail_response, "standing order run log")
+        self.assertContains(detail_response, "autonomous goal run log")
         self.assertContains(detail_response, "System prompt")
-        self.assertContains(detail_response, "standing order")
+        self.assertContains(detail_response, "autonomous goal")
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -1138,14 +1138,14 @@ class IndexViewTests(TestCase):
         visible = _session("visible", name="Visible")
         candidate = _session(
             "orphan-candidate",
-            name="You are Hitch's standing order agent.",
-            preview="You are Hitch's standing order agent.\n\nAnalyze the repo.",
+            name="You are Hitch's autonomous goal agent.",
+            preview="You are Hitch's autonomous goal agent.\n\nAnalyze the repo.",
             thread_source=ThreadSource.subagent,
         )
         judge = _session(
             "orphan-judge",
-            name="You are Hitch's standing order confidence judge.",
-            preview="You are Hitch's standing order confidence judge.\n\nJudge it.",
+            name="You are Hitch's autonomous goal confidence judge.",
+            preview="You are Hitch's autonomous goal confidence judge.\n\nJudge it.",
             thread_source=ThreadSource.subagent,
         )
         candidate.turns = []
@@ -1158,18 +1158,18 @@ class IndexViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Visible")
-        self.assertNotContains(response, "You are Hitch&#x27;s standing order agent.")
+        self.assertNotContains(response, "You are Hitch&#x27;s autonomous goal agent.")
         self.assertNotContains(
-            response, "You are Hitch&#x27;s standing order confidence judge."
+            response, "You are Hitch&#x27;s autonomous goal confidence judge."
         )
 
         system_response = self.client.get(reverse("system_sessions"))
 
         self.assertEqual(system_response.status_code, 200)
         self.assertNotContains(system_response, "Visible")
-        self.assertContains(system_response, "You are Hitch&#x27;s standing order agent.")
+        self.assertContains(system_response, "You are Hitch&#x27;s autonomous goal agent.")
         self.assertContains(
-            system_response, "You are Hitch&#x27;s standing order confidence judge."
+            system_response, "You are Hitch&#x27;s autonomous goal confidence judge."
         )
         self.assertContains(
             system_response,
@@ -1184,43 +1184,72 @@ class IndexViewTests(TestCase):
 
         self.assertEqual(detail_response.status_code, 200)
         self.assertContains(detail_response, '<body class="read-only"')
-        self.assertContains(detail_response, "You are Hitch&#x27;s standing order agent.")
+        self.assertContains(detail_response, "You are Hitch&#x27;s autonomous goal agent.")
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_hides_legacy_standing_order_prompt_threads_without_source(
+    def test_hides_legacy_autonomous_goal_prompt_threads_without_source(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         visible = _session("visible", name="Visible")
         candidate = _session(
             "legacy-candidate",
-            name=system_agents.STANDING_ORDER_AGENT_PROMPT_TITLE,
+            name=system_agents.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE,
             preview=(
-                f"{system_agents.STANDING_ORDER_AGENT_PROMPT_TITLE}\n\n"
+                f"{system_agents.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE}\n\n"
+                "Analyze the repo.\n\n"
+                "Autonomous goal title: Docs\n\n"
+                "Autonomous goal objective:\nKeep documentation tidy.\n\n"
+                "Return only JSON matching this shape: {}"
+            ),
+        )
+        judge = _session(
+            "legacy-judge",
+            name=system_agents.AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE,
+            preview=(
+                f"{system_agents.AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE}\n\n"
+                "Judge it.\n\n"
+                "Autonomous goal title: Docs\n\n"
+                "Candidate session JSON:\n{}\n\n"
+                "Return only JSON matching this shape: {}"
+            ),
+        )
+        legacy_candidate = _session(
+            "legacy-standing-candidate",
+            name=session_index.LEGACY_AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE,
+            preview=(
+                f"{session_index.LEGACY_AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE}\n\n"
                 "Analyze the repo.\n\n"
                 "Standing order title: Docs\n\n"
                 "Standing order goal:\nKeep documentation tidy.\n\n"
                 "Return only JSON matching this shape: {}"
             ),
         )
-        judge = _session(
-            "legacy-judge",
-            name=system_agents.STANDING_ORDER_JUDGE_PROMPT_TITLE,
+        legacy_judge = _session(
+            "legacy-standing-judge",
+            name=session_index.LEGACY_AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE,
             preview=(
-                f"{system_agents.STANDING_ORDER_JUDGE_PROMPT_TITLE}\n\n"
+                f"{session_index.LEGACY_AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE}\n\n"
                 "Judge it.\n\n"
                 "Standing order title: Docs\n\n"
                 "Candidate session JSON:\n{}\n\n"
                 "Return only JSON matching this shape: {}"
             ),
         )
-        _setup_codex(mock_codex, threads=[visible, candidate, judge])
+        _setup_codex(
+            mock_codex,
+            threads=[visible, candidate, judge, legacy_candidate, legacy_judge],
+        )
         mock_discover.return_value = []
 
         response = self.client.get(reverse("index"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Visible")
+        self.assertNotContains(response, "You are Hitch&#x27;s autonomous goal agent.")
+        self.assertNotContains(
+            response, "You are Hitch&#x27;s autonomous goal confidence judge."
+        )
         self.assertNotContains(response, "You are Hitch&#x27;s standing order agent.")
         self.assertNotContains(
             response, "You are Hitch&#x27;s standing order confidence judge."
@@ -1230,6 +1259,10 @@ class IndexViewTests(TestCase):
 
         self.assertEqual(system_response.status_code, 200)
         self.assertNotContains(system_response, "Visible")
+        self.assertContains(system_response, "You are Hitch&#x27;s autonomous goal agent.")
+        self.assertContains(
+            system_response, "You are Hitch&#x27;s autonomous goal confidence judge."
+        )
         self.assertContains(system_response, "You are Hitch&#x27;s standing order agent.")
         self.assertContains(
             system_response, "You are Hitch&#x27;s standing order confidence judge."
@@ -1242,8 +1275,8 @@ class IndexViewTests(TestCase):
     ) -> None:
         user_thread = _session(
             "user-prefixed",
-            name="You are Hitch's standing order agent. Please help",
-            preview="You are Hitch's standing order agent.\n\nPlease explain this.",
+            name="You are Hitch's autonomous goal agent. Please help",
+            preview="You are Hitch's autonomous goal agent.\n\nPlease explain this.",
         )
         user_thread.turns = []
         client = _setup_codex(mock_codex, threads=[user_thread])
@@ -1254,7 +1287,7 @@ class IndexViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(
-            response, "You are Hitch&#x27;s standing order agent. Please help"
+            response, "You are Hitch&#x27;s autonomous goal agent. Please help"
         )
 
         system_detail_response = self.client.get(
@@ -1265,14 +1298,14 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_user_prompt_with_legacy_standing_order_title_remains_visible(
+    def test_user_prompt_with_legacy_autonomous_goal_title_remains_visible(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         user_thread = _session(
             "user-exact-title",
-            name=system_agents.STANDING_ORDER_AGENT_PROMPT_TITLE,
+            name=system_agents.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE,
             preview=(
-                f"{system_agents.STANDING_ORDER_AGENT_PROMPT_TITLE}\n\n"
+                f"{system_agents.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE}\n\n"
                 "Please explain this."
             ),
         )
@@ -1282,12 +1315,12 @@ class IndexViewTests(TestCase):
         response = self.client.get(reverse("index"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "You are Hitch&#x27;s standing order agent.")
+        self.assertContains(response, "You are Hitch&#x27;s autonomous goal agent.")
 
         system_response = self.client.get(reverse("system_sessions"))
 
         self.assertEqual(system_response.status_code, 200)
-        self.assertNotContains(system_response, "You are Hitch&#x27;s standing order agent.")
+        self.assertNotContains(system_response, "You are Hitch&#x27;s autonomous goal agent.")
 
     @patch("hitch.main.views.Codex")
     def test_untracked_system_session_resume_error_is_not_404(
@@ -1371,7 +1404,7 @@ class IndexViewTests(TestCase):
         accepted = _session(
             "accepted-candidate",
             name="Accepted candidate",
-            preview="You are Hitch's standing order agent.\n\nAnalyze the repo.",
+            preview="You are Hitch's autonomous goal agent.\n\nAnalyze the repo.",
         )
         _setup_codex(mock_codex, threads=[accepted])
         mock_discover.return_value = []
@@ -1522,7 +1555,7 @@ class IndexViewTests(TestCase):
         client.thread_list.side_effect = thread_list
         mock_discover.return_value = []
         workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_STANDING_ORDER_RUN,
+            kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
             main_thread_id="visible",
             cwd="/repo",
         )
@@ -1539,7 +1572,7 @@ class IndexViewTests(TestCase):
             )
             SystemAgentRun.objects.create(
                 workflow=workflow,
-                agent_kind="standing_order_run",
+                agent_kind="autonomous_goal_run",
                 thread_id=f"hidden-{i}",
                 instance=instance,
             )
@@ -2002,8 +2035,8 @@ class IndexViewTests(TestCase):
             events_path="/dev/null",
             status=CodexInstance.STATUS_RUNNING,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.STANDING_ORDER_AGENT_KIND,
-            display_author=system_agents.STANDING_ORDER_DISPLAY_AUTHOR,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            display_author=system_agents.AUTONOMOUS_GOAL_DISPLAY_AUTHOR,
             developer_instructions="developer " * 2000,
             base_instructions="base " * 2000,
         )
@@ -2023,7 +2056,7 @@ class IndexViewTests(TestCase):
             )
             self.assertEqual(
                 views._system_agent_run_label(None, instance),
-                system_agents.STANDING_ORDER_DISPLAY_AUTHOR,
+                system_agents.AUTONOMOUS_GOAL_DISPLAY_AUTHOR,
             )
             self.assertEqual(
                 views._system_agent_status(None, instance),
@@ -4372,13 +4405,13 @@ class NewSessionViewTests(TestCase):
     ) -> None:
         _setup_codex(mock_codex, models=[])
         project = Project.objects.create(name="Hitch", repo_path=self.REPO)
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
         )
         proposal = ProposedSession.objects.create(
-            standing_order=order,
+            autonomous_goal=goal,
             title="Add parser coverage",
         )
         prompt = "Go ahead and implement this proposed session."
@@ -4422,7 +4455,7 @@ class NewSessionViewTests(TestCase):
         mock_managed_worktrees.return_value = [Path("/repo-worktree")]
         _setup_codex(mock_codex, models=[])
         project = Project.objects.create(name="Hitch", repo_path=self.REPO)
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
@@ -4433,7 +4466,7 @@ class NewSessionViewTests(TestCase):
             project=project,
         )
         proposal = ProposedSession.objects.create(
-            standing_order=order,
+            autonomous_goal=goal,
             candidate_session=candidate,
             title="Add parser coverage",
         )
@@ -4496,7 +4529,7 @@ class NewSessionViewTests(TestCase):
                 project = Project.objects.create(
                     name=f"Hitch {index}", repo_path=f"{self.REPO}-{index}"
                 )
-                order = StandingOrder.objects.create(
+                goal = AutonomousGoal.objects.create(
                     project=project,
                     title="Improve tests",
                     goal="Find useful test coverage increments.",
@@ -4507,7 +4540,7 @@ class NewSessionViewTests(TestCase):
                     project=project,
                 )
                 proposal = ProposedSession.objects.create(
-                    standing_order=order,
+                    autonomous_goal=goal,
                     candidate_session=candidate,
                     title="Add parser coverage",
                 )
@@ -4574,7 +4607,7 @@ class NewSessionViewTests(TestCase):
             thread=SimpleNamespace(turns=[])
         )
         project = Project.objects.create(name="Hitch", repo_path=self.REPO)
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
@@ -4585,7 +4618,7 @@ class NewSessionViewTests(TestCase):
             project=project,
         )
         proposal = ProposedSession.objects.create(
-            standing_order=order,
+            autonomous_goal=goal,
             candidate_session=candidate,
             title="Add parser coverage",
         )
@@ -4634,22 +4667,22 @@ class NewSessionViewTests(TestCase):
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path=self.REPO)
         other_project = Project.objects.create(name="Other", repo_path="/home/user/other")
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=other_project,
             title="Improve docs",
             goal="Find useful docs increments.",
         )
         proposal = ProposedSession.objects.create(
-            standing_order=order,
+            autonomous_goal=goal,
             title="Add docs coverage",
         )
-        resolved_order = StandingOrder.objects.create(
+        resolved_order = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
         )
         resolved = ProposedSession.objects.create(
-            standing_order=resolved_order,
+            autonomous_goal=resolved_order,
             title="Add parser coverage",
             outcome_status=ProposedSession.OUTCOME_REJECTED,
         )
@@ -9247,7 +9280,7 @@ class SessionViewApprovalContextTests(TestCase):
         self.assertContains(response, "requiredQuestionIds")
 
 
-class StandingOrderViewTests(TestCase):
+class AutonomousGoalViewTests(TestCase):
     @patch("hitch.main.views.system_agents.maybe_start_auto_proposal_workflows")
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
@@ -9258,7 +9291,7 @@ class StandingOrderViewTests(TestCase):
         mock_scheduler: MagicMock,
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
-        StandingOrder.objects.create(
+        AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
@@ -9267,7 +9300,7 @@ class StandingOrderViewTests(TestCase):
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
 
-        for route in ("index", "inbox", "standing_orders"):
+        for route in ("index", "inbox", "autonomous_goals"):
             with self.subTest(route=route):
                 response = self.client.get(reverse(route))
                 self.assertEqual(response.status_code, 200)
@@ -9276,31 +9309,31 @@ class StandingOrderViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
-    def test_page_lists_orders_and_inbox_count_for_selected_project(
+    def test_page_lists_goals_and_inbox_count_for_selected_project(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         other_project = Project.objects.create(name="Other", repo_path="/other")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            ambition=StandingOrder.AMBITION_HIGH,
-            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            ambition=AutonomousGoal.AMBITION_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
             auto_qa_enabled=True,
-            web_search_mode=StandingOrder.WEB_SEARCH_LIVE,
+            web_search_mode=AutonomousGoal.WEB_SEARCH_LIVE,
             auto_merge_to_local_branch=True,
             auto_merge_branch="main",
         )
-        StandingOrder.objects.create(
+        AutonomousGoal.objects.create(
             project=other_project,
-            title="Other order",
+            title="Other goal",
             goal="Should not render.",
         )
         ProposedSession.objects.create(
-            standing_order=order,
+            autonomous_goal=goal,
             title="Add parser coverage",
         )
         ProposedSession.objects.create(
@@ -9309,7 +9342,7 @@ class StandingOrderViewTests(TestCase):
             summary="Should not count for selected project.",
         )
 
-        response = self.client.get(reverse("standing_orders"))
+        response = self.client.get(reverse("autonomous_goals"))
 
         self.assertEqual(response.status_code, 200)
         body = response.content.decode()
@@ -9317,14 +9350,14 @@ class StandingOrderViewTests(TestCase):
         nav_end = body.index("</nav>", nav_start)
         nav_html = body[nav_start:nav_end]
         self.assertIn(
-            f'href="{reverse("standing_orders")}" aria-current="page"', nav_html
+            f'href="{reverse("autonomous_goals")}" aria-current="page"', nav_html
         )
         self.assertIn(f'href="{reverse("inbox")}"', nav_html)
         self.assertIn(
             'class="primary-nav-badge" aria-label="1 inbox message">1</span>',
             nav_html,
         )
-        self.assertIn(">standing orders</a>", nav_html)
+        self.assertIn(">auto goals</a>", nav_html)
         self.assertContains(response, "--accent-soft")
         self.assertContains(response, "--shadow-lg")
         self.assertContains(response, "Improve tests")
@@ -9342,30 +9375,30 @@ class StandingOrderViewTests(TestCase):
         self.assertContains(response, "Web search: Live")
         self.assertContains(response, "Auto-proposal: Off")
         self.assertContains(response, "Auto merge: main")
-        self.assertContains(response, 'class="order-menu" data-order-menu')
+        self.assertContains(response, 'class="goal-menu" data-goal-menu')
         self.assertContains(response, 'role="menuitem">Run</button>')
         self.assertContains(
             response,
-            f'action="{reverse("run_standing_order", args=[order.pk])}"',
+            f'action="{reverse("run_autonomous_goal", args=[goal.pk])}"',
         )
         self.assertContains(
             response,
-            f'data-edit-url="{reverse("edit_standing_order", args=[order.pk])}"',
+            f'data-edit-url="{reverse("edit_autonomous_goal", args=[goal.pk])}"',
         )
         self.assertContains(
-            response, f'data-autonomy="{StandingOrder.AUTONOMY_DRAFT_PATCH}"'
+            response, f'data-autonomy="{AutonomousGoal.AUTONOMY_DRAFT_PATCH}"'
         )
         self.assertContains(response, 'data-auto-qa="true"')
         self.assertContains(
-            response, f'data-web-search-mode="{StandingOrder.WEB_SEARCH_LIVE}"'
+            response, f'data-web-search-mode="{AutonomousGoal.WEB_SEARCH_LIVE}"'
         )
         self.assertContains(response, 'data-auto-proposal-enabled="false"')
         self.assertContains(response, 'data-auto-merge-to-local-branch="true"')
         self.assertContains(response, 'data-auto-merge-branch="main"')
-        self.assertContains(response, 'data-standing-order-edit')
+        self.assertContains(response, 'data-autonomous-goal-edit')
         self.assertNotContains(response, "Add parser coverage")
         self.assertNotContains(response, 'name="proposed_session"')
-        self.assertNotContains(response, "Other order")
+        self.assertNotContains(response, "Other goal")
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
@@ -9375,15 +9408,15 @@ class StandingOrderViewTests(TestCase):
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
-        StandingOrder.objects.create(
+        AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
             auto_qa_enabled=True,
         )
 
-        response = self.client.get(reverse("standing_orders"))
+        response = self.client.get(reverse("autonomous_goals"))
         self.assertEqual(response.status_code, 200)
         body = response.content.decode()
         self.assertIn("autoQa.disabled = !supported;", body)
@@ -9398,11 +9431,11 @@ class StandingOrderViewTests(TestCase):
         other_project = Project.objects.create(name="Other", repo_path="/other")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            ambition=StandingOrder.AMBITION_HIGH,
+            ambition=AutonomousGoal.AMBITION_HIGH,
         )
         candidate = SessionMetadata.objects.create(
             thread_id="candidate-thread",
@@ -9415,17 +9448,17 @@ class StandingOrderViewTests(TestCase):
             project=project,
         )
         ProposedSession.objects.create(
-            standing_order=order,
+            autonomous_goal=goal,
             title="Add parser coverage",
             summary="This adds focused parser coverage.",
             prompt=(
                 "Go ahead and implement this proposed session.\n\n"
-                "Standing order goal:\n"
+                "Autonomous goal objective:\n"
                 "Find useful test coverage increments.\n\n"
                 "Implementation guidance:\n"
                 "Add focused rollout parser tests before changing behavior."
             ),
-            confidence=StandingOrder.CONFIDENCE_HIGH,
+            confidence=AutonomousGoal.CONFIDENCE_HIGH,
             relevant_files=["hitch/main/rollout.py"],
             candidate_session=candidate,
             judge_session=judge,
@@ -9459,7 +9492,7 @@ class StandingOrderViewTests(TestCase):
         self.assertContains(response, 'data-proposed-session-id="')
         self.assertContains(response, f'data-proposed-session-project="{project.pk}"')
         self.assertContains(response, "Go ahead and implement this proposed session.")
-        self.assertContains(response, "Standing order goal:")
+        self.assertContains(response, "Autonomous goal objective:")
         self.assertContains(response, "Find useful test coverage increments.")
         self.assertContains(response, "Judge log")
         self.assertContains(response, 'name="proposed_session"')
@@ -9475,13 +9508,13 @@ class StandingOrderViewTests(TestCase):
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
         )
         ProposedSession.objects.create(
-            standing_order=order,
+            autonomous_goal=goal,
             title="No proposal from Improve tests",
             inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
             summary="No concrete test increment was worth proposing.",
@@ -9491,7 +9524,7 @@ class StandingOrderViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "No proposal from Improve tests")
-        self.assertContains(response, "From standing order: Improve tests")
+        self.assertContains(response, "From autonomous goal: Improve tests")
         self.assertContains(
             response, "No concrete test increment was worth proposing."
         )
@@ -9525,21 +9558,21 @@ class StandingOrderViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
-    def test_page_shows_create_form_inline_when_no_orders(
+    def test_page_shows_create_form_inline_when_no_goals(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
 
-        response = self.client.get(reverse("standing_orders"))
+        response = self.client.get(reverse("autonomous_goals"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'data-standing-order-create-form')
-        self.assertContains(response, "data-standing-order-auto-qa")
+        self.assertContains(response, 'data-autonomous-goal-create-form')
+        self.assertContains(response, "data-autonomous-goal-auto-qa")
         self.assertContains(
             response,
-            '<input type="checkbox" name="auto_qa" value="true" data-standing-order-auto-qa disabled>',
+            '<input type="checkbox" name="auto_qa" value="true" data-autonomous-goal-auto-qa disabled>',
             html=True,
         )
         self.assertContains(
@@ -9548,382 +9581,382 @@ class StandingOrderViewTests(TestCase):
         self.assertContains(
             response, 'value="draft_pr" data-auto-qa-supported="false"'
         )
-        self.assertContains(response, "Create standing order")
-        self.assertNotContains(response, "No standing orders yet.")
+        self.assertContains(response, "Create autonomous goal")
+        self.assertNotContains(response, "No autonomous goals yet.")
         self.assertNotContains(
             response,
-            '<button type="button" role="menuitem" data-create-standing-order-open>',
+            '<button type="button" role="menuitem" data-create-autonomous-goal-open>',
         )
         self.assertNotContains(
             response,
-            '<dialog class="new-session" data-create-standing-order-dialog',
+            '<dialog class="new-session" data-create-autonomous-goal-dialog',
         )
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
-    def test_page_moves_create_form_to_header_dialog_when_orders_exist(
+    def test_page_moves_create_form_to_header_dialog_when_goals_exist(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
-        StandingOrder.objects.create(
+        AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
         )
 
-        response = self.client.get(reverse("standing_orders"))
+        response = self.client.get(reverse("autonomous_goals"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'class="page-menu" data-page-menu')
         self.assertContains(
             response,
-            '<button type="button" role="menuitem" data-create-standing-order-open>',
+            '<button type="button" role="menuitem" data-create-autonomous-goal-open>',
         )
         self.assertContains(response, 'role="menuitem">Run all</button>')
         self.assertContains(
             response,
-            '<dialog class="new-session" data-create-standing-order-dialog',
+            '<dialog class="new-session" data-create-autonomous-goal-dialog',
         )
         self.assertNotContains(response, '<p class="section-label">Create</p>')
 
-    def test_create_standing_order_for_selected_project(self) -> None:
+    def test_create_autonomous_goal_for_selected_project(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
 
         response = self.client.post(
-            reverse("create_standing_order"),
+            reverse("create_autonomous_goal"),
             {
                 "title": "Improve tests",
                 "goal": "Find useful test coverage increments.",
-                "ambition": StandingOrder.AMBITION_YOLO,
-                "autonomy": StandingOrder.AUTONOMY_DRAFT_PR,
+                "ambition": AutonomousGoal.AMBITION_YOLO,
+                "autonomy": AutonomousGoal.AUTONOMY_DRAFT_PR,
                 "auto_qa": "true",
                 "auto_proposal": "true",
-                "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
-                "web_search_mode": StandingOrder.WEB_SEARCH_LIVE,
+                "confidence_threshold": AutonomousGoal.CONFIDENCE_VERY_HIGH,
+                "web_search_mode": AutonomousGoal.WEB_SEARCH_LIVE,
             },
         )
 
         self.assertEqual(response.status_code, 302)
-        order = StandingOrder.objects.get()
-        self.assertEqual(order.project, project)
-        self.assertEqual(order.title, "Improve tests")
-        self.assertEqual(order.ambition, StandingOrder.AMBITION_YOLO)
-        self.assertEqual(order.autonomy, StandingOrder.AUTONOMY_DRAFT_PR)
-        self.assertFalse(order.auto_qa_enabled)
-        self.assertEqual(order.web_search_mode, StandingOrder.WEB_SEARCH_LIVE)
-        self.assertTrue(order.auto_proposal_enabled)
+        goal = AutonomousGoal.objects.get()
+        self.assertEqual(goal.project, project)
+        self.assertEqual(goal.title, "Improve tests")
+        self.assertEqual(goal.ambition, AutonomousGoal.AMBITION_YOLO)
+        self.assertEqual(goal.autonomy, AutonomousGoal.AUTONOMY_DRAFT_PR)
+        self.assertFalse(goal.auto_qa_enabled)
+        self.assertEqual(goal.web_search_mode, AutonomousGoal.WEB_SEARCH_LIVE)
+        self.assertTrue(goal.auto_proposal_enabled)
         self.assertEqual(
-            order.confidence_threshold,
-            StandingOrder.CONFIDENCE_VERY_HIGH,
+            goal.confidence_threshold,
+            AutonomousGoal.CONFIDENCE_VERY_HIGH,
         )
 
-    def test_create_standing_order_stores_auto_merge_branch(self) -> None:
+    def test_create_autonomous_goal_stores_auto_merge_branch(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
 
         with patch("hitch.main.views.local_branch_names", return_value=["main"]):
             response = self.client.post(
-                reverse("create_standing_order"),
+                reverse("create_autonomous_goal"),
                 {
                     "title": "Improve tests",
                     "goal": "Find useful test coverage increments.",
-                    "ambition": StandingOrder.AMBITION_HIGH,
-                    "autonomy": StandingOrder.AUTONOMY_DRAFT_PATCH,
+                    "ambition": AutonomousGoal.AMBITION_HIGH,
+                    "autonomy": AutonomousGoal.AUTONOMY_DRAFT_PATCH,
                     "auto_qa": "true",
-                    "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
+                    "confidence_threshold": AutonomousGoal.CONFIDENCE_VERY_HIGH,
                     "auto_merge_to_local_branch": "true",
                     "auto_merge_branch": "main",
                 },
             )
 
         self.assertEqual(response.status_code, 302)
-        order = StandingOrder.objects.get()
-        self.assertTrue(order.auto_qa_enabled)
-        self.assertTrue(order.auto_merge_to_local_branch)
-        self.assertEqual(order.auto_merge_branch, "main")
+        goal = AutonomousGoal.objects.get()
+        self.assertTrue(goal.auto_qa_enabled)
+        self.assertTrue(goal.auto_merge_to_local_branch)
+        self.assertEqual(goal.auto_merge_branch, "main")
 
-    def test_edit_standing_order_updates_selected_project_order(self) -> None:
+    def test_edit_autonomous_goal_updates_selected_project_goal(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            ambition=StandingOrder.AMBITION_INCREMENTAL,
-            autonomy=StandingOrder.AUTONOMY_PROPOSE_ONLY,
+            ambition=AutonomousGoal.AMBITION_INCREMENTAL,
+            autonomy=AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
             auto_proposal_enabled=True,
-            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
-            web_search_mode=StandingOrder.WEB_SEARCH_CACHED,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            web_search_mode=AutonomousGoal.WEB_SEARCH_CACHED,
         )
 
         response = self.client.post(
-            reverse("edit_standing_order", args=[order.pk]),
+            reverse("edit_autonomous_goal", args=[goal.pk]),
             {
                 "title": "Improve docs",
                 "goal": "Find useful docs increments.",
-                "ambition": StandingOrder.AMBITION_HIGH,
-                "autonomy": StandingOrder.AUTONOMY_DRAFT_PATCH,
+                "ambition": AutonomousGoal.AMBITION_HIGH,
+                "autonomy": AutonomousGoal.AUTONOMY_DRAFT_PATCH,
                 "auto_qa": "true",
                 "auto_proposal": "false",
-                "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
-                "web_search_mode": StandingOrder.WEB_SEARCH_DISABLED,
+                "confidence_threshold": AutonomousGoal.CONFIDENCE_VERY_HIGH,
+                "web_search_mode": AutonomousGoal.WEB_SEARCH_DISABLED,
             },
         )
 
         self.assertEqual(response.status_code, 302)
-        order.refresh_from_db()
-        self.assertEqual(order.title, "Improve docs")
-        self.assertEqual(order.goal, "Find useful docs increments.")
-        self.assertEqual(order.ambition, StandingOrder.AMBITION_HIGH)
-        self.assertEqual(order.autonomy, StandingOrder.AUTONOMY_DRAFT_PATCH)
-        self.assertTrue(order.auto_qa_enabled)
-        self.assertEqual(order.web_search_mode, StandingOrder.WEB_SEARCH_DISABLED)
-        self.assertFalse(order.auto_proposal_enabled)
+        goal.refresh_from_db()
+        self.assertEqual(goal.title, "Improve docs")
+        self.assertEqual(goal.goal, "Find useful docs increments.")
+        self.assertEqual(goal.ambition, AutonomousGoal.AMBITION_HIGH)
+        self.assertEqual(goal.autonomy, AutonomousGoal.AUTONOMY_DRAFT_PATCH)
+        self.assertTrue(goal.auto_qa_enabled)
+        self.assertEqual(goal.web_search_mode, AutonomousGoal.WEB_SEARCH_DISABLED)
+        self.assertFalse(goal.auto_proposal_enabled)
         self.assertEqual(
-            order.confidence_threshold,
-            StandingOrder.CONFIDENCE_VERY_HIGH,
+            goal.confidence_threshold,
+            AutonomousGoal.CONFIDENCE_VERY_HIGH,
         )
 
-    def test_edit_standing_order_can_reset_web_search_to_codex_default(self) -> None:
+    def test_edit_autonomous_goal_can_reset_web_search_to_codex_default(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            ambition=StandingOrder.AMBITION_INCREMENTAL,
-            autonomy=StandingOrder.AUTONOMY_PROPOSE_ONLY,
-            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
-            web_search_mode=StandingOrder.WEB_SEARCH_LIVE,
+            ambition=AutonomousGoal.AMBITION_INCREMENTAL,
+            autonomy=AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            web_search_mode=AutonomousGoal.WEB_SEARCH_LIVE,
         )
 
         response = self.client.post(
-            reverse("edit_standing_order", args=[order.pk]),
+            reverse("edit_autonomous_goal", args=[goal.pk]),
             {
                 "title": "Improve tests",
                 "goal": "Find useful test coverage increments.",
-                "ambition": StandingOrder.AMBITION_INCREMENTAL,
-                "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
-                "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
-                "web_search_mode": StandingOrder.WEB_SEARCH_DEFAULT,
+                "ambition": AutonomousGoal.AMBITION_INCREMENTAL,
+                "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+                "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
+                "web_search_mode": AutonomousGoal.WEB_SEARCH_DEFAULT,
             },
         )
 
         self.assertEqual(response.status_code, 302)
-        order.refresh_from_db()
-        self.assertEqual(order.web_search_mode, StandingOrder.WEB_SEARCH_DEFAULT)
+        goal.refresh_from_db()
+        self.assertEqual(goal.web_search_mode, AutonomousGoal.WEB_SEARCH_DEFAULT)
 
-    def test_edit_standing_order_updates_auto_merge_branch(self) -> None:
+    def test_edit_autonomous_goal_updates_auto_merge_branch(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
         )
 
         with patch("hitch.main.views.local_branch_names", return_value=["release"]):
             response = self.client.post(
-                reverse("edit_standing_order", args=[order.pk]),
+                reverse("edit_autonomous_goal", args=[goal.pk]),
                 {
                     "title": "Improve tests",
                     "goal": "Find useful test coverage increments.",
-                    "ambition": StandingOrder.AMBITION_HIGH,
-                    "autonomy": StandingOrder.AUTONOMY_DRAFT_PATCH,
+                    "ambition": AutonomousGoal.AMBITION_HIGH,
+                    "autonomy": AutonomousGoal.AUTONOMY_DRAFT_PATCH,
                     "auto_qa": "true",
-                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
                     "auto_merge_to_local_branch": "true",
                     "auto_merge_branch": "release",
                 },
             )
 
         self.assertEqual(response.status_code, 302)
-        order.refresh_from_db()
-        self.assertTrue(order.auto_qa_enabled)
-        self.assertTrue(order.auto_merge_to_local_branch)
-        self.assertEqual(order.auto_merge_branch, "release")
+        goal.refresh_from_db()
+        self.assertTrue(goal.auto_qa_enabled)
+        self.assertTrue(goal.auto_merge_to_local_branch)
+        self.assertEqual(goal.auto_merge_branch, "release")
 
-    def test_edit_standing_order_clears_auto_merge_when_unchecked(self) -> None:
+    def test_edit_autonomous_goal_clears_auto_merge_when_unchecked(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
             auto_qa_enabled=True,
             auto_merge_to_local_branch=True,
             auto_merge_branch="release",
         )
 
         response = self.client.post(
-            reverse("edit_standing_order", args=[order.pk]),
+            reverse("edit_autonomous_goal", args=[goal.pk]),
             {
                 "title": "Improve tests",
                 "goal": "Find useful test coverage increments.",
-                "ambition": StandingOrder.AMBITION_HIGH,
-                "autonomy": StandingOrder.AUTONOMY_DRAFT_PATCH,
+                "ambition": AutonomousGoal.AMBITION_HIGH,
+                "autonomy": AutonomousGoal.AUTONOMY_DRAFT_PATCH,
                 "auto_qa": "true",
-                "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
             },
         )
 
         self.assertEqual(response.status_code, 302)
-        order.refresh_from_db()
-        self.assertTrue(order.auto_qa_enabled)
-        self.assertFalse(order.auto_merge_to_local_branch)
-        self.assertEqual(order.auto_merge_branch, "")
+        goal.refresh_from_db()
+        self.assertTrue(goal.auto_qa_enabled)
+        self.assertFalse(goal.auto_merge_to_local_branch)
+        self.assertEqual(goal.auto_merge_branch, "")
 
-    def test_edit_standing_order_preserves_autonomy_when_omitted(self) -> None:
+    def test_edit_autonomous_goal_preserves_autonomy_when_omitted(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            ambition=StandingOrder.AMBITION_INCREMENTAL,
-            autonomy=StandingOrder.AUTONOMY_DRAFT_PR,
+            ambition=AutonomousGoal.AMBITION_INCREMENTAL,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PR,
             auto_proposal_enabled=True,
-            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
-            web_search_mode=StandingOrder.WEB_SEARCH_CACHED,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            web_search_mode=AutonomousGoal.WEB_SEARCH_CACHED,
         )
 
         response = self.client.post(
-            reverse("edit_standing_order", args=[order.pk]),
+            reverse("edit_autonomous_goal", args=[goal.pk]),
             {
                 "title": "Improve docs",
                 "goal": "Find useful docs increments.",
-                "ambition": StandingOrder.AMBITION_HIGH,
-                "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
+                "ambition": AutonomousGoal.AMBITION_HIGH,
+                "confidence_threshold": AutonomousGoal.CONFIDENCE_VERY_HIGH,
             },
         )
 
         self.assertEqual(response.status_code, 302)
-        order.refresh_from_db()
-        self.assertEqual(order.autonomy, StandingOrder.AUTONOMY_DRAFT_PR)
-        self.assertEqual(order.web_search_mode, StandingOrder.WEB_SEARCH_CACHED)
-        self.assertTrue(order.auto_proposal_enabled)
+        goal.refresh_from_db()
+        self.assertEqual(goal.autonomy, AutonomousGoal.AUTONOMY_DRAFT_PR)
+        self.assertEqual(goal.web_search_mode, AutonomousGoal.WEB_SEARCH_CACHED)
+        self.assertTrue(goal.auto_proposal_enabled)
 
-    def test_edit_standing_order_clears_auto_proposal_no_proposal_sha(self) -> None:
+    def test_edit_autonomous_goal_clears_auto_proposal_no_proposal_sha(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            ambition=StandingOrder.AMBITION_INCREMENTAL,
-            autonomy=StandingOrder.AUTONOMY_PROPOSE_ONLY,
-            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+            ambition=AutonomousGoal.AMBITION_INCREMENTAL,
+            autonomy=AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
             auto_proposal_last_no_proposal_sha="a" * 40,
         )
 
         response = self.client.post(
-            reverse("edit_standing_order", args=[order.pk]),
+            reverse("edit_autonomous_goal", args=[goal.pk]),
             {
                 "title": "Improve tests",
                 "goal": "Find useful test coverage increments.",
-                "ambition": StandingOrder.AMBITION_INCREMENTAL,
-                "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
+                "ambition": AutonomousGoal.AMBITION_INCREMENTAL,
+                "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
                 "auto_proposal": "true",
-                "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
             },
         )
 
         self.assertEqual(response.status_code, 302)
-        order.refresh_from_db()
-        self.assertTrue(order.auto_proposal_enabled)
-        self.assertEqual(order.auto_proposal_last_no_proposal_sha, "")
+        goal.refresh_from_db()
+        self.assertTrue(goal.auto_proposal_enabled)
+        self.assertEqual(goal.auto_proposal_last_no_proposal_sha, "")
 
-    def test_edit_standing_order_preserves_auto_qa_when_omitted(self) -> None:
+    def test_edit_autonomous_goal_preserves_auto_qa_when_omitted(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            ambition=StandingOrder.AMBITION_INCREMENTAL,
-            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            ambition=AutonomousGoal.AMBITION_INCREMENTAL,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
             auto_qa_enabled=True,
-            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
         )
 
         response = self.client.post(
-            reverse("edit_standing_order", args=[order.pk]),
+            reverse("edit_autonomous_goal", args=[goal.pk]),
             {
                 "title": "Improve docs",
                 "goal": "Find useful docs increments.",
-                "ambition": StandingOrder.AMBITION_HIGH,
-                "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
+                "ambition": AutonomousGoal.AMBITION_HIGH,
+                "confidence_threshold": AutonomousGoal.CONFIDENCE_VERY_HIGH,
             },
         )
 
         self.assertEqual(response.status_code, 302)
-        order.refresh_from_db()
-        self.assertEqual(order.autonomy, StandingOrder.AUTONOMY_DRAFT_PATCH)
-        self.assertTrue(order.auto_qa_enabled)
+        goal.refresh_from_db()
+        self.assertEqual(goal.autonomy, AutonomousGoal.AUTONOMY_DRAFT_PATCH)
+        self.assertTrue(goal.auto_qa_enabled)
 
-    def test_edit_standing_order_disables_auto_qa_when_false_is_explicit(self) -> None:
+    def test_edit_autonomous_goal_disables_auto_qa_when_false_is_explicit(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
-            ambition=StandingOrder.AMBITION_INCREMENTAL,
-            autonomy=StandingOrder.AUTONOMY_DRAFT_PATCH,
+            ambition=AutonomousGoal.AMBITION_INCREMENTAL,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
             auto_qa_enabled=True,
-            confidence_threshold=StandingOrder.CONFIDENCE_HIGH,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
         )
 
         response = self.client.post(
-            reverse("edit_standing_order", args=[order.pk]),
+            reverse("edit_autonomous_goal", args=[goal.pk]),
             {
                 "title": "Improve docs",
                 "goal": "Find useful docs increments.",
-                "ambition": StandingOrder.AMBITION_HIGH,
-                "autonomy": StandingOrder.AUTONOMY_DRAFT_PATCH,
+                "ambition": AutonomousGoal.AMBITION_HIGH,
+                "autonomy": AutonomousGoal.AUTONOMY_DRAFT_PATCH,
                 "auto_qa": "false",
-                "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
+                "confidence_threshold": AutonomousGoal.CONFIDENCE_VERY_HIGH,
             },
         )
 
         self.assertEqual(response.status_code, 302)
-        order.refresh_from_db()
-        self.assertFalse(order.auto_qa_enabled)
+        goal.refresh_from_db()
+        self.assertFalse(goal.auto_qa_enabled)
 
-    def test_edit_standing_order_is_scoped_to_selected_project(self) -> None:
+    def test_edit_autonomous_goal_is_scoped_to_selected_project(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         other_project = Project.objects.create(name="Other", repo_path="/other")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=other_project,
-            title="Other order",
+            title="Other goal",
             goal="Should not change.",
         )
 
         response = self.client.post(
-            reverse("edit_standing_order", args=[order.pk]),
+            reverse("edit_autonomous_goal", args=[goal.pk]),
             {
                 "title": "Changed",
                 "goal": "Changed.",
-                "ambition": StandingOrder.AMBITION_HIGH,
-                "confidence_threshold": StandingOrder.CONFIDENCE_VERY_HIGH,
+                "ambition": AutonomousGoal.AMBITION_HIGH,
+                "confidence_threshold": AutonomousGoal.CONFIDENCE_VERY_HIGH,
             },
         )
 
         self.assertEqual(response.status_code, 404)
-        order.refresh_from_db()
-        self.assertEqual(order.title, "Other order")
-        self.assertEqual(order.goal, "Should not change.")
+        goal.refresh_from_db()
+        self.assertEqual(goal.title, "Other goal")
+        self.assertEqual(goal.goal, "Should not change.")
 
-    def test_edit_standing_order_rejects_invalid_posts(self) -> None:
+    def test_edit_autonomous_goal_rejects_invalid_posts(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
@@ -9934,10 +9967,10 @@ class StandingOrderViewTests(TestCase):
                 {
                     "title": "",
                     "goal": "Find useful docs increments.",
-                    "ambition": StandingOrder.AMBITION_HIGH,
-                    "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
+                    "ambition": AutonomousGoal.AMBITION_HIGH,
+                    "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
                     "auto_proposal": "false",
-                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
                 },
                 "title is required",
             ),
@@ -9945,10 +9978,10 @@ class StandingOrderViewTests(TestCase):
                 {
                     "title": "Improve docs",
                     "goal": "",
-                    "ambition": StandingOrder.AMBITION_HIGH,
-                    "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
+                    "ambition": AutonomousGoal.AMBITION_HIGH,
+                    "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
                     "auto_proposal": "false",
-                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
                 },
                 "goal is required",
             ),
@@ -9957,9 +9990,9 @@ class StandingOrderViewTests(TestCase):
                     "title": "Improve docs",
                     "goal": "Find useful docs increments.",
                     "ambition": "huge",
-                    "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
+                    "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
                     "auto_proposal": "false",
-                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
                 },
                 "ambition is invalid",
             ),
@@ -9967,10 +10000,10 @@ class StandingOrderViewTests(TestCase):
                 {
                     "title": "Improve docs",
                     "goal": "Find useful docs increments.",
-                    "ambition": StandingOrder.AMBITION_HIGH,
+                    "ambition": AutonomousGoal.AMBITION_HIGH,
                     "autonomy": "self_driving",
                     "auto_proposal": "false",
-                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
                 },
                 "autonomy is invalid",
             ),
@@ -9978,10 +10011,10 @@ class StandingOrderViewTests(TestCase):
                 {
                     "title": "Improve docs",
                     "goal": "Find useful docs increments.",
-                    "ambition": StandingOrder.AMBITION_HIGH,
-                    "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
+                    "ambition": AutonomousGoal.AMBITION_HIGH,
+                    "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
                     "auto_qa": "yes",
-                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
                 },
                 "auto-QA setting is invalid",
             ),
@@ -9989,10 +10022,10 @@ class StandingOrderViewTests(TestCase):
                 {
                     "title": "Improve docs",
                     "goal": "Find useful docs increments.",
-                    "ambition": StandingOrder.AMBITION_HIGH,
-                    "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
+                    "ambition": AutonomousGoal.AMBITION_HIGH,
+                    "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
                     "auto_proposal": "maybe",
-                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
                 },
                 "auto-proposal is invalid",
             ),
@@ -10000,8 +10033,8 @@ class StandingOrderViewTests(TestCase):
                 {
                     "title": "Improve docs",
                     "goal": "Find useful docs increments.",
-                    "ambition": StandingOrder.AMBITION_HIGH,
-                    "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
+                    "ambition": AutonomousGoal.AMBITION_HIGH,
+                    "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
                     "auto_proposal": "false",
                     "confidence_threshold": "absolute",
                 },
@@ -10011,9 +10044,9 @@ class StandingOrderViewTests(TestCase):
                 {
                     "title": "Improve docs",
                     "goal": "Find useful docs increments.",
-                    "ambition": StandingOrder.AMBITION_HIGH,
-                    "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
-                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                    "ambition": AutonomousGoal.AMBITION_HIGH,
+                    "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
                     "web_search_mode": "maybe",
                 },
                 "web search setting is invalid",
@@ -10022,9 +10055,9 @@ class StandingOrderViewTests(TestCase):
                 {
                     "title": "Improve docs",
                     "goal": "Find useful docs increments.",
-                    "ambition": StandingOrder.AMBITION_HIGH,
-                    "autonomy": StandingOrder.AUTONOMY_PROPOSE_ONLY,
-                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                    "ambition": AutonomousGoal.AMBITION_HIGH,
+                    "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
                     "auto_merge_to_local_branch": "true",
                     "auto_merge_branch": "main",
                 },
@@ -10034,10 +10067,10 @@ class StandingOrderViewTests(TestCase):
                 {
                     "title": "Improve docs",
                     "goal": "Find useful docs increments.",
-                    "ambition": StandingOrder.AMBITION_HIGH,
-                    "autonomy": StandingOrder.AUTONOMY_DRAFT_PATCH,
+                    "ambition": AutonomousGoal.AMBITION_HIGH,
+                    "autonomy": AutonomousGoal.AUTONOMY_DRAFT_PATCH,
                     "auto_qa": "true",
-                    "confidence_threshold": StandingOrder.CONFIDENCE_HIGH,
+                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
                     "auto_merge_to_local_branch": "true",
                     "auto_merge_branch": "missing",
                 },
@@ -10046,42 +10079,42 @@ class StandingOrderViewTests(TestCase):
         ):
             with self.subTest(message=message):
                 response = self.client.post(
-                    reverse("edit_standing_order", args=[order.pk]),
+                    reverse("edit_autonomous_goal", args=[goal.pk]),
                     data,
                 )
 
                 self.assertContains(response, message, status_code=400)
 
-        order.refresh_from_db()
-        self.assertEqual(order.title, "Improve tests")
-        self.assertEqual(order.goal, "Find useful test coverage increments.")
+        goal.refresh_from_db()
+        self.assertEqual(goal.title, "Improve tests")
+        self.assertEqual(goal.goal, "Find useful test coverage increments.")
 
-    @patch("hitch.main.views.system_agents.start_standing_order_workflow")
-    def test_run_single_starts_selected_project_order(
+    @patch("hitch.main.views.system_agents.start_autonomous_goal_workflow")
+    def test_run_single_starts_selected_project_goal(
         self, mock_start: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         other_project = Project.objects.create(name="Other", repo_path="/other")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
         )
-        StandingOrder.objects.create(
+        AutonomousGoal.objects.create(
             project=other_project,
-            title="Other order",
+            title="Other goal",
             goal="Should not run.",
         )
 
-        response = self.client.post(reverse("run_standing_order", args=[order.pk]))
+        response = self.client.post(reverse("run_autonomous_goal", args=[goal.pk]))
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(mock_start.call_count, 1)
-        self.assertEqual(mock_start.call_args.kwargs["standing_order"], order)
+        self.assertEqual(mock_start.call_args.kwargs["autonomous_goal"], goal)
         self.assertFalse(mock_start.call_args.kwargs["use_worktrees"])
 
-    @patch("hitch.main.views.system_agents.start_standing_order_workflow")
+    @patch("hitch.main.views.system_agents.start_autonomous_goal_workflow")
     def test_run_single_propagates_worktree_setting(
         self, mock_start: MagicMock
     ) -> None:
@@ -10091,63 +10124,63 @@ class StandingOrderViewTests(TestCase):
             hitch_selected_project_id=str(project.pk),
             **{_USE_WORKTREES_COOKIE: "true"},
         )
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
         )
 
-        response = self.client.post(reverse("run_standing_order", args=[order.pk]))
+        response = self.client.post(reverse("run_autonomous_goal", args=[goal.pk]))
 
         self.assertEqual(response.status_code, 302)
         self.assertTrue(mock_start.call_args.kwargs["use_worktrees"])
 
-    @patch("hitch.main.views.system_agents.start_standing_order_workflow")
+    @patch("hitch.main.views.system_agents.start_autonomous_goal_workflow")
     def test_run_single_is_scoped_to_selected_project(
         self, mock_start: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         other_project = Project.objects.create(name="Other", repo_path="/other")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=other_project,
-            title="Other order",
+            title="Other goal",
             goal="Should not run.",
         )
 
-        response = self.client.post(reverse("run_standing_order", args=[order.pk]))
+        response = self.client.post(reverse("run_autonomous_goal", args=[goal.pk]))
 
         self.assertEqual(response.status_code, 404)
         mock_start.assert_not_called()
 
-    @patch("hitch.main.views.system_agents.start_standing_order_workflow")
-    def test_run_all_starts_each_selected_project_order(
+    @patch("hitch.main.views.system_agents.start_autonomous_goal_workflow")
+    def test_run_all_starts_each_selected_project_goal(
         self, mock_start: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         other_project = Project.objects.create(name="Other", repo_path="/other")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        first = StandingOrder.objects.create(
+        first = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
         )
-        second = StandingOrder.objects.create(
+        second = AutonomousGoal.objects.create(
             project=project,
             title="Improve docs",
             goal="Find useful docs increments.",
         )
-        StandingOrder.objects.create(
+        AutonomousGoal.objects.create(
             project=other_project,
-            title="Other order",
+            title="Other goal",
             goal="Should not run.",
         )
 
-        response = self.client.post(reverse("run_standing_orders"))
+        response = self.client.post(reverse("run_autonomous_goals"))
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(
-            [call.kwargs["standing_order"] for call in mock_start.call_args_list],
+            [call.kwargs["autonomous_goal"] for call in mock_start.call_args_list],
             [first, second],
         )
         self.assertEqual(
@@ -10158,13 +10191,13 @@ class StandingOrderViewTests(TestCase):
     def test_reject_proposed_session_requires_reason(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
         )
         proposal = ProposedSession.objects.create(
-            standing_order=order,
+            autonomous_goal=goal,
             title="Add parser coverage",
         )
 
@@ -10179,7 +10212,7 @@ class StandingOrderViewTests(TestCase):
     def test_accept_proposed_session_links_candidate_session(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
@@ -10190,7 +10223,7 @@ class StandingOrderViewTests(TestCase):
             project=project,
         )
         proposal = ProposedSession.objects.create(
-            standing_order=order,
+            autonomous_goal=goal,
             candidate_session=candidate,
             title="Add parser coverage",
         )
@@ -10208,13 +10241,13 @@ class StandingOrderViewTests(TestCase):
     def test_dismiss_notice_updates_outcome(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
         )
         notice = ProposedSession.objects.create(
-            standing_order=order,
+            autonomous_goal=goal,
             title="No proposal from Improve tests",
             inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
             summary="No concrete test increment was worth proposing.",
@@ -10232,13 +10265,13 @@ class StandingOrderViewTests(TestCase):
     def test_notice_rejects_non_dismissed_outcome(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
         )
         notice = ProposedSession.objects.create(
-            standing_order=order,
+            autonomous_goal=goal,
             title="No proposal from Improve tests",
             inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
         )
@@ -10254,13 +10287,13 @@ class StandingOrderViewTests(TestCase):
     def test_proposal_rejects_dismissed_outcome(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
-        order = StandingOrder.objects.create(
+        goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
         )
         proposal = ProposedSession.objects.create(
-            standing_order=order,
+            autonomous_goal=goal,
             title="Add parser coverage",
         )
 

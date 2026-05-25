@@ -1,4 +1,4 @@
-"""Periodic runner for auto-proposal standing orders."""
+"""Periodic runner for auto-proposal autonomous goals."""
 
 from __future__ import annotations
 

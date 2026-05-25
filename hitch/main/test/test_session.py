@@ -408,8 +408,8 @@ class SessionViewTests(TestCase):
         nav_start = body.index('<nav class="primary-nav"')
         nav_end = body.index("</nav>", nav_start)
         nav_html = body[nav_start:nav_end]
-        self.assertIn(f'href="{reverse("standing_orders")}"', nav_html)
-        self.assertIn(">standing orders</a>", nav_html)
+        self.assertIn(f'href="{reverse("autonomous_goals")}"', nav_html)
+        self.assertIn(">auto goals</a>", nav_html)
         self.assertContains(response, "@media (max-width: 900px)")
 
     @patch("hitch.main.views.Codex")
