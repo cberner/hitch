@@ -41,6 +41,7 @@
             --radius-sm: 8px;
             --safe-top: env(safe-area-inset-top, 0px);
             --safe-bottom: env(safe-area-inset-bottom, 0px);
+            --composer-height: calc(5rem + var(--safe-bottom));
             --composer-keyboard-offset: 0px;
         }
         @media (prefers-color-scheme: dark) {
@@ -86,7 +87,7 @@
             -moz-osx-font-smoothing: grayscale;
             -webkit-tap-highlight-color: transparent;
             min-height: 100vh;
-            padding-bottom: calc(7rem + var(--safe-bottom) + var(--composer-keyboard-offset));
+            padding-bottom: calc(var(--composer-height) + 2rem + var(--composer-keyboard-offset));
         }
         body.read-only {
             padding-bottom: calc(2rem + var(--safe-bottom));
@@ -1220,7 +1221,7 @@
         .live-work {
             position: fixed;
             left: 50%;
-            bottom: calc(5rem + var(--safe-bottom) + var(--composer-keyboard-offset));
+            bottom: calc(var(--composer-height) + 1rem + var(--composer-keyboard-offset));
             transform: translateX(-50%);
             z-index: 24;
             width: min(820px, calc(100vw - 2rem));
@@ -1231,7 +1232,7 @@
         }
         .live-work[data-state="idle"] { display: none; }
         .live-work[data-slash-menu-open="true"] {
-            bottom: calc(8rem + var(--safe-bottom) + var(--composer-keyboard-offset));
+            bottom: calc(var(--composer-height) + 3rem + var(--composer-keyboard-offset));
             justify-content: flex-end;
         }
         .live-work[data-slash-menu-open="true"] .live-status {
@@ -1381,7 +1382,7 @@
         .jump-latest {
             position: fixed;
             right: max(1rem, env(safe-area-inset-right, 0px));
-            bottom: calc(5.9rem + var(--safe-bottom) + var(--composer-keyboard-offset));
+            bottom: calc(var(--composer-height) + 1.8rem + var(--composer-keyboard-offset));
             z-index: 25;
             display: inline-flex;
             align-items: center;
@@ -1560,7 +1561,7 @@
         .diff-fab {
             position: fixed;
             right: max(1rem, env(safe-area-inset-right, 0px));
-            bottom: calc(5.9rem + var(--safe-bottom) + var(--composer-keyboard-offset));
+            bottom: calc(var(--composer-height) + 1.8rem + var(--composer-keyboard-offset));
             z-index: 25;
             display: inline-flex;
             align-items: center;
@@ -1924,7 +1925,6 @@
                 margin-right: -0.1rem;
             }
             .live-work {
-                bottom: calc(4.8rem + var(--safe-bottom) + var(--composer-keyboard-offset));
                 width: calc(100vw - 1rem);
                 flex-wrap: wrap;
             }
@@ -1932,7 +1932,6 @@
                 bottom: calc(0.75rem + var(--safe-bottom));
             }
             .live-work[data-slash-menu-open="true"] {
-                bottom: calc(8rem + var(--safe-bottom) + var(--composer-keyboard-offset));
                 justify-content: flex-start;
             }
             .live-work[data-slash-menu-open="true"] .live-status {
@@ -1967,11 +1966,9 @@
             .composer-attachment-summary { display: none; }
             .diff-fab {
                 right: 0.75rem;
-                bottom: calc(5.4rem + var(--safe-bottom) + var(--composer-keyboard-offset));
             }
             .jump-latest {
                 right: 0.75rem;
-                bottom: calc(5.4rem + var(--safe-bottom) + var(--composer-keyboard-offset));
             }
             body.read-only .jump-latest {
                 bottom: calc(1.55rem + var(--safe-bottom));
@@ -2702,6 +2699,7 @@
                 const nextMessageItems = nextMessageConfig
                     ? nextMessageConfig.querySelectorAll("[data-next-message-item]")
                     : [];
+                const composerHeightProperty = "--composer-height";
                 const composerKeyboardOffsetProperty = "--composer-keyboard-offset";
                 const mobileComposerQuery = window.matchMedia("(max-width: 640px)");
                 const composerKeyboardSettleDelays = [50, 150, 300, 500];
@@ -2711,9 +2709,16 @@
                 let composerKeyboardFrame = 0;
                 let composerKeyboardSettleTimers = [];
                 const hasImages = () => imageInput && (imageInput.files || []).length > 0;
+                const syncComposerHeight = () => {
+                    const height = Math.ceil(composer.getBoundingClientRect().height);
+                    if (height > 0) {
+                        document.documentElement.style.setProperty(composerHeightProperty, `${height}px`);
+                    }
+                };
                 const sync = () => {
                     input.style.height = "auto";
                     input.style.height = input.scrollHeight + "px";
+                    syncComposerHeight();
                     submit.disabled = workflowLocked || (
                         input.value.trim().length === 0 && !hasImages()
                     );
@@ -2870,6 +2875,10 @@
                 setPlanMode(composer.dataset.initialPlanMode === "true");
                 sync();
                 syncImageSummary();
+                const composerResizeObserver = "ResizeObserver" in window
+                    ? new ResizeObserver(syncComposerHeight)
+                    : null;
+                if (composerResizeObserver) composerResizeObserver.observe(composer);
                 if (imageInput) {
                     imageInput.addEventListener("change", () => {
                         syncImageSummary();
@@ -2951,7 +2960,10 @@
                     window.visualViewport.addEventListener("resize", scheduleSettledComposerKeyboardOffset);
                     window.visualViewport.addEventListener("scroll", scheduleSettledComposerKeyboardOffset);
                 }
-                window.addEventListener("resize", scheduleSettledComposerKeyboardOffset);
+                window.addEventListener("resize", () => {
+                    syncComposerHeight();
+                    scheduleSettledComposerKeyboardOffset();
+                });
                 composer.addEventListener("submit", (event) => {
                     const submitter = event.submitter || document.activeElement;
                     if (workflowLocked && submitter !== stop) {
