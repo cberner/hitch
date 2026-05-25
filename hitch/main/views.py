@@ -1125,12 +1125,9 @@ def _materialized_session_list_page_from_codex(
     system_only: bool,
     accepted_visible_thread_ids: set[str],
 ) -> SessionListPage:
-    active_threads = _all_threads(codex)
-    thread_sources = [(thread, False) for thread in active_threads]
+    threads = _all_threads(codex)
     if include_archived:
-        archived_threads = _all_threads(codex, archived=True)
-        thread_sources.extend((thread, True) for thread in archived_threads)
-    threads = [thread for thread, _source_archived in thread_sources]
+        threads.extend(_all_threads(codex, archived=True))
     _add_thread_derived_hidden_ids(
         hidden_thread_ids,
         system_thread_ids,
@@ -1146,7 +1143,7 @@ def _materialized_session_list_page_from_codex(
     )
     sessions = [
         session
-        for thread, source_archived in thread_sources
+        for thread in threads
         if (
             session := _session_row_for_thread(
                 thread,
@@ -1159,7 +1156,6 @@ def _materialized_session_list_page_from_codex(
                 runs_by_thread_id=runs_by_thread_id,
                 instances_by_thread_id=instances_by_thread_id,
                 project_cache=project_cache,
-                source_archived=source_archived,
                 system_only=system_only,
             )
         )
@@ -1358,7 +1354,6 @@ def _peek_source_session(
                 runs_by_thread_id=runs_by_thread_id,
                 instances_by_thread_id=instances_by_thread_id,
                 project_cache=project_cache,
-                source_archived=source.archived,
                 system_only=system_only,
             )
             if session is not None:
@@ -1467,7 +1462,6 @@ def _visible_session_page_from_codex(
                 runs_by_thread_id=runs_by_thread_id,
                 instances_by_thread_id=instances_by_thread_id,
                 project_cache=project_cache,
-                source_archived=archived,
                 system_only=system_only,
             )
             if session is not None:
@@ -1645,7 +1639,6 @@ def _session_row_for_thread(
     runs_by_thread_id: dict[str, SystemAgentRun],
     instances_by_thread_id: dict[str, CodexInstance],
     project_cache: dict[str, Project | None],
-    source_archived: bool,
     system_only: bool,
 ) -> dict[str, Any] | None:
     thread_id = getattr(thread, "id", None)
@@ -1661,19 +1654,13 @@ def _session_row_for_thread(
     )
     if current_project is not None and session_project != current_project:
         return None
-    metadata = metadata_by_thread.get(thread_id)
-    is_archived = (
-        metadata.codex_archived if metadata is not None else _thread_is_archived(thread)
-    )
-    if is_archived != source_archived:
-        return None
     row = {
         "id": thread_id,
         "cwd": _thread_cwd(thread) or "",
         "updated_at": _session_updated_at(thread, qa_updated_at_by_main_thread),
         "display_title": _display_title(thread),
         "name_value": getattr(thread, "name", None) or "",
-        "is_archived": is_archived,
+        "is_archived": _thread_is_archived(thread),
         "project": session_project,
     }
     if system_only:

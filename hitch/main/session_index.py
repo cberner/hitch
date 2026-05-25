@@ -53,11 +53,6 @@ class _SourceRefreshResult(NamedTuple):
     seen_thread_ids: set[str]
 
 
-class _ArchivedStateResolution(NamedTuple):
-    archived: bool
-    preserve_cached_updated_at: bool
-
-
 def should_refresh(*, archived: bool) -> bool:
     source = (
         SessionIndexSyncState.SOURCE_ARCHIVED
@@ -147,36 +142,18 @@ def upsert_thread(thread: Any, *, projects: list[Project]) -> SessionMetadata | 
     if not isinstance(thread_id, str) or not thread_id:
         return None
     cwd = _thread_cwd(thread) or ""
-    created_at = _timestamp_to_datetime(getattr(thread, "created_at", None))
-    updated_at = _timestamp_to_datetime(getattr(thread, "updated_at", None))
-    archived = _thread_is_archived(thread)
-    preserve_cached_updated_at = False
-    existing = SessionMetadata.objects.filter(thread_id=thread_id).first()
-    if existing is not None:
-        archive_resolution = _archived_state_with_cached_transition(
-            existing,
-            archived=archived,
-            source_updated_at=updated_at or created_at,
-        )
-        archived = archive_resolution.archived
-        preserve_cached_updated_at = archive_resolution.preserve_cached_updated_at
     defaults = _codex_defaults(
         thread_id=thread_id,
         cwd=cwd,
         name=getattr(thread, "name", None),
         preview=getattr(thread, "preview", None),
-        created_at=created_at,
-        updated_at=updated_at,
-        archived=archived,
+        created_at=_timestamp_to_datetime(getattr(thread, "created_at", None)),
+        updated_at=_timestamp_to_datetime(getattr(thread, "updated_at", None)),
+        archived=_thread_is_archived(thread),
         path=getattr(thread, "path", None),
         thread_source=_metadata_value(getattr(thread, "thread_source", None)),
     )
-    if (
-        preserve_cached_updated_at
-        and existing is not None
-        and existing.codex_updated_at is not None
-    ):
-        defaults["codex_updated_at"] = existing.codex_updated_at
+    existing = SessionMetadata.objects.filter(thread_id=thread_id).first()
     if existing is None:
         defaults["project"] = _project_for_cwd(cwd, projects)
         defaults["project_cleared"] = False
@@ -259,29 +236,6 @@ def indexed_sessions() -> QuerySet[SessionMetadata]:
         SessionMetadata.objects.exclude(codex_updated_at__isnull=True)
         .select_related("project")
         .order_by("-codex_updated_at", "-pk")
-    )
-
-
-def _archived_state_with_cached_transition(
-    existing: SessionMetadata, *, archived: bool, source_updated_at: datetime | None
-) -> _ArchivedStateResolution:
-    if existing.codex_archived == archived:
-        return _ArchivedStateResolution(
-            archived=archived,
-            preserve_cached_updated_at=False,
-        )
-    if (
-        existing.codex_updated_at is not None
-        and source_updated_at is not None
-        and existing.codex_updated_at > source_updated_at
-    ):
-        return _ArchivedStateResolution(
-            archived=existing.codex_archived,
-            preserve_cached_updated_at=True,
-        )
-    return _ArchivedStateResolution(
-        archived=archived,
-        preserve_cached_updated_at=False,
     )
 
 
