@@ -4,7 +4,7 @@ import tempfile
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import override
+from typing import cast, override
 from unittest.mock import MagicMock, patch
 
 from django.core import signing
@@ -387,7 +387,8 @@ class SessionViewTests(TestCase):
         )
         self.assertContains(response, f'href="{reverse("usage")}"')
         self.assertContains(response, ">settings<")
-        self.assertContains(response, "data-settings-dialog")
+        self.assertIn(reverse("update_settings"), nav_html)
+        self.assertNotContains(response, "data-settings-dialog")
         self.assertContains(response, 'classList.add("primary-nav-js")')
         self.assertNotContains(response, "html:not(.js) .primary-nav-toggle")
         self.assertNotContains(response, 'class="back-link"')
@@ -413,12 +414,10 @@ class SessionViewTests(TestCase):
         self.assertContains(response, "@media (max-width: 900px)")
 
     @patch("hitch.main.views.Codex")
-    def test_settings_dialog_uses_resolved_settings(
+    def test_settings_page_uses_resolved_settings(
         self, mock_codex: MagicMock
     ) -> None:
-        thread = _thread([_turn([_user_message("hi")])])
         client = mock_codex.return_value.__enter__.return_value
-        client._client.thread_resume.return_value.thread = thread
         client.models.return_value.data = [
             SimpleNamespace(
                 id="gpt-current",
@@ -434,7 +433,7 @@ class SessionViewTests(TestCase):
             hitch_reasoning_effort="high",
         )
 
-        response = _get_session(self.client)
+        response = cast(HttpResponse, self.client.get(reverse("update_settings")))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'value="gpt-current" selected')

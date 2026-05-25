@@ -187,7 +187,7 @@
             margin: 0;
         }
         {% include "_primary_nav_styles.html" %}
-        {% include "_settings_dialog_styles.html" %}
+        {% include "_dialog_styles.html" %}
         main {
             max-width: 900px;
             margin: 0 auto;
@@ -517,7 +517,6 @@
         </section>
         {% endif %}
     </main>
-    {% include "_settings_dialog.html" %}
     {% if current_project and autonomous_goals %}
     <dialog class="new-session" data-create-autonomous-goal-dialog aria-labelledby="create-autonomous-goal-dialog-title">
         <form method="post" action="{{ autonomous_goal_create_url }}" data-autonomous-goal-create-form>

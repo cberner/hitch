@@ -2275,7 +2275,6 @@ class IndexViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Matching")
         self.assertContains(response, "Hitch sessions")
-        self.assertContains(response, 'name="selected_project"')
         self.assertNotContains(response, "Other session")
 
     @patch("hitch.main.views.discover_repos")
