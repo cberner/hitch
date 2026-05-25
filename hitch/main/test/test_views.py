@@ -2593,10 +2593,6 @@ class IndexViewTests(TestCase):
         with (
             patch("hitch.main.views.rollout.latest_token_usage") as latest_usage,
             patch("hitch.main.views.rollout.token_usage_history") as usage_history,
-            patch(
-                "hitch.main.views._rollout_path_from_value",
-                side_effect=AssertionError("usage render touched rollout path"),
-            ) as rollout_path_from_value,
             patch("hitch.main.views._start_usage_token_refresh_thread") as start_refresh,
             patch("hitch.main.views._start_models_refresh_thread"),
             patch("hitch.main.views._start_rate_limits_refresh_thread"),
@@ -2606,16 +2602,19 @@ class IndexViewTests(TestCase):
 
         latest_usage.assert_not_called()
         usage_history.assert_not_called()
-        rollout_path_from_value.assert_not_called()
         start_refresh.assert_called_once()
         refresh_items = start_refresh.call_args.args[0]
         self.assertEqual(len(refresh_items), 1)
         self.assertEqual(refresh_items[0].thread_id, "archived")
         self.assertEqual(refresh_items[0].codex_path, str(rollout_path))
-        self.assertNotContains(response, "Refreshing session token usage...")
-        self.assertContains(response, "90K")
-        self.assertContains(response, "23K")
-        self.assertContains(response, "10K")
+        self.assertContains(response, "Refreshing session token usage...")
+        lifetime_usage = cast(dict[str, Any], response.context["lifetime_usage"])
+        self.assertEqual(lifetime_usage["total"]["input"], "0")
+        self.assertEqual(lifetime_usage["total"]["output"], "0")
+        self.assertEqual(lifetime_usage["total"]["cached"], "0")
+        self.assertNotContains(response, "90K")
+        self.assertNotContains(response, "23K")
+        self.assertNotContains(response, "10K")
         self.assertNotContains(response, "810K")
         self.assertNotContains(response, "909,999")
         self.assertNotContains(response, "999,999")
@@ -2629,6 +2628,42 @@ class IndexViewTests(TestCase):
         cache.refresh_from_db()
         self.assertEqual(cache.total_tokens, 999_999)
         self.assertEqual(cache.rollout_mtime_ns, 2_000_000_000)
+
+    def test_lifetime_usage_skips_stale_file_backed_cache(self) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=900,
+                    cached_input_tokens=90,
+                    output_tokens=100,
+                    total_tokens=1_000,
+                )
+            ],
+        )
+        os.utime(rollout_path, ns=(2_000_000_000, 2_000_000_000))
+        metadata = _seed_usage_metadata("active", path=rollout_path)
+        metadata.usage_last_checked_at = datetime.now(UTC)
+        metadata.save(update_fields=["usage_last_checked_at"])
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="active",
+            rollout_path=str(rollout_path),
+            rollout_mtime_ns=1_000_000_000,
+            input_tokens=400,
+            cached_input_tokens=50,
+            output_tokens=600,
+            total_tokens=1_000,
+            daily_usage={"2025-01-05": {"input": 350, "output": 600, "cached": 50}},
+        )
+
+        lifetime_usage = views._lifetime_token_usage_for_metadata([metadata])
+
+        self.assertTrue(lifetime_usage["refresh_pending"])
+        self.assertEqual(lifetime_usage["refresh_pending_count"], 1)
+        self.assertEqual(lifetime_usage["total"]["input"], "0")
+        self.assertEqual(lifetime_usage["total"]["output"], "0")
+        self.assertEqual(lifetime_usage["total"]["cached"], "0")
+        self.assertEqual(lifetime_usage["total"]["chart"], [])
 
     @patch("hitch.main.views.Codex")
     def test_usage_page_schedules_initial_active_and_archived_index_refresh(
