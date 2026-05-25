@@ -868,7 +868,7 @@ def _session_list_page_from_index(
         _ensure_indexed_system_threads(system_thread_ids, projects=projects)
         rows = session_index.indexed_sessions()
     indexed_system_thread_ids = set(
-        rows.filter(codex_thread_source="subagent")
+        rows.filter(is_hidden_system_session=True)
         .exclude(thread_id__in=accepted_visible_thread_ids)
         .values_list("thread_id", flat=True)
     )
@@ -963,6 +963,7 @@ def _ensure_indexed_system_threads(
             projects=projects,
             name=instance.display_author or instance.agent_kind,
             preview=instance.prompt,
+            is_hidden_system_session=True,
         )
 
 
@@ -989,7 +990,7 @@ def _session_row_for_metadata(
     if system_only:
         run = runs_by_thread_id.get(metadata.thread_id)
         instance = run.instance if run is not None else instances_by_thread_id.get(metadata.thread_id)
-        untracked_hitch_system = metadata.codex_thread_source == "subagent"
+        untracked_hitch_system = metadata.is_hidden_system_session
         if instance is None and not untracked_hitch_system:
             return None
         row.update(

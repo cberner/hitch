@@ -62,6 +62,8 @@ PR_MONITOR_DISPLAY_AUTHOR = "PR monitor"
 QA_PANEL_DISPLAY_AUTHOR = "QA panel"
 STANDING_ORDER_DISPLAY_AUTHOR = "Standing order agent"
 STANDING_ORDER_JUDGE_DISPLAY_AUTHOR = "Standing order judge"
+STANDING_ORDER_AGENT_PROMPT_TITLE = session_index.STANDING_ORDER_AGENT_PROMPT_TITLE
+STANDING_ORDER_JUDGE_PROMPT_TITLE = session_index.STANDING_ORDER_JUDGE_PROMPT_TITLE
 SPEC_CRITIC_DISPLAY_AUTHOR = "Spec Critic"
 PR_SLASH_DISPLAY_PROMPT = (
     "Rebase on master, clean it up, and then open a PR"
@@ -1139,6 +1141,12 @@ def hidden_thread_ids(
         .values_list("thread_id", flat=True)
         .distinct()
     )
+    hidden_ids.update(
+        SessionMetadata.objects.filter(is_hidden_system_session=True)
+        .exclude(thread_id="")
+        .values_list("thread_id", flat=True)
+        .distinct()
+    )
     if accepted_visible_thread_ids is None:
         accepted_visible_thread_ids = accepted_visible_system_thread_ids()
     return hidden_ids - accepted_visible_thread_ids
@@ -1159,8 +1167,11 @@ def hidden_thread_ids_from_threads(
 
 
 def hitch_system_agent_thread(thread: Any) -> bool:
-    thread_source = _thread_metadata_value(getattr(thread, "thread_source", None))
-    return thread_source == ThreadSource.subagent.value
+    return session_index.hidden_system_session_from_metadata(
+        name=_thread_metadata_value(getattr(thread, "name", None)).strip(),
+        preview=_thread_metadata_value(getattr(thread, "preview", None)).strip(),
+        thread_source=_thread_metadata_value(getattr(thread, "thread_source", None)),
+    )
 
 
 def _thread_metadata_value(value: Any) -> str:
@@ -2445,6 +2456,7 @@ def _spawn_standing_order_candidate_run(
         auto_qa_enabled=False,
         auto_merge_to_local_branch=False,
         auto_merge_branch="",
+        is_hidden_system_session=True,
     )
     workflow.state = {**workflow.state, "candidate_session_id": metadata.pk}
     workflow.save(update_fields=["state", "updated_at"])
@@ -2497,6 +2509,7 @@ def _spawn_standing_order_judge_run(
         auto_qa_enabled=False,
         auto_merge_to_local_branch=False,
         auto_merge_branch="",
+        is_hidden_system_session=True,
     )
     workflow.state = {**workflow.state, "judge_session_id": metadata.pk}
     workflow.save(update_fields=["state", "updated_at"])
