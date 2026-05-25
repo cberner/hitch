@@ -17,14 +17,13 @@
         <a href="{% url 'standing_orders' %}"{% if current_route == "standing_orders" %} aria-current="page"{% endif %}>standing orders</a>
         {% endif %}
         <a href="{% url 'usage' %}"{% if current_route == "usage" %} aria-current="page"{% endif %}>usage</a>
-        {% endwith %}
         <button type="button" data-settings-open>settings</button>
         {% if user.is_authenticated %}
-        <form class="logout-form" method="post" action="{% url 'logout' %}">
-            {% csrf_token %}
-            <button type="submit">Log out</button>
-        </form>
+        <a class="primary-nav-account"
+           href="{% url 'profile' %}"
+           title="{{ user.get_username }}"{% if current_route == "profile" %} aria-current="page"{% endif %}>{{ user.get_username }}</a>
         {% endif %}
+        {% endwith %}
         {% if server_git_hash %}
         <span class="primary-nav-revision" title="Server git revision">{{ server_git_hash }}</span>
         {% endif %}

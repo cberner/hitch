@@ -2684,6 +2684,28 @@ def login(request: HttpRequest) -> HttpResponse:
     )
 
 
+@require_http_methods(["GET"])
+def profile(request: HttpRequest) -> HttpResponse:
+    user = _authenticated_user(request)
+    if user is None:
+        login_url = reverse("login")
+        next_url = request.get_full_path()
+        return redirect(f"{login_url}?{urlencode({'next': next_url})}")
+
+    resolved_settings = _resolved_settings(request, [])
+    settings_dialog_context = _settings_dialog_context(resolved_settings.values, [])
+    response = render(
+        request,
+        "profile.html",
+        {
+            "logout_url": reverse("logout"),
+            **settings_dialog_context,
+        },
+    )
+    _apply_cookie_updates(response, resolved_settings.cookie_updates)
+    return response
+
+
 @require_http_methods(["POST"])
 def logout(request: HttpRequest) -> HttpResponse:
     values = _stored_settings(request) if _authenticated_user(request) is not None else None
