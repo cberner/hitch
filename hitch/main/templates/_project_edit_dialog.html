@@ -1,0 +1,28 @@
+<dialog class="new-session" data-project-edit-dialog aria-labelledby="project-edit-title">
+    <form method="post" action="{{ edit_project_url }}">
+        {% csrf_token %}
+        <input type="hidden" name="next" value="{{ request.get_full_path }}">
+        <input type="hidden" name="project" value="{{ current_project_id }}" data-project-edit-id>
+        <h2 id="project-edit-title">Edit project</h2>
+        <label>
+            Name
+            <input type="text" name="name" value="{% if current_project %}{{ current_project.name }}{% endif %}" maxlength="{{ project_name_max_len }}" required autocomplete="off" data-project-edit-name>
+        </label>
+        <label>
+            Repository
+            <input type="text" value="{% if current_project %}{{ current_project.repo_path }}{% endif %}" readonly data-project-edit-repo>
+        </label>
+        <label>
+            Auto-PR
+            <select name="auto_pr_mode" required data-project-edit-auto-pr-mode>
+                {% for option in project_auto_pr_options %}
+                <option value="{{ option.id }}" {% if current_project and option.id == current_project.auto_pr_mode %}selected{% endif %}>{{ option.display_name }}</option>
+                {% endfor %}
+            </select>
+        </label>
+        <div class="actions">
+            <button type="button" class="button secondary" data-project-edit-cancel>Cancel</button>
+            <button type="submit" class="button">Save</button>
+        </div>
+    </form>
+</dialog>

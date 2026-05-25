@@ -488,7 +488,7 @@ _HUMAN_TOKEN_UNITS = (
 _MISSING_TOKEN_USAGE_CACHE = object()
 
 
-def _settings_dialog_context(
+def _settings_context(
     current_settings: SettingsValues, models_data: list[Any]
 ) -> dict[str, Any]:
     projects = list(Project.objects.all())
@@ -1767,7 +1767,7 @@ def index(request: HttpRequest) -> HttpResponse:
             current_project=current_project,
             system_only=False,
         )
-    settings_dialog_context = _settings_dialog_context(current_settings, models_data)
+    settings_context = _settings_context(current_settings, models_data)
     new_session_dialog_context = _new_session_dialog_context(
         current_settings, current_project, projects
     )
@@ -1785,7 +1785,7 @@ def index(request: HttpRequest) -> HttpResponse:
             "current_project": current_project,
             "name_max_len": _NAME_MAX_LEN,
             "show_new_session_controls": True,
-            **settings_dialog_context,
+            **settings_context,
             **new_session_dialog_context,
         },
     )
@@ -1815,7 +1815,7 @@ def system_sessions(request: HttpRequest) -> HttpResponse:
             current_project=current_project,
             system_only=True,
         )
-    settings_dialog_context = _settings_dialog_context(current_settings, models_data)
+    settings_context = _settings_context(current_settings, models_data)
     response = render(
         request,
         "index.html",
@@ -1830,7 +1830,7 @@ def system_sessions(request: HttpRequest) -> HttpResponse:
             "name_max_len": _NAME_MAX_LEN,
             "system_session_list": True,
             "show_new_session_controls": False,
-            **settings_dialog_context,
+            **settings_context,
         },
     )
     _apply_cookie_updates(response, cookie_updates)
@@ -1884,7 +1884,7 @@ def usage(request: HttpRequest) -> HttpResponse:
         if usage_index_available
         else None
     )
-    settings_dialog_context = _settings_dialog_context(current_settings, models_data)
+    settings_context = _settings_context(current_settings, models_data)
     response = render(
         request,
         "usage.html",
@@ -1893,7 +1893,7 @@ def usage(request: HttpRequest) -> HttpResponse:
             "register_url": reverse("register"),
             "rate_limits": rate_limits,
             "lifetime_usage": lifetime_usage,
-            **settings_dialog_context,
+            **settings_context,
         },
     )
     _apply_cookie_updates(response, cookie_updates)
@@ -1928,9 +1928,9 @@ def inbox(request: HttpRequest) -> HttpResponse:
         .order_by("created_at", "id")
     )
     _attach_proposed_session_display_state(proposed_sessions)
-    settings_dialog_context = _settings_dialog_context(current_settings, models_data)
+    settings_context = _settings_context(current_settings, models_data)
     new_session_dialog_context = _new_session_dialog_context(
-        current_settings, current_project, settings_dialog_context["projects"]
+        current_settings, current_project, settings_context["projects"]
     )
     response = render(
         request,
@@ -1943,7 +1943,7 @@ def inbox(request: HttpRequest) -> HttpResponse:
             "show_inbox_project_names": current_project is None,
             "proposed_session_rejected_status": ProposedSession.OUTCOME_REJECTED,
             "proposed_session_dismissed_status": ProposedSession.OUTCOME_DISMISSED,
-            **settings_dialog_context,
+            **settings_context,
             **new_session_dialog_context,
         },
     )
@@ -1976,7 +1976,7 @@ def autonomous_goals(request: HttpRequest) -> HttpResponse:
         else []
     )
     _attach_autonomous_goal_run_state(goals)
-    settings_dialog_context = _settings_dialog_context(current_settings, models_data)
+    settings_context = _settings_context(current_settings, models_data)
     response = render(
         request,
         "autonomous_goals.html",
@@ -2000,7 +2000,7 @@ def autonomous_goals(request: HttpRequest) -> HttpResponse:
             "default_web_search_mode": AutonomousGoal.WEB_SEARCH_DEFAULT,
             "local_branch_choices": local_branch_choices,
             "title_max_len": _AUTONOMOUS_GOAL_TITLE_MAX_LEN,
-            **settings_dialog_context,
+            **settings_context,
         },
     )
     _apply_cookie_updates(response, cookie_updates)
@@ -2536,7 +2536,7 @@ def _render_session_detail(
         if active_session_demo is not None
         else ""
     )
-    settings_dialog_context = _settings_dialog_context(settings, models_data)
+    settings_context = _settings_context(settings, models_data)
     active_worker_status_text = _active_worker_status_text(active_instance)
     workflow_status_text = _workflow_status_text(active_system_workflow)
     pr_workflow_progress = streaming.pr_workflow_progress(active_system_workflow)
@@ -2627,7 +2627,7 @@ def _render_session_detail(
             "projects": projects,
             "session_project": session_project,
             "session_project_id": session_project.pk if session_project is not None else "",
-            **settings_dialog_context,
+            **settings_context,
         },
     )
     _apply_cookie_updates(response, cookie_updates)
@@ -2708,13 +2708,13 @@ def profile(request: HttpRequest) -> HttpResponse:
         return redirect(f"{login_url}?{urlencode({'next': next_url})}")
 
     resolved_settings = _resolved_settings(request, [])
-    settings_dialog_context = _settings_dialog_context(resolved_settings.values, [])
+    settings_context = _settings_context(resolved_settings.values, [])
     response = render(
         request,
         "profile.html",
         {
             "logout_url": reverse("logout"),
-            **settings_dialog_context,
+            **settings_context,
         },
     )
     _apply_cookie_updates(response, resolved_settings.cookie_updates)
@@ -4971,8 +4971,29 @@ def _model_default_effort(model_obj: Any) -> str:
     return getattr(default, "value", str(default))
 
 
-@require_http_methods(["POST"])
+@require_http_methods(["GET", "POST"])
 def update_settings(request: HttpRequest) -> HttpResponse:
+    if request.method == "GET":
+        initial_settings = _stored_settings(request)
+        config = codex_pool.app_server_config(
+            enable_memories=initial_settings.enable_memories
+        )
+        with Codex(config=config) as codex:
+            models_data = list(codex.models().data)
+        resolved_settings = _resolved_settings(request, models_data)
+        next_url = _safe_next_url(request) or reverse("index")
+        response = render(
+            request,
+            "settings.html",
+            {
+                "settings_next_url": next_url,
+                "settings_cancel_url": next_url,
+                **_settings_context(resolved_settings.values, models_data),
+            },
+        )
+        _apply_cookie_updates(response, resolved_settings.cookie_updates)
+        return response
+
     model = request.POST.get("model", "").strip()
     effort = request.POST.get("reasoning_effort", "").strip()
     sandbox = request.POST.get("sandbox_policy", "").strip()

@@ -229,7 +229,7 @@
             .button.secondary:hover { background: var(--surface-2); }
         }
 
-        {% include "_settings_dialog_styles.html" %}
+        {% include "_dialog_styles.html" %}
 
         main {
             max-width: 820px;
@@ -2264,8 +2264,6 @@
     {% endif %}
 
     {% if not read_only %}
-    {% include "_settings_dialog.html" %}
-
     <dialog class="new-session" data-move-project-dialog aria-labelledby="move-project-title">
         <form method="post" action="{{ set_project_url }}">
             {% csrf_token %}

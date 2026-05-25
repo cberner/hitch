@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#f7f2e8" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#161c1a" media="(prefers-color-scheme: dark)">
-    <title>Profile - HITCH</title>
+    <title>Settings - HITCH</title>
     <style>
         :root {
             color-scheme: light dark;
@@ -16,14 +16,12 @@
             --border-strong: #c4b69f;
             --text: #1c252e;
             --text-muted: #545d58;
+            --text-faint: #6f6b62;
             --accent: #4f8f66;
             --accent-hover: #3f7b56;
             --accent-soft: rgba(79, 143, 102, 0.10);
             --accent-fg: #ffffff;
-            --danger: #b94f42;
-            --shadow: 0 1px 2px rgba(28, 37, 46, 0.05);
             --shadow-lg: 0 8px 24px rgba(28, 37, 46, 0.10);
-            --radius: 12px;
             --radius-sm: 8px;
             --safe-top: env(safe-area-inset-top, 0px);
             --safe-bottom: env(safe-area-inset-bottom, 0px);
@@ -37,17 +35,18 @@
                 --border-strong: #3d4744;
                 --text: #e8e4d8;
                 --text-muted: #a0a29a;
+                --text-faint: #8a8b82;
                 --accent: #6fb286;
                 --accent-hover: #84c49a;
                 --accent-soft: rgba(111, 178, 134, 0.14);
                 --accent-fg: #0c1814;
-                --danger: #d97062;
-                --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
                 --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
             }
         }
         * { box-sizing: border-box; }
         html, body { margin: 0; padding: 0; }
+        html.modal-scroll-locked,
+        body.modal-scroll-locked { overflow: hidden; }
         body {
             min-height: 100vh;
             background: var(--bg);
@@ -88,7 +87,6 @@
             font-weight: 700;
             letter-spacing: 0.08em;
             margin: 0;
-            color: var(--text);
         }
         {% include "_primary_nav_styles.html" %}
         .button {
@@ -114,24 +112,29 @@
             border-color: var(--accent-hover);
             text-decoration: none;
         }
-        .button.danger {
+        .button.secondary {
             background: transparent;
-            color: var(--danger);
-            border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+            color: var(--text);
+            border-color: var(--border-strong);
         }
-        .button.danger:hover {
-            background: color-mix(in srgb, var(--danger) 10%, transparent);
-            border-color: var(--danger);
+        .button.secondary:hover {
+            background: var(--surface-2);
+            border-color: var(--border-strong);
+        }
+        .button:disabled {
+            cursor: not-allowed;
+            opacity: 0.55;
+            transform: none;
         }
         main {
             width: min(760px, 100%);
-            min-height: calc(100vh - 4.2rem - var(--safe-top));
-            min-height: calc(100dvh - 4.2rem - var(--safe-top));
             margin: 0 auto;
-            padding: 1.25rem 1rem calc(1.5rem + var(--safe-bottom));
-            display: flex;
-            flex-direction: column;
-            gap: 1.25rem;
+            padding: 1.25rem 1rem calc(2rem + var(--safe-bottom));
+        }
+        .settings-header {
+            margin-bottom: 1rem;
+            padding-bottom: 1rem;
+            border-bottom: 1px solid var(--border);
         }
         .section-label {
             font-size: 0.72rem;
@@ -139,53 +142,92 @@
             color: var(--text-muted);
             text-transform: uppercase;
             letter-spacing: 0.08em;
-            margin: 0 0 0.75rem;
+            margin: 0 0 0.35rem;
         }
-        .profile-panel {
-            border: 1px solid var(--border);
-            border-radius: var(--radius);
-            background: var(--surface);
-            box-shadow: var(--shadow);
-            padding: 1rem;
-        }
-        .profile-panel h2 {
+        .settings-header h1 {
             margin: 0;
-            font-size: 1.15rem;
+            font-size: 1.35rem;
             font-weight: 650;
-            overflow-wrap: anywhere;
         }
-        .profile-meta {
-            margin: 0.35rem 0 0;
-            color: var(--text-muted);
-            font-size: 0.9rem;
+        .settings-form {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr);
+            gap: 1rem;
         }
-        .profile-revision {
-            margin: 0;
-            color: var(--text-muted);
-            font-size: 0.78rem;
-            line-height: 1.4;
-            text-align: right;
-        }
-        .profile-revision code {
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-            color: var(--text);
-        }
-        .profile-footer {
-            margin: auto 0 0;
+        .settings-form label {
             display: flex;
             flex-direction: column;
-            gap: 0.5rem;
+            gap: 0.4rem;
+            font-size: 0.82rem;
+            font-weight: 500;
+            color: var(--text-muted);
         }
-        .profile-logout-form {
-            margin: 0;
-            padding-top: 1.25rem;
+        .settings-form label.checkbox-label {
+            flex-direction: row;
+            align-items: center;
+            justify-content: space-between;
+            color: var(--text);
+            gap: 0.75rem;
+            min-height: 2.4rem;
             border-top: 1px solid var(--border);
-            display: flex;
-            justify-content: flex-end;
+            padding-top: 1rem;
         }
+        .settings-form input[type="checkbox"] {
+            width: 1.1rem;
+            height: 1.1rem;
+            accent-color: var(--accent);
+            flex: 0 0 auto;
+        }
+        .settings-form textarea,
+        .settings-form select,
+        .settings-form input[type="text"] {
+            width: 100%;
+            font: inherit;
+            font-size: 0.95rem;
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 0.65rem 0.75rem;
+            background: var(--surface);
+            color: var(--text);
+            transition: border-color 0.12s ease, box-shadow 0.12s ease;
+        }
+        .settings-form textarea:focus,
+        .settings-form select:focus,
+        .settings-form input[type="text"]:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-soft);
+        }
+        .settings-form textarea {
+            min-height: 5rem;
+            resize: vertical;
+            line-height: 1.5;
+        }
+        .settings-link-row,
+        .settings-form .actions {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+        .settings-link-row {
+            justify-content: flex-start;
+        }
+        .settings-form .actions {
+            justify-content: flex-end;
+            border-top: 1px solid var(--border);
+            padding-top: 1rem;
+        }
+        {% include "_dialog_styles.html" %}
         @media (max-width: 480px) {
             .topbar-inner { padding: 0.7rem 1rem; }
-            .profile-logout-form .button { width: 100%; }
+            .settings-link-row,
+            .settings-form .actions {
+                flex-direction: column;
+            }
+            .settings-link-row .button,
+            .settings-form .actions .button {
+                width: 100%;
+            }
         }
     </style>
 </head>
@@ -194,29 +236,51 @@
         <div class="topbar-inner">
             <div class="topbar-leading">
                 {% include "_primary_nav.html" %}
-                <h1 class="brand">HITCH</h1>
+                <p class="brand">HITCH</p>
             </div>
         </div>
     </header>
     <main>
-        <section class="profile-panel" aria-labelledby="profile-title">
-            <p class="section-label">Profile</p>
-            <h2 id="profile-title">{{ user.get_username }}</h2>
-            <p class="profile-meta">Signed in</p>
-        </section>
-        <div class="profile-footer">
-            <form class="profile-logout-form" method="post" action="{{ logout_url }}">
-                {% csrf_token %}
-                <button class="button danger" type="submit">Log out</button>
-            </form>
-            {% if server_git_hash %}
-            <p class="profile-revision">Server git hash: <code>{{ server_git_hash }}</code></p>
-            {% endif %}
-        </div>
+        <header class="settings-header">
+            <p class="section-label">Account</p>
+            <h1>Settings</h1>
+        </header>
+        {% include "_settings_form.html" %}
     </main>
+    {% include "_project_edit_dialog.html" %}
+    <script>document.documentElement.classList.add("js");</script>
     <script>
         (function () {
+            const modalScrollLockClass = "modal-scroll-locked";
+            function syncModalScrollLock() {
+                const hasOpenDialog = Boolean(document.querySelector("dialog[open]"));
+                document.documentElement.classList.toggle(modalScrollLockClass, hasOpenDialog);
+                document.body.classList.toggle(modalScrollLockClass, hasOpenDialog);
+            }
+            function showDialog(dialog) {
+                if (!dialog) return;
+                if (typeof dialog.showModal === "function") {
+                    dialog.showModal();
+                } else {
+                    dialog.setAttribute("open", "");
+                }
+                syncModalScrollLock();
+            }
+            function hideDialog(dialog) {
+                if (!dialog) return;
+                if (typeof dialog.close === "function") {
+                    dialog.close();
+                } else {
+                    dialog.removeAttribute("open");
+                }
+                syncModalScrollLock();
+            }
+            for (const dialog of document.querySelectorAll("dialog")) {
+                dialog.addEventListener("close", syncModalScrollLock);
+            }
+
             {% include "_primary_nav_script.html" %}
+            {% include "_project_edit_script.html" %}
         })();
     </script>
 </body>

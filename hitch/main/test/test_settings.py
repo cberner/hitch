@@ -217,11 +217,11 @@ class ServerRevisionContextTests(SimpleTestCase):
         self.assertEqual(context, {"server_git_hash": ""})
 
 
-class SettingsDialogRenderTests(TestCase):
+class SettingsPageRenderTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.context_processors.server_git_hash", return_value="abc123")
-    def test_dialog_lists_models_and_efforts(
+    def test_page_lists_models_and_efforts(
         self, _mock_hash: MagicMock, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _configure_codex(
@@ -230,17 +230,15 @@ class SettingsDialogRenderTests(TestCase):
         )
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(
+            reverse("update_settings"), {"next": reverse("usage")}
+        )
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "data-nav-menu")
         self.assertContains(response, "data-nav-menu-open")
         self.assertContains(response, "data-nav-menu-panel")
-        self.assertContains(response, "data-session-list-menu")
-        self.assertContains(response, 'class="session-list-menu-fallback"')
-        self.assertContains(response, "html.js .session-list-menu-fallback")
-        self.assertContains(response, 'aria-label="Page actions"')
-        self.assertContains(response, "data-settings-dialog")
+        self.assertNotContains(response, "data-settings-dialog")
         self.assertContains(response, 'aria-label="Navigation menu"')
         body = response.content.decode()
         nav_start = body.index('<nav class="primary-nav"')
@@ -252,31 +250,34 @@ class SettingsDialogRenderTests(TestCase):
         self.assertNotIn(">new session<", nav_html)
         self.assertContains(response, f'href="{reverse("index")}"')
         self.assertContains(response, ">sessions<")
-        self.assertContains(response, f'href="{reverse("system_sessions")}"')
-        self.assertContains(response, ">System sessions<")
         body = response.content.decode()
         primary_nav = body[
             body.index('<div class="primary-nav-panel"') : body.index("</nav>")
         ]
         self.assertNotIn(reverse("system_sessions"), primary_nav)
         self.assertContains(response, ">settings<")
+        self.assertContains(
+            response, f'href="{reverse("update_settings")}" aria-current="page"'
+        )
         self.assertNotIn("Server git hash", primary_nav)
         self.assertNotIn("abc123", primary_nav)
         self.assertContains(response, f'href="{reverse("usage")}"')
         self.assertContains(response, ">usage<")
+        self.assertContains(response, f'action="{reverse("update_settings")}"')
+        self.assertContains(response, f'name="next" value="{reverse("usage")}"')
         self.assertContains(response, "GPT-5")
         # Spot-check a couple of reasoning-effort values so a future enum
         # rename can't quietly empty the dropdown.
         self.assertContains(response, 'value="minimal"')
         self.assertContains(response, 'value="high"')
-        # The empty option is the only way the dialog surfaces the "let
+        # The empty option is the only way the settings page surfaces the "let
         # Codex pick the model default" state; without it a user who once
         # set an explicit value has no UI path back to that state.
         self.assertContains(response, 'value=""')
         self.assertContains(response, "Model default")
         # Sandbox policy dropdown: surface the three policy variants plus
         # an empty "let Codex pick" option, so a future rename here can't
-        # quietly drop the field from the dialog.
+        # quietly drop the field from the page.
         self.assertContains(response, 'name="sandbox_policy"')
         self.assertContains(response, 'value="readOnly"')
         self.assertContains(response, 'value="workspaceWrite"')
@@ -298,17 +299,6 @@ class SettingsDialogRenderTests(TestCase):
         self.assertContains(response, "Extra developer prompt")
         self.assertContains(response, 'name="extra_system_prompt"')
         self.assertContains(response, 'maxlength="2500"')
-        self.assertContains(
-            response, f'action="{reverse("update_archived_session_visibility")}"'
-        )
-        self.assertContains(response, "data-archived-visibility-form")
-        self.assertContains(response, "data-archived-visibility-submit")
-        self.assertContains(
-            response,
-            "requestSubmit(archivedVisibilityForm, archivedVisibilitySubmit)",
-        )
-        self.assertContains(response, "Show archived")
-        self.assertNotContains(response, "Show archived sessions")
         self.assertContains(response, 'name="use_worktrees"')
         self.assertContains(response, "Use worktrees")
         self.assertContains(response, 'name="auto_pr"')
@@ -347,19 +337,18 @@ class SettingsDialogRenderTests(TestCase):
         self.assertContains(response, "data-nav-menu")
         self.assertContains(response, "data-nav-menu-open")
         self.assertContains(response, "data-nav-menu-panel")
-        self.assertContains(response, "data-settings-dialog")
+        self.assertNotContains(response, "data-settings-dialog")
         self.assertContains(response, 'aria-label="Navigation menu"')
         self.assertContains(response, f'href="{reverse("index")}"')
         self.assertContains(response, f'href="{reverse("usage")}" aria-current="page"')
         self.assertContains(response, ">settings<")
-        self.assertContains(response, "GPT-5")
         self.assertContains(response, 'classList.add("primary-nav-js")')
         self.assertNotContains(response, "html:not(.js) .primary-nav-toggle")
         self.assertNotContains(response, 'class="back-link"')
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_saved_extra_system_prompt_renders_in_dialog(
+    def test_saved_extra_system_prompt_renders_on_settings_page(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _seed_cookies(
@@ -376,7 +365,7 @@ class SettingsDialogRenderTests(TestCase):
         )
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("update_settings"))
 
         self.assertContains(response, "Prefer small diffs.")
 
@@ -415,7 +404,7 @@ class SettingsDialogRenderTests(TestCase):
         )
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("update_settings"))
 
         self.assertContains(response, 'name="use_worktrees" value="true" checked')
 
@@ -431,7 +420,7 @@ class SettingsDialogRenderTests(TestCase):
         )
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("update_settings"))
 
         self.assertContains(response, 'name="auto_pr" value="true" checked')
 
@@ -447,7 +436,7 @@ class SettingsDialogRenderTests(TestCase):
         )
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("update_settings"))
 
         self.assertContains(response, 'name="auto_qa" value="true" checked')
 
@@ -515,7 +504,7 @@ class SettingsDialogRenderTests(TestCase):
         )
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("update_settings"))
 
         self.assertContains(response, 'name="qa_panel" value="true" checked')
 
@@ -532,7 +521,7 @@ class SettingsDialogRenderTests(TestCase):
         )
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("update_settings"))
 
         self.assertContains(response, 'name="spec_critic" value="true" checked')
 
@@ -548,13 +537,13 @@ class SettingsDialogRenderTests(TestCase):
         )
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("update_settings"))
 
         self.assertContains(response, 'value="live" selected')
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_project_auto_pr_setting_renders_in_edit_modal(
+    def test_project_auto_pr_setting_renders_in_edit_dialog(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         project = Project.objects.create(
@@ -569,7 +558,7 @@ class SettingsDialogRenderTests(TestCase):
         )
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("update_settings"))
 
         self.assertContains(response, 'data-project-auto-pr-mode="off"')
         self.assertContains(response, 'value="off" selected')
@@ -590,7 +579,7 @@ class SettingsDialogRenderTests(TestCase):
         )
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("update_settings"))
 
         self.assertContains(response, 'value="" selected')
 
@@ -605,7 +594,7 @@ class SettingsDialogRenderTests(TestCase):
         )
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("update_settings"))
 
         self.assertContains(response, "overscroll-behavior: contain")
         self.assertContains(response, "overflow-y: auto")
@@ -714,12 +703,12 @@ class SettingsDialogRenderTests(TestCase):
     def test_renders_when_codex_offers_no_models(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        # An empty model list is the pre-provider local-dev story; the dialog
-        # must still render so the user sees the empty state instead of a 500.
+        # An empty model list is the pre-provider local-dev story; the settings
+        # page must still render so the user sees the empty state instead of a 500.
         _configure_codex(mock_codex, models=[])
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("update_settings"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Codex returned no models")
@@ -740,7 +729,7 @@ class ReconcileSettingsTests(TestCase):
         )
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("update_settings"))
 
         # Defaults are written back to the browser so the next request has
         # them in hand — the "reset on server start based on what Codex
@@ -787,7 +776,7 @@ class ReconcileSettingsTests(TestCase):
         )
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("update_settings"))
 
         # Saved values are still valid → no Set-Cookie on this response.
         self.assertNotIn(_MODEL_COOKIE, response.cookies)
@@ -860,7 +849,7 @@ class ReconcileSettingsTests(TestCase):
         )
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("update_settings"))
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
@@ -1031,9 +1020,14 @@ class UpdateSettingsViewTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertNotIn(_EXTRA_SYSTEM_PROMPT_COOKIE, response.cookies)
 
-    def test_rejects_get(self) -> None:
+    @patch("hitch.main.views.Codex")
+    def test_get_renders_settings_page(self, mock_codex: MagicMock) -> None:
+        _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
+
         response = self.client.get(reverse("update_settings"))
-        self.assertEqual(response.status_code, 405)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "<h1>Settings</h1>")
 
     @patch("hitch.main.views.Codex")
     def test_saves_optional_signed_cookie_settings(
@@ -1261,7 +1255,7 @@ class AuthenticatedWebSearchSettingsTests(TestCase):
         )
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("update_settings"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'value="cached" selected')
@@ -1454,14 +1448,14 @@ class ApprovalModeSettingsTests(TestCase):
                     )
 
 
-class ApprovalModeDialogTests(TestCase):
+class ApprovalModePageTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_saved_approval_renders_as_selected(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         """A mode persisted in the cookie must come back marked selected
-        on the next render — otherwise the dropdown silently rolls back
+        on the settings page — otherwise the dropdown silently rolls back
         to the safe default and the user assumes the pick was lost."""
         _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
         mock_discover.return_value = []
@@ -1470,7 +1464,7 @@ class ApprovalModeDialogTests(TestCase):
             with self.subTest(mode=mode):
                 _seed_cookies(self.client, **{_APPROVAL_COOKIE: mode})
 
-                response = self.client.get(reverse("index"))
+                response = self.client.get(reverse("update_settings"))
 
                 self.assertContains(response, f'value="{mode}" selected')
 
@@ -1480,32 +1474,32 @@ class ApprovalModeDialogTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         """A legacy/tampered cookie value must not render as a phantom
-        option; the dialog snaps back to the safe default so the user has
+        option; the settings page snaps back to the safe default so the user has
         a coherent UI to recover from."""
         _seed_cookies(self.client, **{_APPROVAL_COOKIE: "phantomMode"})
         _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("update_settings"))
 
         self.assertNotContains(response, "phantomMode")
         self.assertContains(response, 'value="auto_review" selected')
 
 
-class SandboxPolicyDialogTests(TestCase):
+class SandboxPolicyPageTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_saved_sandbox_renders_as_selected(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         """A policy persisted in the cookie must come back marked selected
-        on the next render — otherwise the dropdown silently rolls back to
+        on the settings page — otherwise the dropdown silently rolls back to
         the empty default and the user assumes the pick was lost."""
         _seed_cookies(self.client, **{_SANDBOX_COOKIE: "dangerFullAccess"})
         _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("update_settings"))
 
         self.assertContains(response, 'value="dangerFullAccess" selected')
 
@@ -1515,13 +1509,13 @@ class SandboxPolicyDialogTests(TestCase):
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         """A legacy/tampered cookie value must not render as a phantom
-        selected option; the dialog snaps back to the empty "Codex
+        selected option; the settings page snaps back to the empty "Codex
         default" state so the user has a coherent UI to recover from."""
         _seed_cookies(self.client, **{_SANDBOX_COOKIE: "phantomPolicy"})
         _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
         mock_discover.return_value = []
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("update_settings"))
 
         self.assertNotContains(response, "phantomPolicy")
         self.assertContains(response, 'value="" selected')

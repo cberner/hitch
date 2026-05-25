@@ -274,7 +274,7 @@ class AuthenticatedSettingsTests(TestCase):
         nav_end = body.index("</nav>", nav_start)
         nav_html = body[nav_start:nav_end]
         profile_pos = nav_html.index(f'href="{reverse("profile")}"')
-        self.assertLess(nav_html.index(">settings</button>"), profile_pos)
+        self.assertLess(nav_html.index(">settings</a>"), profile_pos)
         self.assertIn('class="primary-nav-account"', nav_html)
         self.assertIn(">dev@example.com</a>", nav_html)
         self.assertNotIn(reverse("logout"), nav_html)
@@ -395,26 +395,34 @@ class AuthenticatedSettingsTests(TestCase):
         _setup_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
         mock_discover.return_value = [Path("/home/user/account"), Path("/home/user/cookie")]
 
-        response = self.client.get(reverse("index"))
+        index_response = self.client.get(reverse("index"))
+        settings_response = self.client.get(reverse("update_settings"))
 
-        self.assertContains(response, 'value="gpt-5" selected')
-        self.assertContains(response, 'value="high" selected')
-        self.assertContains(response, 'value="dangerFullAccess" selected')
-        self.assertContains(response, 'value="deny_all" selected')
-        self.assertContains(response, 'name="use_worktrees" value="true" checked')
-        self.assertContains(response, 'name="auto_pr" value="true" checked')
-        self.assertContains(response, 'name="auto_qa" value="true" checked')
-        self.assertContains(response, 'value="/home/user/account" selected')
-        self.assertContains(response, 'name="enable_memories" value="true" checked')
-        self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
-        self.assertEqual(_cookie_value(response, _SANDBOX_COOKIE), "dangerFullAccess")
-        self.assertEqual(_cookie_value(response, _USE_WORKTREES_COOKIE), "true")
-        self.assertEqual(_cookie_value(response, _AUTO_PR_COOKIE), "true")
-        self.assertEqual(_cookie_value(response, _AUTO_QA_COOKIE), "true")
-        self.assertEqual(
-            _cookie_value(response, _LAST_SELECTED_REPO_COOKIE), "/home/user/account"
+        self.assertContains(settings_response, 'value="gpt-5" selected')
+        self.assertContains(settings_response, 'value="high" selected')
+        self.assertContains(settings_response, 'value="dangerFullAccess" selected')
+        self.assertContains(settings_response, 'value="deny_all" selected')
+        self.assertContains(
+            settings_response, 'name="use_worktrees" value="true" checked'
         )
-        self.assertEqual(_cookie_value(response, _ENABLE_MEMORIES_COOKIE), "true")
+        self.assertContains(settings_response, 'name="auto_pr" value="true" checked')
+        self.assertContains(settings_response, 'name="auto_qa" value="true" checked')
+        self.assertContains(
+            settings_response, 'name="enable_memories" value="true" checked'
+        )
+        self.assertContains(index_response, 'value="/home/user/account" selected')
+        self.assertEqual(_cookie_value(index_response, _MODEL_COOKIE), "gpt-5")
+        self.assertEqual(
+            _cookie_value(index_response, _SANDBOX_COOKIE), "dangerFullAccess"
+        )
+        self.assertEqual(_cookie_value(index_response, _USE_WORKTREES_COOKIE), "true")
+        self.assertEqual(_cookie_value(index_response, _AUTO_PR_COOKIE), "true")
+        self.assertEqual(_cookie_value(index_response, _AUTO_QA_COOKIE), "true")
+        self.assertEqual(
+            _cookie_value(index_response, _LAST_SELECTED_REPO_COOKIE),
+            "/home/user/account",
+        )
+        self.assertEqual(_cookie_value(index_response, _ENABLE_MEMORIES_COOKIE), "true")
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")

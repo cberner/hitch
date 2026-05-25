@@ -1,0 +1,108 @@
+<form class="settings-form" method="post" action="{{ settings_url }}">
+    {% csrf_token %}
+    <input type="hidden" name="next" value="{{ settings_next_url }}">
+    <label>
+        Model
+        {% if model_options %}
+        <select name="model">
+            {% for option in model_options %}
+            <option value="{{ option.id }}" {% if option.id == current_model %}selected{% endif %}>{{ option.display_name }}</option>
+            {% endfor %}
+        </select>
+        {% else %}
+        <input type="text" name="model" value="{{ current_model }}" placeholder="Codex returned no models" autocomplete="off">
+        {% endif %}
+    </label>
+    <label>
+        Reasoning effort
+        <select name="reasoning_effort">
+            <option value="" {% if not current_effort %}selected{% endif %}>Model default</option>
+            {% for option in effort_options %}
+            <option value="{{ option }}" {% if option == current_effort %}selected{% endif %}>{{ option }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <label>
+        Sandbox policy
+        <select name="sandbox_policy">
+            <option value="" {% if not current_sandbox %}selected{% endif %}>Codex default</option>
+            {% for option in sandbox_options %}
+            <option value="{{ option.id }}" {% if option.id == current_sandbox %}selected{% endif %}>{{ option.display_name }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <label>
+        Approval mode
+        <select name="approval_mode">
+            {% for option in approval_options %}
+            <option value="{{ option.id }}" {% if option.id == current_approval %}selected{% endif %}>{{ option.display_name }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <label>
+        Coding agent
+        <select name="coding_agent">
+            {% for option in coding_agent_options %}
+            <option value="{{ option.id }}" {% if option.id == current_coding_agent %}selected{% endif %}>{{ option.display_name }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <label>
+        Extra developer prompt
+        <textarea class="extra-system-prompt" name="extra_system_prompt" maxlength="{{ extra_system_prompt_max_len }}" autocomplete="off" placeholder="Optional developer instructions for new sessions">{{ current_extra_system_prompt }}</textarea>
+    </label>
+    <label class="checkbox-label">
+        <span>Use worktrees</span>
+        <input type="checkbox" name="use_worktrees" value="true" {% if current_use_worktrees %}checked{% endif %}>
+    </label>
+    <label class="checkbox-label">
+        <span>Auto-PR</span>
+        <input type="checkbox" name="auto_pr" value="true" {% if current_auto_pr %}checked{% endif %}>
+    </label>
+    <label class="checkbox-label">
+        <span>Auto-QA</span>
+        <input type="checkbox" name="auto_qa" value="true" {% if current_auto_qa %}checked{% endif %}>
+    </label>
+    <label class="checkbox-label">
+        <span>Parallel QA panel</span>
+        <input type="checkbox" name="qa_panel" value="true" {% if current_qa_panel %}checked{% endif %}>
+    </label>
+    <label>
+        Web search
+        <select name="web_search_mode">
+            {% for option in web_search_options %}
+            <option value="{{ option.id }}" {% if option.id == current_web_search %}selected{% endif %}>{{ option.display_name }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <label class="checkbox-label">
+        <span>Spec Critic preflight</span>
+        <input type="checkbox" name="spec_critic" value="true" {% if current_spec_critic %}checked{% endif %}>
+    </label>
+    <label class="checkbox-label">
+        <span>Enable Codex memories</span>
+        <input type="checkbox" name="enable_memories" value="true" {% if current_enable_memories %}checked{% endif %}>
+    </label>
+    <label>
+        Project
+        <select name="selected_project" data-settings-project-select>
+            <option value="" {% if not current_project_id %}selected{% endif %}>All projects</option>
+            {% for project in projects %}
+            <option
+                value="{{ project.pk }}"{% if project.pk == current_project_id %} selected{% endif %}
+                data-project-name="{{ project.name }}"
+                data-project-repo-path="{{ project.repo_path }}"
+                data-project-auto-pr-mode="{{ project.auto_pr_mode }}"
+            >{{ project.name }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <div class="settings-link-row">
+        <a class="button secondary" href="{{ new_project_url }}">Create project</a>
+        <button type="button" class="button secondary" data-project-edit-open {% if not current_project_id %}disabled{% endif %}>Edit project</button>
+    </div>
+    <div class="actions">
+        <a class="button secondary" href="{{ settings_cancel_url }}">Cancel</a>
+        <button type="submit" class="button">Save</button>
+    </div>
+</form>

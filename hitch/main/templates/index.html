@@ -621,7 +621,7 @@
             }
         }
 
-        {% include "_settings_dialog_styles.html" %}
+        {% include "_dialog_styles.html" %}
         dialog.new-session .new-session-field {
             display: flex;
             flex-direction: column;
@@ -875,8 +875,6 @@
         <span class="plus" aria-hidden="true">+</span>New
     </button>
     {% endif %}
-
-    {% include "_settings_dialog.html" %}
 
     {% if show_new_session_controls %}
     <dialog class="new-session" data-new-session-dialog aria-labelledby="new-session-title">

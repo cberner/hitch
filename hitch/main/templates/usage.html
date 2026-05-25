@@ -48,10 +48,6 @@
         }
         * { box-sizing: border-box; }
         html, body { margin: 0; padding: 0; }
-        html.modal-scroll-locked,
-        body.modal-scroll-locked {
-            overflow: hidden;
-        }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             color: var(--text);
@@ -431,7 +427,6 @@
             color: var(--text-faint);
             margin-top: 0.5rem;
         }
-        {% include "_settings_dialog_styles.html" %}
         @media (max-width: 480px) {
             .topbar-inner { padding: 0.7rem 1rem; }
             .usage-header {
@@ -580,7 +575,6 @@
             {% endif %}
         </section>
     </main>
-    {% include "_settings_dialog.html" %}
     <script>
         (function () {
             const totalToggle = document.querySelector("[data-lifetime-total-toggle]");
@@ -633,34 +627,6 @@
                 el.dateTime = date.toISOString();
                 el.title = date.toString();
                 el.textContent = relativeFromNow(date);
-            }
-
-            const modalScrollLockClass = "modal-scroll-locked";
-            function syncModalScrollLock() {
-                const hasOpenDialog = Boolean(document.querySelector("dialog[open]"));
-                document.documentElement.classList.toggle(modalScrollLockClass, hasOpenDialog);
-                document.body.classList.toggle(modalScrollLockClass, hasOpenDialog);
-            }
-            function showDialog(dialog) {
-                if (!dialog) return;
-                if (typeof dialog.showModal === "function") {
-                    dialog.showModal();
-                } else {
-                    dialog.setAttribute("open", "");
-                }
-                syncModalScrollLock();
-            }
-            function hideDialog(dialog) {
-                if (!dialog) return;
-                if (typeof dialog.close === "function") {
-                    dialog.close();
-                } else {
-                    dialog.removeAttribute("open");
-                }
-                syncModalScrollLock();
-            }
-            for (const dialog of document.querySelectorAll("dialog")) {
-                dialog.addEventListener("close", syncModalScrollLock);
             }
 
             {% include "_primary_nav_script.html" %}

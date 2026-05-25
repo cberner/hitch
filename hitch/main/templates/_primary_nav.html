@@ -20,7 +20,7 @@
         <a href="{% url 'autonomous_goals' %}"{% if current_route == "autonomous_goals" %} aria-current="page"{% endif %}>auto goals</a>
         {% endif %}
         <a href="{% url 'usage' %}"{% if current_route == "usage" %} aria-current="page"{% endif %}>usage</a>
-        <button type="button" data-settings-open>settings</button>
+        <a href="{{ settings_url }}{% if current_route != 'update_settings' %}?next={{ request.get_full_path|urlencode }}{% endif %}"{% if current_route == "update_settings" %} aria-current="page"{% endif %}>settings</a>
         {% if user.is_authenticated %}
         <a class="primary-nav-account"
            href="{% url 'profile' %}"
