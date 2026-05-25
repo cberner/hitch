@@ -186,14 +186,6 @@
             letter-spacing: 0.08em;
             margin: 0;
         }
-        .account-label {
-            max-width: 12rem;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            font-size: 0.82rem;
-            color: var(--text-muted);
-        }
         {% include "_primary_nav_styles.html" %}
         {% include "_settings_dialog_styles.html" %}
         main {
@@ -410,10 +402,9 @@
                 {% include "_primary_nav.html" %}
                 <h1 class="brand">HITCH</h1>
             </div>
+            {% if not user.is_authenticated or current_project %}
             <div class="topbar-actions">
-                {% if user.is_authenticated %}
-                <span class="account-label" title="{{ user.get_username }}">{{ user.get_username }}</span>
-                {% else %}
+                {% if not user.is_authenticated %}
                 <a class="button secondary account-action" href="{{ login_url }}">Log in</a>
                 <a class="button account-action" href="{{ register_url }}">Register</a>
                 {% endif %}
@@ -432,6 +423,7 @@
                 </div>
                 {% endif %}
             </div>
+            {% endif %}
         </div>
     </header>
     <main>

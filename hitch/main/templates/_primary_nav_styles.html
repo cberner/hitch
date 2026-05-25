@@ -79,14 +79,6 @@
             display: grid;
             gap: 0.15rem;
         }
-        .primary-nav-panel .logout-form {
-            margin: 0;
-            display: inline-flex;
-        }
-        .primary-nav.primary-nav-js .primary-nav-panel .logout-form {
-            display: block;
-            width: 100%;
-        }
         .primary-nav-revision {
             display: inline-flex;
             align-items: center;
@@ -184,6 +176,15 @@
         }
         .primary-nav.primary-nav-js .primary-nav-panel a.primary-nav-with-badge {
             justify-content: space-between;
+        }
+        .primary-nav-panel a.primary-nav-account {
+            max-width: 12rem;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .primary-nav.primary-nav-js .primary-nav-panel a.primary-nav-account {
+            max-width: none;
         }
         .primary-nav-badge {
             display: inline-flex;

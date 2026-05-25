@@ -223,11 +223,34 @@ class AuthViewTests(TestCase):
         )
         self.assertEqual(_cookie_value(response, _ENABLE_MEMORIES_COOKIE), "false")
 
+    def test_profile_redirects_anonymous_users_to_login(self) -> None:
+        response = self.client.get(reverse("profile"))
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.headers["Location"], f"{reverse('login')}?next=%2Fprofile%2F"
+        )
+
+    def test_profile_renders_logout_form_for_authenticated_user(self) -> None:
+        user = _make_user()
+        self.client.force_login(user)
+
+        response = self.client.get(reverse("profile"))
+
+        body = response.content.decode()
+        self.assertContains(response, "dev@example.com")
+        self.assertContains(response, f'action="{reverse("logout")}"')
+        self.assertContains(response, ">Log out</button>")
+        self.assertLess(
+            body.index('<section class="profile-panel"'),
+            body.index('<form class="profile-logout-form"'),
+        )
+
 
 class AuthenticatedSettingsTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_index_places_logout_in_primary_nav(
+    def test_index_places_profile_link_in_primary_nav(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         user = _make_user()
@@ -241,9 +264,12 @@ class AuthenticatedSettingsTests(TestCase):
         nav_start = body.index('<nav class="primary-nav"')
         nav_end = body.index("</nav>", nav_start)
         nav_html = body[nav_start:nav_end]
-        logout_pos = nav_html.index(f'action="{reverse("logout")}"')
-        self.assertLess(nav_html.index(">settings</button>"), logout_pos)
-        self.assertIn(">Log out</button>", nav_html)
+        profile_pos = nav_html.index(f'href="{reverse("profile")}"')
+        self.assertLess(nav_html.index(">settings</button>"), profile_pos)
+        self.assertIn('class="primary-nav-account"', nav_html)
+        self.assertIn(">dev@example.com</a>", nav_html)
+        self.assertNotIn(reverse("logout"), nav_html)
+        self.assertNotIn("account-label", body)
 
     def test_update_settings_writes_database_and_cookie_mirror(self) -> None:
         user = _make_user()
