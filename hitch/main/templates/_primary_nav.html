@@ -8,7 +8,7 @@
         {% with current_route=request.resolver_match.url_name %}
         <span class="primary-nav-session-item">
             <a class="primary-nav-session-link" href="{% url 'index' %}"{% if current_route == "index" %} aria-current="page"{% endif %}>sessions</a>
-            <a class="primary-nav-new-session" href="{% url 'index' %}#new-session" data-new-session-open aria-label="New session">
+            <a class="primary-nav-new-session" href="{% url 'new_session' %}"{% if current_route == "new_session" %} aria-current="page"{% endif %} aria-label="New session">
                 <span aria-hidden="true">+</span>
             </a>
         </span>

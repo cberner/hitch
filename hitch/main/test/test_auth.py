@@ -361,7 +361,7 @@ class AuthenticatedSettingsTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_index_prefers_account_settings_over_conflicting_cookies(
+    def test_new_session_page_prefers_account_settings_over_conflicting_cookies(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         user = _make_user()
@@ -395,7 +395,7 @@ class AuthenticatedSettingsTests(TestCase):
         _setup_codex(mock_codex, models=[_model("gpt-5", is_default=True)])
         mock_discover.return_value = [Path("/home/user/account"), Path("/home/user/cookie")]
 
-        index_response = self.client.get(reverse("index"))
+        new_session_response = self.client.get(reverse("new_session"))
         settings_response = self.client.get(reverse("update_settings"))
 
         self.assertContains(settings_response, 'value="gpt-5" selected')
@@ -410,19 +410,25 @@ class AuthenticatedSettingsTests(TestCase):
         self.assertContains(
             settings_response, 'name="enable_memories" value="true" checked'
         )
-        self.assertContains(index_response, 'value="/home/user/account" selected')
-        self.assertEqual(_cookie_value(index_response, _MODEL_COOKIE), "gpt-5")
-        self.assertEqual(
-            _cookie_value(index_response, _SANDBOX_COOKIE), "dangerFullAccess"
+        self.assertContains(
+            new_session_response, 'value="/home/user/account" selected'
         )
-        self.assertEqual(_cookie_value(index_response, _USE_WORKTREES_COOKIE), "true")
-        self.assertEqual(_cookie_value(index_response, _AUTO_PR_COOKIE), "true")
-        self.assertEqual(_cookie_value(index_response, _AUTO_QA_COOKIE), "true")
+        self.assertEqual(_cookie_value(new_session_response, _MODEL_COOKIE), "gpt-5")
         self.assertEqual(
-            _cookie_value(index_response, _LAST_SELECTED_REPO_COOKIE),
+            _cookie_value(new_session_response, _SANDBOX_COOKIE), "dangerFullAccess"
+        )
+        self.assertEqual(
+            _cookie_value(new_session_response, _USE_WORKTREES_COOKIE), "true"
+        )
+        self.assertEqual(_cookie_value(new_session_response, _AUTO_PR_COOKIE), "true")
+        self.assertEqual(_cookie_value(new_session_response, _AUTO_QA_COOKIE), "true")
+        self.assertEqual(
+            _cookie_value(new_session_response, _LAST_SELECTED_REPO_COOKIE),
             "/home/user/account",
         )
-        self.assertEqual(_cookie_value(index_response, _ENABLE_MEMORIES_COOKIE), "true")
+        self.assertEqual(
+            _cookie_value(new_session_response, _ENABLE_MEMORIES_COOKIE), "true"
+        )
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")

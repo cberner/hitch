@@ -1016,7 +1016,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "HITCH")
         self.assertContains(response, "No sessions found.")
         self.assertContains(response, "New session")
-        self.assertContains(response, "No git repositories found")
+        self.assertContains(response, f'href="{reverse("new_session")}"')
         self.assertContains(response, "Create project")
 
     @patch("hitch.main.views.discover_repos")
@@ -2083,7 +2083,7 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_new_session_dialog_adjusts_for_mobile_keyboard(
+    def test_index_links_to_new_session_page_instead_of_dialog(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _setup_codex(mock_codex)
@@ -2091,11 +2091,9 @@ class IndexViewTests(TestCase):
 
         response = self.client.get(reverse("index"))
 
-        self.assertContains(response, "keyboard-adjusted")
-        self.assertContains(response, "--dialog-keyboard-top")
-        self.assertContains(response, "window.visualViewport")
-        self.assertContains(response, 'window.matchMedia("(max-width: 640px)")')
-        self.assertContains(response, "scheduleKeyboardAdjustedDialog();")
+        self.assertContains(response, f'href="{reverse("new_session")}"')
+        self.assertNotContains(response, "data-new-session-dialog")
+        self.assertNotContains(response, "keyboard-adjusted")
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -3429,7 +3427,7 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_new_session_dialog_populates_project_and_bare_repo_selectors(
+    def test_new_session_page_populates_project_and_bare_repo_selectors(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         project_a = Project.objects.create(
@@ -3441,7 +3439,7 @@ class IndexViewTests(TestCase):
         _setup_codex(mock_codex)
         mock_discover.return_value = [Path("/home/user/proj-a"), Path("/home/user/proj-b")]
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("new_session"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'name="project"')
@@ -3475,7 +3473,7 @@ class IndexViewTests(TestCase):
         _setup_codex(mock_codex)
         mock_discover.return_value = [Path("/home/user/proj-a"), Path("/home/user/proj-b")]
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("new_session"))
 
         self.assertContains(response, 'value="/home/user/proj-b" selected')
         self.assertNotContains(response, 'value="/home/user/proj-a" selected')
@@ -3494,7 +3492,7 @@ class IndexViewTests(TestCase):
         _setup_codex(mock_codex)
         mock_discover.return_value = [Path("/home/user/proj-a"), Path("/home/user/proj-b")]
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("new_session"))
 
         self.assertContains(response, f'value="{project_b.pk}" selected')
         self.assertContains(response, "data-new-session-repo-field hidden")
@@ -3512,7 +3510,7 @@ class IndexViewTests(TestCase):
         _setup_codex(mock_codex)
         mock_discover.return_value = [Path("/home/user/proj-a"), Path("/home/user/bare")]
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("new_session"))
 
         self.assertContains(
             response, f'value="{views._BARE_REPO_PROJECT_VALUE}" selected'
@@ -3533,20 +3531,20 @@ class IndexViewTests(TestCase):
         _setup_codex(mock_codex)
         mock_discover.return_value = [Path("/home/user/proj-a")]
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("new_session"))
 
         self.assertContains(response, f'value="{project.pk}" selected')
         self.assertContains(response, "data-new-session-repo-field hidden")
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_new_session_dialog_supports_super_enter_submit(
+    def test_new_session_page_supports_super_enter_submit(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _setup_codex(mock_codex)
         mock_discover.return_value = [Path("/home/user/proj")]
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("new_session"))
 
         self.assertContains(response, "data-new-session-submit")
         self.assertContains(response, "event.metaKey")
@@ -3557,13 +3555,13 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_new_session_dialog_exposes_plan_slash_command(
+    def test_new_session_page_exposes_plan_slash_command(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _setup_codex(mock_codex)
         mock_discover.return_value = [Path("/home/user/proj")]
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("new_session"))
 
         self.assertContains(response, 'class="slash-trigger"')
         self.assertContains(response, 'name="plan_mode"')
@@ -3580,14 +3578,14 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_new_session_dialog_exposes_coding_agent_override(
+    def test_new_session_page_exposes_coding_agent_override(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _setup_codex(mock_codex)
         mock_discover.return_value = [Path("/home/user/proj")]
         _seed_cookies(self.client, **{_CODING_AGENT_COOKIE: "hitch"})
 
-        response = self.client.get(reverse("index"))
+        response = self.client.get(reverse("new_session"))
 
         self.assertContains(response, "data-new-session-coding-agent")
         self.assertContains(response, "Use settings (HITCH)")
@@ -5803,10 +5801,16 @@ class NewSessionViewTests(TestCase):
                 mock_spawn.assert_not_called()
 
     @patch("hitch.main.views.discover_repos")
-    def test_rejects_get(self, mock_discover: MagicMock) -> None:
+    @patch("hitch.main.views.Codex")
+    def test_renders_get(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
+        _setup_codex(mock_codex)
         mock_discover.return_value = []
+
         response = self.client.get(reverse("new_session"))
-        self.assertEqual(response.status_code, 405)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Start a new session")
+        self.assertContains(response, 'class="new-session-form"')
 
 
 class SendMessageViewTests(TestCase):
@@ -9446,7 +9450,7 @@ class AutonomousGoalViewTests(TestCase):
             cwd="/repo",
             project=project,
         )
-        ProposedSession.objects.create(
+        proposal = ProposedSession.objects.create(
             autonomous_goal=goal,
             title="Add parser coverage",
             summary="This adds focused parser coverage.",
@@ -9482,22 +9486,63 @@ class AutonomousGoalViewTests(TestCase):
         )
         self.assertContains(response, "Add parser coverage")
         self.assertContains(response, "This adds focused parser coverage.")
-        self.assertContains(response, "Implementation guidance:")
-        self.assertContains(
-            response, "Add focused rollout parser tests before changing behavior."
-        )
         self.assertContains(response, "hitch/main/rollout.py")
-        self.assertContains(response, 'data-proposed-session-do')
-        self.assertContains(response, 'data-proposed-session-id="')
-        self.assertContains(response, f'data-proposed-session-project="{project.pk}"')
-        self.assertContains(response, "Go ahead and implement this proposed session.")
-        self.assertContains(response, "Autonomous goal objective:")
-        self.assertContains(response, "Find useful test coverage increments.")
+        self.assertContains(
+            response, f'href="{reverse("new_session")}?proposed_session={proposal.pk}"'
+        )
         self.assertContains(response, "Judge log")
-        self.assertContains(response, 'name="proposed_session"')
-        self.assertContains(response, "function requireNewSessionPromptOrImages()")
-        self.assertContains(response, 'command === "/pr" || command === "/qa"')
+        self.assertNotContains(response, 'data-proposed-session-do')
+        self.assertNotContains(response, 'name="proposed_session"')
         self.assertNotContains(response, "Other proposal")
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_new_session_page_prefills_proposed_session(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _setup_codex(mock_codex)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            title="Add parser coverage",
+            summary="This adds focused parser coverage.",
+            prompt="Add focused rollout parser tests before changing behavior.",
+        )
+
+        response = self.client.get(
+            f"{reverse('new_session')}?proposed_session={proposal.pk}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'name="proposed_session"')
+        self.assertContains(response, f'value="{proposal.pk}"')
+        self.assertContains(response, "Add focused rollout parser tests")
+        self.assertContains(response, f'value="{project.pk}" selected')
+        self.assertContains(response, f'href="{reverse("inbox")}"')
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/other")])
+    @patch("hitch.main.views.Codex")
+    def test_new_session_page_rejects_proposed_session_for_unavailable_repo(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Add parser coverage",
+            prompt="Add focused rollout parser tests before changing behavior.",
+        )
+
+        response = self.client.get(
+            f"{reverse('new_session')}?proposed_session={proposal.pk}"
+        )
+
+        self.assertEqual(response.status_code, 404)
+        mock_codex.assert_not_called()
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
@@ -9534,12 +9579,12 @@ class AutonomousGoalViewTests(TestCase):
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_page_lists_agent_created_proposal(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         _setup_codex(mock_codex)
-        ProposedSession.objects.create(
+        proposal = ProposedSession.objects.create(
             project=project,
             title="Add CLI proposal tests",
             summary="Cover the proposed session CLI.",
@@ -9552,8 +9597,11 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Add CLI proposal tests")
         self.assertContains(response, "From coding agent")
-        self.assertContains(response, "Implement tests for the proposed session CLI.")
-        self.assertContains(response, f'data-proposed-session-project="{project.pk}"')
+        self.assertContains(
+            response, f'href="{reverse("new_session")}?proposed_session={proposal.pk}"'
+        )
+        self.assertNotContains(response, "Implement tests for the proposed session CLI.")
+        self.assertNotContains(response, 'data-proposed-session-project="')
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")

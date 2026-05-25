@@ -561,12 +561,17 @@ def _proposed_session_inbox_count(current_project: Project | None) -> int:
     return _proposed_session_inbox_queryset(current_project).count()
 
 
-def _new_session_dialog_context(
+def _new_session_form_context(
     current_settings: SettingsValues,
     current_project: Project | None,
     projects: list[Project],
+    *,
+    initial_prompt: str = "",
+    proposed_session: ProposedSession | None = None,
+    repos: list[str] | None = None,
 ) -> dict[str, Any]:
-    repos = [str(p) for p in discover_repos()]
+    if repos is None:
+        repos = [str(p) for p in discover_repos()]
     repo_set = set(repos)
     saved_repo = (
         current_settings.last_selected_repo
@@ -576,8 +581,13 @@ def _new_session_dialog_context(
     new_session_projects = [
         project for project in projects if project.repo_path in repo_set
     ]
+    selected_project = (
+        _project_for_proposed_session(proposed_session)
+        if proposed_session is not None
+        else current_project
+    )
     current_new_session_project = _new_session_project_for_dialog(
-        current_project, saved_repo, new_session_projects
+        selected_project, saved_repo, new_session_projects
     )
     current_new_session_auto_pr = _effective_auto_pr_enabled(
         current_new_session_project,
@@ -591,6 +601,13 @@ def _new_session_dialog_context(
         "repos": repos,
         "new_session_projects": new_session_projects,
         "new_session_url": reverse("new_session"),
+        "new_session_cancel_url": (
+            reverse("inbox") if proposed_session is not None else reverse("index")
+        ),
+        "initial_new_session_prompt": initial_prompt,
+        "initial_proposed_session_id": (
+            proposed_session.pk if proposed_session is not None else ""
+        ),
         "current_repo": _selected_repo_for_dialog(
             saved_repo, repos, current_new_session_project
         ),
@@ -1768,9 +1785,6 @@ def index(request: HttpRequest) -> HttpResponse:
             system_only=False,
         )
     settings_context = _settings_context(current_settings, models_data)
-    new_session_dialog_context = _new_session_dialog_context(
-        current_settings, current_project, projects
-    )
     response = render(
         request,
         "index.html",
@@ -1786,7 +1800,6 @@ def index(request: HttpRequest) -> HttpResponse:
             "name_max_len": _NAME_MAX_LEN,
             "show_new_session_controls": True,
             **settings_context,
-            **new_session_dialog_context,
         },
     )
     _apply_cookie_updates(response, cookie_updates)
@@ -1929,9 +1942,6 @@ def inbox(request: HttpRequest) -> HttpResponse:
     )
     _attach_proposed_session_display_state(proposed_sessions)
     settings_context = _settings_context(current_settings, models_data)
-    new_session_dialog_context = _new_session_dialog_context(
-        current_settings, current_project, settings_context["projects"]
-    )
     response = render(
         request,
         "inbox.html",
@@ -1944,7 +1954,6 @@ def inbox(request: HttpRequest) -> HttpResponse:
             "proposed_session_rejected_status": ProposedSession.OUTCOME_REJECTED,
             "proposed_session_dismissed_status": ProposedSession.OUTCOME_DISMISSED,
             **settings_context,
-            **new_session_dialog_context,
         },
     )
     _apply_cookie_updates(response, cookie_updates)
@@ -5304,9 +5313,7 @@ def _posted_proposed_session_for_new_session(
     )
     if proposed_session is None:
         return None, "proposed session is required"
-    session_project = proposed_session.project
-    if session_project is None and proposed_session.autonomous_goal is not None:
-        session_project = proposed_session.autonomous_goal.project
+    session_project = _project_for_proposed_session(proposed_session)
     if session_project is None:
         return None, "proposed session is required"
     if target.project is not None and target.project != session_project:
@@ -5314,6 +5321,18 @@ def _posted_proposed_session_for_new_session(
     if target.project is None and target.cwd != session_project.repo_path:
         return None, "proposed session does not match project"
     return proposed_session, None
+
+
+def _project_for_proposed_session(
+    proposed_session: ProposedSession | None,
+) -> Project | None:
+    if proposed_session is None:
+        return None
+    if proposed_session.project is not None:
+        return proposed_session.project
+    if proposed_session.autonomous_goal is not None:
+        return proposed_session.autonomous_goal.project
+    return None
 
 
 def _candidate_session_to_continue_from_proposal(
@@ -5324,9 +5343,7 @@ def _candidate_session_to_continue_from_proposal(
     candidate_session = proposed_session.candidate_session
     if not candidate_session.cwd:
         return None
-    project = proposed_session.project
-    if project is None and proposed_session.autonomous_goal is not None:
-        project = proposed_session.autonomous_goal.project
+    project = _project_for_proposed_session(proposed_session)
     if project is not None and candidate_session.cwd == project.repo_path:
         return None
     return candidate_session
@@ -6627,9 +6644,87 @@ def stop_session(request: HttpRequest, session_id: str) -> HttpResponse:
     return redirect("session", session_id=session_id)
 
 
-@_limit_input_image_uploads
-@require_http_methods(["POST"])
-def new_session(request: HttpRequest) -> HttpResponse:
+def _proposed_session_for_new_session_page(
+    request: HttpRequest,
+    *,
+    repo_set: set[str],
+) -> ProposedSession | None:
+    raw_session_id = request.GET.get("proposed_session", "").strip()
+    if not raw_session_id:
+        return None
+    try:
+        session_id = int(raw_session_id)
+    except ValueError as exc:
+        raise Http404("proposed session not found") from exc
+    if session_id < 1 or session_id > _MAX_BIGAUTOFIELD:
+        raise Http404("proposed session not found")
+    proposed_session = (
+        ProposedSession.objects.select_related(
+            "project", "autonomous_goal__project", "candidate_session"
+        )
+        .filter(
+            pk=session_id,
+            inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL,
+            outcome_status=ProposedSession.OUTCOME_UNSET,
+        )
+        .first()
+    )
+    project = _project_for_proposed_session(proposed_session)
+    if (
+        proposed_session is None
+        or project is None
+        or project.repo_path not in repo_set
+    ):
+        raise Http404("proposed session not found")
+    _attach_proposed_session_display_state([proposed_session])
+    return proposed_session
+
+
+def _render_new_session_page(request: HttpRequest) -> HttpResponse:
+    codex_pool.reconcile_dead()
+    repos = [str(p) for p in discover_repos()]
+    proposed_session = _proposed_session_for_new_session_page(
+        request, repo_set=set(repos)
+    )
+    initial_settings = _stored_settings(request)
+    config = codex_pool.app_server_config(
+        enable_memories=initial_settings.enable_memories
+    )
+    with Codex(config=config) as codex:
+        models_data = list(codex.models().data)
+        resolved_settings = _resolved_settings(request, models_data)
+        current_settings = resolved_settings.values
+        cookie_updates = resolved_settings.cookie_updates
+    projects = list(Project.objects.all())
+    current_project = _selected_project_for_settings(current_settings, projects)
+    settings_context = _settings_context(current_settings, models_data)
+    new_session_context = _new_session_form_context(
+        current_settings,
+        current_project,
+        settings_context["projects"],
+        initial_prompt=(
+            _proposed_session_prompt(proposed_session)
+            if proposed_session is not None
+            else ""
+        ),
+        proposed_session=proposed_session,
+        repos=repos,
+    )
+    response = render(
+        request,
+        "new_session.html",
+        {
+            "login_url": reverse("login"),
+            "register_url": reverse("register"),
+            **settings_context,
+            **new_session_context,
+        },
+    )
+    _apply_cookie_updates(response, cookie_updates)
+    return response
+
+
+def _post_new_session(request: HttpRequest) -> HttpResponse:
     intent = _message_intent(request)
     pr_activation = _is_pr_activation(request)
     qa_activation = _is_qa_activation(request)
@@ -6962,6 +7057,14 @@ def new_session(request: HttpRequest) -> HttpResponse:
     response = redirect("session", session_id=instance.thread_id)
     _apply_cookie_updates(response, cookie_updates)
     return response
+
+
+@_limit_input_image_uploads
+@require_http_methods(["GET", "POST"])
+def new_session(request: HttpRequest) -> HttpResponse:
+    if request.method == "GET":
+        return _render_new_session_page(request)
+    return _post_new_session(request)
 
 
 def _collapse_flat_entries(flat: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:

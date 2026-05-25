@@ -152,11 +152,11 @@ def _cookie_value(response: object, name: str) -> str:
     return _signer(name).unsign(raw)
 
 
-def _new_session_dialog_html(response: object) -> str:
+def _new_session_form_html(response: object) -> str:
     content: bytes = response.content  # type: ignore[attr-defined]
     body = content.decode()
-    start = body.index('<dialog class="new-session" data-new-session-dialog')
-    end = body.index("</dialog>", start)
+    start = body.index('<form class="new-session-form"')
+    end = body.index("</form>", start)
     return body[start:end]
 
 
@@ -244,7 +244,7 @@ class SettingsPageRenderTests(TestCase):
         nav_start = body.index('<nav class="primary-nav"')
         nav_end = body.index("</nav>", nav_start)
         nav_html = body[nav_start:nav_end]
-        self.assertIn(f'href="{reverse("index")}#new-session"', nav_html)
+        self.assertIn(f'href="{reverse("new_session")}"', nav_html)
         self.assertIn('class="primary-nav-new-session"', nav_html)
         self.assertIn('aria-label="New session"', nav_html)
         self.assertNotIn(">new session<", nav_html)
@@ -442,7 +442,7 @@ class SettingsPageRenderTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_saved_auto_qa_setting_checks_new_session_dialogs(
+    def test_saved_auto_qa_setting_checks_new_session_page(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _seed_cookies(self.client, **{_AUTO_QA_COOKIE: "true"})
@@ -452,20 +452,18 @@ class SettingsPageRenderTests(TestCase):
         )
         mock_discover.return_value = []
 
-        for view_name in ("index", "inbox"):
-            with self.subTest(view=view_name):
-                response = self.client.get(reverse(view_name))
-                dialog_html = _new_session_dialog_html(response)
-                auto_qa_input = _input_tag_containing(
-                    dialog_html, "data-new-session-auto-qa"
-                )
+        response = self.client.get(reverse("new_session"))
+        form_html = _new_session_form_html(response)
+        auto_qa_input = _input_tag_containing(
+            form_html, "data-new-session-auto-qa"
+        )
 
-                self.assertIn('name="auto_qa"', auto_qa_input)
-                self.assertIn("checked", auto_qa_input)
+        self.assertIn('name="auto_qa"', auto_qa_input)
+        self.assertIn("checked", auto_qa_input)
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_auto_pr_takes_precedence_in_new_session_dialogs(
+    def test_auto_pr_takes_precedence_in_new_session_page(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         _seed_cookies(
@@ -478,19 +476,17 @@ class SettingsPageRenderTests(TestCase):
         )
         mock_discover.return_value = []
 
-        for view_name in ("index", "inbox"):
-            with self.subTest(view=view_name):
-                response = self.client.get(reverse(view_name))
-                dialog_html = _new_session_dialog_html(response)
-                auto_pr_input = _input_tag_containing(
-                    dialog_html, "data-new-session-auto-pr"
-                )
-                auto_qa_input = _input_tag_containing(
-                    dialog_html, "data-new-session-auto-qa"
-                )
+        response = self.client.get(reverse("new_session"))
+        form_html = _new_session_form_html(response)
+        auto_pr_input = _input_tag_containing(
+            form_html, "data-new-session-auto-pr"
+        )
+        auto_qa_input = _input_tag_containing(
+            form_html, "data-new-session-auto-qa"
+        )
 
-                self.assertIn("checked", auto_pr_input)
-                self.assertNotIn("checked", auto_qa_input)
+        self.assertIn("checked", auto_pr_input)
+        self.assertNotIn("checked", auto_qa_input)
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")

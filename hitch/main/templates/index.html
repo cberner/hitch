@@ -50,10 +50,6 @@
         }
         * { box-sizing: border-box; }
         html, body { margin: 0; padding: 0; }
-        html.modal-scroll-locked,
-        body.modal-scroll-locked {
-            overflow: hidden;
-        }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             color: var(--text);
@@ -598,6 +594,7 @@
             display: none;
             align-items: center;
             gap: 0.45rem;
+            text-decoration: none;
             transition: transform 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
         }
         .fab:active { transform: scale(0.96); }
@@ -621,117 +618,6 @@
             }
         }
 
-        {% include "_dialog_styles.html" %}
-        dialog.new-session .new-session-field {
-            display: flex;
-            flex-direction: column;
-            gap: 0.4rem;
-        }
-        dialog.new-session [hidden] {
-            display: none !important;
-        }
-        dialog.new-session .new-session-prompt-row {
-            display: grid;
-            grid-template-columns: 2.6rem minmax(0, 1fr);
-            align-items: start;
-            gap: 0.5rem;
-        }
-        dialog.new-session .new-session-prompt-row textarea {
-            width: 100%;
-        }
-        dialog.new-session .new-session-command {
-            position: relative;
-        }
-        dialog.new-session .slash-trigger {
-            width: 2.6rem;
-            min-width: 2.6rem;
-            height: 2.6rem;
-            padding: 0;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            background: var(--surface);
-            color: var(--text-muted);
-            border: 1px solid var(--border-strong);
-            border-radius: var(--radius-sm);
-            font: inherit;
-            font-size: 1.1rem;
-            font-weight: 700;
-            line-height: 1;
-            cursor: pointer;
-            transition: background 0.12s ease, border-color 0.12s ease, color 0.12s ease;
-        }
-        dialog.new-session .slash-trigger:hover,
-        dialog.new-session .slash-trigger[aria-expanded="true"] {
-            background: var(--surface-2);
-            border-color: var(--accent);
-            color: var(--text);
-        }
-        dialog.new-session form[data-plan-mode="true"] .slash-trigger {
-            background: var(--accent);
-            border-color: var(--accent);
-            color: var(--accent-fg);
-        }
-        dialog.new-session .slash-menu {
-            position: absolute;
-            left: 0;
-            top: calc(100% + 0.4rem);
-            z-index: 35;
-            width: min(18rem, calc(100vw - 2rem));
-            padding: 0.35rem;
-            border: 1px solid var(--border);
-            border-radius: var(--radius-sm);
-            background: var(--surface);
-            box-shadow: var(--shadow-lg);
-        }
-        dialog.new-session .slash-menu[hidden] { display: none; }
-        dialog.new-session .slash-menu button {
-            width: 100%;
-            display: flex;
-            flex-direction: column;
-            align-items: flex-start;
-            gap: 0.15rem;
-            min-height: 0;
-            padding: 0.55rem 0.65rem;
-            border: 0;
-            border-radius: 6px;
-            background: transparent;
-            color: var(--text);
-            text-align: left;
-            font: inherit;
-            cursor: pointer;
-        }
-        dialog.new-session .slash-menu button:hover,
-        dialog.new-session .slash-menu button:focus {
-            outline: none;
-            background: var(--surface-2);
-        }
-        dialog.new-session .slash-menu button[aria-checked="true"] {
-            background: var(--accent-soft);
-        }
-        dialog.new-session .slash-menu-title {
-            font-weight: 600;
-            font-size: 0.9rem;
-        }
-        dialog.new-session .empty-repos {
-            color: var(--danger);
-            font-size: 0.82rem;
-            margin: 0;
-            font-weight: 400;
-        }
-        @media (max-width: 640px) {
-            dialog.new-session.keyboard-adjusted {
-                position: fixed;
-                top: var(--dialog-keyboard-top, 0.5rem);
-                left: var(--dialog-keyboard-left, 50%);
-                right: auto;
-                bottom: auto;
-                width: min(520px, calc(var(--dialog-keyboard-width, 100vw) - 1rem));
-                max-height: var(--dialog-keyboard-max-height, calc(100dvh - 1rem));
-                margin: 0;
-                transform: translateX(-50%);
-            }
-        }
         @media (max-width: 480px) {
             .session-list-header {
                 gap: 0.65rem;
@@ -763,9 +649,9 @@
                 <a class="button account-action" href="{{ register_url }}">Register</a>
                 {% endif %}
                 {% if show_new_session_controls %}
-                <button type="button" class="button topbar-action" data-new-session-open>
+                <a class="button topbar-action" href="{% url 'new_session' %}">
                     <span class="plus">+</span>New session
-                </button>
+                </a>
                 {% endif %}
                 {% if system_session_list %}
                 <a class="session-list-menu-fallback" href="{% url 'index' %}">Sessions</a>
@@ -871,100 +757,12 @@
     {% endif %}
 
     {% if show_new_session_controls %}
-    <button type="button" class="fab" data-new-session-open aria-label="New session">
+    <a class="fab" href="{% url 'new_session' %}" aria-label="New session">
         <span class="plus" aria-hidden="true">+</span>New
-    </button>
+    </a>
     {% endif %}
 
-    {% if show_new_session_controls %}
-    <dialog class="new-session" data-new-session-dialog aria-labelledby="new-session-title">
-        <form method="post" action="{{ new_session_url }}" enctype="multipart/form-data">
-            {% csrf_token %}
-            <input type="hidden" name="plan_mode" value="" data-plan-mode-input>
-            <h2 id="new-session-title">Start a new session</h2>
-            <div class="new-session-field">
-                <label for="new-session-prompt">Prompt</label>
-                <div class="new-session-prompt-row">
-                    <div class="new-session-command" data-slash-command>
-                        <button type="button" class="slash-trigger" aria-label="Slash commands" aria-haspopup="menu" aria-expanded="false" aria-pressed="false" data-slash-trigger>/</button>
-                        <div class="slash-menu" role="menu" data-slash-menu hidden>
-                            <button type="button" role="menuitemcheckbox" aria-checked="false" data-slash-plan>
-                                <span class="slash-menu-title">Plan mode</span>
-                            </button>
-                        </div>
-                    </div>
-                    <textarea id="new-session-prompt" name="prompt" autocomplete="off" placeholder="Describe what you want the agent to do…"></textarea>
-                </div>
-            </div>
-            <label>
-                Image attachment
-                <input type="file" name="input_images" accept="{{ input_image_accept }}" multiple data-new-session-image-input>
-            </label>
-            <label>
-                Project
-                <select name="project" required data-new-session-project>
-                    {% for project in new_session_projects %}
-                    <option
-                        value="{{ project.pk }}"{% if project.pk == current_new_session_project_id %} selected{% endif %}
-                        data-auto-pr-default="{% if project.auto_pr_mode == project_auto_pr_on %}true{% elif project.auto_pr_mode == project_auto_pr_off %}false{% elif current_auto_pr %}true{% else %}false{% endif %}"
-                        data-auto-qa-default="{% if current_auto_qa %}true{% else %}false{% endif %}"
-                    >{{ project.name }}</option>
-                    {% endfor %}
-                    <option
-                        value="{{ bare_repo_project_value }}"{% if not current_new_session_project_id %} selected{% endif %}
-                        data-auto-pr-default="{% if current_auto_pr %}true{% else %}false{% endif %}"
-                        data-auto-qa-default="{% if current_auto_qa %}true{% else %}false{% endif %}"
-                    >&lt;bare repo&gt;</option>
-                </select>
-            </label>
-            <label>
-                Coding agent
-                <select name="coding_agent" data-new-session-coding-agent>
-                    <option value="" selected>Use settings ({{ new_session_default_coding_agent_label }})</option>
-                    {% for option in new_session_coding_agent_options %}
-                    <option value="{{ option.id }}">{{ option.display_name }}</option>
-                    {% endfor %}
-                </select>
-            </label>
-            <label>
-                Web search
-                <select name="web_search_mode">
-                    <option value="" selected>Use settings ({{ new_session_default_web_search_label }})</option>
-                    {% for option in new_session_web_search_options %}
-                    <option value="{{ option.id }}">{{ option.display_name }}</option>
-                    {% endfor %}
-                </select>
-            </label>
-            <div class="new-session-field" data-new-session-repo-field {% if current_new_session_project_id %}hidden{% endif %}>
-                <label for="new-session-cwd">Repository</label>
-                {% if repos %}
-                <select id="new-session-cwd" name="cwd" required data-new-session-repo>
-                    {% for repo in repos %}
-                    <option value="{{ repo }}"{% if repo == current_repo %} selected{% endif %}>{{ repo }}</option>
-                    {% endfor %}
-                </select>
-                {% else %}
-                <select id="new-session-cwd" name="cwd" required disabled data-new-session-repo></select>
-                <p class="empty-repos">No git repositories found within two levels of your home directory.</p>
-                {% endif %}
-            </div>
-            <label class="checkbox-label">
-                <span>Auto-PR</span>
-                <input type="hidden" name="auto_pr" value="false">
-                <input type="checkbox" name="auto_pr" value="true" data-new-session-auto-pr {% if current_new_session_auto_pr %}checked{% endif %}>
-            </label>
-            <label class="checkbox-label">
-                <span>Auto-QA</span>
-                <input type="hidden" name="auto_qa" value="false">
-                <input type="checkbox" name="auto_qa" value="true" data-new-session-auto-qa {% if current_new_session_auto_qa %}checked{% endif %}>
-            </label>
-            <div class="actions">
-                <button type="button" class="button secondary" data-new-session-cancel>Cancel</button>
-                <button type="submit" class="button" data-new-session-submit {% if not repos %}disabled{% endif %}>Start session</button>
-            </div>
-        </form>
-    </dialog>
-    {% endif %}
+
 
     <script>
         (function () {
@@ -998,13 +796,6 @@
                 el.title = date.toString();
                 el.textContent = `${absolute.format(date)} (${relativeFromNow(date)})`;
             }
-            const modalScrollLockClass = "modal-scroll-locked";
-            function syncModalScrollLock() {
-                const hasOpenDialog = Boolean(document.querySelector("dialog[open]"));
-                document.documentElement.classList.toggle(modalScrollLockClass, hasOpenDialog);
-                document.body.classList.toggle(modalScrollLockClass, hasOpenDialog);
-            }
-
             const csrfToken = (document.querySelector("input[name='csrfmiddlewaretoken']") || {}).value || "";
             const archiveToast = document.querySelector("[data-archive-toast]");
             const archiveUndo = document.querySelector("[data-archive-undo]");
@@ -1325,95 +1116,6 @@
                 if (openButton) openButton.focus();
             });
 
-            function showDialog(dialog) {
-                if (!dialog) return;
-                if (typeof dialog.showModal === "function") {
-                    dialog.showModal();
-                } else {
-                    dialog.setAttribute("open", "");
-                }
-                syncModalScrollLock();
-            }
-            function hideDialog(dialog) {
-                if (!dialog) return;
-                if (typeof dialog.close === "function") {
-                    dialog.close();
-                } else {
-                    dialog.removeAttribute("open");
-                }
-                syncModalScrollLock();
-            }
-            for (const dialog of document.querySelectorAll("dialog")) {
-                dialog.addEventListener("close", syncModalScrollLock);
-            }
-
-            const newSessionDialog = document.querySelector("[data-new-session-dialog]");
-            const keyboardAdjustedClass = "keyboard-adjusted";
-            const mobileDialogQuery = window.matchMedia("(max-width: 640px)");
-            let keyboardAdjustmentFrame = 0;
-            function clearKeyboardAdjustedDialog(dialog) {
-                if (!dialog) return;
-                dialog.classList.remove(keyboardAdjustedClass);
-                dialog.style.removeProperty("--dialog-keyboard-top");
-                dialog.style.removeProperty("--dialog-keyboard-left");
-                dialog.style.removeProperty("--dialog-keyboard-width");
-                dialog.style.removeProperty("--dialog-keyboard-max-height");
-            }
-            function updateKeyboardAdjustedDialog() {
-                keyboardAdjustmentFrame = 0;
-                if (!newSessionDialog || !newSessionDialog.open) return;
-                const viewport = window.visualViewport;
-                if (!viewport || !mobileDialogQuery.matches) {
-                    clearKeyboardAdjustedDialog(newSessionDialog);
-                    return;
-                }
-                const margin = 8;
-                const maxHeight = Math.max(1, Math.floor(viewport.height - margin * 2));
-                newSessionDialog.classList.add(keyboardAdjustedClass);
-                newSessionDialog.style.setProperty(
-                    "--dialog-keyboard-left",
-                    `${Math.round(viewport.offsetLeft + viewport.width / 2)}px`,
-                );
-                newSessionDialog.style.setProperty("--dialog-keyboard-width", `${Math.floor(viewport.width)}px`);
-                newSessionDialog.style.setProperty("--dialog-keyboard-max-height", `${maxHeight}px`);
-                const height = Math.min(newSessionDialog.getBoundingClientRect().height || maxHeight, maxHeight);
-                const top = viewport.offsetTop + Math.max(margin, Math.floor((viewport.height - height) / 2));
-                newSessionDialog.style.setProperty("--dialog-keyboard-top", `${Math.round(top)}px`);
-            }
-            function scheduleKeyboardAdjustedDialog() {
-                if (keyboardAdjustmentFrame) return;
-                keyboardAdjustmentFrame = window.requestAnimationFrame(updateKeyboardAdjustedDialog);
-            }
-            if (window.visualViewport) {
-                window.visualViewport.addEventListener("resize", scheduleKeyboardAdjustedDialog);
-                window.visualViewport.addEventListener("scroll", scheduleKeyboardAdjustedDialog);
-            }
-            window.addEventListener("resize", scheduleKeyboardAdjustedDialog);
-            const newSessionOpenButtons = document.querySelectorAll("[data-new-session-open]");
-            const newSessionCancel = newSessionDialog && newSessionDialog.querySelector("[data-new-session-cancel]");
-            const newSessionForm = newSessionDialog && newSessionDialog.querySelector("form");
-            const newSessionSubmit = newSessionDialog && newSessionDialog.querySelector("[data-new-session-submit]");
-            const newSessionInput = newSessionForm && newSessionForm.querySelector("textarea[name='prompt']");
-            const newSessionPlanModeInput = newSessionForm && newSessionForm.querySelector("[data-plan-mode-input]");
-            const newSessionProjectSelect = newSessionForm && newSessionForm.querySelector("[data-new-session-project]");
-            const newSessionRepoField = newSessionForm && newSessionForm.querySelector("[data-new-session-repo-field]");
-            const newSessionRepoSelect = newSessionForm && newSessionForm.querySelector("[data-new-session-repo]");
-            const newSessionAutoPr = newSessionForm && newSessionForm.querySelector("[data-new-session-auto-pr]");
-            const newSessionAutoQa = newSessionForm && newSessionForm.querySelector("[data-new-session-auto-qa]");
-            const newSessionImageInput = newSessionForm && newSessionForm.querySelector("[data-new-session-image-input]");
-            const newSessionSlashCommand = newSessionForm && newSessionForm.querySelector("[data-slash-command]");
-            const newSessionSlashTrigger = newSessionForm && newSessionForm.querySelector("[data-slash-trigger]");
-            const newSessionSlashMenu = newSessionForm && newSessionForm.querySelector("[data-slash-menu]");
-            const newSessionSlashPlan = newSessionForm && newSessionForm.querySelector("[data-slash-plan]");
-            const bareRepoProjectValue = "{{ bare_repo_project_value|escapejs }}";
-            const prPrompt = "{{ pr_slash_prompt|escapejs }}";
-            const qaPrompt = "{{ qa_slash_prompt|escapejs }}";
-            function isSuperEnter(event) {
-                const hasSuper = event.metaKey
-                    || (event.getModifierState && event.getModifierState("Meta"))
-                    || (event.getModifierState && event.getModifierState("OS"));
-                return event.key === "Enter" && hasSuper;
-            }
             function requestSubmit(form, submitter) {
                 if (!form || !submitter || submitter.disabled) return;
                 if (typeof form.requestSubmit === "function") {
@@ -1422,205 +1124,8 @@
                     submitter.click();
                 }
             }
-            function syncNewSessionProjectFields() {
-                if (!newSessionProjectSelect) return;
-                const bareRepoSelected = newSessionProjectSelect.value === bareRepoProjectValue;
-                if (newSessionRepoField) newSessionRepoField.hidden = !bareRepoSelected;
-                if (newSessionRepoSelect) newSessionRepoSelect.required = bareRepoSelected;
-                if (newSessionAutoPr) {
-                    const option = newSessionProjectSelect.selectedOptions && newSessionProjectSelect.selectedOptions[0];
-                    newSessionAutoPr.checked = option && option.dataset.autoPrDefault === "true";
-                    if (newSessionAutoQa) {
-                        newSessionAutoQa.checked = Boolean(option && option.dataset.autoQaDefault === "true" && !newSessionAutoPr.checked);
-                    }
-                }
-            }
-            function setNewSessionPlanMode(enabled) {
-                if (!newSessionForm) return;
-                newSessionForm.dataset.planMode = enabled ? "true" : "false";
-                if (newSessionPlanModeInput) newSessionPlanModeInput.value = enabled ? "true" : "";
-                if (newSessionSlashTrigger) newSessionSlashTrigger.setAttribute("aria-pressed", enabled ? "true" : "false");
-                if (newSessionSlashPlan) newSessionSlashPlan.setAttribute("aria-checked", enabled ? "true" : "false");
-            }
-            function clearNewSessionImages() {
-                if (newSessionImageInput) newSessionImageInput.value = "";
-            }
-            function newSessionHasImages() {
-                return Boolean(newSessionImageInput && (newSessionImageInput.files || []).length);
-            }
-            function newSessionHasPromptOrImages() {
-                return Boolean(
-                    (newSessionInput && newSessionInput.value.trim().length)
-                    || newSessionHasImages()
-                );
-            }
-            function clearNewSessionPromptValidity() {
-                if (newSessionInput) newSessionInput.setCustomValidity("");
-            }
-            function requireNewSessionPromptOrImages() {
-                if (!newSessionInput || newSessionHasPromptOrImages()) return true;
-                newSessionInput.setCustomValidity("Enter a prompt or attach an image.");
-                newSessionInput.reportValidity();
-                return false;
-            }
-            function closeNewSessionSlashMenu() {
-                if (!newSessionSlashMenu || !newSessionSlashTrigger) return;
-                newSessionSlashMenu.hidden = true;
-                newSessionSlashTrigger.setAttribute("aria-expanded", "false");
-            }
-            function openNewSessionSlashMenu() {
-                if (!newSessionSlashMenu || !newSessionSlashTrigger) return;
-                newSessionSlashMenu.hidden = false;
-                newSessionSlashTrigger.setAttribute("aria-expanded", "true");
-            }
-            function parseNewSessionPlanCommand() {
-                if (!newSessionInput) return null;
-                const text = newSessionInput.value.trim();
-                const parts = text.split(/\s+/, 2);
-                if ((parts[0] || "").toLowerCase() !== "/plan") return null;
-                return text.slice(parts[0].length).trim();
-            }
-            function parseNewSessionPrCommand() {
-                if (!newSessionInput) return null;
-                const text = newSessionInput.value.trim();
-                const parts = text.split(/\s+/, 2);
-                if ((parts[0] || "").toLowerCase() !== "/pr") return null;
-                return prPrompt;
-            }
-            function parseNewSessionQaCommand() {
-                if (!newSessionInput) return null;
-                const text = newSessionInput.value.trim();
-                const parts = text.split(/\s+/, 2);
-                if ((parts[0] || "").toLowerCase() !== "/qa") return null;
-                return qaPrompt;
-            }
-            function openNewSessionDialog() {
-                syncNewSessionProjectFields();
-                showDialog(newSessionDialog);
-                scheduleKeyboardAdjustedDialog();
-                if (newSessionInput) newSessionInput.focus();
-                scheduleKeyboardAdjustedDialog();
-            }
-            setNewSessionPlanMode(false);
-            syncNewSessionProjectFields();
-            if (newSessionDialog) {
-                newSessionDialog.addEventListener("close", () => {
-                    clearKeyboardAdjustedDialog(newSessionDialog);
-                    closeNewSessionSlashMenu();
-                });
-            }
-            if (newSessionCancel) newSessionCancel.addEventListener("click", () => hideDialog(newSessionDialog));
-            if (newSessionSlashTrigger && newSessionSlashMenu) {
-                newSessionSlashTrigger.addEventListener("click", () => {
-                    if (newSessionSlashMenu.hidden) {
-                        openNewSessionSlashMenu();
-                    } else {
-                        closeNewSessionSlashMenu();
-                    }
-                });
-            }
-            if (newSessionSlashPlan) {
-                newSessionSlashPlan.addEventListener("click", () => {
-                    const enabled = newSessionForm && newSessionForm.dataset.planMode !== "true";
-                    setNewSessionPlanMode(Boolean(enabled));
-                    if (enabled && newSessionInput && newSessionInput.value.trim() === "/") {
-                        newSessionInput.value = "";
-                    }
-                    closeNewSessionSlashMenu();
-                    if (newSessionInput) newSessionInput.focus();
-                });
-            }
-            document.addEventListener("click", (event) => {
-                if (!newSessionSlashCommand || !newSessionSlashMenu || newSessionSlashMenu.hidden) return;
-                if (!newSessionSlashCommand.contains(event.target)) closeNewSessionSlashMenu();
-            });
-            document.addEventListener("keydown", (event) => {
-                if (event.key !== "Escape") return;
-                if (!newSessionSlashMenu || newSessionSlashMenu.hidden) return;
-                closeNewSessionSlashMenu();
-                if (newSessionSlashTrigger) newSessionSlashTrigger.focus();
-            });
-            if (newSessionInput) {
-                newSessionInput.addEventListener("input", () => {
-                    clearNewSessionPromptValidity();
-                    if (newSessionInput.value.trim() === "/") {
-                        openNewSessionSlashMenu();
-                    } else {
-                        closeNewSessionSlashMenu();
-                    }
-                });
-            }
-            if (newSessionImageInput) {
-                newSessionImageInput.addEventListener("change", clearNewSessionPromptValidity);
-            }
-            if (newSessionProjectSelect) {
-                newSessionProjectSelect.addEventListener("change", syncNewSessionProjectFields);
-            }
-            if (newSessionAutoPr && newSessionAutoQa) {
-                newSessionAutoPr.addEventListener("change", () => {
-                    if (newSessionAutoPr.checked) newSessionAutoQa.checked = false;
-                });
-                newSessionAutoQa.addEventListener("change", () => {
-                    if (newSessionAutoQa.checked) newSessionAutoPr.checked = false;
-                });
-            }
-            if (newSessionForm) {
-                newSessionForm.addEventListener("keydown", (event) => {
-                    if (!isSuperEnter(event)) return;
-                    event.preventDefault();
-                    requestSubmit(newSessionForm, newSessionSubmit);
-                });
-                newSessionForm.addEventListener("submit", (event) => {
-                    const prCommandPrompt = parseNewSessionPrCommand();
-                    const qaCommandPrompt = prCommandPrompt === null ? parseNewSessionQaCommand() : null;
-                    const workflowCommandPrompt = prCommandPrompt || qaCommandPrompt;
-                    const commandPrompt = workflowCommandPrompt === null ? parseNewSessionPlanCommand() : null;
-                    if (workflowCommandPrompt !== null && newSessionInput) {
-                        setNewSessionPlanMode(false);
-                        clearNewSessionImages();
-                        newSessionInput.value = workflowCommandPrompt;
-                    } else if (commandPrompt !== null && newSessionInput) {
-                        setNewSessionPlanMode(true);
-                        newSessionInput.value = commandPrompt;
-                        if (!commandPrompt && !newSessionHasImages()) {
-                            event.preventDefault();
-                            requireNewSessionPromptOrImages();
-                            newSessionInput.focus();
-                        }
-                    } else if (!requireNewSessionPromptOrImages()) {
-                        event.preventDefault();
-                        if (newSessionInput) newSessionInput.focus();
-                    }
-                });
-            }
 
             {% include "_primary_nav_script.html" %}
-            function isPlainPrimaryClick(event) {
-                return event.button === 0
-                    && !event.altKey
-                    && !event.ctrlKey
-                    && !event.metaKey
-                    && !event.shiftKey;
-            }
-            function preserveHashForLink(target) {
-                if (!(target instanceof HTMLAnchorElement) || !target.hash) return;
-                const url = new URL(target.href);
-                if (url.origin === window.location.origin && url.pathname === window.location.pathname) {
-                    window.history.pushState(null, "", url.hash);
-                }
-            }
-            if (newSessionDialog) {
-                newSessionOpenButtons.forEach((btn) => btn.addEventListener("click", (event) => {
-                    if (!isPlainPrimaryClick(event)) return;
-                    event.preventDefault();
-                    closeNavMenu();
-                    preserveHashForLink(event.currentTarget);
-                    openNewSessionDialog();
-                }));
-            }
-            if (newSessionDialog && window.location.hash === "#new-session") {
-                openNewSessionDialog();
-            }
 
             const archivedVisibilityForm = document.querySelector("[data-archived-visibility-form]");
             const archivedVisibilityToggle = document.querySelector("[data-archived-visibility-toggle]");
