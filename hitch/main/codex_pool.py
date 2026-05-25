@@ -23,6 +23,7 @@ import signal
 import subprocess
 import sys
 import threading
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,13 @@ _TRACKED_WORKER_PROCS_LOCK = threading.Lock()
 _VALID_WEB_SEARCH_MODES = frozenset(mode.value for mode in WebSearchMode)
 _MAX_INPUT_ATTACHMENT_PATHS_PER_INSTANCE = 16
 _MAX_INPUT_ATTACHMENT_PATHS_PER_THREAD = 64
+# How long a freshly spawned row may sit with pid=0 before reconcile_dead
+# treats it as orphaned. ``_spawn_worker`` commits the row before
+# ``subprocess.Popen`` returns, so a transient pid=0 window is a normal part
+# of the launch handshake; the grace is generous enough to absorb a slow Popen
+# on a loaded host but bounded so a parent that crashed mid-spawn cannot leave
+# the row pending forever.
+_PID_ASSIGNMENT_GRACE = timedelta(minutes=2)
 
 
 def _normalized_web_search_mode(web_search_mode: str | None) -> str | None:
@@ -314,9 +322,19 @@ def worker_is_alive(instance: CodexInstance) -> bool:
     Generic pid existence is not enough here: a crashed worker's pid can be
     recycled to an unrelated process while the CodexInstance row is still
     marked running.
+
+    A row with ``pid <= 0`` and a recent ``started_at`` is in the spawn
+    handshake window: ``_spawn_worker`` commits the row before
+    ``subprocess.Popen`` returns the real pid. Treating that as "dead" lets a
+    concurrent ``reconcile_dead`` overwrite a still-launching worker with a
+    terminal status and (for system-agent purposes) route the row through its
+    workflow's failure handler before the worker has even started.
     """
     if instance.pid <= 0:
-        return False
+        started_at = instance.started_at
+        if started_at is None:
+            return False
+        return started_at >= timezone.now() - _PID_ASSIGNMENT_GRACE
     with _TRACKED_WORKER_PROCS_LOCK:
         if (instance.pid, instance.pk) in _REAPED_WORKERS:
             return False
