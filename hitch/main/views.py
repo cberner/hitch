@@ -2183,11 +2183,6 @@ def update_proposed_session_outcome(
         and outcome_status != ProposedSession.OUTCOME_DISMISSED
     ):
         return HttpResponseBadRequest("outcome status is invalid")
-    if (
-        proposed_session.inbox_kind == ProposedSession.INBOX_KIND_PROPOSAL
-        and outcome_status == ProposedSession.OUTCOME_DISMISSED
-    ):
-        return HttpResponseBadRequest("outcome status is invalid")
     proposed_session.outcome_status = outcome_status
     proposed_session.outcome_notes = outcome_notes
     update_fields = ["outcome_status", "outcome_notes", "updated_at"]

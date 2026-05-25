@@ -9493,6 +9493,16 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(
             response, f'href="{reverse("new_session")}?proposed_session={proposal.pk}"'
         )
+        self.assertContains(
+            response, f'aria-label="Actions for {proposal.title}"'
+        )
+        self.assertContains(
+            response,
+            f'action="{reverse("update_proposed_session_outcome", args=[proposal.pk])}"',
+        )
+        self.assertContains(
+            response, f'value="{ProposedSession.OUTCOME_DISMISSED}"'
+        )
         self.assertContains(response, "Judge log")
         self.assertNotContains(response, 'data-proposed-session-do')
         self.assertNotContains(response, 'name="proposed_session"')
@@ -10334,7 +10344,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.content, b"outcome status is invalid")
 
-    def test_proposal_rejects_dismissed_outcome(self) -> None:
+    def test_dismiss_proposed_session_uses_distinct_outcome(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
@@ -10352,5 +10362,8 @@ class AutonomousGoalViewTests(TestCase):
             {"outcome_status": ProposedSession.OUTCOME_DISMISSED},
         )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.content, b"outcome status is invalid")
+        self.assertEqual(response.status_code, 302)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_DISMISSED)
+        self.assertNotEqual(proposal.outcome_status, ProposedSession.OUTCOME_REJECTED)
+        self.assertEqual(proposal.outcome_notes, "")
