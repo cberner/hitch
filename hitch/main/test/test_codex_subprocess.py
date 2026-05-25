@@ -14,6 +14,7 @@ import threading
 import time
 import unittest
 from collections.abc import Callable, Iterator
+from datetime import timedelta
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -1109,6 +1110,58 @@ class ReconcileAndLookupTests(TestCase):
         self.assertIsNone(live_running.ended_at)
         self.assertEqual(completed.status, CodexInstance.STATUS_COMPLETED)
         self.assertIn("exited", dead_running.error)
+
+    def test_reconcile_spares_freshly_spawned_worker_with_unassigned_pid(self) -> None:
+        # ``_spawn_worker`` commits the CodexInstance row with ``pid=0`` before
+        # ``subprocess.Popen`` returns. Between those two writes, reconcile_dead
+        # — invoked on essentially every page render — must not interpret the
+        # row's transient unassigned pid as "worker process exited"; doing so
+        # poisons a completing turn with a leftover error message and prematurely
+        # routes system-agent workers through their workflow's failure handler.
+        starting = self._make(pid=0, status=CodexInstance.STATUS_STARTING)
+
+        n = codex_pool.reconcile_dead()
+
+        starting.refresh_from_db()
+        self.assertEqual(starting.status, CodexInstance.STATUS_STARTING)
+        self.assertEqual(starting.error, "")
+        self.assertIsNone(starting.ended_at)
+        self.assertEqual(n, 0)
+
+    def test_reconcile_fails_stale_unassigned_pid_after_grace_window(self) -> None:
+        # The pid=0 reprieve must be bounded: if the Django parent crashed
+        # between row commit and pid assignment, the orphaned row would
+        # otherwise pin the session in ``starting`` forever. After the launch
+        # grace window expires, reconcile_dead reclaims it.
+        instance = self._make(pid=0, status=CodexInstance.STATUS_STARTING)
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            started_at=timezone.now() - timedelta(minutes=10)
+        )
+
+        n = codex_pool.reconcile_dead()
+
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertEqual(n, 1)
+
+    @patch("hitch.main.system_agents.on_codex_instance_finished")
+    def test_reconcile_does_not_notify_system_agents_for_unassigned_pid(
+        self, mock_notify: MagicMock
+    ) -> None:
+        # A system-agent worker in its pid=0 launch window must not be routed
+        # through ``on_codex_instance_finished``. The autonomous-goal and
+        # PR-QA workflows treat a system-agent ``finished`` event as terminal
+        # and block on the recorded error — so the workflow would be marked
+        # failed before its worker subprocess has even started running.
+        self._make(
+            pid=0,
+            status=CodexInstance.STATUS_STARTING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        )
+
+        codex_pool.reconcile_dead()
+
+        mock_notify.assert_not_called()
 
     @patch("hitch.main.codex_pool.worker_is_alive")
     def test_reconcile_dead_retains_pending_attachments(
