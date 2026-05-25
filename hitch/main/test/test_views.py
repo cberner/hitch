@@ -2139,6 +2139,66 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    def test_index_settles_pending_archives_before_link_navigation(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex, threads=[_session("abc", name="Session")])
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, "function settlePendingArchivesBeforeNavigation")
+        self.assertContains(
+            response,
+            'document.addEventListener("click", settlePendingArchivesBeforeNavigation, true)',
+        )
+        self.assertContains(
+            response,
+            'window.addEventListener("pagehide", settlePendingArchives)',
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_codex_cursor_page_hides_recently_archived_stale_active_thread(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _setup_codex(
+            mock_codex,
+            threads=[_session("abc", name="Stale active session", updated_at=1000)],
+        )
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        SessionMetadata.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            codex_display_title="Stale active session",
+            codex_name="Stale active session",
+            codex_created_at=datetime.fromtimestamp(1000, UTC),
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+            codex_archived=True,
+        )
+
+        stale_cursor_url = f"{reverse('index')}?cursor=stale-active"
+
+        response = self.client.get(stale_cursor_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "Stale active session")
+        metadata = SessionMetadata.objects.get(thread_id="abc")
+        self.assertTrue(metadata.codex_archived)
+        self.assertEqual(metadata.codex_updated_at, now)
+
+        response = self.client.get(stale_cursor_url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "Stale active session")
+        metadata = SessionMetadata.objects.get(thread_id="abc")
+        self.assertTrue(metadata.codex_archived)
+        self.assertEqual(metadata.codex_updated_at, now)
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
     def test_session_updated_at_includes_hidden_qa_agent_activity(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
