@@ -349,24 +349,36 @@ def _parse_unified_diff(text: str, *, truncated: bool = False) -> DiffView:
             current.add_meta(raw_line)
             continue
 
+        if not raw_line:
+            # ``build_worktree_diff`` joins ``git diff`` output (which is
+            # always newline-terminated) to the synthetic untracked-file
+            # diff with ``"\n".join``; ``splitlines()`` yields a blank
+            # string at that boundary. Unified-diff hunk content always
+            # carries a ``+``/``-``/`` ``/``\`` prefix, so a truly empty
+            # line is never legitimate content -- accepting it as context
+            # would render a phantom blank row and bump line counters past
+            # EOF, misnumbering everything that follows in the same file.
+            continue
         prefix = raw_line[:1]
-        code = raw_line[1:] if raw_line else ""
         if prefix == "+":
-            current.add_line("add", None, new_lineno, _highlight_code(current.path, code))
+            current.add_line("add", None, new_lineno, _highlight_code(current.path, raw_line[1:]))
             current.additions += 1
             new_lineno += 1
         elif prefix == "-":
-            current.add_line("remove", old_lineno, None, _highlight_code(current.old_path or current.path, code))
+            current.add_line(
+                "remove",
+                old_lineno,
+                None,
+                _highlight_code(current.old_path or current.path, raw_line[1:]),
+            )
             current.deletions += 1
             old_lineno += 1
-        else:
-            if prefix == " ":
-                code = raw_line[1:]
-            else:
-                code = raw_line
-            current.add_line("context", old_lineno, new_lineno, _highlight_code(current.path, code))
+        elif prefix == " ":
+            current.add_line("context", old_lineno, new_lineno, _highlight_code(current.path, raw_line[1:]))
             old_lineno += 1
             new_lineno += 1
+        else:
+            current.add_meta(raw_line)
 
     if current is not None:
         files.append(current.freeze())
