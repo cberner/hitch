@@ -1946,6 +1946,10 @@ class IndexViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "System sessions")
+        self.assertContains(response, "data-session-list-menu")
+        self.assertContains(response, 'class="session-list-menu-fallback"')
+        self.assertContains(response, f'href="{reverse("index")}" role="menuitem"')
+        self.assertContains(response, ">Sessions<")
         self.assertContains(response, "Hidden QA")
         self.assertContains(
             response, reverse("system_session", kwargs={"session_id": "qa-thread"})

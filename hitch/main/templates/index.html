@@ -95,6 +95,91 @@
             gap: 0.85rem;
             min-width: 0;
         }
+        .session-list-menu {
+            display: none;
+            position: relative;
+            flex: 0 0 auto;
+        }
+        html.js .session-list-menu {
+            display: block;
+        }
+        .session-list-menu-fallback {
+            font: inherit;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 34px;
+            color: var(--text-muted);
+            text-decoration: none;
+            border-radius: 999px;
+            padding: 0.35rem 0.65rem;
+            line-height: 1.25;
+        }
+        .session-list-menu-fallback:hover,
+        .session-list-menu-fallback:focus {
+            outline: none;
+            background: var(--surface-2);
+            color: var(--text);
+            text-decoration: none;
+        }
+        html.js .session-list-menu-fallback {
+            display: none;
+        }
+        .session-list-menu-toggle {
+            font: inherit;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 2.25rem;
+            height: 2.25rem;
+            font-size: 1.2rem;
+            line-height: 1;
+            background: transparent;
+            color: var(--text-muted);
+            border: none;
+            border-radius: 8px;
+            padding: 0;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        .session-list-menu-toggle:hover,
+        .session-list-menu-toggle[aria-expanded="true"] {
+            background: var(--surface-2);
+            color: var(--text);
+        }
+        .session-list-menu-panel {
+            position: absolute;
+            right: 0;
+            top: calc(100% + 0.35rem);
+            z-index: 60;
+            min-width: 12rem;
+            padding: 0.35rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--surface);
+            box-shadow: var(--shadow-lg);
+        }
+        .session-list-menu-panel[hidden] { display: none; }
+        .session-list-menu-panel a {
+            width: 100%;
+            display: block;
+            font: inherit;
+            font-size: 0.9rem;
+            text-align: left;
+            text-decoration: none;
+            border: 0;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text);
+            padding: 0.5rem 0.65rem;
+            cursor: pointer;
+        }
+        .session-list-menu-panel a:hover,
+        .session-list-menu-panel a:focus {
+            outline: none;
+            background: var(--surface-2);
+            text-decoration: none;
+        }
         {% include "_primary_nav_styles.html" %}
         .brand {
             font-size: 1rem;
@@ -672,7 +757,6 @@
                 {% include "_primary_nav.html" %}
                 <h1 class="brand">HITCH</h1>
             </div>
-            {% if not user.is_authenticated or show_new_session_controls %}
             <div class="topbar-actions">
                 {% if not user.is_authenticated %}
                 <a class="button secondary account-action" href="{{ login_url }}">Log in</a>
@@ -683,8 +767,22 @@
                     <span class="plus">+</span>New session
                 </button>
                 {% endif %}
+                {% if system_session_list %}
+                <a class="session-list-menu-fallback" href="{% url 'index' %}">Sessions</a>
+                {% else %}
+                <a class="session-list-menu-fallback" href="{% url 'system_sessions' %}">System sessions</a>
+                {% endif %}
+                <div class="session-list-menu" data-session-list-menu>
+                    <button type="button" class="session-list-menu-toggle" aria-label="Page actions" aria-haspopup="menu" aria-expanded="false" data-session-list-menu-open>...</button>
+                    <div class="session-list-menu-panel" role="menu" data-session-list-menu-panel hidden>
+                        {% if system_session_list %}
+                        <a href="{% url 'index' %}" role="menuitem">Sessions</a>
+                        {% else %}
+                        <a href="{% url 'system_sessions' %}" role="menuitem">System sessions</a>
+                        {% endif %}
+                    </div>
+                </div>
             </div>
-            {% endif %}
         </div>
     </header>
     <main>
@@ -916,6 +1014,38 @@
             const pendingArchives = new Map();
             const swipableRows = new WeakSet();
             let undoRow = null;
+            const sessionListMenu = document.querySelector("[data-session-list-menu]");
+            const sessionListMenuButton = sessionListMenu && sessionListMenu.querySelector("[data-session-list-menu-open]");
+            const sessionListMenuPanel = sessionListMenu && sessionListMenu.querySelector("[data-session-list-menu-panel]");
+
+            function closeSessionListMenu(focusButton) {
+                if (!sessionListMenuButton || !sessionListMenuPanel) return;
+                sessionListMenuPanel.hidden = true;
+                sessionListMenuButton.setAttribute("aria-expanded", "false");
+                if (focusButton) sessionListMenuButton.focus();
+            }
+
+            if (sessionListMenu && sessionListMenuButton && sessionListMenuPanel) {
+                sessionListMenuButton.addEventListener("click", (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    const willOpen = sessionListMenuPanel.hidden;
+                    sessionListMenuPanel.hidden = !willOpen;
+                    sessionListMenuButton.setAttribute("aria-expanded", willOpen ? "true" : "false");
+                    if (willOpen) {
+                        closeNavMenu();
+                        closeSessionMenus();
+                    }
+                });
+                document.addEventListener("click", (event) => {
+                    if (sessionListMenu.contains(event.target)) return;
+                    closeSessionListMenu(false);
+                });
+                document.addEventListener("keydown", (event) => {
+                    if (event.key !== "Escape" || sessionListMenuPanel.hidden) return;
+                    closeSessionListMenu(true);
+                });
+            }
 
             function closeSessionMenu(menu) {
                 const button = menu && menu.querySelector("[data-session-menu-open]");
@@ -1117,6 +1247,10 @@
                         event.stopPropagation();
                         const willOpen = menuPanel.hidden;
                         closeSessionMenus(menu);
+                        if (willOpen) {
+                            closeNavMenu();
+                            closeSessionListMenu(false);
+                        }
                         menuPanel.hidden = !willOpen;
                         menuButton.setAttribute("aria-expanded", willOpen ? "true" : "false");
                         row.classList.toggle("menu-open", willOpen);
