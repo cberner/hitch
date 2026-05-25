@@ -105,14 +105,17 @@
             padding: 1.25rem 1rem 2.5rem;
         }
         .page-header {
-            display: flex;
-            align-items: flex-start;
-            justify-content: space-between;
-            gap: 1rem;
             margin: 0 0 1rem;
             padding: 0 0.25rem;
         }
+        .page-title-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+        }
         .page-title {
+            min-width: 0;
             margin: 0;
             font-size: 1.2rem;
             line-height: 1.25;
@@ -165,17 +168,13 @@
             box-shadow: var(--shadow);
         }
         .new-session-form {
-            position: relative;
             display: flex;
             flex-direction: column;
             gap: 1rem;
             padding: 1.25rem;
         }
         .new-session-close {
-            position: absolute;
-            top: 0.75rem;
-            right: 0.75rem;
-            z-index: 1;
+            flex: 0 0 auto;
             width: 2rem;
             height: 2rem;
             display: inline-flex;
@@ -377,15 +376,15 @@
     </header>
     <main>
         <div class="page-header">
-            <div>
+            <div class="page-title-row">
                 <h1 class="page-title" id="new-session-title">Start a new session</h1>
-                <p class="page-meta">Choose the repository, options, and initial prompt.</p>
+                <a class="new-session-close" href="{{ new_session_cancel_url }}" aria-label="Cancel new session" title="Cancel">&times;</a>
             </div>
+            <p class="page-meta">Choose the repository, options, and initial prompt.</p>
         </div>
         <section class="new-session-panel" aria-labelledby="new-session-title">
             <form class="new-session-form" method="post" action="{{ new_session_url }}" enctype="multipart/form-data" data-new-session-form>
                 {% csrf_token %}
-                <a class="new-session-close" href="{{ new_session_cancel_url }}" aria-label="Cancel new session" title="Cancel">&times;</a>
                 <input type="hidden" name="plan_mode" value="" data-plan-mode-input>
                 <input type="hidden" name="proposed_session" value="{{ initial_proposed_session_id }}">
                 <div class="new-session-field">
