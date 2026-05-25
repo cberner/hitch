@@ -4099,19 +4099,8 @@ def _parse_json_object(raw_output: str) -> dict[str, Any] | None:
 
 
 def _parse_qa_output(raw_output: str) -> dict[str, Any] | None:
-    text = raw_output.strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines and lines[0].startswith("```"):
-            lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(parsed, dict):
+    parsed = _parse_json_object(raw_output)
+    if parsed is None:
         return None
     feedback = parsed.get("feedback")
     lgtm = parsed.get("lgtm")
@@ -4121,12 +4110,8 @@ def _parse_qa_output(raw_output: str) -> dict[str, Any] | None:
 
 
 def _parse_qa_panel_lane_output(raw_output: str) -> dict[str, Any] | None:
-    text = _strip_json_markdown_fence(raw_output)
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(parsed, dict):
+    parsed = _parse_json_object(raw_output)
+    if parsed is None:
         return None
     summary = parsed.get("summary")
     findings = parsed.get("findings")
@@ -4171,12 +4156,8 @@ def _parse_qa_panel_lane_output(raw_output: str) -> dict[str, Any] | None:
 
 
 def _parse_autonomous_goal_candidate_output(raw_output: str) -> dict[str, Any] | None:
-    text = _strip_json_markdown_fence(raw_output)
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(parsed, dict):
+    parsed = _parse_json_object(raw_output)
+    if parsed is None:
         return None
     if "proposal" in parsed:
         proposal = parsed.get("proposal")
@@ -4264,12 +4245,8 @@ def _parse_autonomous_goal_candidate_proposal(
 
 
 def _parse_autonomous_goal_judge_output(raw_output: str) -> dict[str, str] | None:
-    text = _strip_json_markdown_fence(raw_output)
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(parsed, dict):
+    parsed = _parse_json_object(raw_output)
+    if parsed is None:
         return None
     confidence = parsed.get("confidence")
     summary = parsed.get("summary")
@@ -4286,12 +4263,8 @@ def _parse_autonomous_goal_judge_output(raw_output: str) -> dict[str, str] | Non
 
 
 def _parse_pr_monitor_output(raw_output: str) -> dict[str, Any] | None:
-    text = _strip_json_markdown_fence(raw_output)
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(parsed, dict):
+    parsed = _parse_json_object(raw_output)
+    if parsed is None:
         return None
     status = parsed.get("status")
     summary = parsed.get("summary")
