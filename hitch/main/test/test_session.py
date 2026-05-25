@@ -377,7 +377,7 @@ class SessionViewTests(TestCase):
         nav_start = body.index('<nav class="primary-nav"')
         nav_end = body.index("</nav>", nav_start)
         nav_html = body[nav_start:nav_end]
-        self.assertIn(f'href="{reverse("index")}#new-session"', nav_html)
+        self.assertIn(f'href="{reverse("new_session")}"', nav_html)
         self.assertIn('class="primary-nav-new-session"', nav_html)
         self.assertIn('aria-label="New session"', nav_html)
         self.assertNotIn(">new session<", nav_html)
