@@ -8,10 +8,11 @@ from django.contrib.auth import get_user_model
 from django.core import signing
 from django.test import Client, SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
+from django.utils import timezone
 from openai_codex.errors import MethodNotFoundError
 from openai_codex.generated.v2_all import ReasoningEffort
 
-from hitch.main import coding_agents, context_processors
+from hitch.main import coding_agents, context_processors, views
 from hitch.main.models import Project, UserSettings
 
 _MODEL_COOKIE = "hitch_model"
@@ -215,6 +216,111 @@ class ServerRevisionContextTests(SimpleTestCase):
         context = context_processors.server_revision(MagicMock())
 
         self.assertEqual(context, {"server_git_hash": ""})
+
+
+class UsageModelCacheTests(SimpleTestCase):
+    @override
+    def tearDown(self) -> None:
+        with views._MODELS_REFRESH_LOCK:
+            views._MODELS_CACHE_VALUE = {}
+            views._MODELS_CACHE_FETCHED_AT = {}
+            views._MODELS_REFRESH_IN_FLIGHT = set()
+        super().tearDown()
+
+    def test_failed_initial_model_refresh_remains_retryable(self) -> None:
+        with views._MODELS_REFRESH_LOCK:
+            views._MODELS_CACHE_VALUE = {}
+            views._MODELS_CACHE_FETCHED_AT = {}
+            views._MODELS_REFRESH_IN_FLIGHT = {False}
+
+        with (
+            patch("hitch.main.views.codex_pool.app_server_config", return_value=object()),
+            patch("hitch.main.views.Codex", side_effect=RuntimeError("codex down")),
+            patch("hitch.main.views.logger.exception") as log_exception,
+        ):
+            views._refresh_models_cache_best_effort(enable_memories=False)
+
+        log_exception.assert_called_once()
+        with views._MODELS_REFRESH_LOCK:
+            self.assertEqual(views._MODELS_CACHE_VALUE, {})
+            self.assertEqual(views._MODELS_CACHE_FETCHED_AT, {})
+            self.assertNotIn(False, views._MODELS_REFRESH_IN_FLIGHT)
+        self.assertTrue(views._models_refresh_needed(enable_memories=False))
+
+    @patch("hitch.main.views.codex_pool.app_server_config", return_value=object())
+    @patch("hitch.main.views.Codex")
+    def test_successful_empty_model_refresh_marks_cache_fresh(
+        self, mock_codex: MagicMock, _mock_config: MagicMock
+    ) -> None:
+        ctx = mock_codex.return_value.__enter__.return_value
+        ctx.models.return_value.data = []
+
+        views._refresh_models_cache_best_effort(enable_memories=False)
+
+        self.assertEqual(views._cached_models_data(enable_memories=False), [])
+        with views._MODELS_REFRESH_LOCK:
+            self.assertIn(False, views._MODELS_CACHE_FETCHED_AT)
+            self.assertNotIn(False, views._MODELS_REFRESH_IN_FLIGHT)
+        self.assertFalse(views._models_refresh_needed(enable_memories=False))
+
+    def test_model_cache_freshness_is_keyed_by_memories_mode(self) -> None:
+        models = [_model("gpt-5", is_default=True)]
+        with views._MODELS_REFRESH_LOCK:
+            views._MODELS_CACHE_VALUE = {False: models}
+            views._MODELS_CACHE_FETCHED_AT = {False: timezone.now()}
+            views._MODELS_REFRESH_IN_FLIGHT = set()
+
+        self.assertEqual(
+            views._cached_models_data(enable_memories=False),
+            models,
+        )
+        self.assertEqual(views._cached_models_data(enable_memories=True), [])
+        self.assertFalse(views._models_refresh_needed(enable_memories=False))
+        self.assertTrue(views._models_refresh_needed(enable_memories=True))
+
+
+class UsageRateLimitCacheTests(SimpleTestCase):
+    @override
+    def tearDown(self) -> None:
+        with views._RATE_LIMITS_REFRESH_LOCK:
+            views._RATE_LIMITS_CACHE_VALUE = None
+            views._RATE_LIMITS_CACHE_HAS_VALUE = False
+            views._RATE_LIMITS_CACHE_FETCHED_AT = None
+            views._RATE_LIMITS_REFRESH_IN_FLIGHT = False
+        super().tearDown()
+
+    def test_empty_rate_limit_refresh_preserves_existing_snapshot(self) -> None:
+        snapshot = {
+            "windows": [
+                {
+                    "label": "Primary",
+                    "used_percent": 30,
+                    "remaining_percent": 70,
+                    "resets_at": 1_700_000_000,
+                    "window_duration_label": "5-hour",
+                }
+            ],
+            "limit_name": None,
+            "plan_type": "plus",
+        }
+        with views._RATE_LIMITS_REFRESH_LOCK:
+            views._RATE_LIMITS_CACHE_VALUE = snapshot
+            views._RATE_LIMITS_CACHE_HAS_VALUE = True
+            views._RATE_LIMITS_CACHE_FETCHED_AT = None
+            views._RATE_LIMITS_REFRESH_IN_FLIGHT = True
+
+        with (
+            patch("hitch.main.views.codex_pool.app_server_config", return_value=object()),
+            patch("hitch.main.views.Codex"),
+            patch("hitch.main.views._fetch_rate_limits", return_value=None),
+        ):
+            views._refresh_rate_limits_cache_best_effort(enable_memories=False)
+
+        self.assertEqual(views._cached_rate_limits(), snapshot)
+        with views._RATE_LIMITS_REFRESH_LOCK:
+            self.assertTrue(views._RATE_LIMITS_CACHE_HAS_VALUE)
+            self.assertIsNotNone(views._RATE_LIMITS_CACHE_FETCHED_AT)
+            self.assertFalse(views._RATE_LIMITS_REFRESH_IN_FLIGHT)
 
 
 class SettingsPageRenderTests(TestCase):
@@ -606,9 +712,29 @@ class SettingsPageRenderTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     def test_usage_page_renders_rate_limit_windows(self, mock_codex: MagicMock) -> None:
-        """When the account/rateLimits/read call returns a snapshot, the
+        """When the cached account/rateLimits/read data has a snapshot, the
         usage page must render each present window so a user can see how
         much of their budget is left before kicking off a new turn."""
+        rate_limits = {
+            "windows": [
+                {
+                    "label": "Primary",
+                    "used_percent": 30,
+                    "remaining_percent": 70,
+                    "resets_at": 1_700_000_000,
+                    "window_duration_label": "5-hour",
+                },
+                {
+                    "label": "Secondary",
+                    "used_percent": 80,
+                    "remaining_percent": 20,
+                    "resets_at": 1_700_010_000,
+                    "window_duration_label": "7-day",
+                },
+            ],
+            "limit_name": None,
+            "plan_type": "plus",
+        }
         _configure_codex(
             mock_codex,
             models=[],
@@ -623,7 +749,12 @@ class SettingsPageRenderTests(TestCase):
             ),
         )
 
-        response = self.client.get(reverse("usage"))
+        with (
+            patch("hitch.main.views._cached_rate_limits", return_value=rate_limits),
+            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+        ):
+            response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
         # Both windows surface, with "remaining" framing rather than "used"
@@ -643,6 +774,31 @@ class SettingsPageRenderTests(TestCase):
         # Plan label gives context for which plan the limits apply to.
         self.assertContains(response, "plus")
 
+    def test_usage_page_reconciles_settings_from_cached_models(self) -> None:
+        _seed_cookies(
+            self.client,
+            **{_MODEL_COOKIE: "stale-model", _EFFORT_COOKIE: "high"},
+        )
+        models = [_model("gpt-5", is_default=True, default_effort="medium")]
+
+        with (
+            patch("hitch.main.views._cached_models_data", return_value=models),
+            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            patch("hitch.main.views._start_usage_session_index_refresh_thread"),
+        ):
+            response = self.client.get(reverse("usage"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["current_model"], "gpt-5")
+        self.assertEqual(response.context["current_effort"], "medium")
+        self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
+        self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "medium")
+        self.assertEqual(
+            response.context["model_options"],
+            [{"id": "gpt-5", "display_name": "gpt-5"}],
+        )
+
     @patch("hitch.main.views.Codex")
     def test_usage_page_hides_rate_limits_when_unsupported(
         self, mock_codex: MagicMock
@@ -657,7 +813,11 @@ class SettingsPageRenderTests(TestCase):
             rate_limits=MethodNotFoundError(-32601, "method not found", None),
         )
 
-        response = self.client.get(reverse("usage"))
+        with (
+            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+        ):
+            response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'aria-labelledby="quota-title"')
@@ -678,7 +838,11 @@ class SettingsPageRenderTests(TestCase):
             rate_limits=ValueError("malformed payload"),
         )
 
-        response = self.client.get(reverse("usage"))
+        with (
+            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+        ):
+            response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'aria-labelledby="quota-title"')
@@ -698,7 +862,11 @@ class SettingsPageRenderTests(TestCase):
             rate_limits=_rate_limit_snapshot(),
         )
 
-        response = self.client.get(reverse("usage"))
+        with (
+            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+        ):
+            response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, 'aria-labelledby="quota-title"')

@@ -89,6 +89,19 @@ _USAGE_TOKEN_REFRESH_IN_FLIGHT = False
 _USAGE_TOKEN_REFRESH_BATCH_SIZE = 25
 _USAGE_TOKEN_REFRESH_CHECKED_UPDATE_BATCH_SIZE = 500
 _USAGE_TOKEN_REFRESH_CHECK_INTERVAL = timedelta(seconds=30)
+_USAGE_SESSION_INDEX_REFRESH_LOCK = threading.Lock()
+_USAGE_SESSION_INDEX_REFRESH_IN_FLIGHT = False
+_RATE_LIMITS_REFRESH_LOCK = threading.Lock()
+_RATE_LIMITS_REFRESH_IN_FLIGHT = False
+_RATE_LIMITS_CACHE_VALUE: dict[str, Any] | None = None
+_RATE_LIMITS_CACHE_HAS_VALUE = False
+_RATE_LIMITS_CACHE_FETCHED_AT: datetime | None = None
+_RATE_LIMITS_CACHE_TTL = timedelta(seconds=30)
+_MODELS_REFRESH_LOCK = threading.Lock()
+_MODELS_REFRESH_IN_FLIGHT: set[bool] = set()
+_MODELS_CACHE_VALUE: dict[bool, list[Any]] = {}
+_MODELS_CACHE_FETCHED_AT: dict[bool, datetime] = {}
+_MODELS_CACHE_TTL = timedelta(minutes=5)
 
 
 class SettingsValues(NamedTuple):
@@ -141,6 +154,14 @@ class ResolvedSettings(NamedTuple):
 class UsageContext(NamedTuple):
     template_context: dict[str, Any]
     cookie_updates: dict[str, str]
+
+
+class UsageSessionIndexState(NamedTuple):
+    active_complete: bool
+    archived_complete: bool
+    refresh_active: bool
+    refresh_archived: bool
+    totals_available: bool
 
 
 class AutonomousGoalValues(NamedTuple):
@@ -1892,24 +1913,28 @@ def usage(request: HttpRequest) -> HttpResponse:
 
 
 def _usage_context(request: HttpRequest) -> UsageContext:
-    initial_settings = _stored_settings(request)
-    config = codex_pool.app_server_config(
-        enable_memories=initial_settings.enable_memories
+    stored_settings = _stored_settings(request)
+    models_data = _cached_models_data(enable_memories=stored_settings.enable_memories)
+    _schedule_models_refresh(enable_memories=stored_settings.enable_memories)
+    resolved_settings = _resolved_settings(request, models_data)
+    current_settings = resolved_settings.values
+    cookie_updates = resolved_settings.cookie_updates
+    rate_limits = _cached_rate_limits()
+    _schedule_rate_limits_refresh(enable_memories=current_settings.enable_memories)
+    session_index_state = _usage_session_index_state()
+    _schedule_usage_session_index_refresh_if_needed(
+        enable_memories=current_settings.enable_memories,
+        index_state=session_index_state,
     )
-    with Codex(config=config) as codex:
-        models_data = _models_for_plan_mode_fallback(codex)
-        resolved_settings = _resolved_settings(request, models_data)
-        current_settings = resolved_settings.values
-        cookie_updates = resolved_settings.cookie_updates
-        rate_limits = _fetch_rate_limits(codex)
-        usage_index_available = _ensure_usage_session_index(codex)
-    usage_metadata = _metadata_rows_for_usage() if usage_index_available else []
+    usage_metadata = (
+        _metadata_rows_for_usage() if session_index_state.totals_available else []
+    )
     lifetime_usage = (
         _lifetime_token_usage_for_metadata(usage_metadata)
-        if usage_index_available
+        if session_index_state.totals_available
         else None
     )
-    if usage_index_available:
+    if session_index_state.totals_available:
         _schedule_usage_token_refresh(usage_metadata)
     settings_context = _settings_context(current_settings, models_data)
     return UsageContext(
@@ -3252,37 +3277,105 @@ def _metadata_rows_for_usage() -> list[SessionMetadata]:
     )
 
 
-def _ensure_usage_session_index(codex: Codex) -> bool:
+def _usage_session_index_state() -> UsageSessionIndexState:
+    # Source coverage is the availability contract: complete-but-empty is valid
+    # zero usage, while any partial source would undercount "All sessions".
     active_complete = session_index.is_complete(archived=False)
     archived_complete = session_index.is_complete(archived=True)
-    if not active_complete or not archived_complete:
-        result = session_index.refresh_from_codex(
-            codex,
-            projects=list(Project.objects.all()),
-            include_active=not active_complete,
-            include_archived=not archived_complete,
-            use_state_db_only=False,
-            max_pages=None,
+    refresh_active = not active_complete or session_index.should_refresh(archived=False)
+    refresh_archived = not archived_complete or session_index.should_refresh(
+        archived=True
+    )
+    return UsageSessionIndexState(
+        active_complete=active_complete,
+        archived_complete=archived_complete,
+        refresh_active=refresh_active,
+        refresh_archived=refresh_archived,
+        totals_available=active_complete and archived_complete,
+    )
+
+
+def _schedule_usage_session_index_refresh_if_needed(
+    *,
+    enable_memories: bool,
+    index_state: UsageSessionIndexState | None = None,
+) -> None:
+    if index_state is None:
+        index_state = _usage_session_index_state()
+    refresh_active = index_state.refresh_active
+    refresh_archived = index_state.refresh_archived
+    if not refresh_active and not refresh_archived:
+        return
+    transaction.on_commit(
+        lambda: _start_usage_session_index_refresh_thread(
+            enable_memories=enable_memories,
+            include_active=refresh_active,
+            include_archived=refresh_archived,
         )
-        if result.failed:
-            return False
-        return session_index.is_complete(archived=False) and session_index.is_complete(
+    )
+
+
+def _usage_session_index_refresh_needed(*, archived: bool) -> bool:
+    return not session_index.is_complete(archived=archived) or session_index.should_refresh(
+        archived=archived
+    )
+
+
+def _start_usage_session_index_refresh_thread(
+    *, enable_memories: bool, include_active: bool, include_archived: bool
+) -> None:
+    global _USAGE_SESSION_INDEX_REFRESH_IN_FLIGHT
+    with _USAGE_SESSION_INDEX_REFRESH_LOCK:
+        if _USAGE_SESSION_INDEX_REFRESH_IN_FLIGHT:
+            return
+        _USAGE_SESSION_INDEX_REFRESH_IN_FLIGHT = True
+    try:
+        threading.Thread(
+            target=_refresh_usage_session_index_best_effort,
+            kwargs={
+                "enable_memories": enable_memories,
+                "include_active": include_active,
+                "include_archived": include_archived,
+            },
+            name="usage-session-index-refresh",
+            daemon=True,
+        ).start()
+    except Exception:
+        with _USAGE_SESSION_INDEX_REFRESH_LOCK:
+            _USAGE_SESSION_INDEX_REFRESH_IN_FLIGHT = False
+        logger.exception("failed to start usage session index refresh thread")
+
+
+def _refresh_usage_session_index_best_effort(
+    *, enable_memories: bool, include_active: bool, include_archived: bool
+) -> None:
+    global _USAGE_SESSION_INDEX_REFRESH_IN_FLIGHT
+    try:
+        close_old_connections()
+        refresh_active = include_active and _usage_session_index_refresh_needed(
+            archived=False
+        )
+        refresh_archived = include_archived and _usage_session_index_refresh_needed(
             archived=True
         )
-
-    refresh_active = session_index.should_refresh(archived=False)
-    refresh_archived = session_index.should_refresh(archived=True)
-    if not refresh_active and not refresh_archived:
-        return True
-    session_index.refresh_from_codex(
-        codex,
-        projects=list(Project.objects.all()),
-        include_active=refresh_active,
-        include_archived=refresh_archived,
-        use_state_db_only=False,
-        max_pages=None,
-    )
-    return True
+        if not refresh_active and not refresh_archived:
+            return
+        config = codex_pool.app_server_config(enable_memories=enable_memories)
+        with Codex(config=config) as codex:
+            session_index.refresh_from_codex(
+                codex,
+                projects=list(Project.objects.all()),
+                include_active=refresh_active,
+                include_archived=refresh_archived,
+                use_state_db_only=False,
+                max_pages=None,
+            )
+    except Exception:
+        logger.exception("failed to refresh usage session index")
+    finally:
+        close_old_connections()
+        with _USAGE_SESSION_INDEX_REFRESH_LOCK:
+            _USAGE_SESSION_INDEX_REFRESH_IN_FLIGHT = False
 
 
 def _lifetime_token_usage_for_metadata(
@@ -4914,6 +5007,135 @@ def _safe_next_url(request: HttpRequest) -> str:
     ):
         return candidate
     return ""
+
+
+def _cached_models_data(*, enable_memories: bool) -> list[Any]:
+    with _MODELS_REFRESH_LOCK:
+        return list(_MODELS_CACHE_VALUE.get(enable_memories, []))
+
+
+def _schedule_models_refresh(*, enable_memories: bool) -> None:
+    if not _models_refresh_needed(enable_memories=enable_memories):
+        return
+    transaction.on_commit(
+        lambda: _start_models_refresh_thread(enable_memories=enable_memories)
+    )
+
+
+def _models_refresh_needed(*, enable_memories: bool) -> bool:
+    with _MODELS_REFRESH_LOCK:
+        fetched_at = _MODELS_CACHE_FETCHED_AT.get(enable_memories)
+        if fetched_at is None:
+            return True
+        return timezone.now() - _MODELS_CACHE_TTL >= fetched_at
+
+
+def _start_models_refresh_thread(*, enable_memories: bool) -> None:
+    with _MODELS_REFRESH_LOCK:
+        if enable_memories in _MODELS_REFRESH_IN_FLIGHT:
+            return
+        fetched_at = _MODELS_CACHE_FETCHED_AT.get(enable_memories)
+        if fetched_at is not None and timezone.now() - _MODELS_CACHE_TTL < fetched_at:
+            return
+        _MODELS_REFRESH_IN_FLIGHT.add(enable_memories)
+    try:
+        threading.Thread(
+            target=_refresh_models_cache_best_effort,
+            kwargs={"enable_memories": enable_memories},
+            name="models-refresh",
+            daemon=True,
+        ).start()
+    except Exception:
+        with _MODELS_REFRESH_LOCK:
+            _MODELS_REFRESH_IN_FLIGHT.discard(enable_memories)
+        logger.exception("failed to start models refresh thread")
+
+
+def _refresh_models_cache_best_effort(*, enable_memories: bool) -> None:
+    refreshed = False
+    models_data: list[Any] = []
+    try:
+        close_old_connections()
+        config = codex_pool.app_server_config(enable_memories=enable_memories)
+        with Codex(config=config) as codex:
+            models_data = list(codex.models().data)
+        refreshed = True
+    except Exception:
+        logger.exception("failed to refresh models cache")
+    finally:
+        close_old_connections()
+        with _MODELS_REFRESH_LOCK:
+            if refreshed:
+                _MODELS_CACHE_VALUE[enable_memories] = models_data
+                _MODELS_CACHE_FETCHED_AT[enable_memories] = timezone.now()
+            _MODELS_REFRESH_IN_FLIGHT.discard(enable_memories)
+
+
+def _cached_rate_limits() -> dict[str, Any] | None:
+    with _RATE_LIMITS_REFRESH_LOCK:
+        return _RATE_LIMITS_CACHE_VALUE if _RATE_LIMITS_CACHE_HAS_VALUE else None
+
+
+def _schedule_rate_limits_refresh(*, enable_memories: bool) -> None:
+    if not _rate_limits_refresh_needed():
+        return
+    transaction.on_commit(
+        lambda: _start_rate_limits_refresh_thread(enable_memories=enable_memories)
+    )
+
+
+def _rate_limits_refresh_needed() -> bool:
+    with _RATE_LIMITS_REFRESH_LOCK:
+        if _RATE_LIMITS_CACHE_FETCHED_AT is None:
+            return True
+        return timezone.now() - _RATE_LIMITS_CACHE_TTL >= _RATE_LIMITS_CACHE_FETCHED_AT
+
+
+def _start_rate_limits_refresh_thread(*, enable_memories: bool) -> None:
+    global _RATE_LIMITS_REFRESH_IN_FLIGHT
+    with _RATE_LIMITS_REFRESH_LOCK:
+        if _RATE_LIMITS_REFRESH_IN_FLIGHT:
+            return
+        if (
+            _RATE_LIMITS_CACHE_FETCHED_AT is not None
+            and timezone.now() - _RATE_LIMITS_CACHE_TTL < _RATE_LIMITS_CACHE_FETCHED_AT
+        ):
+            return
+        _RATE_LIMITS_REFRESH_IN_FLIGHT = True
+    try:
+        threading.Thread(
+            target=_refresh_rate_limits_cache_best_effort,
+            kwargs={"enable_memories": enable_memories},
+            name="rate-limits-refresh",
+            daemon=True,
+        ).start()
+    except Exception:
+        with _RATE_LIMITS_REFRESH_LOCK:
+            _RATE_LIMITS_REFRESH_IN_FLIGHT = False
+        logger.exception("failed to start rate limits refresh thread")
+
+
+def _refresh_rate_limits_cache_best_effort(*, enable_memories: bool) -> None:
+    global _RATE_LIMITS_CACHE_FETCHED_AT
+    global _RATE_LIMITS_CACHE_HAS_VALUE
+    global _RATE_LIMITS_CACHE_VALUE
+    global _RATE_LIMITS_REFRESH_IN_FLIGHT
+    rate_limits: dict[str, Any] | None = None
+    try:
+        close_old_connections()
+        config = codex_pool.app_server_config(enable_memories=enable_memories)
+        with Codex(config=config) as codex:
+            rate_limits = _fetch_rate_limits(codex)
+    except Exception:
+        logger.exception("failed to refresh rate limits cache")
+    finally:
+        close_old_connections()
+        with _RATE_LIMITS_REFRESH_LOCK:
+            if rate_limits is not None or not _RATE_LIMITS_CACHE_HAS_VALUE:
+                _RATE_LIMITS_CACHE_VALUE = rate_limits
+                _RATE_LIMITS_CACHE_HAS_VALUE = True
+            _RATE_LIMITS_CACHE_FETCHED_AT = timezone.now()
+            _RATE_LIMITS_REFRESH_IN_FLIGHT = False
 
 
 def _fetch_rate_limits(codex: Codex) -> dict[str, Any] | None:
