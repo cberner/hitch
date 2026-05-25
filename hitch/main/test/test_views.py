@@ -2368,7 +2368,12 @@ class IndexViewTests(TestCase):
         )
         client = _setup_codex(mock_codex)
 
-        response = self.client.get(reverse("usage"))
+        with (
+            patch("hitch.main.views._start_usage_token_refresh_thread"),
+            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+        ):
+            response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "90K")
@@ -2404,6 +2409,8 @@ class IndexViewTests(TestCase):
                 side_effect=AssertionError("usage render touched rollout path"),
             ) as rollout_path_from_value,
             patch("hitch.main.views._start_usage_token_refresh_thread") as start_refresh,
+            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.views._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
         ):
             response = self.client.get(reverse("usage"))
@@ -2435,7 +2442,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(cache.rollout_mtime_ns, 2_000_000_000)
 
     @patch("hitch.main.views.Codex")
-    def test_usage_page_primes_active_and_archived_index_before_usage(
+    def test_usage_page_schedules_initial_active_and_archived_index_refresh(
         self, mock_codex: MagicMock
     ) -> None:
         rollout_path = _make_rollout(
@@ -2466,58 +2473,164 @@ class IndexViewTests(TestCase):
             ],
         )
 
-        response = self.client.get(reverse("usage"))
+        with (
+            patch(
+                "hitch.main.views._start_usage_session_index_refresh_thread"
+            ) as start_index_refresh,
+            patch("hitch.main.views._start_usage_token_refresh_thread"),
+            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "350")
-        self.assertContains(response, "600")
-        self.assertContains(response, "50")
-        self.assertTrue(SessionMetadata.objects.filter(thread_id="archived").exists())
-        client.thread_list.assert_any_call(
-            limit=100,
-            sort_key=ThreadSortKey.updated_at,
-            sort_direction=SortDirection.desc,
-            use_state_db_only=False,
-        )
-        client.thread_list.assert_any_call(
-            limit=100,
-            sort_key=ThreadSortKey.updated_at,
-            sort_direction=SortDirection.desc,
-            use_state_db_only=False,
-            archived=True,
+        self.assertContains(response, "All sessions usage unavailable.")
+        self.assertFalse(SessionMetadata.objects.filter(thread_id="archived").exists())
+        client.thread_list.assert_not_called()
+        start_index_refresh.assert_called_once_with(
+            enable_memories=False,
+            include_active=True,
+            include_archived=True,
         )
 
     @patch("hitch.main.views.Codex")
-    def test_usage_page_live_refresh_invalidates_absent_metadata(
+    def test_usage_page_renders_zero_usage_when_complete_index_is_empty(
         self, mock_codex: MagicMock
     ) -> None:
-        _seed_usage_metadata("stale")
+        session_index.mark_synced(archived=False, complete=True)
+        session_index.mark_synced(archived=True, complete=True)
+        client = _setup_codex(mock_codex)
+
+        with (
+            patch(
+                "hitch.main.views._start_usage_session_index_refresh_thread"
+            ) as start_index_refresh,
+            patch("hitch.main.views._start_usage_token_refresh_thread") as start_tokens,
+            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+        ):
+            response = self.client.get(reverse("usage"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "All sessions usage unavailable.")
+        lifetime_usage = cast(dict[str, Any], response.context["lifetime_usage"])
+        self.assertEqual(lifetime_usage["total"]["input"], "0")
+        self.assertEqual(lifetime_usage["total"]["output"], "0")
+        self.assertEqual(lifetime_usage["total"]["cached"], "0")
+        client.thread_list.assert_not_called()
+        start_tokens.assert_not_called()
+        start_index_refresh.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    def test_usage_page_schedules_stale_index_refresh_and_renders_cached_usage(
+        self, mock_codex: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=400,
+                    cached_input_tokens=50,
+                    output_tokens=600,
+                    total_tokens=1_000,
+                )
+            ],
+        )
+        _seed_usage_metadata("stale", path=rollout_path)
         _cache_token_usage(
             "stale",
             input_tokens=400,
             cached_input_tokens=50,
             output_tokens=600,
             total_tokens=1_000,
+            path=rollout_path,
+        )
+        SessionMetadata.objects.filter(thread_id="stale").update(
+            usage_last_checked_at=datetime.now(UTC)
         )
         SessionIndexSyncState.objects.update(
             last_synced_at=datetime(2025, 1, 1, tzinfo=UTC)
         )
         client = _setup_codex(mock_codex, threads=[], archived_threads=[])
 
-        response = self.client.get(reverse("usage"))
+        with (
+            patch(
+                "hitch.main.views._start_usage_session_index_refresh_thread"
+            ) as start_index_refresh,
+            patch("hitch.main.views._start_usage_token_refresh_thread"),
+            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
         metadata = SessionMetadata.objects.get(thread_id="stale")
-        self.assertIsNone(metadata.codex_updated_at)
+        self.assertIsNotNone(metadata.codex_updated_at)
         lifetime_usage = cast(dict[str, Any], response.context["lifetime_usage"])
-        self.assertEqual(lifetime_usage["total"]["input"], "0")
-        self.assertEqual(lifetime_usage["total"]["output"], "0")
-        self.assertEqual(lifetime_usage["total"]["cached"], "0")
-        client.thread_list.assert_any_call(
-            limit=100,
-            sort_key=ThreadSortKey.updated_at,
-            sort_direction=SortDirection.desc,
-            use_state_db_only=False,
+        self.assertEqual(lifetime_usage["total"]["input"], "350")
+        self.assertEqual(lifetime_usage["total"]["output"], "600")
+        self.assertEqual(lifetime_usage["total"]["cached"], "50")
+        client.thread_list.assert_not_called()
+        start_index_refresh.assert_called_once_with(
+            enable_memories=False,
+            include_active=True,
+            include_archived=True,
+        )
+
+    @patch("hitch.main.views.Codex")
+    def test_usage_page_hides_totals_until_active_and_archived_indexes_complete(
+        self, mock_codex: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=400,
+                    cached_input_tokens=50,
+                    output_tokens=600,
+                    total_tokens=1_000,
+                )
+            ],
+        )
+        session_index.mark_synced(archived=False, complete=True)
+        SessionMetadata.objects.create(
+            thread_id="active-only",
+            codex_path=str(rollout_path),
+            codex_updated_at=datetime(2025, 1, 5, tzinfo=UTC),
+            usage_last_checked_at=datetime.now(UTC),
+        )
+        _cache_token_usage(
+            "active-only",
+            input_tokens=400,
+            cached_input_tokens=50,
+            output_tokens=600,
+            total_tokens=1_000,
+            path=rollout_path,
+        )
+        client = _setup_codex(mock_codex)
+
+        with (
+            patch(
+                "hitch.main.views._start_usage_session_index_refresh_thread"
+            ) as start_index_refresh,
+            patch("hitch.main.views._start_usage_token_refresh_thread") as start_tokens,
+            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            response = self.client.get(reverse("usage"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "All sessions usage unavailable.")
+        self.assertIsNone(response.context["lifetime_usage"])
+        client.thread_list.assert_not_called()
+        start_tokens.assert_not_called()
+        start_index_refresh.assert_called_once_with(
+            enable_memories=False,
+            include_active=False,
+            include_archived=True,
         )
 
     def test_token_usage_snapshot_drops_stale_cache_when_rollout_has_no_usage(
@@ -3118,6 +3231,8 @@ class IndexViewTests(TestCase):
 
         with (
             patch("hitch.main.views._start_usage_token_refresh_thread") as start_refresh,
+            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.views._start_rate_limits_refresh_thread"),
             patch(
                 "hitch.main.views._rollout_path_from_value",
                 side_effect=AssertionError("usage render touched rollout path"),
@@ -3192,18 +3307,32 @@ class IndexViewTests(TestCase):
         client.thread_list.assert_not_called()
 
     @patch("hitch.main.views.Codex")
-    def test_usage_page_marks_usage_unavailable_when_initial_index_refresh_fails(
+    def test_usage_page_marks_usage_unavailable_until_initial_index_refresh_finishes(
         self, mock_codex: MagicMock
     ) -> None:
         client = _setup_codex(mock_codex)
         client.thread_list.side_effect = AppServerError("thread list unavailable")
 
-        response = self.client.get(reverse("usage"))
+        with (
+            patch(
+                "hitch.main.views._start_usage_session_index_refresh_thread"
+            ) as start_index_refresh,
+            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            response = self.client.get(reverse("usage"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "All sessions usage unavailable.")
         self.assertNotContains(response, "Refreshing session token usage...")
         self.assertIsNone(response.context["lifetime_usage"])
+        client.thread_list.assert_not_called()
+        start_index_refresh.assert_called_once_with(
+            enable_memories=False,
+            include_active=True,
+            include_archived=True,
+        )
 
     @patch("hitch.main.views.Codex")
     def test_usage_page_schedules_missing_metadata_path_refresh(
@@ -3225,6 +3354,8 @@ class IndexViewTests(TestCase):
 
         with (
             patch("hitch.main.views._start_usage_token_refresh_thread") as start_refresh,
+            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.views._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
         ):
             response = self.client.get(reverse("usage"))
