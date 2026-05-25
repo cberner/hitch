@@ -1,0 +1,287 @@
+        .section-label {
+            font-size: 0.72rem;
+            font-weight: 600;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            margin: 0 0 0.75rem;
+        }
+        h2 {
+            margin: 0;
+            font-size: 1.15rem;
+            font-weight: 650;
+        }
+        .usage-header {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 1rem;
+            margin: 0 0 1rem;
+        }
+        .usage-section + .usage-section {
+            margin-top: 1.75rem;
+        }
+        .usage-plan {
+            margin: 0;
+            color: var(--text-muted);
+            font-size: 0.86rem;
+        }
+        .usage-title-button {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            border: 0;
+            border-radius: 4px;
+            background: transparent;
+            color: inherit;
+            font: inherit;
+            margin: 0;
+            padding: 0;
+            cursor: pointer;
+        }
+        .usage-title-button:hover {
+            color: var(--accent-hover);
+        }
+        .usage-title-button:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 4px;
+        }
+        .usage-title-button::after {
+            content: "";
+            width: 0.42rem;
+            height: 0.42rem;
+            border-right: 1.5px solid currentColor;
+            border-bottom: 1.5px solid currentColor;
+            transform: translateY(-0.12rem) rotate(45deg);
+            transition: transform 0.12s ease;
+        }
+        .usage-title-button[aria-expanded="true"]::after {
+            transform: translateY(0.08rem) rotate(225deg);
+        }
+        .usage-total-chart {
+            display: none;
+            margin: -0.15rem 0 1rem;
+            border-top: 1px solid var(--border);
+            padding-top: 0.8rem;
+            --lifetime-chart-stack-height: 7.75rem;
+        }
+        .usage-total-chart.is-expanded {
+            display: block;
+        }
+        .lifetime-stats {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 0.65rem;
+        }
+        .lifetime-stat {
+            display: flex;
+            flex-direction: column;
+            gap: 0.7rem;
+            width: 100%;
+            color: inherit;
+            font: inherit;
+            text-align: left;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--surface);
+            box-shadow: var(--shadow);
+            padding: 0.85rem 0.95rem;
+            min-width: 0;
+            cursor: pointer;
+        }
+        .lifetime-stat:hover {
+            border-color: var(--border-strong);
+        }
+        .lifetime-stat:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 2px;
+        }
+        .lifetime-label {
+            color: var(--text-faint);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            font-size: 0.66rem;
+            font-weight: 600;
+        }
+        .lifetime-breakdown {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.6rem;
+        }
+        .lifetime-metric {
+            min-width: 0;
+        }
+        .lifetime-metric-label {
+            display: block;
+            color: var(--text-muted);
+            font-size: 0.72rem;
+            line-height: 1.2;
+        }
+        .lifetime-value {
+            display: block;
+            color: var(--text);
+            font-size: 1.15rem;
+            font-weight: 650;
+            line-height: 1.25;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+        .lifetime-unit {
+            color: var(--text-muted);
+            font-size: 0.78rem;
+        }
+        .lifetime-chart {
+            display: none;
+            border-top: 1px solid var(--border);
+            padding-top: 0.8rem;
+            --lifetime-chart-stack-height: 7.75rem;
+        }
+        .lifetime-stat.is-expanded .lifetime-chart {
+            display: block;
+        }
+        .lifetime-chart-plot {
+            display: grid;
+            grid-template-columns: max-content minmax(0, 1fr);
+            align-items: start;
+            gap: 0.45rem;
+            min-width: 0;
+        }
+        .lifetime-chart-axis {
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            height: var(--lifetime-chart-stack-height);
+            color: var(--text-faint);
+            font-size: 0.62rem;
+            font-variant-numeric: tabular-nums;
+            line-height: 1;
+            text-align: right;
+        }
+        .lifetime-chart-axis-value {
+            display: block;
+            min-width: 2.2rem;
+        }
+        .lifetime-chart-bars {
+            display: flex;
+            align-items: end;
+            gap: 0.45rem;
+            min-width: 0;
+            overflow-x: auto;
+            padding-bottom: 0.2rem;
+        }
+        .lifetime-chart-day {
+            display: grid;
+            grid-template-rows: var(--lifetime-chart-stack-height) auto;
+            gap: 0.35rem;
+            min-width: 2.6rem;
+        }
+        .lifetime-chart-stack {
+            display: flex;
+            flex-direction: column-reverse;
+            justify-content: end;
+            height: 100%;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: 6px 6px 3px 3px;
+            overflow: hidden;
+        }
+        .lifetime-chart-segment {
+            min-height: 0;
+        }
+        .lifetime-chart-segment.input { background: #4f8f66; }
+        .lifetime-chart-segment.output { background: #5278bd; }
+        .lifetime-chart-segment.cached { background: #b37a34; }
+        .lifetime-chart-label {
+            color: var(--text-faint);
+            font-size: 0.64rem;
+            line-height: 1.1;
+            text-align: center;
+            white-space: nowrap;
+        }
+        .lifetime-chart-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.45rem 0.7rem;
+            margin-top: 0.65rem;
+            color: var(--text-muted);
+            font-size: 0.72rem;
+        }
+        .lifetime-chart-legend-item {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
+        }
+        .lifetime-chart-swatch {
+            width: 0.55rem;
+            height: 0.55rem;
+            border-radius: 2px;
+        }
+        .lifetime-chart-swatch.input { background: #4f8f66; }
+        .lifetime-chart-swatch.output { background: #5278bd; }
+        .lifetime-chart-swatch.cached { background: #b37a34; }
+        .rate-limit-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.65rem;
+        }
+        .rate-limit-row {
+            display: flex;
+            flex-direction: column;
+            gap: 0.45rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--surface);
+            box-shadow: var(--shadow);
+            padding: 0.9rem 1rem;
+        }
+        .rate-limit-row-head {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            gap: 0.75rem;
+            color: var(--text);
+            font-size: 0.95rem;
+        }
+        .rate-limit-row h3 {
+            margin: 0;
+            font-size: 0.95rem;
+            font-weight: 600;
+        }
+        .rate-limit-remaining {
+            color: var(--text-muted);
+            font-size: 0.86rem;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+        }
+        .rate-limit-bar {
+            position: relative;
+            height: 0.5rem;
+            background: var(--surface-2);
+            border-radius: 999px;
+            overflow: hidden;
+        }
+        .rate-limit-bar-fill {
+            position: absolute;
+            inset: 0 auto 0 0;
+            background: var(--accent);
+            border-radius: inherit;
+        }
+        .rate-limit-meta {
+            font-size: 0.78rem;
+            color: var(--text-faint);
+            font-variant-numeric: tabular-nums;
+        }
+        .empty {
+            text-align: center;
+            padding: 3rem 1rem;
+            color: var(--text-muted);
+            border: 1px dashed var(--border-strong);
+            border-radius: var(--radius);
+            background: var(--surface);
+        }
+        .empty p { margin: 0; font-size: 0.95rem; }
+        .empty .hint {
+            font-size: 0.82rem;
+            color: var(--text-faint);
+            margin-top: 0.5rem;
+        }

@@ -16,6 +16,7 @@
             --border-strong: #c4b69f;
             --text: #1c252e;
             --text-muted: #545d58;
+            --text-faint: #6f6b62;
             --accent: #4f8f66;
             --accent-hover: #3f7b56;
             --accent-soft: rgba(79, 143, 102, 0.10);
@@ -37,6 +38,7 @@
                 --border-strong: #3d4744;
                 --text: #e8e4d8;
                 --text-muted: #a0a29a;
+                --text-faint: #8a8b82;
                 --accent: #6fb286;
                 --accent-hover: #84c49a;
                 --accent-soft: rgba(111, 178, 134, 0.14);
@@ -83,6 +85,12 @@
             gap: 0.85rem;
             min-width: 0;
         }
+        .topbar-actions {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex: 0 0 auto;
+        }
         .brand {
             font-size: 1rem;
             font-weight: 700;
@@ -123,6 +131,20 @@
             background: color-mix(in srgb, var(--danger) 10%, transparent);
             border-color: var(--danger);
         }
+        .button.secondary {
+            background: transparent;
+            color: var(--text);
+            border-color: var(--border-strong);
+        }
+        .button.secondary:hover {
+            background: var(--surface-2);
+            border-color: var(--border-strong);
+        }
+        .account-action {
+            min-height: 2.1rem;
+            padding: 0.35rem 0.65rem;
+            font-size: 0.86rem;
+        }
         main {
             width: min(760px, 100%);
             min-height: calc(100vh - 4.2rem - var(--safe-top));
@@ -132,14 +154,6 @@
             display: flex;
             flex-direction: column;
             gap: 1.25rem;
-        }
-        .section-label {
-            font-size: 0.72rem;
-            font-weight: 600;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.08em;
-            margin: 0 0 0.75rem;
         }
         .profile-panel {
             border: 1px solid var(--border);
@@ -170,21 +184,44 @@
             font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
             color: var(--text);
         }
+        {% include "_usage_styles.html" %}
         .profile-footer {
             margin: auto 0 0;
+            padding-top: 1.25rem;
+            border-top: 1px solid var(--border);
             display: flex;
             flex-direction: column;
             gap: 0.5rem;
         }
         .profile-logout-form {
             margin: 0;
-            padding-top: 1.25rem;
-            border-top: 1px solid var(--border);
             display: flex;
             justify-content: flex-end;
         }
         @media (max-width: 480px) {
             .topbar-inner { padding: 0.7rem 1rem; }
+            .topbar-actions {
+                gap: 0.35rem;
+            }
+            .account-action {
+                padding-inline: 0.55rem;
+            }
+            .usage-header {
+                align-items: flex-start;
+                flex-direction: column;
+                gap: 0.35rem;
+            }
+            .lifetime-stats {
+                grid-template-columns: 1fr;
+            }
+            .lifetime-breakdown {
+                grid-template-columns: repeat(3, minmax(0, 1fr));
+            }
+            .rate-limit-row-head {
+                align-items: flex-start;
+                flex-direction: column;
+                gap: 0.2rem;
+            }
             .profile-logout-form .button { width: 100%; }
         }
     </style>
@@ -196,14 +233,22 @@
                 {% include "_primary_nav.html" %}
                 <h1 class="brand">HITCH</h1>
             </div>
+            {% if not user.is_authenticated %}
+            <div class="topbar-actions">
+                <a class="button secondary account-action" href="{{ login_url }}">Log in</a>
+                <a class="button account-action" href="{{ register_url }}">Register</a>
+            </div>
+            {% endif %}
         </div>
     </header>
     <main>
         <section class="profile-panel" aria-labelledby="profile-title">
             <p class="section-label">Profile</p>
-            <h2 id="profile-title">{{ user.get_username }}</h2>
-            <p class="profile-meta">Signed in</p>
+            <h2 id="profile-title">{{ profile_name }}</h2>
+            <p class="profile-meta">{{ profile_status }}</p>
         </section>
+        {% include "_usage_sections.html" %}
+        {% if user.is_authenticated %}
         <div class="profile-footer">
             <form class="profile-logout-form" method="post" action="{{ logout_url }}">
                 {% csrf_token %}
@@ -213,9 +258,12 @@
             <p class="profile-revision">Server git hash: <code>{{ server_git_hash }}</code></p>
             {% endif %}
         </div>
+        {% endif %}
     </main>
     <script>
         (function () {
+            {% include "_usage_scripts.html" %}
+
             {% include "_primary_nav_script.html" %}
         })();
     </script>

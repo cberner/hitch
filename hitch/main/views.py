@@ -138,6 +138,11 @@ class ResolvedSettings(NamedTuple):
     cookie_updates: dict[str, str]
 
 
+class UsageContext(NamedTuple):
+    template_context: dict[str, Any]
+    cookie_updates: dict[str, str]
+
+
 class AutonomousGoalValues(NamedTuple):
     title: str
     goal: str
@@ -1880,6 +1885,13 @@ def system_session(request: HttpRequest, session_id: str) -> HttpResponse:
 
 @require_http_methods(["GET"])
 def usage(request: HttpRequest) -> HttpResponse:
+    usage_context = _usage_context(request)
+    response = render(request, "usage.html", usage_context.template_context)
+    _apply_cookie_updates(response, usage_context.cookie_updates)
+    return response
+
+
+def _usage_context(request: HttpRequest) -> UsageContext:
     initial_settings = _stored_settings(request)
     config = codex_pool.app_server_config(
         enable_memories=initial_settings.enable_memories
@@ -1897,22 +1909,19 @@ def usage(request: HttpRequest) -> HttpResponse:
         if usage_index_available
         else None
     )
+    if usage_index_available:
+        _schedule_usage_token_refresh(usage_metadata)
     settings_context = _settings_context(current_settings, models_data)
-    response = render(
-        request,
-        "usage.html",
-        {
+    return UsageContext(
+        template_context={
             "login_url": reverse("login"),
             "register_url": reverse("register"),
             "rate_limits": rate_limits,
             "lifetime_usage": lifetime_usage,
             **settings_context,
         },
+        cookie_updates=cookie_updates,
     )
-    _apply_cookie_updates(response, cookie_updates)
-    if usage_index_available:
-        _schedule_usage_token_refresh(usage_metadata)
-    return response
 
 
 @require_http_methods(["GET"])
@@ -2711,23 +2720,38 @@ def login(request: HttpRequest) -> HttpResponse:
 @require_http_methods(["GET"])
 def profile(request: HttpRequest) -> HttpResponse:
     user = _authenticated_user(request)
-    if user is None:
-        login_url = reverse("login")
-        next_url = request.get_full_path()
-        return redirect(f"{login_url}?{urlencode({'next': next_url})}")
-
-    resolved_settings = _resolved_settings(request, [])
-    settings_context = _settings_context(resolved_settings.values, [])
+    usage_context = _profile_usage_context(request)
+    profile_name = user.get_username() if user is not None else "anonymous"
     response = render(
         request,
         "profile.html",
         {
-            "logout_url": reverse("logout"),
-            **settings_context,
+            "profile_name": profile_name,
+            "profile_status": "Signed in" if user is not None else "Signed out",
+            "logout_url": reverse("logout") if user is not None else "",
+            **usage_context.template_context,
         },
     )
-    _apply_cookie_updates(response, resolved_settings.cookie_updates)
+    _apply_cookie_updates(response, usage_context.cookie_updates)
     return response
+
+
+def _profile_usage_context(request: HttpRequest) -> UsageContext:
+    try:
+        return _usage_context(request)
+    except Exception:
+        logger.exception("failed to load profile usage context; showing empty usage state")
+    settings_context = _settings_context(_stored_settings(request), [])
+    return UsageContext(
+        template_context={
+            "login_url": reverse("login"),
+            "register_url": reverse("register"),
+            "rate_limits": None,
+            "lifetime_usage": None,
+            **settings_context,
+        },
+        cookie_updates={},
+    )
 
 
 @require_http_methods(["POST"])
