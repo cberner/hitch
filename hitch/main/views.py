@@ -2981,7 +2981,22 @@ def _system_agent_runs_by_thread_id(
     runs = (
         SystemAgentRun.objects.filter(thread_id__in=ids)
         .exclude(thread_id="")
-        .select_related("instance", "workflow")
+        .select_related("instance")
+        .only(
+            "id",
+            "workflow",
+            "agent_kind",
+            "thread_id",
+            "instance",
+            "status",
+            "created_at",
+            "instance__id",
+            "instance__thread_id",
+            "instance__display_author",
+            "instance__agent_kind",
+            "instance__status",
+            "instance__started_at",
+        )
         .order_by("thread_id", "-created_at", "-pk")
     )
     by_thread_id: dict[str, SystemAgentRun] = {}
@@ -3003,6 +3018,14 @@ def _system_agent_instances_by_thread_id(
         )
         .exclude(thread_id="")
         .exclude(agent_kind=demo.DEMO_AGENT_KIND)
+        .only(
+            "id",
+            "thread_id",
+            "display_author",
+            "agent_kind",
+            "status",
+            "started_at",
+        )
         .order_by("thread_id", "-started_at", "-pk")
     )
     by_thread_id: dict[str, CodexInstance] = {}
