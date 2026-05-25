@@ -179,6 +179,72 @@
             flex-wrap: wrap;
             margin-top: 0.85rem;
         }
+        .proposal-menu {
+            position: relative;
+            flex: 0 0 auto;
+        }
+        .proposal-menu-toggle {
+            font: inherit;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 2.25rem;
+            height: 2.25rem;
+            font-size: 1.1rem;
+            line-height: 1;
+            background: transparent;
+            color: var(--text-muted);
+            border: none;
+            border-radius: 8px;
+            padding: 0;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        .proposal-menu-toggle:hover,
+        .proposal-menu-toggle[aria-expanded="true"] {
+            background: var(--surface-2);
+            color: var(--text);
+        }
+        .proposal-menu-panel {
+            position: absolute;
+            right: 0;
+            top: calc(100% + 0.35rem);
+            z-index: 60;
+            min-width: 10rem;
+            padding: 0.35rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--surface);
+            box-shadow: var(--shadow-lg);
+        }
+        .proposal-menu-panel[hidden] { display: none; }
+        .proposal-menu-panel form { margin: 0; }
+        .proposal-menu-panel button,
+        .proposal-menu-panel a {
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            min-height: 34px;
+            font: inherit;
+            font-size: 0.9rem;
+            text-align: left;
+            text-decoration: none;
+            border: 0;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text);
+            padding: 0.5rem 0.65rem;
+            cursor: pointer;
+        }
+        .proposal-menu-panel button:hover,
+        .proposal-menu-panel button:focus,
+        .proposal-menu-panel a:hover,
+        .proposal-menu-panel a:focus {
+            outline: none;
+            background: var(--surface-2);
+        }
+        .proposal-menu-panel .danger { color: var(--danger); }
         .meta {
             color: var(--text-muted);
             font-size: 0.86rem;
@@ -333,19 +399,30 @@
                         {% endif %}
                         {% else %}
                         <a class="button" href="{% url 'new_session' %}?proposed_session={{ proposed_session.pk }}">Do it</a>
-                        <button
-                            type="button"
-                            class="button danger"
-                            data-proposed-session-reject
-                            data-reject-url="{% url 'update_proposed_session_outcome' proposed_session.pk %}"
-                            data-session-title="{{ proposed_session.title }}"
-                        >Reject</button>
-                        {% if proposed_session.candidate_log_url %}
-                        <a class="button secondary" href="{{ proposed_session.candidate_log_url }}">Candidate log</a>
-                        {% endif %}
-                        {% if proposed_session.judge_log_url %}
-                        <a class="button secondary" href="{{ proposed_session.judge_log_url }}">Judge log</a>
-                        {% endif %}
+                        <div class="proposal-menu" data-context-menu>
+                            <button type="button" class="proposal-menu-toggle" aria-label="Actions for {{ proposed_session.title }}" aria-haspopup="menu" aria-expanded="false" data-context-menu-open>...</button>
+                            <div class="proposal-menu-panel" role="menu" data-context-menu-panel hidden>
+                                <form method="post" action="{% url 'update_proposed_session_outcome' proposed_session.pk %}" role="none">
+                                    {% csrf_token %}
+                                    <input type="hidden" name="outcome_status" value="{{ proposed_session_dismissed_status }}">
+                                    <button type="submit" role="menuitem">Dismiss</button>
+                                </form>
+                                <button
+                                    type="button"
+                                    class="danger"
+                                    role="menuitem"
+                                    data-proposed-session-reject
+                                    data-reject-url="{% url 'update_proposed_session_outcome' proposed_session.pk %}"
+                                    data-session-title="{{ proposed_session.title }}"
+                                >Reject</button>
+                                {% if proposed_session.candidate_log_url %}
+                                <a href="{{ proposed_session.candidate_log_url }}" role="menuitem">Candidate log</a>
+                                {% endif %}
+                                {% if proposed_session.judge_log_url %}
+                                <a href="{{ proposed_session.judge_log_url }}" role="menuitem">Judge log</a>
+                                {% endif %}
+                            </div>
+                        </div>
                         {% endif %}
                     </div>
                 </li>
@@ -404,6 +481,49 @@
             for (const dialog of document.querySelectorAll("dialog")) {
                 dialog.addEventListener("close", syncModalScrollLock);
             }
+            const contextMenus = Array.from(document.querySelectorAll("[data-context-menu]"));
+            function menuParts(menu) {
+                return {
+                    button: menu && menu.querySelector("[data-context-menu-open]"),
+                    panel: menu && menu.querySelector("[data-context-menu-panel]"),
+                };
+            }
+            function closeContextMenu(menu, focusButton) {
+                const parts = menuParts(menu);
+                if (!parts.button || !parts.panel) return;
+                parts.panel.hidden = true;
+                parts.button.setAttribute("aria-expanded", "false");
+                if (focusButton) parts.button.focus();
+            }
+            function closeContextMenus(exceptMenu) {
+                for (const menu of contextMenus) {
+                    if (menu !== exceptMenu) closeContextMenu(menu, false);
+                }
+            }
+            for (const menu of contextMenus) {
+                const parts = menuParts(menu);
+                if (!parts.button || !parts.panel) continue;
+                parts.button.addEventListener("click", () => {
+                    const willOpen = parts.panel.hidden;
+                    closeContextMenus(menu);
+                    parts.panel.hidden = !willOpen;
+                    parts.button.setAttribute("aria-expanded", willOpen ? "true" : "false");
+                });
+            }
+            document.addEventListener("click", (event) => {
+                for (const menu of contextMenus) {
+                    if (!menu.contains(event.target)) closeContextMenu(menu, false);
+                }
+            });
+            document.addEventListener("keydown", (event) => {
+                if (event.key !== "Escape") return;
+                const openMenu = contextMenus.find((menu) => {
+                    const parts = menuParts(menu);
+                    return parts.panel && !parts.panel.hidden;
+                });
+                if (!openMenu) return;
+                closeContextMenu(openMenu, true);
+            });
             const rejectDialog = document.querySelector("[data-reject-session-dialog]");
             const rejectForm = rejectDialog && rejectDialog.querySelector("[data-reject-session-form]");
             const rejectTitle = rejectDialog && rejectDialog.querySelector("[data-reject-session-title]");
@@ -412,6 +532,7 @@
             for (const button of document.querySelectorAll("[data-proposed-session-reject]")) {
                 button.addEventListener("click", () => {
                     if (!rejectForm) return;
+                    closeContextMenus(null);
                     rejectForm.action = button.dataset.rejectUrl || "";
                     if (rejectTitle) rejectTitle.textContent = button.dataset.sessionTitle || "";
                     if (rejectReason) rejectReason.value = "";
