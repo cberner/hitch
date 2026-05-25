@@ -422,3 +422,36 @@ class WorktreeDiffTests(SimpleTestCase):
         self.assertEqual(diff.files[0].status, "Renamed")
         self.assertEqual(diff.files[0].old_path, old_name)
         self.assertEqual(diff.files[0].path, new_name)
+
+    def test_tracked_and_untracked_changes_do_not_phantom_context_line(self) -> None:
+        # ``build_worktree_diff`` joins ``git diff`` output -- which always
+        # ends with a newline -- to the synthetic untracked-file diff with
+        # ``"\n".join``. ``splitlines()`` therefore yields a blank string at
+        # the boundary, and previously the parser fell through to the
+        # context branch and appended a phantom blank line with bogus line
+        # numbers past EOF to the last tracked file. This regresses to a
+        # visible "line 2" pseudo-context in a single-line file, plus a
+        # misleading additions/deletions tail in the rendered diff.
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            tracked = repo / "tracked.txt"
+            tracked.write_text("line1\n")
+            _git(repo, "add", "tracked.txt")
+            _git(repo, "commit", "-m", "initial")
+
+            tracked.write_text("line1 modified\n")
+            (repo / "untracked.txt").write_text("brand new\n")
+
+            diff = build_worktree_diff(str(repo))
+
+        paths = [file.path for file in diff.files]
+        self.assertIn("tracked.txt", paths)
+        self.assertIn("untracked.txt", paths)
+        tracked_file = next(file for file in diff.files if file.path == "tracked.txt")
+        context_line_numbers = [
+            (line.old_lineno, line.new_lineno)
+            for line in tracked_file.lines
+            if line.kind == "context"
+        ]
+        self.assertEqual(context_line_numbers, [])
