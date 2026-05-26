@@ -48,8 +48,6 @@
         }
         * { box-sizing: border-box; }
         html, body { margin: 0; padding: 0; }
-        html.modal-scroll-locked,
-        body.modal-scroll-locked { overflow: hidden; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
             color: var(--text);
@@ -606,33 +604,7 @@
     </dialog>
     <script>
         (function () {
-            const modalScrollLockClass = "modal-scroll-locked";
-            function syncModalScrollLock() {
-                const hasOpenDialog = Boolean(document.querySelector("dialog[open]"));
-                document.documentElement.classList.toggle(modalScrollLockClass, hasOpenDialog);
-                document.body.classList.toggle(modalScrollLockClass, hasOpenDialog);
-            }
-            function showDialog(dialog) {
-                if (!dialog) return;
-                if (typeof dialog.showModal === "function") {
-                    dialog.showModal();
-                } else {
-                    dialog.setAttribute("open", "");
-                }
-                syncModalScrollLock();
-            }
-            function hideDialog(dialog) {
-                if (!dialog) return;
-                if (typeof dialog.close === "function") {
-                    dialog.close();
-                } else {
-                    dialog.removeAttribute("open");
-                }
-                syncModalScrollLock();
-            }
-            for (const dialog of document.querySelectorAll("dialog")) {
-                dialog.addEventListener("close", syncModalScrollLock);
-            }
+            {% include "_dialog_script.html" %}
             const editGoalDialog = document.querySelector("[data-edit-autonomous-goal-dialog]");
             const editGoalForm = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-form]");
             const editGoalTitle = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-title]");
@@ -651,7 +623,7 @@
             const createGoalTitle = createGoalDialog && createGoalDialog.querySelector("[data-create-autonomous-goal-title]");
             const createGoalCancel = createGoalDialog && createGoalDialog.querySelector("[data-create-autonomous-goal-cancel]");
             const pageMenu = document.querySelector("[data-page-menu]");
-            const contextMenus = Array.from(document.querySelectorAll("[data-context-menu]"));
+            {% include "_context_menu_script.html" %}
             function selectedAutoQaSupported(autonomySelect) {
                 const option = autonomySelect && autonomySelect.selectedOptions && autonomySelect.selectedOptions[0];
                 return Boolean(option && option.dataset.autoQaSupported === "true");
@@ -664,51 +636,9 @@
                 const supported = selectedAutoQaSupported(autonomySelect);
                 autoQa.disabled = !supported;
             }
-            function menuParts(menu) {
-                return {
-                    button: menu && menu.querySelector("[data-context-menu-open]"),
-                    panel: menu && menu.querySelector("[data-context-menu-panel]"),
-                };
-            }
-            function closeContextMenu(menu, focusButton) {
-                const parts = menuParts(menu);
-                if (!parts.button || !parts.panel) return;
-                parts.panel.hidden = true;
-                parts.button.setAttribute("aria-expanded", "false");
-                if (focusButton) parts.button.focus();
-            }
-            function closeContextMenus(exceptMenu) {
-                for (const menu of contextMenus) {
-                    if (menu !== exceptMenu) closeContextMenu(menu, false);
-                }
-            }
             function closePageMenu() {
                 if (pageMenu) closeContextMenu(pageMenu, false);
             }
-            for (const menu of contextMenus) {
-                const parts = menuParts(menu);
-                if (!parts.button || !parts.panel) continue;
-                parts.button.addEventListener("click", () => {
-                    const willOpen = parts.panel.hidden;
-                    closeContextMenus(menu);
-                    parts.panel.hidden = !willOpen;
-                    parts.button.setAttribute("aria-expanded", willOpen ? "true" : "false");
-                });
-            }
-            document.addEventListener("click", (event) => {
-                for (const menu of contextMenus) {
-                    if (!menu.contains(event.target)) closeContextMenu(menu, false);
-                }
-            });
-            document.addEventListener("keydown", (event) => {
-                if (event.key !== "Escape") return;
-                const openMenu = contextMenus.find((menu) => {
-                    const parts = menuParts(menu);
-                    return parts.panel && !parts.panel.hidden;
-                });
-                if (!openMenu) return;
-                closeContextMenu(openMenu, true);
-            });
             if (createGoalOpen) {
                 createGoalOpen.addEventListener("click", () => {
                     closePageMenu();

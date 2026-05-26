@@ -1,0 +1,43 @@
+            const contextMenus = Array.from(document.querySelectorAll("[data-context-menu]"));
+            function menuParts(menu) {
+                return {
+                    button: menu && menu.querySelector("[data-context-menu-open]"),
+                    panel: menu && menu.querySelector("[data-context-menu-panel]"),
+                };
+            }
+            function closeContextMenu(menu, focusButton) {
+                const parts = menuParts(menu);
+                if (!parts.button || !parts.panel) return;
+                parts.panel.hidden = true;
+                parts.button.setAttribute("aria-expanded", "false");
+                if (focusButton) parts.button.focus();
+            }
+            function closeContextMenus(exceptMenu) {
+                for (const menu of contextMenus) {
+                    if (menu !== exceptMenu) closeContextMenu(menu, false);
+                }
+            }
+            for (const menu of contextMenus) {
+                const parts = menuParts(menu);
+                if (!parts.button || !parts.panel) continue;
+                parts.button.addEventListener("click", () => {
+                    const willOpen = parts.panel.hidden;
+                    closeContextMenus(menu);
+                    parts.panel.hidden = !willOpen;
+                    parts.button.setAttribute("aria-expanded", willOpen ? "true" : "false");
+                });
+            }
+            document.addEventListener("click", (event) => {
+                for (const menu of contextMenus) {
+                    if (!menu.contains(event.target)) closeContextMenu(menu, false);
+                }
+            });
+            document.addEventListener("keydown", (event) => {
+                if (event.key !== "Escape") return;
+                const openMenu = contextMenus.find((menu) => {
+                    const parts = menuParts(menu);
+                    return parts.panel && !parts.panel.hidden;
+                });
+                if (!openMenu) return;
+                closeContextMenu(openMenu, true);
+            });
