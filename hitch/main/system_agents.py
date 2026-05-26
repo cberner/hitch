@@ -4371,7 +4371,15 @@ def _merge_pr_handoff_dicts(
                 "latest_commit_sha": canonical_head_sha,
             }
     for key, value in update.items():
-        if value in ("", None, [], {}):
+        # ``""`` and ``None`` are "absent" sentinels (a writer with no fresh
+        # observation for the field); empty list/dict updates are explicit
+        # "observed and found none" overwrites that must clear any stale
+        # list left over from an earlier observation -- otherwise the next
+        # monitor/feedback prompt is rendered with ``unresolved_thread_count:
+        # 0`` sitting next to an ``unresolved_threads`` array describing the
+        # already-resolved thread, the same shape 48b0840 fixed at the
+        # per-turn snapshot layer.
+        if value == "" or value is None:
             continue
         merged[key] = value
     return merged
