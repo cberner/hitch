@@ -566,6 +566,39 @@ class LocalMergeTests(SimpleTestCase):
             ):
                 build_auto_merge_review_patch(session, "main")
 
+    def test_auto_merge_review_patch_preserves_unchanged_symlink_to_directory(
+        self,
+    ) -> None:
+        # A tracked symlink whose target is a directory must round-trip
+        # through the source-worktree tree builder unchanged. Otherwise
+        # ``_source_worktree_tree`` silently drops it, the resulting
+        # ``base_sha vs source_tree_sha`` diff shows the symlink as deleted,
+        # and ``_validate_reviewable_patch`` rejects the whole patch even
+        # though the user only touched an unrelated regular file.
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            session = root / "session"
+            _init_repo(repo)
+            (repo / "shared").mkdir()
+            (repo / "shared" / "data.txt").write_text("payload\n")
+            _git(repo, "add", "shared/data.txt")
+            (repo / "vendor").symlink_to("shared")
+            _git(repo, "add", "vendor")
+            _git(repo, "commit", "-m", "add symlink to directory")
+            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
+            (session / "README.md").write_text("hello\napproved\n")
+
+            result = _merge_reviewed_patch(session, "main")
+
+            self.assertTrue(result.changed)
+            self.assertEqual(
+                _git(repo, "show", "main:README.md"), "hello\napproved"
+            )
+            # The symlink must still be a symlink on the merged branch, not
+            # a deletion or a regular file.
+            self.assertIn("120000", _git(repo, "ls-tree", "main", "vendor"))
+
     def test_auto_merge_review_patch_rejects_oversized_changes(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
