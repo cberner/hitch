@@ -1,0 +1,133 @@
+        :root {
+            color-scheme: light dark;
+            --bg: #f7f2e8;
+            --surface: #ffffff;
+            --surface-2: #efe7da;
+            --border: #d8cdbd;
+            --border-strong: #c4b69f;
+            --text: #1c252e;
+            --text-muted: #545d58;
+            --accent: #4f8f66;
+            --accent-hover: #3f7b56;
+            --accent-soft: rgba(79, 143, 102, 0.10);
+            --accent-fg: #ffffff;
+            --danger: #b94f42;
+            --shadow-lg: 0 8px 24px rgba(28, 37, 46, 0.10);
+            --radius: 12px;
+            --radius-sm: 8px;
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #161c1a;
+                --surface: #1f2624;
+                --surface-2: #2a322f;
+                --border: #2f3835;
+                --border-strong: #3d4744;
+                --text: #e8e4d8;
+                --text-muted: #a0a29a;
+                --accent: #6fb286;
+                --accent-hover: #84c49a;
+                --accent-soft: rgba(111, 178, 134, 0.14);
+                --accent-fg: #0c1814;
+                --danger: #d97062;
+                --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
+            }
+        }
+        * { box-sizing: border-box; }
+        body {
+            min-height: 100vh;
+            margin: 0;
+            display: grid;
+            place-items: center;
+            padding: 1rem;
+            background: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
+        main {
+            width: min(100%, 420px);
+            padding: 1.25rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--surface);
+            box-shadow: var(--shadow-lg);
+        }
+        h1 {
+            margin: 0 0 1rem;
+            font-size: 1.05rem;
+            letter-spacing: 0.08em;
+        }
+        form {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        label {
+            display: flex;
+            flex-direction: column;
+            gap: 0.4rem;
+            font-size: 0.82rem;
+            font-weight: 500;
+            color: var(--text-muted);
+        }
+        input {
+            width: 100%;
+            min-width: 0;
+            font: inherit;
+            font-size: 0.95rem;
+            border: 1px solid var(--border-strong);
+            border-radius: var(--radius-sm);
+            padding: 0.65rem 0.75rem;
+            background: var(--bg);
+            color: var(--text);
+        }
+        input:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-soft);
+        }
+        .errors,
+        .field-error {
+            margin: 0;
+            color: var(--danger);
+            font-size: 0.82rem;
+        }
+        .errors ul {
+            margin: 0;
+            padding-left: 1.1rem;
+        }
+        .actions {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+            flex-wrap: wrap;
+        }
+        .button {
+            font: inherit;
+            font-weight: 500;
+            background: var(--accent);
+            color: var(--accent-fg);
+            border: 1px solid var(--accent);
+            border-radius: 999px;
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 38px;
+            transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
+            font-size: 0.9rem;
+        }
+        .button:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+        .button:active { transform: scale(0.97); }
+        .link {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            text-decoration: none;
+        }
+        .link:hover { color: var(--text); }
