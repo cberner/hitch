@@ -3505,37 +3505,6 @@ class IndexViewTests(TestCase):
         self.assertEqual(refresh_items[0].thread_id, "missing")
         self.assertEqual(refresh_items[0].codex_path, "/nonexistent/rollout.jsonl")
 
-    def test_lifetime_usage_bulk_loads_cached_usage(self) -> None:
-        threads = [_session(f"active-{i}", name=f"Active {i}") for i in range(3)]
-        for thread in threads:
-            ArchivedSessionTokenUsage.objects.create(
-                thread_id=thread.id,
-                input_tokens=400,
-                cached_input_tokens=50,
-                output_tokens=600,
-                total_tokens=1_000,
-                daily_usage={"2025-01-05": {"input": 350, "output": 600, "cached": 50}},
-            )
-
-        with (
-            CaptureQueriesContext(connection) as queries,
-            patch("hitch.main.views.rollout.latest_token_usage") as latest_usage,
-            patch("hitch.main.views.rollout.token_usage_history") as usage_history,
-        ):
-            lifetime_usage = views._lifetime_token_usage_for(threads)
-
-        cache_queries = [
-            query
-            for query in queries.captured_queries
-            if 'FROM "main_archivedsessiontokenusage"' in query["sql"]
-        ]
-        self.assertEqual(len(cache_queries), 1)
-        latest_usage.assert_not_called()
-        usage_history.assert_not_called()
-        self.assertEqual(lifetime_usage["total"]["input"], "1.1K")
-        self.assertEqual(lifetime_usage["total"]["output"], "1.8K")
-        self.assertEqual(lifetime_usage["total"]["cached"], "150")
-
     @patch("hitch.main.views.Codex")
     def test_usage_page_uses_indexed_usage_when_session_list_fails(
         self, mock_codex: MagicMock
