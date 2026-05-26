@@ -1068,6 +1068,251 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
         self.assertEqual(snapshot["unresolved_thread_count"], 0)
         self.assertEqual(snapshot.get("unresolved_threads", []), [])
 
+    def test_pr_snapshot_clears_stale_failing_jobs_on_clean_re_observation(
+        self,
+    ) -> None:
+        # A PR turn that observes one failing CI job, the user pushes a fix,
+        # and the agent re-checks the same workflow's jobs must end with
+        # the snapshot reflecting the second observation -- ``ci_status``
+        # ``success`` AND ``failing_jobs`` cleared. Before the fix
+        # ``_copy_ci_fields`` only wrote ``failing_jobs`` when the list was
+        # non-empty, so the clean second observation produced an update
+        # without the key. ``_merge_pr_snapshot_update`` therefore kept the
+        # first observation's stale failing list alongside ``ci_status:
+        # "success"``, and ``system_agents._ci_gate`` -- which short-circuits
+        # to BLOCKED whenever ``failing_jobs`` has any items, regardless of
+        # ``ci_status`` -- then surfaced the PR as "Failing CI jobs were
+        # observed" to the PR follow-up agent. The follow-up workflow looped
+        # feedback rounds trying to "fix" CI that was already green, burning
+        # iterations until ``max_iterations`` was reached. Identical shape to
+        # the ``unresolved_threads`` bug 48b0840 fixed at the merge layer,
+        # but here the stale list never even reached the merge guard.
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_create_pull_request",
+                                    "result": {
+                                        "structuredContent": {
+                                            "url": (
+                                                "https://github.com/cberner/hitch/pull/172"
+                                            ),
+                                            "number": 172,
+                                            "head_sha": "abc123",
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=5,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_fetch_workflow_run_jobs",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "run_id": 42,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "jobs": [
+                                                {
+                                                    "name": "lint",
+                                                    "status": "completed",
+                                                    "conclusion": "success",
+                                                },
+                                                {
+                                                    "name": "test-suite",
+                                                    "status": "completed",
+                                                    "conclusion": "failure",
+                                                },
+                                            ]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_fetch_workflow_run_jobs",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "run_id": 43,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "jobs": [
+                                                {
+                                                    "name": "lint",
+                                                    "status": "completed",
+                                                    "conclusion": "success",
+                                                },
+                                                {
+                                                    "name": "test-suite",
+                                                    "status": "completed",
+                                                    "conclusion": "success",
+                                                },
+                                            ]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["ci_status"], "success")
+        self.assertEqual(snapshot.get("failing_jobs", []), [])
+        self.assertEqual(snapshot.get("pending_jobs", []), [])
+
+    def test_pr_snapshot_clears_stale_pending_jobs_on_clean_re_observation(
+        self,
+    ) -> None:
+        # Mirror of the failing-jobs case for ``pending_jobs``: a job that
+        # was queued/in-progress on the first observation and completed
+        # successfully on the second must not leak its name into the
+        # persisted ``pending_jobs`` list. ``system_agents`` does not
+        # surface pending jobs as a hard block (no "pending list short-
+        # circuit" sibling to ``_pr_list_has_items(failing_jobs)``), but
+        # ``_ci_feedback_details`` does render pending job names into the
+        # feedback prompt sent to the next PR follow-up turn, so a stale
+        # name there asks the next agent to chase a job that already
+        # completed.
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_create_pull_request",
+                                    "result": {
+                                        "structuredContent": {
+                                            "url": (
+                                                "https://github.com/cberner/hitch/pull/173"
+                                            ),
+                                            "number": 173,
+                                            "head_sha": "abc123",
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=5,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_fetch_workflow_run_jobs",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "run_id": 50,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "jobs": [
+                                                {
+                                                    "name": "lint",
+                                                    "status": "completed",
+                                                    "conclusion": "success",
+                                                },
+                                                {
+                                                    "name": "deploy",
+                                                    "status": "in_progress",
+                                                },
+                                            ]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_fetch_workflow_run_jobs",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "run_id": 50,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "jobs": [
+                                                {
+                                                    "name": "lint",
+                                                    "status": "completed",
+                                                    "conclusion": "success",
+                                                },
+                                                {
+                                                    "name": "deploy",
+                                                    "status": "completed",
+                                                    "conclusion": "success",
+                                                },
+                                            ]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["ci_status"], "success")
+        self.assertEqual(snapshot.get("pending_jobs", []), [])
+        self.assertEqual(snapshot.get("failing_jobs", []), [])
+
     def test_pr_snapshot_ignores_other_threads_and_non_github_tools(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "events.jsonl"
