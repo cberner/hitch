@@ -878,6 +878,80 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
         assert snapshot is not None
         self.assertEqual(snapshot["ci_status"], "failure")
 
+    def test_ci_status_from_jobs_is_unknown_when_every_entry_is_malformed(
+        self,
+    ) -> None:
+        # ``fetch_workflow_run_jobs`` results that round-trip through MCP can
+        # arrive with a ``jobs`` list whose entries are non-dict (e.g. the
+        # remote returned strings rather than the structured job payload the
+        # snapshot reader expects). The reader filters those out one by one,
+        # but the prior implementation then returned ``ci_status="success"``
+        # for a list with zero observed completed jobs -- the snapshot
+        # falsely claims the PR's CI is green, the follow-up agent treats
+        # the CI gate as passing, and the user is led to ship a PR whose
+        # jobs were never actually evaluated.
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_create_pull_request",
+                                    "result": {
+                                        "structuredContent": {
+                                            "url": (
+                                                "https://github.com/cberner/hitch/pull/170"
+                                            ),
+                                            "number": 170,
+                                            "head_sha": "abc123",
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=5,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_fetch_workflow_run_jobs",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "run_id": 42,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "jobs": ["lint", "build", "deploy"],
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["ci_status"], "unknown")
+
     def test_pr_snapshot_ignores_other_threads_and_non_github_tools(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "events.jsonl"

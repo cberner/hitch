@@ -704,12 +704,20 @@ def _ci_status_from_runs(raw_runs: Any) -> str:
 
 
 def _ci_status_from_jobs(raw_jobs: Any) -> tuple[str, list[str], list[str]]:
+    # Mirror the "must have observed at least one completed job" guard the
+    # ``_ci_status_from_runs`` precedence fix added: a non-empty ``jobs``
+    # list whose every entry is filtered out (e.g. every item is not a dict
+    # because the upstream payload was malformed) leaves both ``failing``
+    # and ``pending`` empty, so the prior unconditional ``"success"`` would
+    # falsely mark the PR CI gate as green for the follow-up agent and the
+    # snapshot UI even though no job actually succeeded.
     if not isinstance(raw_jobs, list):
         return "", [], []
     if not raw_jobs:
         return "unknown", [], []
     failing: list[str] = []
     pending: list[str] = []
+    saw_completed = False
     for job in raw_jobs:
         if not isinstance(job, dict):
             continue
@@ -718,7 +726,9 @@ def _ci_status_from_jobs(raw_jobs: Any) -> tuple[str, list[str], list[str]]:
         conclusion = _string_from_any(job.get("conclusion")).lower()
         if status != "completed":
             pending.append(name)
-        elif conclusion in _FAILURE_CONCLUSIONS or (
+            continue
+        saw_completed = True
+        if conclusion in _FAILURE_CONCLUSIONS or (
             conclusion and conclusion not in _SUCCESS_CONCLUSIONS
         ):
             failing.append(name)
@@ -726,7 +736,7 @@ def _ci_status_from_jobs(raw_jobs: Any) -> tuple[str, list[str], list[str]]:
         return "failure", failing[:_PR_DETAIL_LIMIT], pending[:_PR_DETAIL_LIMIT]
     if pending:
         return "pending", [], pending[:_PR_DETAIL_LIMIT]
-    return "success", [], []
+    return ("success", [], []) if saw_completed else ("unknown", [], [])
 
 
 def _merge_pr_snapshot_update(
