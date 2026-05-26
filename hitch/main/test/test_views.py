@@ -7856,6 +7856,48 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    def test_slash_commands_forward_session_auto_merge_branch_to_workflow(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        # SessionMetadata says "after QA approves, merge into ``release``
+        # locally instead of opening a PR". The auto-review code path in
+        # ``system_agents`` already honors this for auto_qa/auto_pr workers;
+        # the manual /qa and /pr slash activations must too, or the user's
+        # configured local merge silently disappears every time they trigger
+        # QA from the composer.
+        mock_discover.return_value = [Path("/repo")]
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        SessionMetadata.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            project=project,
+            auto_qa_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="release",
+        )
+
+        for prompt in ("/qa", "/pr"):
+            with self.subTest(prompt=prompt):
+                self._patch_codex(mock_codex, model="gpt-5.4")
+                mock_start_workflow.reset_mock()
+
+                response = self.client.post(
+                    reverse("send_message", kwargs={"session_id": "abc"}),
+                    data={"prompt": prompt},
+                )
+
+                self.assertEqual(response.status_code, 302)
+                self.assertEqual(
+                    mock_start_workflow.call_args.kwargs["auto_merge_branch"],
+                    "release",
+                )
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
     def test_qa_slash_command_forwards_hitch_base_instructions_to_workflow(
         self,
         mock_codex: MagicMock,
