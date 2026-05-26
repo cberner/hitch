@@ -1,12 +1,11 @@
 """Pool of detached Codex worker subprocesses.
 
 Each worker runs a single turn for one Codex thread and then exits. Workers
-are spawned with ``start_new_session=True`` (a fresh process group) so they
-survive a Django restart: the parent's stdin/stdout/stderr are redirected to
-``/dev/null`` and the child no longer inherits the parent's controlling
-terminal. The CodexInstance row + JSONL events file on disk are the durable
-post-spawn links back to a worker; a sibling control JSONL file carries
-mid-turn requests such as steer payloads into the detached process.
+are launched outside the Django process tree, preferably inside a per-worker
+systemd user scope with its own memory cgroup. The CodexInstance row + JSONL
+events file on disk are the durable post-spawn links back to a worker; a
+sibling control JSONL file carries mid-turn requests such as steer payloads
+into the detached process.
 
 The worker is the ``codex_worker`` management command in this app; running it
 as a Django command lets it use the same ORM/settings as the parent without
@@ -22,10 +21,12 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
+from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from django.conf import settings
 from django.db import transaction
@@ -51,6 +52,18 @@ _MAX_INPUT_ATTACHMENT_PATHS_PER_THREAD = 64
 # on a loaded host but bounded so a parent that crashed mid-spawn cannot leave
 # the row pending forever.
 _PID_ASSIGNMENT_GRACE = timedelta(minutes=2)
+_WORKER_ISOLATION_AUTO = "auto"
+_WORKER_ISOLATION_DIRECT = "direct"
+_WORKER_ISOLATION_SYSTEMD = "systemd"
+
+
+@dataclass(frozen=True)
+class WorkerLaunch:
+    """Result of launching a detached worker or its systemd-run wrapper."""
+
+    pid: int
+    proc: subprocess.Popen[bytes] | None = None
+    scope_unit: str = ""
 
 
 def _normalized_web_search_mode(web_search_mode: str | None) -> str | None:
@@ -345,7 +358,7 @@ def worker_is_alive(instance: CodexInstance) -> bool:
             return not _reap_tracked_worker_process(
                 instance.pid, tracked_instance_id, proc
             )
-    return _pid_is_our_worker(instance.pid, instance.pk)
+    return _pid_is_instance_worker(instance)
 
 
 def _track_worker_process(instance_id: int, proc: subprocess.Popen[bytes]) -> None:
@@ -597,7 +610,7 @@ def _steer_instance(
         return None
     if not prompt.strip() and not image_paths:
         return None
-    if not _pid_is_our_worker(instance.pid, instance.pk):
+    if not _pid_is_instance_worker(instance):
         _mark_failed(instance, "worker process unavailable for steer")
         return None
 
@@ -691,7 +704,7 @@ def _interrupt_instance(instance: CodexInstance) -> CodexInstance | None:
         # not-yet-interruptible; the user can retry after a moment.
         return None
 
-    if not _pid_is_our_worker(instance.pid, instance.pk):
+    if not _pid_is_instance_worker(instance):
         # PID gone, recycled, or owned by an unrelated process. No safe
         # target for either SIGTERM or SIGKILL, but the leftover row
         # still has to be flipped to failed so the UI exits streaming
@@ -731,7 +744,7 @@ def _interrupt_instance(instance: CodexInstance) -> CodexInstance | None:
     # immediately, then write a terminal status ourselves — the
     # worker no longer gets to run its end-of-turn save.
     try:
-        os.killpg(instance.pid, signal.SIGKILL)
+        _force_kill_instance(instance)
     except ProcessLookupError:
         pass
     except OSError:
@@ -761,7 +774,45 @@ def _mark_failed(instance: CodexInstance, error: str) -> CodexInstance | None:
     return instance
 
 
-def _pid_is_our_worker(pid: int, instance_id: int) -> bool:
+def _force_kill_instance(instance: CodexInstance) -> None:
+    if instance.systemd_scope_unit:
+        systemctl = shutil.which("systemctl")
+        if systemctl is None:
+            raise OSError("systemctl is required to kill scoped Codex workers")
+        try:
+            subprocess.run(
+                [
+                    systemctl,
+                    "--user",
+                    "kill",
+                    "--kill-whom=all",
+                    "--signal=SIGKILL",
+                    instance.systemd_scope_unit,
+                ],
+                check=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except subprocess.CalledProcessError as exc:
+            raise OSError("systemctl failed to kill scoped Codex worker") from exc
+        return
+    os.killpg(instance.pid, signal.SIGKILL)
+
+
+def _pid_is_instance_worker(instance: CodexInstance) -> bool:
+    if instance.systemd_scope_unit:
+        return _pid_is_our_worker(
+            instance.pid,
+            instance.pk,
+            require_session_leader=False,
+        )
+    return _pid_is_our_worker(instance.pid, instance.pk)
+
+
+def _pid_is_our_worker(
+    pid: int, instance_id: int, *, require_session_leader: bool = True
+) -> bool:
     """Return whether ``pid`` is still *our* worker for ``instance_id``.
 
     Two-layer identity check:
@@ -784,11 +835,12 @@ def _pid_is_our_worker(pid: int, instance_id: int) -> bool:
     local-dev on macOS where pid recycling within milliseconds is
     rare in practice.
     """
-    try:
-        if os.getsid(pid) != pid:
+    if require_session_leader:
+        try:
+            if os.getsid(pid) != pid:
+                return False
+        except OSError:
             return False
-    except OSError:
-        return False
     proc_root = Path("/proc")
     try:
         cmdline = (proc_root / str(pid) / "cmdline").read_bytes()
@@ -1257,7 +1309,7 @@ def _spawn_worker(
             launch_kwargs["plan_mode"] = plan_mode
         if collaboration_mode:
             launch_kwargs["collaboration_mode"] = collaboration_mode
-        proc = _launch_worker_process(**launch_kwargs)
+        launch = _launch_worker_process(**launch_kwargs)
     except Exception as exc:
         # Without this, a Popen failure (e.g. ENOMEM, E2BIG, missing python)
         # would leave the row stuck in ``starting`` with pid=0 and no
@@ -1268,10 +1320,22 @@ def _spawn_worker(
         instance.save(update_fields=["status", "ended_at", "error"])
         cleanup_input_images_for(instance)
         raise
-    instance.pid = proc.pid
-    instance.save(update_fields=["pid"])
-    if isinstance(proc, subprocess.Popen):
-        _track_worker_process(instance.pk, proc)
+    update_fields: list[str] = []
+    launch_pid = getattr(launch, "pid", 0)
+    scope_unit = getattr(launch, "scope_unit", "")
+    if launch_pid > 0:
+        instance.pid = launch_pid
+        update_fields.append("pid")
+    if scope_unit:
+        instance.systemd_scope_unit = scope_unit
+        update_fields.append("systemd_scope_unit")
+    if update_fields:
+        instance.save(update_fields=update_fields)
+    launch_proc = getattr(launch, "proc", None)
+    if isinstance(launch_proc, subprocess.Popen):
+        _track_worker_process(instance.pk, cast(subprocess.Popen[bytes], launch_proc))
+    elif isinstance(launch, subprocess.Popen):
+        _track_worker_process(instance.pk, cast(subprocess.Popen[bytes], launch))
     return instance
 
 
@@ -1286,15 +1350,117 @@ def _launch_worker_process(
     enable_memories: bool = False,
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
-) -> subprocess.Popen[bytes]:
+) -> WorkerLaunch:
     web_search_mode = _normalized_web_search_mode(web_search_mode)
-    manage_py = str(Path(settings.BASE_DIR) / "manage.py")
     env = os.environ.copy()
     # Django needs an explicit settings module since hitch ships per-env
     # settings files; inherit whatever the parent process is running.
     if settings.SETTINGS_MODULE:
         env["DJANGO_SETTINGS_MODULE"] = settings.SETTINGS_MODULE
 
+    argv = _worker_argv(
+        instance_id=instance_id,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        sandbox_policy=sandbox_policy,
+        approval_mode=approval_mode,
+        web_search_mode=web_search_mode,
+        enable_memories=enable_memories,
+        collaboration_mode=collaboration_mode,
+        plan_mode=plan_mode,
+    )
+
+    requested_isolation = _worker_isolation()
+    if requested_isolation == _WORKER_ISOLATION_DIRECT:
+        proc = _popen_detached(argv, env=env)
+        return WorkerLaunch(pid=proc.pid, proc=proc)
+    if requested_isolation not in (
+        _WORKER_ISOLATION_AUTO,
+        _WORKER_ISOLATION_SYSTEMD,
+    ):
+        raise ValueError(f"invalid CODEX_WORKER_ISOLATION: {requested_isolation!r}")
+    systemd_run = _systemd_run_for_isolation(requested_isolation)
+    if systemd_run is None:
+        proc = _popen_detached(argv, env=env)
+        return WorkerLaunch(pid=proc.pid, proc=proc)
+    try:
+        return _launch_systemd_worker(
+            systemd_run=systemd_run,
+            scope_unit=_scope_unit_for_instance(instance_id),
+            worker_argv=argv,
+            env=env,
+        )
+    except RuntimeError as exc:
+        if requested_isolation == _WORKER_ISOLATION_SYSTEMD:
+            raise
+        logger.warning("falling back to direct Codex worker launch: %s", exc)
+        proc = _popen_detached(argv, env=env)
+        return WorkerLaunch(pid=proc.pid, proc=proc)
+
+
+def _systemd_run_for_isolation(requested_isolation: str) -> str | None:
+    systemd_run = shutil.which("systemd-run")
+    if systemd_run is None:
+        if requested_isolation == _WORKER_ISOLATION_SYSTEMD:
+            raise RuntimeError("systemd-run is required for Codex worker isolation")
+        return None
+    if requested_isolation == _WORKER_ISOLATION_AUTO and not _systemd_user_manager_available():
+        return None
+    return systemd_run
+
+
+def _systemd_user_manager_available() -> bool:
+    systemctl = shutil.which("systemctl")
+    if systemctl is None:
+        return False
+    try:
+        result = subprocess.run(
+            [systemctl, "--user", "show-environment"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=0.5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _launch_systemd_worker(
+    *,
+    systemd_run: str,
+    scope_unit: str,
+    worker_argv: list[str],
+    env: dict[str, str],
+) -> WorkerLaunch:
+    with tempfile.TemporaryFile() as stderr_file:
+        proc = _popen_detached(
+            _systemd_scope_argv(
+                systemd_run=systemd_run,
+                scope_unit=scope_unit,
+                worker_argv=worker_argv,
+            ),
+            env=env,
+            stderr=stderr_file,
+        )
+        _raise_for_immediate_systemd_run_failure(proc, scope_unit, stderr_file)
+    return WorkerLaunch(pid=0, proc=proc, scope_unit=scope_unit)
+
+
+def _worker_argv(
+    *,
+    instance_id: int,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    sandbox_policy: str | None = None,
+    approval_mode: str | None = None,
+    web_search_mode: str | None = None,
+    enable_memories: bool = False,
+    collaboration_mode: str | None = None,
+    plan_mode: bool = False,
+) -> list[str]:
+    manage_py = str(Path(settings.BASE_DIR) / "manage.py")
     argv = [
         sys.executable,
         manage_py,
@@ -1321,13 +1487,76 @@ def _launch_worker_process(
         argv.extend(["--collaboration-mode", collaboration_mode])
     if plan_mode:
         argv.append("--plan-mode")
+    return argv
 
+
+def _worker_isolation() -> str:
+    return str(
+        getattr(settings, "CODEX_WORKER_ISOLATION", _WORKER_ISOLATION_AUTO)
+    ).strip().lower()
+
+
+def _scope_unit_for_instance(instance_id: int) -> str:
+    return f"hitch-codex-worker-{instance_id}.scope"
+
+
+def _systemd_scope_argv(
+    *,
+    systemd_run: str,
+    scope_unit: str,
+    worker_argv: list[str],
+) -> list[str]:
+    argv = [
+        systemd_run,
+        "--user",
+        "--scope",
+        "--quiet",
+        "--collect",
+        f"--unit={scope_unit.removesuffix('.scope')}",
+    ]
+    memory_high = str(getattr(settings, "CODEX_WORKER_MEMORY_HIGH", "") or "").strip()
+    if memory_high:
+        argv.append(f"--property=MemoryHigh={memory_high}")
+    memory_max = str(getattr(settings, "CODEX_WORKER_MEMORY_MAX", "") or "").strip()
+    if memory_max:
+        argv.append(f"--property=MemoryMax={memory_max}")
+    argv.append("--")
+    argv.extend(worker_argv)
+    return argv
+
+
+def _raise_for_immediate_systemd_run_failure(
+    proc: subprocess.Popen[bytes], scope_unit: str, stderr_file: Any
+) -> None:
+    try:
+        returncode = proc.wait(timeout=0.25)
+    except subprocess.TimeoutExpired:
+        return
+    if returncode == 0:
+        return
+    stderr_file.seek(0)
+    stderr = stderr_file.read()
+    if isinstance(stderr, bytes):
+        detail = stderr.decode("utf-8", errors="replace").strip()
+    else:
+        detail = str(stderr).strip()
+    message = f"systemd-run failed to launch Codex worker scope {scope_unit}"
+    if detail:
+        message = f"{message}: {detail}"
+    else:
+        message = f"{message}: exited with status {returncode}"
+    raise RuntimeError(message)
+
+
+def _popen_detached(
+    argv: list[str], *, env: dict[str, str], stderr: Any = subprocess.DEVNULL
+) -> subprocess.Popen[bytes]:
     return subprocess.Popen(
         argv,
         start_new_session=True,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=stderr,
         env=env,
         close_fds=True,
     )

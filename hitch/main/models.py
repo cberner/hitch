@@ -427,10 +427,10 @@ class SessionDemo(models.Model):
 class CodexInstance(models.Model):
     """One row per spawned Codex worker subprocess.
 
-    A worker is detached from the Django parent (``start_new_session=True``) so
-    it survives a server restart. We identify a worker by ``pid`` plus
-    ``started_at`` — PIDs alone are recycled, but the pair is effectively
-    unique on the host for the lifetime of the worker.
+    A worker is detached from the Django parent so it survives a server
+    restart. We identify a worker by ``pid`` plus ``started_at`` — PIDs alone
+    are recycled, but the pair is effectively unique on the host for the
+    lifetime of the worker.
     """
 
     STATUS_STARTING = "starting"
@@ -455,6 +455,7 @@ class CodexInstance(models.Model):
     )
 
     pid = models.IntegerField()
+    systemd_scope_unit = models.CharField(max_length=128, blank=True, default="")
     thread_id = models.CharField(max_length=128, db_index=True)
     cwd = models.CharField(max_length=4096)
     # Stored on the row instead of passed as a CLI argument so prompts
