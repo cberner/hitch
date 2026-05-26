@@ -739,3 +739,50 @@ class LocalMergeTests(SimpleTestCase):
 
             with self.assertRaisesRegex(LocalBranchMergeError, "submodule changes"):
                 build_auto_merge_review_patch(session, "main")
+
+    def test_auto_merge_review_patch_rejects_unresolved_merge_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            session = root / "session"
+            _init_repo(repo)
+            # ``other`` carries a conflicting edit so a later merge into the
+            # session worktree leaves README.md unmerged in the index.
+            _git(repo, "checkout", "-b", "other")
+            (repo / "README.md").write_text("other side\n")
+            _git(repo, "add", "README.md")
+            _git(repo, "commit", "-m", "other side")
+            _git(repo, "checkout", "main")
+            _git(repo, "worktree", "add", "-b", "session", str(session), "main")
+            (session / "README.md").write_text("session side\n")
+            _git(session, "add", "README.md")
+            _git(session, "commit", "-m", "session side")
+            merge = subprocess.run(
+                ["git", "-C", str(session), "merge", "other"],
+                env={
+                    **os.environ,
+                    "GIT_AUTHOR_NAME": "Hitch Tests",
+                    "GIT_AUTHOR_EMAIL": "hitch@example.com",
+                    "GIT_COMMITTER_NAME": "Hitch Tests",
+                    "GIT_COMMITTER_EMAIL": "hitch@example.com",
+                },
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(merge.returncode, 0)
+            self.assertIn("<<<<<<<", (session / "README.md").read_text())
+            staged = subprocess.run(
+                ["git", "-C", str(session), "ls-files", "-s", "--", "README.md"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(len(staged.stdout.splitlines()), 3)
+
+            with self.assertRaisesRegex(
+                LocalBranchMergeError, "unresolved merge conflict"
+            ):
+                build_auto_merge_review_patch(session, "main")
+
+            # main must not pick up the conflict markers via the bug path.
+            self.assertEqual(_git(repo, "show", "main:README.md"), "hello")

@@ -484,7 +484,17 @@ def _cached_index_entry(
     ).strip()
     if not output:
         return None
-    first = output.splitlines()[0]
+    lines = output.splitlines()
+    # ``ls-files -s`` emits one row per index stage; conflicted files have
+    # three (base/ours/theirs). Falling through would hash the worktree copy
+    # -- still carrying ``<<<<<<<`` markers and friends -- into the synthetic
+    # source tree, and the resulting patch would commit those markers to the
+    # target branch under the auto-merge label.
+    if len(lines) > 1:
+        raise LocalBranchMergeError(
+            f"auto merge does not support unresolved merge conflicts in {relpath!r}"
+        )
+    first = lines[0]
     skip_worktree = first.startswith("S ")
     meta = first.split("\t", 1)[0]
     parts = meta.split()
