@@ -104,6 +104,31 @@ def _events_file(test: TestCase, payload: dict[str, object]) -> str:
     return events_path
 
 
+def _agent_message_events_file(
+    test: TestCase, text: str, *, phase: str | None = "final_answer"
+) -> str:
+    item = {
+        "id": "msg-1",
+        "type": "agentMessage",
+        "text": text,
+    }
+    if phase is not None:
+        item["phase"] = phase
+    with tempfile.NamedTemporaryFile(mode="w", delete=False) as fh:
+        fh.write(
+            json.dumps(
+                {
+                    "method": "item/completed",
+                    "payload": {"item": item},
+                }
+            )
+            + "\n"
+        )
+        events_path = fh.name
+    test.addCleanup(Path(events_path).unlink, missing_ok=True)
+    return events_path
+
+
 def _assert_response_schema_objects_are_strict(
     test: TestCase, schema: dict[str, Any], *, path: str = "$"
 ) -> None:
@@ -1323,6 +1348,157 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertTrue(workflow.state["enable_memories"])
         self.assertEqual(workflow.state["next_user_message_index"], 3)
         mock_spawn.assert_called_once()
+
+    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    def test_auto_pr_waits_when_turn_finishes_with_proposed_plan(
+        self, mock_start: MagicMock
+    ) -> None:
+        sectioned_plan = (
+            "**Summary**\n"
+            "- Draft implementation after approval.\n\n"
+            "**Test Plan**\n"
+            "- Run the focused tests."
+        )
+        cases = [
+            ("final answer phase", sectioned_plan, "final_answer"),
+            ("unphased numbered plan", "1. Step one\n2. Step two", None),
+            ("simple heading plan", "# Plan\n\nImplement it.", "final_answer"),
+        ]
+        for label, plan, phase in cases:
+            with self.subTest(label=label):
+                instance = _instance(
+                    thread_id=f"main-thread-{label}",
+                    auto_pr_enabled=True,
+                    events_path=_agent_message_events_file(
+                        self, f"<proposed_plan>\n{plan}\n</proposed_plan>", phase=phase
+                    ),
+                )
+
+                system_agents.on_codex_instance_finished(instance)
+
+                instance.refresh_from_db()
+                self.assertIsNone(instance.auto_pr_triggered_at)
+        mock_start.assert_not_called()
+
+    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    def test_auto_pr_waits_when_rollout_renders_pending_plan(
+        self, mock_start: MagicMock
+    ) -> None:
+        plan = (
+            "**Summary**\n"
+            "- Draft implementation after approval.\n\n"
+            "**Test Plan**\n"
+            "- Run the focused tests."
+        )
+        tagged_plan = f"<proposed_plan>\n{plan}\n</proposed_plan>"
+        rollout_path = _raw_events_file(
+            self,
+            [
+                {"type": "turn_context", "payload": {"collaboration_mode": {"mode": "plan"}}},
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "Discuss it"},
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "This can work."}
+                        ],
+                        "phase": "final_answer",
+                    },
+                },
+                {
+                    "type": "turn_context",
+                    "payload": {"collaboration_mode": {"mode": "default"}},
+                },
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "Make the plan."},
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": tagged_plan}],
+                        "phase": "final_answer",
+                    },
+                },
+            ],
+        )
+        SessionMetadata.objects.create(
+            thread_id="thread-1", cwd="/repo", codex_path=rollout_path
+        )
+        instance = _instance(
+            auto_pr_enabled=True,
+            events_path=_agent_message_events_file(self, "Done"),
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        instance.refresh_from_db()
+        self.assertIsNone(instance.auto_pr_triggered_at)
+        mock_start.assert_not_called()
+
+    @patch("hitch.main.system_agents.start_pr_qa_workflow")
+    def test_auto_pr_starts_after_literal_proposed_plan_example(
+        self, mock_start: MagicMock
+    ) -> None:
+        text = "<proposed_plan>\n# Plan XML Example\n\nliteral example\n</proposed_plan>"
+        rollout_path = _raw_events_file(
+            self,
+            [
+                {"type": "turn_context", "payload": {"collaboration_mode": {"mode": "plan"}}},
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "Discuss it"},
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "This can work."}
+                        ],
+                        "phase": "final_answer",
+                    },
+                },
+                {
+                    "type": "turn_context",
+                    "payload": {"collaboration_mode": {"mode": "default"}},
+                },
+                {
+                    "type": "event_msg",
+                    "payload": {"type": "user_message", "message": "Show the tags."},
+                },
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": text}],
+                        "phase": "final_answer",
+                    },
+                },
+            ],
+        )
+        SessionMetadata.objects.create(
+            thread_id="thread-1", cwd="/repo", codex_path=rollout_path
+        )
+        instance = _instance(
+            auto_pr_enabled=True,
+            events_path=_agent_message_events_file(self, text),
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        instance.refresh_from_db()
+        self.assertIsNotNone(instance.auto_pr_triggered_at)
+        mock_start.assert_called_once()
 
     @patch("hitch.main.system_agents.start_pr_qa_workflow")
     def test_auto_qa_starts_review_workflow_after_completed_user_turn(

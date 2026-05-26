@@ -6619,6 +6619,31 @@ class SendMessageViewTests(TestCase):
             ]
         )
 
+    def _make_plan_discussion_rollout(self) -> Path:
+        return self._make_rollout(
+            [
+                _rollout_line("turn_context", {"collaboration_mode": {"mode": "plan"}}),
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Talk through the shape."},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "This can work; I need one decision first.",
+                            }
+                        ],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
     def _assert_follow_up_spawn(
         self,
         mock_spawn: MagicMock,
@@ -7995,6 +8020,44 @@ class SendMessageViewTests(TestCase):
 
                 self.assertEqual(response.status_code, 302)
                 self._assert_follow_up_spawn(mock_spawn, **expected)
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_follow_up_after_plan_mode_discussion_stays_in_plan_mode(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="abc",
+            cwd="/repo",
+            prompt="Talk through the shape.",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            plan_mode=True,
+        )
+        self._patch_codex(
+            mock_codex,
+            model="gpt-5.4",
+            path=str(self._make_plan_discussion_rollout()),
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "yes, make that the plan"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self._assert_follow_up_spawn(
+            mock_spawn,
+            prompt="yes, make that the plan",
+            model="gpt-5.4",
+            plan_mode=True,
+        )
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")

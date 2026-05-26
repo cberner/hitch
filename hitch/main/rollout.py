@@ -82,6 +82,22 @@ def iter_entries(rollout_path: Path) -> Iterator[dict[str, Any]]:
     yield from _entries_from_lines(lines)
 
 
+def entries_await_plan_approval(entries: list[dict[str, Any]]) -> bool:
+    return pending_plan_entry(entries) is not None
+
+
+def pending_plan_entry(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for entry in reversed(entries):
+        kind = entry.get("kind")
+        if kind in {"intermediate", "approval_declined", "tool_call", "thinking", "user"}:
+            continue
+        if kind == "plan":
+            return entry
+        if kind == "agent":
+            return None
+    return None
+
+
 def latest_token_usage(rollout_path: Path) -> dict[str, int] | None:
     """Return latest token counts and context window for a thread.
 
@@ -637,15 +653,18 @@ def _proposed_plan_texts_by_turn(
     by_turn: dict[int, set[str]] = {}
     event_by_turn: dict[int, set[str]] = {}
     awaiting_plan_approval = False
+    allow_plan_mode_followup = False
     for turn_idx, turn_lines in _lines_by_turn(lines):
+        is_plan_mode_turn = turn_idx in plan_mode_turns
         event_turn_texts: set[str] = set()
         response_turn_texts: set[str] = set()
         for entry in turn_lines:
             source, plan_text = _proposed_plan_text_from_line(entry)
             if plan_text is None or not _should_render_proposed_plan(
                 plan_text,
-                turn_idx in plan_mode_turns,
+                is_plan_mode_turn,
                 awaiting_plan_approval,
+                allow_plan_mode_followup,
             ):
                 continue
             if source == "event":
@@ -663,6 +682,9 @@ def _proposed_plan_texts_by_turn(
             awaiting_plan_approval = True
         elif _turn_has_agent_response(turn_lines):
             awaiting_plan_approval = False
+        allow_plan_mode_followup = bool(
+            is_plan_mode_turn and not turn_texts and _turn_has_agent_response(turn_lines)
+        )
     return by_turn, event_by_turn
 
 
@@ -680,15 +702,14 @@ def _proposed_plan_text_from_line(entry: dict[str, Any]) -> tuple[str | None, st
     if entry.get("type") == "event_msg" and payload.get("type") == "agent_message":
         text = payload.get("message")
         if isinstance(text, str):
-            text, _ = _strip_memory_citations(text)
-            return "event", _proposed_plan_text(text.strip())
+            return "event", proposed_plan_text_from_agent_text(text)
     if (
         entry.get("type") == "response_item"
         and payload.get("type") == "message"
         and payload.get("role") == "assistant"
     ):
-        text, _ = _strip_memory_citations(_response_message_text(payload.get("content")))
-        return "response", _proposed_plan_text(text.strip())
+        text = _response_message_text(payload.get("content"))
+        return "response", proposed_plan_text_from_agent_text(text)
     return None, None
 
 
@@ -929,7 +950,7 @@ def _extract_memory_block(text: str, open_tag: str, close_tag: str) -> str | Non
     return body
 
 
-def _proposed_plan_text(text: str) -> str | None:
+def proposed_plan_text(text: str) -> str | None:
     open_tag = "<proposed_plan>"
     close_tag = "</proposed_plan>"
     if text.startswith(open_tag) and text.endswith(close_tag):
@@ -937,16 +958,72 @@ def _proposed_plan_text(text: str) -> str | None:
     return None
 
 
+def proposed_plan_text_from_agent_text(text: str) -> str | None:
+    text, _ = _strip_memory_citations(text)
+    return proposed_plan_text(text.strip())
+
+
+def _proposed_plan_text(text: str) -> str | None:
+    return proposed_plan_text(text)
+
+
 def _should_render_proposed_plan(
     plan_text: str | None,
     is_plan_mode_turn: bool,
     awaiting_plan_approval: bool,
+    allow_plan_mode_followup: bool,
 ) -> bool:
     if plan_text is None:
         return False
     if is_plan_mode_turn:
         return True
-    return awaiting_plan_approval
+    if awaiting_plan_approval:
+        return True
+    return allow_plan_mode_followup and looks_like_plan_text(plan_text)
+
+
+def looks_like_plan_text(text: str) -> bool:
+    lines = [line.strip() for line in text.splitlines()]
+    non_empty = [line for line in lines if line]
+    if not non_empty:
+        return False
+    if _looks_like_simple_plan_heading(non_empty):
+        return True
+    if _looks_like_list_plan(non_empty):
+        return True
+    section_markers = {
+        "summary",
+        "key changes",
+        "test plan",
+        "validation",
+        "implementation",
+        "assumptions",
+    }
+    matched_sections = 0
+    for line in non_empty:
+        normalized = line.strip("#*_:- ").lower()
+        if normalized in section_markers:
+            matched_sections += 1
+    return matched_sections >= 2
+
+
+def _looks_like_simple_plan_heading(lines: list[str]) -> bool:
+    if len(lines) < 2:
+        return False
+    heading = lines[0].strip("#*_:- ").lower()
+    if not heading:
+        return False
+    if any(marker in heading for marker in ("example", "xml", "tag", "syntax")):
+        return False
+    return heading == "plan" or heading.endswith(" plan")
+
+
+def _looks_like_list_plan(lines: list[str]) -> bool:
+    list_items = 0
+    for line in lines:
+        if re.match(r"(?:[-*]|\d+[.)])\s+\S", line):
+            list_items += 1
+    return list_items >= 2
 
 
 def _plan_entry_from_completed_item(

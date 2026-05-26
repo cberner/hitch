@@ -2933,7 +2933,7 @@ def _render_session_detail(
     # double up every entry in the live DOM. The page reload on stream end
     # restores the canonical view.
     entries = _trim_in_progress_turn(entries, active_instance)
-    default_plan_mode = _entries_await_plan_approval(entries)
+    default_plan_mode = _session_defaults_to_plan_mode(session_id, entries)
     _mark_pending_plan_actions(entries)
     token_usage = _token_usage_for(thread)
     goal_objective = codex_events.latest_goal_for_thread(session_id)
@@ -6459,12 +6459,15 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             thread = resumed.thread
             thread_entries = list(_entries_for(thread))
             thread_awaits_plan_approval = _entries_await_plan_approval(thread_entries)
+            thread_defaults_to_plan_mode = _session_defaults_to_plan_mode(
+                session_id, thread_entries
+            )
             if (
                 not collaboration_mode
                 and intent.allow_pending_plan_default
                 and not intent.explicit_plan_mode
             ):
-                plan_mode = thread_awaits_plan_approval
+                plan_mode = thread_defaults_to_plan_mode
             if (
                 thread_awaits_plan_approval
                 and not collaboration_mode
@@ -6685,6 +6688,21 @@ def _thread_awaits_plan_approval(thread: Any) -> bool:
     return _entries_await_plan_approval(list(_entries_for(thread)))
 
 
+def _session_defaults_to_plan_mode(
+    session_id: str, entries: list[dict[str, Any]]
+) -> bool:
+    if _entries_await_plan_approval(entries):
+        return True
+    latest = codex_pool.latest_for_thread(session_id)
+    return bool(
+        latest is not None
+        and latest.purpose == CodexInstance.PURPOSE_USER
+        and latest.workflow_id is None
+        and latest.status == CodexInstance.STATUS_COMPLETED
+        and latest.plan_mode
+    )
+
+
 def _pr_url_for_thread(thread: Any) -> str | None:
     """Return the PR opened by the latest completed /pr turn, if any."""
     turns = getattr(thread, "turns", []) or []
@@ -6749,19 +6767,11 @@ def _pr_urls_from_value(value: Any) -> list[str]:
 
 
 def _entries_await_plan_approval(entries: list[dict[str, Any]]) -> bool:
-    return _pending_plan_entry(entries) is not None
+    return rollout.entries_await_plan_approval(entries)
 
 
 def _pending_plan_entry(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
-    for entry in reversed(entries):
-        kind = entry.get("kind")
-        if kind in {"intermediate", "approval_declined", "tool_call", "thinking", "user"}:
-            continue
-        if kind == "plan":
-            return entry
-        if kind == "agent":
-            return None
-    return None
+    return rollout.pending_plan_entry(entries)
 
 
 def _mark_pending_plan_actions(entries: list[dict[str, Any]]) -> None:
