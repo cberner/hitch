@@ -3939,6 +3939,40 @@ class ApprovalHandlerTests(TestCase):
                     methods_to_payload["approval/resolved"]["decision"], "accept"
                 )
 
+    def test_interactive_handler_round_trips_structured_decision(self) -> None:
+        instance = self._make_instance()
+        events: list[tuple[str, dict[str, Any]]] = []
+        payload = {
+            "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": ["just", "test"]
+            }
+        }
+
+        def _record(method: str, event_payload: Any) -> None:
+            assert isinstance(event_payload, dict)
+            events.append((method, event_payload))
+
+        handler = _make_approval_handler(
+            instance=instance,
+            write_event=_record,
+            approval_mode="auto_review",
+        )
+
+        with patch(
+            "hitch.main.management.commands.codex_worker._wait_for_decision",
+            return_value=payload,
+        ):
+            result = handler(
+                "item/commandExecution/requestApproval",
+                {"item": {"command": "just test"}},
+            )
+
+        self.assertEqual(result, {"decision": payload})
+        methods_to_payload = {method: event_payload for method, event_payload in events}
+        self.assertEqual(
+            methods_to_payload["approval/resolved"]["decision"], payload
+        )
+
     def test_handler_creates_user_input_row_and_emits_events(self) -> None:
         """Plan-mode ``request_user_input`` calls use the same durable
         browser handoff shape as approvals, even in ``approve_all`` mode:
@@ -4042,6 +4076,27 @@ class ApprovalHandlerTests(TestCase):
     @patch(
         "hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001
     )
+    def test_wait_for_decision_returns_structured_decision_payload(self) -> None:
+        from hitch.main.management.commands.codex_worker import _wait_for_decision
+
+        payload = {
+            "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": ["uv", "run", "python"]
+            }
+        }
+        approval = ApprovalRequest.objects.create(
+            instance=self._make_instance(),
+            method="item/commandExecution/requestApproval",
+            params={},
+            decision="accept",
+            decision_payload=payload,
+        )
+
+        self.assertEqual(_wait_for_decision(approval.pk), payload)
+
+    @patch(
+        "hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001
+    )
     def test_wait_for_decision_normalizes_legacy_recorded_decision(self) -> None:
         """A worker may observe an old-page POST that wrote pre-v2 decision
         strings. Normalize before answering app-server."""
@@ -4119,8 +4174,8 @@ class ApprovalHandlerTests(TestCase):
                 qs = original_values_list(*args, **kwargs)
 
                 class _Wrap:
-                    def get(self, **q: Any) -> str:
-                        result: str = qs.get(**q)
+                    def get(self, **q: Any) -> tuple[str, Any]:
+                        result: tuple[str, Any] = qs.get(**q)
                         ApprovalRequest.objects.filter(pk=approval.pk).update(
                             decision="accept"
                         )

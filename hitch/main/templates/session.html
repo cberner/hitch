@@ -3299,6 +3299,26 @@
                 return "Demo setup approval requested.";
             }
 
+            function execpolicyAmendmentDecision(params) {
+                const decisions = params && Array.isArray(params.availableDecisions)
+                    ? params.availableDecisions
+                    : [];
+                return decisions.find((decision) => {
+                    return decision
+                        && typeof decision === "object"
+                        && decision.acceptWithExecpolicyAmendment
+                        && Array.isArray(decision.acceptWithExecpolicyAmendment.execpolicy_amendment);
+                }) || null;
+            }
+
+            function approvalDecisionText(decision) {
+                if (typeof decision === "string") return decision || "decline";
+                if (decision && typeof decision === "object" && decision.acceptWithExecpolicyAmendment) {
+                    return "accept and remember";
+                }
+                return "decline";
+            }
+
             function sanitizedToolDetail(item) {
                 if (item.type === "commandExecution") {
                     return demoCommandDetail(item.command || "") || "Demo setup command details hidden.";
@@ -3834,15 +3854,23 @@
                 actions.className = "approval-actions";
                 const buttons = [
                     { decision: "accept", label: "Run" },
-                    { decision: "decline", label: "Skip" },
                     { decision: "cancel", label: "Cancel" },
                 ];
-                for (const { decision, label } of buttons) {
+                const amendmentDecision = execpolicyAmendmentDecision(payload.params);
+                if (amendmentDecision) {
+                    buttons.splice(1, 0, {
+                        decision: "accept",
+                        label: "Run and remember",
+                        decisionPayload: amendmentDecision,
+                    });
+                }
+                buttons.splice(buttons.length - 1, 0, { decision: "decline", label: "Skip" });
+                for (const { decision, label, decisionPayload } of buttons) {
                     const btn = document.createElement("button");
                     btn.type = "button";
                     btn.dataset.decision = decision;
                     btn.textContent = label;
-                    btn.addEventListener("click", () => submitApproval(id, decision));
+                    btn.addEventListener("click", () => submitApproval(id, decision, decisionPayload));
                     actions.appendChild(btn);
                 }
                 box.appendChild(actions);
@@ -4008,7 +4036,7 @@
                 followRenderedContent();
             }
 
-            function submitApproval(id, decision) {
+            function submitApproval(id, decision, decisionPayload) {
                 const entry = approvals.get(id);
                 if (!entry || !entry.actions) return;
                 const reenable = () => {
@@ -4020,6 +4048,7 @@
                     btn.disabled = true;
                 }
                 const body = new URLSearchParams({ decision });
+                if (decisionPayload) body.set("decision_payload", JSON.stringify(decisionPayload));
                 // Swap the placeholder pk Django emits via
                 // ``reverse('resolve_approval', kwargs={'approval_id': 0})``
                 // for the real ApprovalRequest id. The regex anchors on the
@@ -4096,7 +4125,7 @@
                 if (entry.actions && entry.actions.parentNode) entry.actions.remove();
                 const note = document.createElement("div");
                 note.className = "approval-resolution";
-                note.textContent = "Decision: " + (payload.decision || "decline");
+                note.textContent = "Decision: " + approvalDecisionText(payload.decision);
                 entry.box.appendChild(note);
                 followRenderedContent();
             }

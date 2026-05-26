@@ -7081,11 +7081,9 @@ def _parse_instance_id(raw: str) -> tuple[int | None, str | None]:
     return instance_id, None
 
 
-# Decisions the approval endpoint accepts. The wire string the worker writes
-# back to codex's app-server is taken straight from this set, so the constants
-# must stay aligned with app-server's approval response schema
-# (``accept`` / ``decline`` / ``cancel``). UI labels live in the template;
-# this layer only validates the wire value.
+# String decisions the approval endpoint accepts. Some approval requests also
+# offer structured decisions, such as acceptWithExecpolicyAmendment; those are
+# validated against the original app-server payload before being stored.
 _VALID_APPROVAL_DECISIONS = frozenset(
     {
         ApprovalRequest.DECISION_ACCEPT,
@@ -7095,33 +7093,78 @@ _VALID_APPROVAL_DECISIONS = frozenset(
 )
 
 
+def _posted_approval_decision(
+    request: HttpRequest, approval: ApprovalRequest
+) -> tuple[str | None, Any, str | None]:
+    raw_payload = request.POST.get("decision_payload", "").strip()
+    if raw_payload:
+        try:
+            decision_payload = json.loads(raw_payload)
+        except json.JSONDecodeError:
+            return None, None, "invalid decision"
+        if not _valid_structured_approval_decision(decision_payload):
+            return None, None, "invalid decision"
+        if not _approval_offered_decision(approval, decision_payload):
+            return None, None, "invalid decision"
+        return ApprovalRequest.DECISION_ACCEPT, decision_payload, None
+
+    raw_decision = request.POST.get("decision", "").strip()
+    decision = ApprovalRequest.normalize_decision(raw_decision)
+    if decision not in _VALID_APPROVAL_DECISIONS:
+        return None, None, "invalid decision"
+    return decision, None, None
+
+
+def _valid_structured_approval_decision(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    if set(value) != {"acceptWithExecpolicyAmendment"}:
+        return False
+    body = value["acceptWithExecpolicyAmendment"]
+    if not isinstance(body, dict):
+        return False
+    amendment = body.get("execpolicy_amendment")
+    return (
+        isinstance(amendment, list)
+        and bool(amendment)
+        and all(isinstance(part, str) and part for part in amendment)
+    )
+
+
+def _approval_offered_decision(approval: ApprovalRequest, decision: Any) -> bool:
+    available = approval.params.get("availableDecisions")
+    if not isinstance(available, list):
+        return False
+    return any(option == decision for option in available)
+
+
 @require_http_methods(["POST"])
 def resolve_approval(request: HttpRequest, approval_id: int) -> HttpResponse:
     """Record the user's decision on a pending command/file approval.
 
     The worker's polling loop wakes on the row update and answers the
-    SDK's JSON-RPC request with the recorded ``decision``. The response is
-    intentionally minimal (200 with the recorded decision string) so the
+    SDK's JSON-RPC request with the recorded wire decision. The response is
+    intentionally minimal (200 with the recorded status string) so the
     browser-side fetch can surface success without parsing JSON.
 
     Returns 409 if the approval has already been resolved — racing two
     clicks shouldn't silently overwrite an earlier choice that the worker
     has already returned to codex.
     """
-    raw_decision = request.POST.get("decision", "").strip()
-    decision = ApprovalRequest.normalize_decision(raw_decision)
-    if decision not in _VALID_APPROVAL_DECISIONS:
-        return HttpResponseBadRequest("invalid decision")
     try:
         approval = ApprovalRequest.objects.get(pk=approval_id)
     except ApprovalRequest.DoesNotExist:
         return HttpResponse("approval not found", status=404)
     if approval.decision:
         return HttpResponse("approval already resolved", status=409)
+    decision, decision_payload, error = _posted_approval_decision(request, approval)
+    if error is not None or decision is None:
+        return HttpResponseBadRequest(error or "invalid decision")
     # Filter on ``decision=""`` so two concurrent POSTs can't both succeed
     # in flipping the row away from pending.
     updated = ApprovalRequest.objects.filter(pk=approval_id, decision="").update(
         decision=decision,
+        decision_payload=decision_payload,
         decided_at=timezone.now(),
     )
     if not updated:
