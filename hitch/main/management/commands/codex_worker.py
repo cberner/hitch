@@ -242,8 +242,10 @@ class Command(BaseCommand):
         signal.signal(signal.SIGTERM, _on_sigterm)
         signal.signal(signal.SIGUSR1, _on_sigusr1)
 
+        _apply_worker_oom_score_adjust()
+        instance.pid = os.getpid()
         instance.status = CodexInstance.STATUS_RUNNING
-        instance.save(update_fields=["status"])
+        instance.save(update_fields=["pid", "status"])
 
         try:
             with open(instance.events_path, "a", buffering=1, encoding="utf-8") as events_file:
@@ -316,6 +318,27 @@ def _notify_system_agents(instance: CodexInstance) -> None:
         demo.on_codex_instance_finished(instance)
     except Exception:
         logger.exception("failed to route completed worker %s to demo workflow", instance.pk)
+
+
+def _apply_worker_oom_score_adjust(
+    path: Path = Path("/proc/self/oom_score_adj"),
+) -> None:
+    """Prefer this worker and its descendants during global OOM selection."""
+    raw_score = getattr(settings, "CODEX_WORKER_OOM_SCORE_ADJ", 0)
+    try:
+        score = int(raw_score)
+    except (TypeError, ValueError):
+        logger.warning("invalid CODEX_WORKER_OOM_SCORE_ADJ: %r", raw_score)
+        return
+    if score == 0:
+        return
+    score = max(-1000, min(1000, score))
+    try:
+        path.write_text(f"{score}\n", encoding="utf-8")
+    except FileNotFoundError:
+        return
+    except OSError:
+        logger.exception("failed to set worker oom_score_adj")
 
 
 def _run_turn(

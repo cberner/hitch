@@ -215,6 +215,29 @@ class SpawnNewSessionTests(TestCase):
 
     @patch("hitch.main.codex_pool._launch_worker_process")
     @patch("hitch.main.codex_pool.Codex")
+    def test_systemd_launch_leaves_pid_for_worker_and_records_scope(
+        self, mock_codex: MagicMock, mock_launch: MagicMock
+    ) -> None:
+        _stub_codex_thread_start(mock_codex, "thread-scoped")
+        mock_launch.return_value = codex_pool.WorkerLaunch(
+            pid=0,
+            scope_unit="hitch-codex-worker-7.scope",
+        )
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_new_session(cwd="/repo", prompt="hi")
+
+        self.assertEqual(instance.pid, 0)
+        self.assertEqual(
+            instance.systemd_scope_unit,
+            "hitch-codex-worker-7.scope",
+        )
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.codex_pool.Codex")
     def test_spawn_new_session_persists_auto_qa_and_auto_merge_fields(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
@@ -824,14 +847,17 @@ class SpawnTurnTests(TestCase):
 
 
 class LaunchWorkerProcessTests(TestCase):
+    @override_settings(CODEX_WORKER_ISOLATION="direct")
     @patch("hitch.main.codex_pool.subprocess.Popen")
-    def test_launches_manage_command_in_new_session(self, mock_popen: MagicMock) -> None:
+    def test_direct_launches_manage_command_in_new_session(self, mock_popen: MagicMock) -> None:
         mock_popen.return_value = SimpleNamespace(pid=999)
 
-        codex_pool._launch_worker_process(instance_id=7)
+        launch = codex_pool._launch_worker_process(instance_id=7)
 
         args, kwargs = mock_popen.call_args
         argv = args[0]
+        self.assertEqual(launch.pid, 999)
+        self.assertEqual(launch.scope_unit, "")
         self.assertEqual(argv[1].endswith("manage.py"), True)
         self.assertEqual(argv[2], "codex_worker")
         self.assertIn("--instance-id", argv)
@@ -857,6 +883,165 @@ class LaunchWorkerProcessTests(TestCase):
         # default takes over inside the worker.
         self.assertNotIn("--reasoning-effort", argv)
 
+    @override_settings(
+        CODEX_WORKER_ISOLATION="systemd",
+        CODEX_WORKER_MEMORY_HIGH="4G",
+        CODEX_WORKER_MEMORY_MAX="12G",
+    )
+    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
+    @patch("hitch.main.codex_pool.subprocess.Popen")
+    def test_systemd_launches_worker_in_memory_capped_scope(
+        self, mock_popen: MagicMock, mock_which: MagicMock
+    ) -> None:
+        proc = MagicMock()
+        proc.pid = 999
+        proc.wait.side_effect = subprocess.TimeoutExpired("systemd-run", 0.25)
+        mock_popen.return_value = proc
+
+        launch = codex_pool._launch_worker_process(instance_id=7)
+
+        args, kwargs = mock_popen.call_args
+        argv = args[0]
+        self.assertEqual(launch.pid, 0)
+        self.assertEqual(launch.scope_unit, "hitch-codex-worker-7.scope")
+        self.assertEqual(
+            argv[:5],
+            ["/usr/bin/systemd-run", "--user", "--scope", "--quiet", "--collect"],
+        )
+        self.assertIn("--unit=hitch-codex-worker-7", argv)
+        self.assertIn("--property=MemoryHigh=4G", argv)
+        self.assertIn("--property=MemoryMax=12G", argv)
+        separator = argv.index("--")
+        worker_argv = argv[separator + 1 :]
+        self.assertEqual(worker_argv[1].endswith("manage.py"), True)
+        self.assertEqual(worker_argv[2], "codex_worker")
+        self.assertEqual(worker_argv[worker_argv.index("--instance-id") + 1], "7")
+        self.assertTrue(kwargs["start_new_session"])
+        self.assertEqual(
+            kwargs["env"]["DJANGO_SETTINGS_MODULE"],
+            "hitch.settings.dev",
+        )
+        proc.wait.assert_called_once_with(timeout=0.25)
+        mock_which.assert_called_once_with("systemd-run")
+
+    @override_settings(CODEX_WORKER_ISOLATION="systemd")
+    @patch("hitch.main.codex_pool.shutil.which", return_value=None)
+    def test_systemd_launch_fails_closed_when_systemd_run_missing(
+        self, mock_which: MagicMock
+    ) -> None:
+        with self.assertRaisesRegex(RuntimeError, "systemd-run is required"):
+            codex_pool._launch_worker_process(instance_id=7)
+
+        mock_which.assert_called_once_with("systemd-run")
+
+    @override_settings(CODEX_WORKER_ISOLATION="auto")
+    @patch("hitch.main.codex_pool._systemd_user_manager_available", return_value=False)
+    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
+    @patch("hitch.main.codex_pool.subprocess.Popen")
+    def test_auto_launch_falls_back_to_direct_when_user_manager_unavailable(
+        self,
+        mock_popen: MagicMock,
+        mock_which: MagicMock,
+        mock_user_manager: MagicMock,
+    ) -> None:
+        mock_popen.return_value = SimpleNamespace(pid=999)
+
+        launch = codex_pool._launch_worker_process(instance_id=7)
+
+        argv = mock_popen.call_args.args[0]
+        self.assertEqual(launch.pid, 999)
+        self.assertEqual(launch.scope_unit, "")
+        self.assertEqual(argv[2], "codex_worker")
+        mock_which.assert_called_once_with("systemd-run")
+        mock_user_manager.assert_called_once_with()
+
+    @override_settings(CODEX_WORKER_ISOLATION="auto")
+    @patch("hitch.main.codex_pool._systemd_user_manager_available", return_value=True)
+    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
+    @patch("hitch.main.codex_pool.subprocess.Popen")
+    def test_auto_launch_uses_systemd_when_user_manager_available(
+        self,
+        mock_popen: MagicMock,
+        _mock_which: MagicMock,
+        mock_user_manager: MagicMock,
+    ) -> None:
+        proc = MagicMock()
+        proc.pid = 999
+        proc.wait.side_effect = subprocess.TimeoutExpired("systemd-run", 0.25)
+        mock_popen.return_value = proc
+
+        launch = codex_pool._launch_worker_process(instance_id=7)
+
+        argv = mock_popen.call_args.args[0]
+        self.assertEqual(launch.pid, 0)
+        self.assertEqual(launch.scope_unit, "hitch-codex-worker-7.scope")
+        self.assertEqual(argv[0], "/usr/bin/systemd-run")
+        mock_user_manager.assert_called_once_with()
+
+    @override_settings(CODEX_WORKER_ISOLATION="auto")
+    @patch("hitch.main.codex_pool.logger.warning")
+    @patch("hitch.main.codex_pool._systemd_user_manager_available", return_value=True)
+    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
+    @patch("hitch.main.codex_pool.subprocess.Popen")
+    def test_auto_launch_falls_back_to_direct_when_systemd_run_fails(
+        self,
+        mock_popen: MagicMock,
+        _mock_which: MagicMock,
+        _mock_user_manager: MagicMock,
+        mock_warning: MagicMock,
+    ) -> None:
+        failed_proc = MagicMock()
+        failed_proc.wait.return_value = 1
+        direct_proc = SimpleNamespace(pid=999)
+
+        def popen_side_effect(*_args: object, **kwargs: object) -> object:
+            if "stderr" in kwargs and kwargs["stderr"] is not subprocess.DEVNULL:
+                stderr = cast(Any, kwargs["stderr"])
+                stderr.write(b"Failed to connect to bus\n")
+                stderr.flush()
+                return failed_proc
+            return direct_proc
+
+        mock_popen.side_effect = popen_side_effect
+
+        launch = codex_pool._launch_worker_process(instance_id=7)
+
+        self.assertEqual(launch.pid, 999)
+        self.assertEqual(launch.scope_unit, "")
+        self.assertEqual(mock_popen.call_count, 2)
+        mock_warning.assert_called_once()
+
+    @override_settings(CODEX_WORKER_ISOLATION="systemd")
+    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
+    @patch("hitch.main.codex_pool.subprocess.Popen")
+    def test_systemd_launch_fails_promptly_when_wrapper_exits_nonzero(
+        self, mock_popen: MagicMock, _mock_which: MagicMock
+    ) -> None:
+        proc = MagicMock()
+        proc.wait.return_value = 1
+
+        def popen_side_effect(*_args: object, **kwargs: object) -> MagicMock:
+            stderr = cast(Any, kwargs["stderr"])
+            stderr.write(b"Failed to connect to bus: Operation not permitted\n")
+            stderr.flush()
+            return proc
+
+        mock_popen.side_effect = popen_side_effect
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "Failed to connect to bus: Operation not permitted",
+        ):
+            codex_pool._launch_worker_process(instance_id=7)
+
+        proc.wait.assert_called_once_with(timeout=0.25)
+
+    @override_settings(CODEX_WORKER_ISOLATION="bogus")
+    def test_rejects_unknown_worker_isolation(self) -> None:
+        with self.assertRaisesRegex(ValueError, "invalid CODEX_WORKER_ISOLATION"):
+            codex_pool._launch_worker_process(instance_id=7)
+
+    @override_settings(CODEX_WORKER_ISOLATION="direct")
     @patch("hitch.main.codex_pool.subprocess.Popen")
     def test_forwards_optional_cli_args(
         self, mock_popen: MagicMock
@@ -1536,9 +1721,11 @@ class InterruptActiveTests(TestCase):
         pid: int = 1,
         thread_id: str = "t",
         status: str = CodexInstance.STATUS_RUNNING,
+        systemd_scope_unit: str = "",
     ) -> CodexInstance:
         return CodexInstance.objects.create(
             pid=pid,
+            systemd_scope_unit=systemd_scope_unit,
             thread_id=thread_id,
             cwd="/r",
             events_path="/dev/null",
@@ -1603,6 +1790,55 @@ class InterruptActiveTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertEqual(instance.error, "forcibly stopped by user")
         self.assertIsNotNone(instance.ended_at)
+
+    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.codex_pool.subprocess.run")
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_second_stop_escalates_scoped_worker_to_systemctl_kill(
+        self,
+        mock_kill: MagicMock,
+        mock_killpg: MagicMock,
+        mock_identity: MagicMock,
+        mock_run: MagicMock,
+        mock_which: MagicMock,
+    ) -> None:
+        instance = self._make(
+            pid=4321,
+            status=CodexInstance.STATUS_RUNNING,
+            systemd_scope_unit="hitch-codex-worker-7.scope",
+        )
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            interrupt_requested_at=timezone.now()
+        )
+
+        result = codex_pool.interrupt_active("t")
+
+        self.assertIsNotNone(result)
+        mock_kill.assert_not_called()
+        mock_killpg.assert_not_called()
+        mock_identity.assert_called_once_with(
+            4321, instance.pk, require_session_leader=False
+        )
+        mock_which.assert_called_once_with("systemctl")
+        mock_run.assert_called_once_with(
+            [
+                "/usr/bin/systemctl",
+                "--user",
+                "kill",
+                "--kill-whom=all",
+                "--signal=SIGKILL",
+                "hitch-codex-worker-7.scope",
+            ],
+            check=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertEqual(instance.error, "forcibly stopped by user")
 
     @patch("hitch.main.codex_pool.os.kill")
     @patch("hitch.main.codex_pool.os.killpg")
@@ -2593,7 +2829,10 @@ class PidIsOurWorkerTests(TestCase):
         self, mock_getsid: MagicMock, mock_path: MagicMock
     ) -> None:
         mock_getsid.return_value = 4321
-        cmdline = b"/usr/bin/python\x00manage.py\x00codex_worker\x00--instance-id\x0042\x00"
+        cmdline = (
+            b"/usr/bin/python\x00manage.py\x00codex_worker\x00"
+            b"--instance-id\x0042\x00"
+        )
         mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.return_value = cmdline
 
         self.assertTrue(codex_pool._pid_is_our_worker(4321, 42))
@@ -2648,6 +2887,22 @@ class PidIsOurWorkerTests(TestCase):
         mock_getsid.return_value = 999  # different from pid
 
         self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
+
+    @patch("hitch.main.codex_pool.Path")
+    @patch("hitch.main.codex_pool.os.getsid")
+    def test_scoped_worker_identity_does_not_require_session_leader(
+        self, mock_getsid: MagicMock, mock_path: MagicMock
+    ) -> None:
+        mock_getsid.return_value = 999
+        cmdline = b"/usr/bin/python\x00manage.py\x00codex_worker\x00--instance-id\x0042\x00"
+        mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.return_value = cmdline
+
+        self.assertTrue(
+            codex_pool._pid_is_our_worker(
+                4321, 42, require_session_leader=False
+            )
+        )
+        mock_getsid.assert_not_called()
 
     @patch("hitch.main.codex_pool.os.getsid")
     def test_rejects_when_pid_gone(self, mock_getsid: MagicMock) -> None:
@@ -3061,6 +3316,33 @@ class CodexWorkerCommandTests(TestCase):
         mock_system_notify.assert_called_once_with(instance)
         mock_demo_notify.assert_called_once_with(instance)
 
+    @override_settings(CODEX_WORKER_OOM_SCORE_ADJ=1000)
+    def test_apply_worker_oom_score_adjust_writes_configured_score(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "oom_score_adj"
+
+            codex_worker_module._apply_worker_oom_score_adjust(path)
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "1000\n")
+
+    @override_settings(CODEX_WORKER_OOM_SCORE_ADJ=1500)
+    def test_apply_worker_oom_score_adjust_clamps_score(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "oom_score_adj"
+
+            codex_worker_module._apply_worker_oom_score_adjust(path)
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "1000\n")
+
+    @override_settings(CODEX_WORKER_OOM_SCORE_ADJ=0)
+    def test_apply_worker_oom_score_adjust_skips_zero_score(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "oom_score_adj"
+
+            codex_worker_module._apply_worker_oom_score_adjust(path)
+
+            self.assertFalse(path.exists())
+
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_streams_notifications_and_marks_completed(self, mock_codex: MagicMock) -> None:
         events = [
@@ -3096,6 +3378,7 @@ class CodexWorkerCommandTests(TestCase):
         self.assertEqual(lines[1]["method"], "turn/completed")
 
         instance.refresh_from_db()
+        self.assertEqual(instance.pid, os.getpid())
         self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
         self.assertIsNotNone(instance.ended_at)
         self.assertEqual(instance.error, "")

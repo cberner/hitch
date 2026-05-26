@@ -8,6 +8,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -125,6 +126,16 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # running Django and live somewhere that survives restarts. Kept outside the
 # project tree so setuptools' flat-layout discovery doesn't pick it up.
 CODEX_EVENTS_DIR = Path.home() / ".hitch" / "codex_events"
+
+# Worker isolation policy: "auto" uses systemd scopes only when the user
+# manager is reachable, "systemd" fails closed, and "direct" preserves the
+# legacy process-group launch path for non-systemd environments.
+CODEX_WORKER_ISOLATION = os.environ.get("HITCH_CODEX_WORKER_ISOLATION", "auto")
+CODEX_WORKER_MEMORY_HIGH = os.environ.get("HITCH_CODEX_WORKER_MEMORY_HIGH", "4G")
+CODEX_WORKER_MEMORY_MAX = os.environ.get("HITCH_CODEX_WORKER_MEMORY_MAX", "12G")
+CODEX_WORKER_OOM_SCORE_ADJ = int(
+    os.environ.get("HITCH_CODEX_WORKER_OOM_SCORE_ADJ", "0" if TESTING else "1000")
+)
 
 # Managed git worktrees for new Codex sessions when the user opts into
 # isolating agent changes from the source checkout selected in the UI.
