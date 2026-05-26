@@ -133,8 +133,8 @@ CODEX_EVENTS_DIR = Path.home() / ".hitch" / "codex_events"
 CODEX_WORKER_ISOLATION = os.environ.get("HITCH_CODEX_WORKER_ISOLATION", "auto")
 CODEX_WORKER_MEMORY_HIGH = os.environ.get("HITCH_CODEX_WORKER_MEMORY_HIGH", "4G")
 CODEX_WORKER_MEMORY_MAX = os.environ.get("HITCH_CODEX_WORKER_MEMORY_MAX", "12G")
-CODEX_WORKER_OOM_SCORE_ADJ = int(
-    os.environ.get("HITCH_CODEX_WORKER_OOM_SCORE_ADJ", "0" if TESTING else "1000")
+CODEX_WORKER_OOM_SCORE_ADJ = os.environ.get(
+    "HITCH_CODEX_WORKER_OOM_SCORE_ADJ", "0" if TESTING else "1000"
 )
 
 # Managed git worktrees for new Codex sessions when the user opts into
