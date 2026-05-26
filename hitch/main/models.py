@@ -668,6 +668,9 @@ class ApprovalRequest(models.Model):
     decision = models.CharField(
         max_length=32, choices=DECISION_CHOICES, default=DECISION_PENDING, blank=True
     )
+    # Exact JSON-RPC decision value to return when the selected option is
+    # structured, such as acceptWithExecpolicyAmendment.
+    decision_payload = models.JSONField(default=None, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     decided_at = models.DateTimeField(null=True, blank=True)
 

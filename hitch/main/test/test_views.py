@@ -9784,7 +9784,10 @@ class ResolveApprovalViewTests(TestCase):
     decision — see ``hitch.main.management.commands.codex_worker``."""
 
     def _make_approval(
-        self, *, decision: str = ApprovalRequest.DECISION_PENDING
+        self,
+        *,
+        decision: str = ApprovalRequest.DECISION_PENDING,
+        params: dict[str, object] | None = None,
     ) -> ApprovalRequest:
         instance = CodexInstance.objects.create(
             pid=1,
@@ -9797,7 +9800,7 @@ class ResolveApprovalViewTests(TestCase):
         return ApprovalRequest.objects.create(
             instance=instance,
             method="item/commandExecution/requestApproval",
-            params={"item": {"command": "ls"}},
+            params=params or {"item": {"command": "ls"}},
             decision=decision,
         )
 
@@ -9839,6 +9842,62 @@ class ResolveApprovalViewTests(TestCase):
                 self.assertEqual(response.content, stored.encode())
                 approval.refresh_from_db()
                 self.assertEqual(approval.decision, stored)
+
+    def test_accepts_structured_execpolicy_amendment_decision(self) -> None:
+        """Codex can offer a structured accept decision that both runs the
+        command and persists the proposed command-prefix approval."""
+        payload = {
+            "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": ["just", "test"]
+            }
+        }
+        approval = self._make_approval(
+            params={
+                "item": {"command": "just test"},
+                "availableDecisions": ["accept", payload, "cancel"],
+            }
+        )
+
+        response = self.client.post(
+            reverse("resolve_approval", kwargs={"approval_id": approval.pk}),
+            data={
+                "decision": "accept",
+                "decision_payload": json.dumps(payload),
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"accept")
+        approval.refresh_from_db()
+        self.assertEqual(approval.decision, "accept")
+        self.assertEqual(approval.decision_payload, payload)
+        self.assertIsNotNone(approval.decided_at)
+
+    def test_rejects_unoffered_structured_decision(self) -> None:
+        payload = {
+            "acceptWithExecpolicyAmendment": {
+                "execpolicy_amendment": ["just", "test"]
+            }
+        }
+        approval = self._make_approval(
+            params={
+                "item": {"command": "just test"},
+                "availableDecisions": ["accept", "cancel"],
+            }
+        )
+
+        response = self.client.post(
+            reverse("resolve_approval", kwargs={"approval_id": approval.pk}),
+            data={
+                "decision": "accept",
+                "decision_payload": json.dumps(payload),
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        approval.refresh_from_db()
+        self.assertEqual(approval.decision, "")
+        self.assertIsNone(approval.decision_payload)
 
     def test_rejects_invalid_or_stale_requests(self) -> None:
         """A POST with a value outside the app-server-accepted set must 400

@@ -38,7 +38,7 @@ import time
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
-from typing import IO, Any, Protocol, override
+from typing import IO, Any, Protocol, cast, override
 
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandParser
@@ -1275,7 +1275,13 @@ def _record_default_user_input_response(
         connection.close()
 
 
-def _wait_for_decision(request_id: int) -> str:
+def _stored_approval_decision(decision: str, payload: Any) -> str | dict[str, Any]:
+    if isinstance(payload, dict):
+        return cast(dict[str, Any], payload)
+    return ApprovalRequest.normalize_decision(decision)
+
+
+def _wait_for_decision(request_id: int) -> str | dict[str, Any]:
     """Poll the row for a recorded decision; default to ``decline`` on timeout.
 
     Polling (rather than a Postgres ``LISTEN``/``NOTIFY``-style wakeup)
@@ -1297,13 +1303,13 @@ def _wait_for_decision(request_id: int) -> str:
     deadline = time.monotonic() + _APPROVAL_WAIT_SECONDS
     while True:
         try:
-            decision: str = ApprovalRequest.objects.values_list(
-                "decision", flat=True
+            decision, payload = ApprovalRequest.objects.values_list(
+                "decision", "decision_payload"
             ).get(pk=request_id)
         finally:
             connection.close()
         if decision:
-            return ApprovalRequest.normalize_decision(decision)
+            return _stored_approval_decision(decision, payload)
         if time.monotonic() >= deadline:
             try:
                 updated = ApprovalRequest.objects.filter(
@@ -1317,10 +1323,10 @@ def _wait_for_decision(request_id: int) -> str:
                 # Zero rows matched → the user wrote a real decision in
                 # the window between the last read and this UPDATE.
                 # Honour it rather than overwriting with ``decline``.
-                final_decision: str = ApprovalRequest.objects.values_list(
-                    "decision", flat=True
+                final_decision, final_payload = ApprovalRequest.objects.values_list(
+                    "decision", "decision_payload"
                 ).get(pk=request_id)
-                return ApprovalRequest.normalize_decision(final_decision)
+                return _stored_approval_decision(final_decision, final_payload)
             finally:
                 connection.close()
         time.sleep(_APPROVAL_POLL_INTERVAL)
