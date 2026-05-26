@@ -6332,6 +6332,12 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         auto_merge_to_local_branch, auto_merge_branch = (
             _auto_merge_to_local_branch_for_session(session_id)
         )
+        # ``auto_merge_branch`` is the gated value used by the auto-review
+        # spawn path (only forwarded when auto_qa is enabled). The manual
+        # ``/qa`` and ``/pr`` activations should honor the session-configured
+        # merge target regardless of the auto_qa flag, since the user is
+        # explicitly opting into the QA workflow at that moment.
+        session_auto_merge_branch = auto_merge_branch
         if not auto_qa_enabled:
             auto_merge_to_local_branch = False
             auto_merge_branch = ""
@@ -6367,6 +6373,12 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 workflow_kwargs["qa_panel_enabled"] = True
             if qa_activation:
                 workflow_kwargs["open_pr_on_lgtm"] = False
+            # Honor the session's auto-merge target the same way auto_qa /
+            # auto_pr workflows do, so manual /qa and /pr respect the user's
+            # "merge into a local branch instead of opening a PR" setting
+            # rather than silently dropping it.
+            if session_auto_merge_branch:
+                workflow_kwargs["auto_merge_branch"] = session_auto_merge_branch
             system_agents.start_pr_qa_workflow(**workflow_kwargs)
             return redirect("session", session_id=session_id)
         spawn_kwargs: dict[str, Any] = {
