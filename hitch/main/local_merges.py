@@ -449,8 +449,10 @@ def _worktree_index_entry(
         if cached_entry is not None and cached_entry.skip_worktree:
             return cached_entry.mode, cached_entry.blob_sha
         return None
-    if path.is_dir():
-        return None
+    # ``is_symlink`` must be tested before ``is_dir``: pathlib follows symlinks
+    # for ``is_dir``, so a symlink that points at a directory would otherwise
+    # be silently dropped from the source tree, surfacing as a synthetic
+    # symlink deletion in the review patch.
     if path.is_symlink():
         blob_sha = _git(
             source_repo,
@@ -459,6 +461,8 @@ def _worktree_index_entry(
             hooks_path=hooks_path,
         ).strip()
         return "120000", blob_sha
+    if path.is_dir():
+        return None
     if not path.is_file():
         raise LocalBranchMergeError("auto merge does not support submodule changes")
     mode = "100755" if path.stat().st_mode & 0o111 else "100644"
