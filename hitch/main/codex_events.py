@@ -671,10 +671,17 @@ def _ci_status_from_statuses(raw_statuses: Any) -> str:
 
 
 def _ci_status_from_runs(raw_runs: Any) -> str:
+    # Match the failure-over-pending precedence used by ``_ci_status_from_statuses``
+    # and ``_ci_status_from_jobs``: a confirmed failure on one workflow run must
+    # surface even while a sibling run is still in progress, so the PR follow-up
+    # agent and the snapshot UI both see the break instead of treating the PR as
+    # healthy-but-waiting until the slowest workflow finishes.
     if not isinstance(raw_runs, list):
         return ""
     if not raw_runs:
         return "unknown"
+    has_failure = False
+    has_pending = False
     saw_completed = False
     for run in raw_runs:
         if not isinstance(run, dict):
@@ -682,12 +689,17 @@ def _ci_status_from_runs(raw_runs: Any) -> str:
         status = _string_from_any(run.get("status")).lower()
         conclusion = _string_from_any(run.get("conclusion")).lower()
         if status != "completed":
-            return "pending"
+            has_pending = True
+            continue
         saw_completed = True
-        if conclusion in _FAILURE_CONCLUSIONS:
-            return "failure"
-        if conclusion and conclusion not in _SUCCESS_CONCLUSIONS:
-            return "failure"
+        if conclusion in _FAILURE_CONCLUSIONS or (
+            conclusion and conclusion not in _SUCCESS_CONCLUSIONS
+        ):
+            has_failure = True
+    if has_failure:
+        return "failure"
+    if has_pending:
+        return "pending"
     return "success" if saw_completed else "unknown"
 
 
