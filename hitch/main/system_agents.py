@@ -17,7 +17,7 @@ from django.utils.dateparse import parse_datetime
 from openai_codex import AppServerError, Codex
 from openai_codex.generated.v2_all import GetAccountRateLimitsResponse, ThreadSource
 
-from hitch.main import codex_events, codex_pool, demo, session_index
+from hitch.main import codex_events, codex_pool, demo, rollout, session_index
 from hitch.main.diffs import build_worktree_diff_text
 from hitch.main.local_merges import (
     LocalBranchMergeError,
@@ -1266,6 +1266,8 @@ def _maybe_start_auto_review_workflow(instance: CodexInstance) -> None:
     # automation triggered it.
     if _auto_review_requires_visible_approval(instance):
         return
+    if _completed_turn_has_pending_proposed_plan(instance):
+        return
     automation = "auto_pr" if instance.auto_pr_enabled else "auto_qa"
     trigger_field = (
         "auto_pr_triggered_at"
@@ -1318,6 +1320,27 @@ def _auto_review_requires_visible_approval(instance: CodexInstance) -> bool:
     return (
         instance.approval_mode or SYSTEM_AGENT_APPROVAL_MODE
     ) in AUTO_REVIEW_BLOCKED_APPROVAL_MODES
+
+
+def _completed_turn_has_pending_proposed_plan(instance: CodexInstance) -> bool:
+    rollout_pending = _thread_rollout_has_pending_plan(instance.thread_id)
+    if rollout_pending is not None:
+        return rollout_pending
+    final_text = _final_agent_text(instance.events_path)
+    plan_text = (
+        rollout.proposed_plan_text_from_agent_text(final_text) if final_text else None
+    )
+    return plan_text is not None and rollout.looks_like_plan_text(plan_text)
+
+
+def _thread_rollout_has_pending_plan(thread_id: str) -> bool | None:
+    metadata = SessionMetadata.objects.filter(thread_id=thread_id).first()
+    if metadata is None or not metadata.codex_path:
+        return None
+    entries = list(rollout.iter_entries(Path(metadata.codex_path)))
+    if not entries:
+        return None
+    return rollout.entries_await_plan_approval(entries)
 
 
 def _record_auto_review_workflow_for_proposals(

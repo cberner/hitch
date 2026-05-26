@@ -998,6 +998,190 @@ class IterEntriesTests(TestCase):
             ],
         )
 
+    def test_plan_like_proposed_plan_after_plan_mode_discussion_renders_plan(
+        self,
+    ) -> None:
+        plan = (
+            "**AG Proposal Rollout Flow**\n\n"
+            "**Summary**\n"
+            "- Draft the implementation in a hidden managed worktree.\n\n"
+            "**Key Changes**\n"
+            "- Link the inbox proposal to the hidden session.\n\n"
+            "**Test Plan**\n"
+            "- Run the focused view tests."
+        )
+        tagged_plan = f"<proposed_plan>\n{plan}\n</proposed_plan>"
+        path = self._make(
+            [
+                _line("turn_context", {"collaboration_mode": {"mode": "plan"}}),
+                _line("event_msg", {"type": "user_message", "message": "Discuss it"}),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "This can work."}],
+                        "phase": "final_answer",
+                    },
+                ),
+                _line("turn_context", {"collaboration_mode": {"mode": "default"}}),
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Turn that into the plan."},
+                ),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "message": tagged_plan,
+                        "phase": "final_answer",
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": tagged_plan}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+
+        self.assertEqual(entries[-1]["kind"], "plan")
+        self.assertEqual(entries[-1]["text"], plan)
+        self.assertFalse(any("<proposed_plan>" in entry.get("text", "") for entry in entries))
+
+    def test_numbered_proposed_plan_after_plan_mode_discussion_renders_plan(
+        self,
+    ) -> None:
+        plan = "1. Step one\n2. Step two"
+        path = self._make(
+            [
+                _line("turn_context", {"collaboration_mode": {"mode": "plan"}}),
+                _line("event_msg", {"type": "user_message", "message": "Discuss it"}),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "This can work."}],
+                        "phase": "final_answer",
+                    },
+                ),
+                _line("turn_context", {"collaboration_mode": {"mode": "default"}}),
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Turn that into steps."},
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": f"<proposed_plan>\n{plan}\n</proposed_plan>",
+                            }
+                        ],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+
+        self.assertEqual(entries[-1]["kind"], "plan")
+        self.assertEqual(entries[-1]["text"], plan)
+
+    def test_simple_proposed_plan_after_plan_mode_discussion_renders_plan(
+        self,
+    ) -> None:
+        plan = "# Plan\n\nImplement it."
+        path = self._make(
+            [
+                _line("turn_context", {"collaboration_mode": {"mode": "plan"}}),
+                _line("event_msg", {"type": "user_message", "message": "Discuss it"}),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "This can work."}],
+                        "phase": "final_answer",
+                    },
+                ),
+                _line("turn_context", {"collaboration_mode": {"mode": "default"}}),
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Turn that into a plan."},
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": f"<proposed_plan>\n{plan}\n</proposed_plan>",
+                            }
+                        ],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+
+        self.assertEqual(entries[-1]["kind"], "plan")
+        self.assertEqual(entries[-1]["text"], plan)
+
+    def test_literal_proposed_plan_example_after_plan_mode_discussion_stays_agent(
+        self,
+    ) -> None:
+        text = "<proposed_plan>\n# Plan XML Example\n\nliteral example\n</proposed_plan>"
+        path = self._make(
+            [
+                _line("turn_context", {"collaboration_mode": {"mode": "plan"}}),
+                _line("event_msg", {"type": "user_message", "message": "Discuss it"}),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "This can work."}],
+                        "phase": "final_answer",
+                    },
+                ),
+                _line("turn_context", {"collaboration_mode": {"mode": "default"}}),
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Show the tags."},
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": text}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+
+        self.assertEqual(entries[-1]["kind"], "agent")
+        self.assertEqual(entries[-1]["text"], text)
+
     def test_final_proposed_plan_replaces_streamed_draft_plan(self) -> None:
         draft_plan = "# Draft Plan\n\nStill streaming."
         final_plan = "# Final Plan\n\nUse the canonical response item."
@@ -1172,6 +1356,54 @@ class IterEntriesTests(TestCase):
                     },
                 ),
                 _line("event_msg", {"type": "user_message", "message": "Show XML"}),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": text}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+
+        self.assertEqual(entries[-1]["kind"], "agent")
+        self.assertEqual(entries[-1]["text"], text)
+
+    def test_plan_mode_followup_fallback_expires_after_one_turn(self) -> None:
+        text = "<proposed_plan>\n# Plan XML Example\n\nliteral example\n</proposed_plan>"
+        path = self._make(
+            [
+                _line("turn_context", {"collaboration_mode": {"mode": "plan"}}),
+                _line("event_msg", {"type": "user_message", "message": "Discuss it"}),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "This can work."}],
+                        "phase": "final_answer",
+                    },
+                ),
+                _line("turn_context", {"collaboration_mode": {"mode": "default"}}),
+                _line("event_msg", {"type": "user_message", "message": "Thanks"}),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Done."}],
+                        "phase": "final_answer",
+                    },
+                ),
+                _line("turn_context", {"collaboration_mode": {"mode": "default"}}),
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Show the tags"},
+                ),
                 _line(
                     "response_item",
                     {
