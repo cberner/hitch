@@ -3675,6 +3675,69 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(handoff["pr_number"], 170)
         self.assertNotIn("ci_status", handoff)
 
+    def test_pr_handoff_merge_clears_stale_list_on_clean_re_observation(
+        self,
+    ) -> None:
+        # A PR follow-up monitor that observes the previously-blocking review
+        # thread as resolved (or a feedback turn whose post-fix MCP snapshot
+        # returns an empty thread list) must end with the persisted handoff
+        # reflecting the second observation -- ``unresolved_thread_count == 0``
+        # AND ``unresolved_threads == []``. The handoff feeds the prompts the
+        # next follow-up monitor/feedback agent reads via
+        # ``_format_pr_handoff``, so a stale list left behind here gets pasted
+        # straight back into the next turn's prompt and contradicts the
+        # ``unresolved_thread_count: 0`` field next to it -- the same shape
+        # 48b0840 documented for the per-turn snapshot path.
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            state={
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": "https://github.com/cberner/hitch/pull/171",
+                    "pr_number": 171,
+                    "head_sha": "abc123",
+                    "mergeable": True,
+                    "draft": False,
+                    "review_signal": "commented",
+                    "unresolved_thread_count": 1,
+                    "unresolved_threads": [
+                        {"id": "thread-A", "path": "x.py", "line": 12}
+                    ],
+                    "ci_status": "success",
+                },
+            },
+        )
+
+        system_agents._merge_pr_handoff(
+            workflow,
+            {
+                "url": "https://github.com/cberner/hitch/pull/171",
+                "pr_number": 171,
+                "head_sha": "abc123",
+                "mergeable": True,
+                "draft": False,
+                "review_signal": "commented",
+                "unresolved_thread_count": 0,
+                "unresolved_threads": [],
+                "ci_status": "success",
+            },
+        )
+
+        handoff = workflow.state[system_agents._PR_HANDOFF_STATE_KEY]
+        self.assertEqual(handoff["unresolved_thread_count"], 0)
+        self.assertEqual(handoff.get("unresolved_threads", []), [])
+        # The Review gate keys off the persisted list when the count is 0, so a
+        # stale list keeps the gate blocked on a thread GitHub already resolved
+        # and the PR follow-up workflow loops the feedback agent on a
+        # non-issue until the iteration cap fails the run with a phantom
+        # "unresolved review threads" error.
+        statuses = {
+            gate["key"]: gate["status"]
+            for gate in system_agents._evaluate_pr_gates(handoff)
+        }
+        self.assertEqual(statuses["review"], "pending")
+
 
 class AutoProposalQuotaPauseTests(TestCase):
     def test_rate_limit_window_pauses_below_half_linear_remaining_threshold(
