@@ -987,6 +987,8 @@ def looks_like_plan_text(text: str) -> bool:
     non_empty = [line for line in lines if line]
     if not non_empty:
         return False
+    if _looks_like_literal_plan_example(non_empty):
+        return False
     if _looks_like_simple_plan_heading(non_empty):
         return True
     if _looks_like_list_plan(non_empty):
@@ -1007,13 +1009,18 @@ def looks_like_plan_text(text: str) -> bool:
     return matched_sections >= 2
 
 
+def _looks_like_literal_plan_example(lines: list[str]) -> bool:
+    heading = lines[0].strip("#*_:- ").lower()
+    return any(
+        marker in heading for marker in ("example", "xml", "tag", "syntax", "literal")
+    )
+
+
 def _looks_like_simple_plan_heading(lines: list[str]) -> bool:
     if len(lines) < 2:
         return False
     heading = lines[0].strip("#*_:- ").lower()
     if not heading:
-        return False
-    if any(marker in heading for marker in ("example", "xml", "tag", "syntax")):
         return False
     return heading == "plan" or heading.endswith(" plan")
 

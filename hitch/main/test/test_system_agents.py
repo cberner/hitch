@@ -1447,7 +1447,10 @@ class SpecCriticWorkflowTests(TestCase):
     def test_auto_pr_starts_after_literal_proposed_plan_example(
         self, mock_start: MagicMock
     ) -> None:
-        text = "<proposed_plan>\n# Plan XML Example\n\nliteral example\n</proposed_plan>"
+        text = (
+            "<proposed_plan>\n# Plan XML Example\n\n"
+            "1. literal step\n2. still an example\n</proposed_plan>"
+        )
         rollout_path = _raw_events_file(
             self,
             [

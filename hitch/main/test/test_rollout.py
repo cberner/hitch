@@ -1146,7 +1146,10 @@ class IterEntriesTests(TestCase):
     def test_literal_proposed_plan_example_after_plan_mode_discussion_stays_agent(
         self,
     ) -> None:
-        text = "<proposed_plan>\n# Plan XML Example\n\nliteral example\n</proposed_plan>"
+        text = (
+            "<proposed_plan>\n# Plan XML Example\n\n"
+            "1. literal step\n2. still an example\n</proposed_plan>"
+        )
         path = self._make(
             [
                 _line("turn_context", {"collaboration_mode": {"mode": "plan"}}),
