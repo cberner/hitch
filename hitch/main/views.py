@@ -3101,10 +3101,6 @@ def _rollout_mtime_ns(rollout_path: Path | None) -> int:
     return rollout_state.mtime_ns if rollout_state is not None else 0
 
 
-def _archived_token_usage_numbers_for(thread: Any) -> dict[str, int] | None:
-    return _token_usage_numbers_for(thread)
-
-
 def _cached_token_usage_is_current(
     cache: ArchivedSessionTokenUsage, rollout_path: Path | None
 ) -> bool:
@@ -3991,59 +3987,6 @@ def _write_zero_token_usage_cache(thread_id: str, rollout_path: Path) -> None:
     )
 
 
-def _lifetime_token_usage_for(threads: list[Any]) -> dict[str, Any]:
-    accepted_visible_thread_ids = system_agents.accepted_visible_system_thread_ids()
-    hidden_thread_ids = system_agents.hidden_thread_ids(
-        accepted_visible_thread_ids=accepted_visible_thread_ids
-    )
-    hidden_thread_ids.update(
-        system_agents.hidden_thread_ids_from_threads(
-            threads, accepted_visible_thread_ids=accepted_visible_thread_ids
-        )
-    )
-    cached_usage_by_thread_id = _token_usage_caches_by_thread_id(threads)
-    total_usage = _empty_lifetime_token_usage()
-    session_usage = _empty_lifetime_token_usage()
-    system_usage = _empty_lifetime_token_usage()
-    total_by_date: dict[str, dict[str, int]] = {}
-    session_by_date: dict[str, dict[str, int]] = {}
-    system_by_date: dict[str, dict[str, int]] = {}
-    for thread in threads:
-        thread_id = getattr(thread, "id", None)
-        snapshot = _token_usage_snapshot_for(
-            thread,
-            cached_usage=(
-                cached_usage_by_thread_id.get(thread_id)
-                if isinstance(thread_id, str)
-                else _MISSING_TOKEN_USAGE_CACHE
-            ),
-        )
-        if snapshot is None:
-            continue
-        usage = snapshot["usage"]
-        is_system = isinstance(thread_id, str) and thread_id in hidden_thread_ids
-        total_usage["input"] += _non_cached_input_tokens(usage)
-        total_usage["output"] += usage.get("output_tokens", 0)
-        total_usage["cached"] += usage.get("cached_input_tokens", 0)
-        bucket = system_usage if is_system else session_usage
-        bucket["input"] += _non_cached_input_tokens(usage)
-        bucket["output"] += usage.get("output_tokens", 0)
-        bucket["cached"] += usage.get("cached_input_tokens", 0)
-        _merge_daily_token_usage(total_by_date, snapshot["daily_usage"])
-        _merge_daily_token_usage(
-            system_by_date if is_system else session_by_date,
-            snapshot["daily_usage"],
-        )
-    return _formatted_lifetime_token_usage(
-        total_usage=total_usage,
-        session_usage=session_usage,
-        system_usage=system_usage,
-        total_by_date=total_by_date,
-        session_by_date=session_by_date,
-        system_by_date=system_by_date,
-    )
-
-
 def _formatted_lifetime_token_usage(
     *,
     total_usage: Mapping[str, int],
@@ -4070,16 +4013,6 @@ def _formatted_lifetime_token_usage(
             "chart_axis": _format_lifetime_token_chart_axis(system_by_date),
         },
     }
-
-
-def _token_usage_caches_by_thread_id(
-    threads: Iterable[Any],
-) -> dict[str, ArchivedSessionTokenUsage]:
-    return _token_usage_caches_by_thread_ids(
-        thread_id
-        for thread in threads
-        if isinstance(thread_id := getattr(thread, "id", None), str)
-    )
 
 
 def _token_usage_caches_by_thread_ids(
