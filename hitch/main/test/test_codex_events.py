@@ -798,6 +798,86 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
         self.assertEqual(snapshot["reaction_count"], 1)
         self.assertEqual(snapshot["review_signal"], "changes_requested")
 
+    def test_ci_status_reports_failure_when_some_workflow_runs_still_pending(
+        self,
+    ) -> None:
+        # A PR with both a completed-failure workflow and one still in progress
+        # must be surfaced as ``failure`` regardless of list order, matching
+        # the precedence used by the combined-status and per-job paths. The
+        # snapshot drives the PR follow-up agent's behaviour; under-reporting
+        # the failure as ``pending`` keeps the user uninformed while a CI
+        # break sits unaddressed.
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_create_pull_request",
+                                    "result": {
+                                        "structuredContent": {
+                                            "url": (
+                                                "https://github.com/cberner/hitch/pull/169"
+                                            ),
+                                            "number": 169,
+                                            "head_sha": "abc123",
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=5,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_fetch_commit_workflow_runs",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "commit_sha": "abc123",
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "workflow_runs": [
+                                                {
+                                                    "status": "in_progress",
+                                                    "conclusion": "",
+                                                },
+                                                {
+                                                    "status": "completed",
+                                                    "conclusion": "failure",
+                                                },
+                                            ]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["ci_status"], "failure")
+
     def test_pr_snapshot_ignores_other_threads_and_non_github_tools(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "events.jsonl"
