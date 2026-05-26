@@ -610,7 +610,10 @@ def _steer_instance(
         return None
     if not prompt.strip() and not image_paths:
         return None
-    if not _pid_is_instance_worker(instance):
+    identity_required = not (
+        instance.systemd_scope_unit and instance.status != CodexInstance.STATUS_RUNNING
+    )
+    if identity_required and not _pid_is_instance_worker(instance):
         _mark_failed(instance, "worker process unavailable for steer")
         return None
 
@@ -703,6 +706,10 @@ def _interrupt_instance(instance: CodexInstance) -> CodexInstance | None:
         # continue running despite the user's stop click. Treat as
         # not-yet-interruptible; the user can retry after a moment.
         return None
+    if instance.systemd_scope_unit and instance.status == CodexInstance.STATUS_STARTING:
+        # The stored pid is still the systemd-run wrapper until the worker
+        # records its real pid. Do not treat the wrapper as interruptible.
+        return None
 
     if not _pid_is_instance_worker(instance):
         # PID gone, recycled, or owned by an unrelated process. No safe
@@ -779,25 +786,46 @@ def _force_kill_instance(instance: CodexInstance) -> None:
         systemctl = shutil.which("systemctl")
         if systemctl is None:
             raise OSError("systemctl is required to kill scoped Codex workers")
-        try:
-            subprocess.run(
-                [
-                    systemctl,
-                    "--user",
-                    "kill",
-                    "--kill-whom=all",
-                    "--signal=SIGKILL",
-                    instance.systemd_scope_unit,
-                ],
-                check=True,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except subprocess.CalledProcessError as exc:
-            raise OSError("systemctl failed to kill scoped Codex worker") from exc
-        return
+        result = subprocess.run(
+            [
+                systemctl,
+                "--user",
+                "kill",
+                "--kill-whom=all",
+                "--signal=SIGKILL",
+                instance.systemd_scope_unit,
+            ],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        if result.returncode == 0:
+            return
+        if _systemd_scope_is_missing(systemctl, instance.systemd_scope_unit):
+            raise ProcessLookupError
+        detail = result.stderr.decode("utf-8", errors="replace").strip()
+        message = "systemctl failed to kill scoped Codex worker"
+        if detail:
+            message = f"{message}: {detail}"
+        raise OSError(message)
     os.killpg(instance.pid, signal.SIGKILL)
+
+
+def _systemd_scope_is_missing(systemctl: str, scope_unit: str) -> bool:
+    try:
+        result = subprocess.run(
+            [systemctl, "--user", "show", scope_unit, "--property=LoadState", "--value"],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    if result.returncode != 0:
+        return False
+    return result.stdout.decode("utf-8", errors="replace").strip() in {"", "not-found"}
 
 
 def _pid_is_instance_worker(instance: CodexInstance) -> bool:
@@ -853,7 +881,7 @@ def _pid_is_our_worker(
         # signaling whoever inherits the pid next). The presence of
         # ``/proc`` itself disambiguates: on Linux we always have
         # ``/proc`` even when a specific pid entry disappears.
-        return not proc_root.exists()
+        return require_session_leader and not proc_root.exists()
     except OSError:
         return False
     parts = cmdline.split(b"\0")
@@ -1383,19 +1411,12 @@ def _launch_worker_process(
     if systemd_run is None:
         proc = _popen_detached(argv, env=env)
         return WorkerLaunch(pid=proc.pid, proc=proc)
-    try:
-        return _launch_systemd_worker(
-            systemd_run=systemd_run,
-            scope_unit=_scope_unit_for_instance(instance_id),
-            worker_argv=argv,
-            env=env,
-        )
-    except RuntimeError as exc:
-        if requested_isolation == _WORKER_ISOLATION_SYSTEMD:
-            raise
-        logger.warning("falling back to direct Codex worker launch: %s", exc)
-        proc = _popen_detached(argv, env=env)
-        return WorkerLaunch(pid=proc.pid, proc=proc)
+    return _launch_systemd_worker(
+        systemd_run=systemd_run,
+        scope_unit=_scope_unit_for_instance(instance_id),
+        worker_argv=argv,
+        env=env,
+    )
 
 
 def _systemd_run_for_isolation(requested_isolation: str) -> str | None:
@@ -1445,7 +1466,7 @@ def _launch_systemd_worker(
             stderr=stderr_file,
         )
         _raise_for_immediate_systemd_run_failure(proc, scope_unit, stderr_file)
-    return WorkerLaunch(pid=0, proc=proc, scope_unit=scope_unit)
+    return WorkerLaunch(pid=proc.pid, proc=proc, scope_unit=scope_unit)
 
 
 def _worker_argv(
