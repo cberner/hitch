@@ -643,10 +643,16 @@ def _copy_ci_fields(
         elif tool == "fetch_workflow_run_jobs":
             status, failing_jobs, pending_jobs = _ci_status_from_jobs(source.get("jobs"))
             if status:
+                # Empty ``failing_jobs``/``pending_jobs`` are explicit "observed
+                # and found none" overwrites that ``_merge_pr_snapshot_update``
+                # propagates so a clean re-observation clears any stale list
+                # left behind by an earlier failing or pending observation in
+                # the same turn. Without this, a flaky test that fails on the
+                # first ``fetch_workflow_run_jobs`` call and passes on a later
+                # one leaves ``failing_jobs`` pointing at the resolved job --
+                # the same shape b90ceed and 48b0840 fixed at the merge layer.
                 target["ci_status"] = status
-            if failing_jobs:
                 target["failing_jobs"] = failing_jobs
-            if pending_jobs:
                 target["pending_jobs"] = pending_jobs
 
 
