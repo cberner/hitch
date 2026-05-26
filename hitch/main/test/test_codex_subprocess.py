@@ -3343,6 +3343,22 @@ class CodexWorkerCommandTests(TestCase):
 
             self.assertFalse(path.exists())
 
+    @override_settings(CODEX_WORKER_OOM_SCORE_ADJ="not-an-int")
+    @patch("hitch.main.management.commands.codex_worker.logger.warning")
+    def test_apply_worker_oom_score_adjust_ignores_invalid_score(
+        self, mock_warning: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "oom_score_adj"
+
+            codex_worker_module._apply_worker_oom_score_adjust(path)
+
+            self.assertFalse(path.exists())
+        mock_warning.assert_called_once_with(
+            "invalid CODEX_WORKER_OOM_SCORE_ADJ: %r",
+            "not-an-int",
+        )
+
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_streams_notifications_and_marks_completed(self, mock_codex: MagicMock) -> None:
         events = [
