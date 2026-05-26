@@ -952,6 +952,122 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
         assert snapshot is not None
         self.assertEqual(snapshot["ci_status"], "unknown")
 
+    def test_pr_snapshot_clears_stale_review_thread_list_on_clean_re_observation(
+        self,
+    ) -> None:
+        # A PR turn that observes one unresolved review thread, resolves it,
+        # and then re-checks the threads must end with the snapshot reflecting
+        # the second observation -- the same head SHA, zero open threads, an
+        # empty ``unresolved_threads`` list. Before the fix the merger
+        # treated the second update's ``unresolved_threads: []`` as "no
+        # information" and skipped it, so the snapshot kept the stale thread
+        # from the first observation alongside ``unresolved_thread_count=0``.
+        # That inconsistent state propagates into ``workflow.state.pr_handoff``
+        # and is rendered verbatim into the next PR follow-up monitor agent's
+        # prompt via ``_format_pr_handoff``; the persisted-handoff text the
+        # agent reads then contradicts itself, which can mislead the monitor
+        # into reporting the stale thread back as still-unresolved and stall
+        # the Review gate on a thread that GitHub already shows resolved.
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_create_pull_request",
+                                    "result": {
+                                        "structuredContent": {
+                                            "url": (
+                                                "https://github.com/cberner/hitch/pull/171"
+                                            ),
+                                            "number": 171,
+                                            "head_sha": "abc123",
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=5,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_list_pull_request_review_threads",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "pr_number": 171,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "review_threads": [
+                                                {
+                                                    "id": "thread-A",
+                                                    "is_resolved": False,
+                                                    "is_outdated": False,
+                                                    "path": "x.py",
+                                                    "line": 12,
+                                                }
+                                            ]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_list_pull_request_review_threads",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "pr_number": 171,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "review_threads": [
+                                                {
+                                                    "id": "thread-A",
+                                                    "is_resolved": True,
+                                                    "is_outdated": False,
+                                                    "path": "x.py",
+                                                    "line": 12,
+                                                }
+                                            ]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["unresolved_thread_count"], 0)
+        self.assertEqual(snapshot.get("unresolved_threads", []), [])
+
     def test_pr_snapshot_ignores_other_threads_and_non_github_tools(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "events.jsonl"
