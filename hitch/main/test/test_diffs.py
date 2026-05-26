@@ -5,7 +5,7 @@ from pathlib import Path
 
 from django.test import SimpleTestCase
 
-from hitch.main.diffs import build_worktree_diff
+from hitch.main.diffs import build_worktree_diff, build_worktree_diff_text
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -455,3 +455,43 @@ class WorktreeDiffTests(SimpleTestCase):
             if line.kind == "context"
         ]
         self.assertEqual(context_line_numbers, [])
+
+    def test_untracked_file_without_trailing_newline_marks_eof(self) -> None:
+        # The synthetic untracked-file diff is rendered into the session view
+        # and -- when auto-merge is disabled -- forwarded verbatim to the QA
+        # reviewer prompt via ``build_worktree_diff_text``. Without the
+        # ``\ No newline at end of file`` marker the diff is indistinguishable
+        # from a file that does end with ``\n``, so the reviewer cannot tell
+        # whether the new file is missing the trailing newline that lint tools
+        # commonly flag.
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            (repo / "missing.txt").write_bytes(b"line1\nline2")
+            (repo / "single.txt").write_bytes(b"only")
+            (repo / "complete.txt").write_bytes(b"line1\nline2\n")
+
+            diff_text = build_worktree_diff_text(str(repo))
+            diff = build_worktree_diff(str(repo))
+
+        missing_section, _, after = diff_text.partition("+++ b/missing.txt\n")
+        missing_body, _, _ = after.partition("diff --git ")
+        self.assertIn("\\ No newline at end of file", missing_body)
+        single_section, _, after = diff_text.partition("+++ b/single.txt\n")
+        single_body, _, _ = after.partition("diff --git ")
+        self.assertIn("\\ No newline at end of file", single_body)
+        complete_section, _, after = diff_text.partition("+++ b/complete.txt\n")
+        complete_body, _, _ = after.partition("diff --git ")
+        self.assertNotIn("\\ No newline at end of file", complete_body)
+
+        files = {file.path: file for file in diff.files}
+        missing_meta = [line.html for line in files["missing.txt"].lines if line.kind == "meta"]
+        self.assertTrue(
+            any("No newline at end of file" in html for html in missing_meta),
+            msg=f"expected EOF marker in meta lines, got {missing_meta!r}",
+        )
+        complete_meta = [line.html for line in files["complete.txt"].lines if line.kind == "meta"]
+        self.assertFalse(
+            any("No newline at end of file" in html for html in complete_meta),
+            msg=f"unexpected EOF marker in meta lines, got {complete_meta!r}",
+        )

@@ -257,15 +257,26 @@ def _synthetic_new_file_diff(repo: Path, relpath: str) -> str:
     clipped = len(data) > _MAX_UNTRACKED_FILE_BYTES
     text = data[:_MAX_UNTRACKED_FILE_BYTES].decode("utf-8", errors="replace")
     lines = text.splitlines()
+    # ``splitlines`` strips line terminators, so the trailing-newline status
+    # of the file would otherwise be lost. Capture it here so we can emit the
+    # git-style ``\ No newline at end of file`` marker that ``_parse_unified_diff``
+    # surfaces as a meta row and that reviewer agents look for. When the file
+    # is clipped the marker would describe the synthetic ``File preview
+    # truncated`` line rather than the real file, so suppress it.
+    file_ends_with_newline = text.endswith(("\n", "\r"))
     if clipped:
         lines.append("File preview truncated")
-    body = difflib.unified_diff(
-        [],
-        lines,
-        fromfile="/dev/null",
-        tofile=f"b/{relpath}",
-        lineterm="",
+    body = list(
+        difflib.unified_diff(
+            [],
+            lines,
+            fromfile="/dev/null",
+            tofile=f"b/{relpath}",
+            lineterm="",
+        )
     )
+    if lines and not clipped and not file_ends_with_newline:
+        body.append("\\ No newline at end of file")
     return "\n".join([f"diff --git a/{relpath} b/{relpath}", "new file mode 100644", *body])
 
 
