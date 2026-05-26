@@ -848,6 +848,296 @@ class IndexViewTests(TestCase):
         self.assertNotContains(response, "New front session")
         client.thread_list.assert_not_called()
 
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_system_sessions_pages_before_helper_lookups_and_keeps_cursor_stable(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        for i in range(51):
+            SessionMetadata.objects.create(
+                thread_id=f"system-{i:02d}",
+                cwd="/repo",
+                codex_display_title=f"System {i:02d}",
+                codex_name=f"System {i:02d}",
+                codex_created_at=datetime.fromtimestamp(1000 - i, UTC),
+                codex_updated_at=datetime.fromtimestamp(1000 - i, UTC),
+                codex_last_synced_at=now,
+                is_hidden_system_session=True,
+            )
+
+        with (
+            patch(
+                "hitch.main.views._system_agent_runs_by_thread_id",
+                return_value={},
+            ) as runs_by_thread_id,
+            patch(
+                "hitch.main.views._system_agent_instances_by_thread_id",
+                return_value={},
+            ) as instances_by_thread_id,
+        ):
+            response = self.client.get(reverse("system_sessions"))
+            load_more_url = self._assert_index_cursor_url(response)
+
+            self.assertEqual(response.status_code, 200)
+            self.assertContains(response, "System 00")
+            self.assertContains(response, "System 49")
+            self.assertNotContains(response, "System 50")
+            expected_first_page_ids = [f"system-{i:02d}" for i in range(50)]
+            self.assertEqual(
+                list(runs_by_thread_id.call_args.args[0]), expected_first_page_ids
+            )
+            self.assertEqual(
+                list(instances_by_thread_id.call_args.args[0]),
+                expected_first_page_ids,
+            )
+
+            SessionMetadata.objects.create(
+                thread_id="new-front-system",
+                cwd="/repo",
+                codex_display_title="New front system",
+                codex_created_at=datetime.fromtimestamp(2000, UTC),
+                codex_updated_at=datetime.fromtimestamp(2000, UTC),
+                codex_last_synced_at=now,
+                is_hidden_system_session=True,
+            )
+            response = self.client.get(load_more_url)
+
+            self.assertContains(response, "System 50")
+            self.assertNotContains(response, "System 49")
+            self.assertNotContains(response, "New front system")
+            self.assertEqual(
+                list(runs_by_thread_id.call_args.args[0]), ["system-50"]
+            )
+            self.assertEqual(
+                list(instances_by_thread_id.call_args.args[0]), ["system-50"]
+            )
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_system_sessions_cursor_keeps_same_second_rows_stable(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        same_second = datetime.fromtimestamp(1000, UTC)
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        for i in range(51):
+            SessionMetadata.objects.create(
+                thread_id=f"system-{i:02d}",
+                cwd="/repo",
+                codex_display_title=f"System {i:02d}",
+                codex_name=f"System {i:02d}",
+                codex_created_at=same_second,
+                codex_updated_at=same_second + timedelta(microseconds=50 - i),
+                codex_last_synced_at=now,
+                is_hidden_system_session=True,
+            )
+
+        response = self.client.get(reverse("system_sessions"))
+        load_more_url = self._assert_index_cursor_url(response)
+
+        self.assertContains(response, "System 00")
+        self.assertContains(response, "System 49")
+        self.assertNotContains(response, "System 50")
+
+        response = self.client.get(load_more_url)
+
+        self.assertContains(response, "System 50")
+        self.assertNotContains(response, "System 00")
+        self.assertNotContains(response, "System 49")
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_system_sessions_accepts_cold_index_second_precision_cursor(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        mock_discover.return_value = []
+        threads = [
+            SimpleNamespace(
+                id=f"system-{i:02d}",
+                name=f"System {i:02d}",
+                preview="",
+                cwd="/repo",
+                path=None,
+                updated_at=1000 + ((50 - i) / 1_000_000),
+                thread_source=ThreadSource.subagent,
+            )
+            for i in range(51)
+        ]
+        client = _setup_codex(mock_codex, threads=threads)
+
+        response = self.client.get(reverse("system_sessions"))
+        load_more_url = self._assert_index_cursor_url(response)
+
+        self.assertContains(response, "System 50")
+        self.assertContains(response, "System 01")
+        self.assertNotContains(response, "System 00")
+
+        response = self.client.get(load_more_url)
+
+        self.assertContains(response, "System 00")
+        self.assertNotContains(response, "System 01")
+        self.assertNotContains(response, "System 50")
+        self.assertEqual(client.thread_list.call_count, 1)
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_system_sessions_keeps_cold_index_second_precision_across_pages(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        mock_discover.return_value = []
+        threads = [
+            SimpleNamespace(
+                id=f"system-{i:03d}",
+                name=f"System {i:03d}",
+                preview="",
+                cwd="/repo",
+                path=None,
+                updated_at=1000 + ((119 - i) / 1_000_000),
+                thread_source=ThreadSource.subagent,
+            )
+            for i in range(120)
+        ]
+        client = _setup_codex(mock_codex, threads=threads)
+
+        response = self.client.get(reverse("system_sessions"))
+        page_two_url = self._assert_index_cursor_url(response)
+
+        self.assertContains(response, "System 119")
+        self.assertContains(response, "System 070")
+        self.assertNotContains(response, "System 069")
+
+        response = self.client.get(page_two_url)
+        page_three_url = self._assert_index_cursor_url(response)
+
+        self.assertContains(response, "System 069")
+        self.assertContains(response, "System 020")
+        self.assertNotContains(response, "System 070")
+        self.assertNotContains(response, "System 019")
+
+        response = self.client.get(page_three_url)
+
+        self.assertContains(response, "System 019")
+        self.assertContains(response, "System 000")
+        self.assertNotContains(response, "System 070")
+        self.assertNotContains(response, "System 020")
+        self.assertEqual(client.thread_list.call_count, 1)
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_system_sessions_ignores_invalid_index_cursor_timestamps(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="system",
+            cwd="/repo",
+            codex_display_title="System",
+            codex_name="System",
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+            is_hidden_system_session=True,
+        )
+
+        cases = (
+            ("NaN", ""),
+            ("Infinity", ""),
+            ("-Infinity", ""),
+            ("1e100", ""),
+            ("1e100", ',"updated_at_precision":"exact"'),
+            ("-1e100", ""),
+            ("-1e100", ',"updated_at_precision":"exact"'),
+        )
+        for updated_at, precision in cases:
+            with self.subTest(updated_at=updated_at, precision=precision):
+                cursor_payload = f'{{"updated_at":{updated_at},"id":"a"{precision}}}'
+                cursor = "idx:" + base64.urlsafe_b64encode(
+                    cursor_payload.encode()
+                ).decode()
+
+                response = self.client.get(
+                    reverse("system_sessions"), {"cursor": cursor}
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, "System")
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_system_sessions_excludes_accepted_visible_system_thread(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        accepted = SessionMetadata.objects.create(
+            thread_id="accepted-system",
+            cwd="/repo",
+            codex_display_title="Accepted visible system",
+            codex_name="Accepted visible system",
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+            is_hidden_system_session=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="other-system",
+            cwd="/repo",
+            codex_display_title="Other system",
+            codex_name="Other system",
+            codex_created_at=datetime.fromtimestamp(1000, UTC),
+            codex_updated_at=datetime.fromtimestamp(1000, UTC),
+            codex_last_synced_at=now,
+            is_hidden_system_session=True,
+        )
+        ProposedSession.objects.create(
+            title="Accepted proposal",
+            candidate_session=accepted,
+            accepted_session=accepted,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        )
+
+        index_response = self.client.get(reverse("index"))
+        system_response = self.client.get(reverse("system_sessions"))
+
+        self.assertContains(index_response, "Accepted visible system")
+        self.assertContains(system_response, "Other system")
+        self.assertNotContains(system_response, "Accepted visible system")
+        client.thread_list.assert_not_called()
+
     @patch("hitch.main.views.Codex")
     def test_full_refresh_invalidates_absent_active_rows(
         self, mock_codex: MagicMock

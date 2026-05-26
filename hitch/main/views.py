@@ -3,6 +3,7 @@ import binascii
 import contextlib
 import json
 import logging
+import math
 import os
 import re
 import threading
@@ -24,7 +25,7 @@ from django.core.exceptions import SuspiciousOperation
 from django.core.files.uploadedfile import UploadedFile
 from django.core.files.uploadhandler import FileUploadHandler
 from django.db import IntegrityError, close_old_connections, transaction
-from django.db.models import QuerySet
+from django.db.models import Q, QuerySet
 from django.http import (
     Http404,
     HttpRequest,
@@ -216,6 +217,17 @@ class SessionListPage(NamedTuple):
     archived_next_offset: int
     archived_next_done: bool
     materialized_order: bool = False
+
+
+@dataclass(frozen=True)
+class _IndexCursor:
+    updated_at: float
+    thread_id: str
+    exact_updated_at: bool = False
+
+    @property
+    def sort_key(self) -> tuple[float, str]:
+        return (self.updated_at, self.thread_id)
 
 
 @dataclass
@@ -960,12 +972,6 @@ def _session_list_page_from_warm_index(
     system_thread_ids = (
         hidden_thread_ids | _demo_system_thread_ids() if system_only else set()
     )
-    runs_by_thread_id = (
-        _system_agent_runs_by_thread_id(system_thread_ids) if system_only else {}
-    )
-    instances_by_thread_id = (
-        _system_agent_instances_by_thread_id(system_thread_ids) if system_only else {}
-    )
     request_uses_index_cursor = _request_uses_index_cursor(request)
     refresh_active = (
         not request_uses_index_cursor and session_index.should_refresh(archived=False)
@@ -980,17 +986,218 @@ def _session_list_page_from_warm_index(
         include_active=refresh_active,
         include_archived=refresh_archived,
     )
+    if system_only:
+        return _system_session_list_page_from_index(
+            request,
+            current_project=current_project,
+            show_archived=current_settings.show_archived_sessions,
+            system_thread_ids=system_thread_ids,
+            projects=projects,
+            accepted_visible_thread_ids=accepted_visible_thread_ids,
+        )
     return _session_list_page_from_index(
         request,
         current_project=current_project,
         show_archived=current_settings.show_archived_sessions,
         hidden_thread_ids=hidden_thread_ids,
         system_thread_ids=system_thread_ids,
-        runs_by_thread_id=runs_by_thread_id,
-        instances_by_thread_id=instances_by_thread_id,
+        runs_by_thread_id={},
+        instances_by_thread_id={},
         projects=projects,
         system_only=system_only,
         accepted_visible_thread_ids=accepted_visible_thread_ids,
+    )
+
+
+def _system_session_list_page_from_index(
+    request: HttpRequest,
+    *,
+    current_project: Project | None,
+    show_archived: bool,
+    system_thread_ids: set[str],
+    projects: list[Project],
+    accepted_visible_thread_ids: set[str],
+) -> SessionListPage:
+    _ensure_indexed_system_threads(system_thread_ids, projects=projects)
+    indexed_system_thread_ids = set(
+        SessionMetadata.objects.filter(is_hidden_system_session=True)
+        .exclude(codex_updated_at__isnull=True)
+        .exclude(thread_id__in=accepted_visible_thread_ids)
+        .values_list("thread_id", flat=True)
+    )
+    system_thread_ids = system_thread_ids | indexed_system_thread_ids
+    rows = _system_session_metadata_rows(
+        current_project=current_project,
+        show_archived=show_archived,
+        system_thread_ids=system_thread_ids,
+        accepted_visible_thread_ids=accepted_visible_thread_ids,
+    )
+    index_cursor = _index_cursor(request.GET.get("cursor", ""))
+    next_cursor = ""
+    has_more = False
+    if index_cursor is not None and not index_cursor.exact_updated_at:
+        metadata_page, next_cursor, has_more = _legacy_system_metadata_page(
+            rows, index_cursor
+        )
+        offset = 0
+    elif index_cursor is not None:
+        rows = _metadata_rows_after_index_cursor(rows, index_cursor)
+        offset = 0
+        metadata_page = list(rows[:_SESSION_PAGE_SIZE])
+    else:
+        offset = _non_negative_int(request.GET.get("offset", ""))
+        metadata_page = list(rows[offset : offset + _SESSION_PAGE_SIZE])
+    page_thread_ids = [metadata.thread_id for metadata in metadata_page]
+    runs_by_thread_id = _system_agent_runs_by_thread_id(page_thread_ids)
+    instances_by_thread_id = _system_agent_instances_by_thread_id(page_thread_ids)
+    page = [
+        session
+        for metadata in metadata_page
+        if (
+            session := _session_row_for_metadata(
+                metadata,
+                qa_updated_at_by_main_thread={},
+                runs_by_thread_id=runs_by_thread_id,
+                instances_by_thread_id=instances_by_thread_id,
+                system_only=True,
+            )
+        )
+        is not None
+    ]
+    if (
+        index_cursor is None or index_cursor.exact_updated_at
+    ) and metadata_page and len(metadata_page) == _SESSION_PAGE_SIZE:
+        has_more = _metadata_rows_after_index_cursor(
+            rows,
+            _index_cursor_for_metadata_row(metadata_page[-1]),
+        ).exists()
+        next_cursor = (
+            ""
+            if not has_more or not metadata_page
+            else _index_cursor_for_metadata(metadata_page[-1])
+        )
+    next_offset = offset + len(page)
+    return SessionListPage(
+        sessions=page,
+        next_cursor=next_cursor,
+        next_offset=0 if next_cursor or not has_more else next_offset,
+        next_done=not has_more,
+        include_archived_source=False,
+        archived_next_cursor="",
+        archived_next_offset=0,
+        archived_next_done=True,
+    )
+
+
+def _system_session_metadata_rows(
+    *,
+    current_project: Project | None,
+    show_archived: bool,
+    system_thread_ids: set[str],
+    accepted_visible_thread_ids: set[str],
+) -> QuerySet[SessionMetadata]:
+    rows = (
+        SessionMetadata.objects.exclude(codex_updated_at__isnull=True)
+        .select_related("project")
+        .only(
+            "thread_id",
+            "cwd",
+            "codex_display_title",
+            "codex_name",
+            "codex_updated_at",
+            "codex_archived",
+            "is_hidden_system_session",
+            "project",
+            "project__name",
+        )
+        .order_by("-codex_updated_at", "-thread_id")
+    )
+    if current_project is not None:
+        rows = rows.filter(project=current_project)
+    if not show_archived:
+        rows = rows.filter(codex_archived=False)
+    return rows.exclude(thread_id__in=accepted_visible_thread_ids).filter(
+        Q(thread_id__in=system_thread_ids) | Q(is_hidden_system_session=True)
+    )
+
+
+def _legacy_system_metadata_page(
+    rows: QuerySet[SessionMetadata], index_cursor: _IndexCursor
+) -> tuple[list[SessionMetadata], str, bool]:
+    cursor_second_start, cursor_second_end = _index_cursor_second_bounds(index_cursor)
+    same_second_rows = rows.filter(
+        codex_updated_at__gte=cursor_second_start,
+        codex_updated_at__lt=cursor_second_end,
+        thread_id__lt=index_cursor.thread_id,
+    ).order_by("-thread_id")
+    metadata_page = list(same_second_rows[:_SESSION_PAGE_SIZE])
+    if len(metadata_page) < _SESSION_PAGE_SIZE:
+        earlier_rows = rows.filter(codex_updated_at__lt=cursor_second_start)
+        metadata_page.extend(
+            earlier_rows[: _SESSION_PAGE_SIZE - len(metadata_page)]
+        )
+    if not metadata_page or len(metadata_page) < _SESSION_PAGE_SIZE:
+        return metadata_page, "", False
+
+    last_metadata = metadata_page[-1]
+    if _metadata_in_cursor_second(
+        last_metadata,
+        start=cursor_second_start,
+        end=cursor_second_end,
+    ):
+        has_more = (
+            same_second_rows.filter(thread_id__lt=last_metadata.thread_id).exists()
+            or rows.filter(codex_updated_at__lt=cursor_second_start).exists()
+        )
+        return (
+            metadata_page,
+            _index_cursor_for_legacy_second(index_cursor, last_metadata)
+            if has_more
+            else "",
+            has_more,
+        )
+
+    next_cursor = _index_cursor_for_metadata_row(last_metadata)
+    has_more = _metadata_rows_after_index_cursor(rows, next_cursor).exists()
+    return (
+        metadata_page,
+        _index_cursor_for_metadata(last_metadata) if has_more else "",
+        has_more,
+    )
+
+
+def _index_cursor_second_bounds(index_cursor: _IndexCursor) -> tuple[datetime, datetime]:
+    cursor_second_start = datetime.fromtimestamp(int(index_cursor.updated_at), UTC)
+    return cursor_second_start, cursor_second_start + timedelta(seconds=1)
+
+
+def _metadata_in_cursor_second(
+    metadata: SessionMetadata, *, start: datetime, end: datetime
+) -> bool:
+    updated_at = metadata.codex_updated_at
+    return isinstance(updated_at, datetime) and start <= updated_at < end
+
+
+def _metadata_rows_after_index_cursor(
+    rows: QuerySet[SessionMetadata],
+    index_cursor: _IndexCursor,
+) -> QuerySet[SessionMetadata]:
+    if not index_cursor.exact_updated_at:
+        cursor_second_start, cursor_second_end = _index_cursor_second_bounds(
+            index_cursor
+        )
+        return rows.filter(
+            Q(codex_updated_at__lt=cursor_second_start)
+            | Q(
+                codex_updated_at__gte=cursor_second_start,
+                codex_updated_at__lt=cursor_second_end,
+                thread_id__lt=index_cursor.thread_id,
+            )
+        )
+    cursor_updated_at = datetime.fromtimestamp(index_cursor.updated_at, UTC)
+    return rows.filter(
+        Q(codex_updated_at__lt=cursor_updated_at)
+        | Q(codex_updated_at=cursor_updated_at, thread_id__lt=index_cursor.thread_id)
     )
 
 
@@ -1664,10 +1871,39 @@ def _session_index_sort_key(session: dict[str, Any]) -> tuple[float, str]:
 
 
 def _index_cursor_for_session(session: dict[str, Any]) -> str:
+    return _index_cursor_for_sort_key(_session_index_sort_key(session))
+
+
+def _index_cursor_for_metadata(metadata: SessionMetadata) -> str:
+    cursor = _index_cursor_for_metadata_row(metadata)
+    return _index_cursor_for_sort_key(cursor.sort_key, exact_updated_at=True)
+
+
+def _index_cursor_for_metadata_row(metadata: SessionMetadata) -> _IndexCursor:
+    return _IndexCursor(
+        updated_at=_updated_at_sort_key(metadata.codex_updated_at),
+        thread_id=metadata.thread_id,
+        exact_updated_at=True,
+    )
+
+
+def _index_cursor_for_legacy_second(
+    index_cursor: _IndexCursor, metadata: SessionMetadata
+) -> str:
+    return _index_cursor_for_sort_key(
+        (float(int(index_cursor.updated_at)), metadata.thread_id)
+    )
+
+
+def _index_cursor_for_sort_key(
+    sort_key: tuple[float, str], *, exact_updated_at: bool = False
+) -> str:
     payload = {
-        "updated_at": _updated_at_sort_key(session["updated_at"]),
-        "id": str(session["id"]),
+        "updated_at": sort_key[0],
+        "id": sort_key[1],
     }
+    if exact_updated_at:
+        payload["updated_at_precision"] = "exact"
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":")).encode()
     ).decode()
@@ -1675,17 +1911,42 @@ def _index_cursor_for_session(session: dict[str, Any]) -> str:
 
 
 def _index_cursor_sort_key(cursor: str) -> tuple[float, str] | None:
+    parsed = _index_cursor(cursor)
+    return parsed.sort_key if parsed is not None else None
+
+
+def _index_cursor(cursor: str) -> _IndexCursor | None:
     if not _is_index_cursor(cursor):
         return None
     try:
         payload = json.loads(base64.urlsafe_b64decode(cursor[4:].encode()).decode())
     except (ValueError, binascii.Error, json.JSONDecodeError):
         return None
+    if not isinstance(payload, dict):
+        return None
     updated_at = payload.get("updated_at")
     thread_id = payload.get("id")
     if not isinstance(updated_at, int | float) or not isinstance(thread_id, str):
         return None
-    return (float(updated_at), thread_id)
+    updated_at_float = _index_cursor_updated_at(updated_at)
+    if updated_at_float is None:
+        return None
+    return _IndexCursor(
+        updated_at=updated_at_float,
+        thread_id=thread_id,
+        exact_updated_at=payload.get("updated_at_precision") == "exact",
+    )
+
+
+def _index_cursor_updated_at(updated_at: int | float) -> float | None:
+    updated_at_float = float(updated_at)
+    if not math.isfinite(updated_at_float):
+        return None
+    try:
+        datetime.fromtimestamp(updated_at_float, UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return updated_at_float
 
 
 def _is_index_cursor(cursor: str) -> bool:
