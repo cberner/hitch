@@ -1,0 +1,27 @@
+            const modalScrollLockClass = "modal-scroll-locked";
+            function syncModalScrollLock() {
+                const hasOpenDialog = Boolean(document.querySelector("dialog[open]"));
+                document.documentElement.classList.toggle(modalScrollLockClass, hasOpenDialog);
+                document.body.classList.toggle(modalScrollLockClass, hasOpenDialog);
+            }
+            function showDialog(dialog) {
+                if (!dialog) return;
+                if (typeof dialog.showModal === "function") {
+                    dialog.showModal();
+                } else {
+                    dialog.setAttribute("open", "");
+                }
+                syncModalScrollLock();
+            }
+            function hideDialog(dialog) {
+                if (!dialog) return;
+                if (typeof dialog.close === "function") {
+                    dialog.close();
+                } else {
+                    dialog.removeAttribute("open");
+                }
+                syncModalScrollLock();
+            }
+            for (const dialog of document.querySelectorAll("dialog")) {
+                dialog.addEventListener("close", syncModalScrollLock);
+            }
