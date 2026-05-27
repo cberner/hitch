@@ -1181,6 +1181,60 @@ class IterEntriesTests(TestCase):
         self.assertEqual(entries[-1]["kind"], "agent")
         self.assertEqual(entries[-1]["text"], text)
 
+    def test_proposed_plan_with_tag_substring_heading_is_recognized_as_plan(
+        self,
+    ) -> None:
+        # ``_looks_like_literal_plan_example`` uses the literal-example markers
+        # ("example", "xml", "tag", "syntax", "literal") to reject literal
+        # ``<proposed_plan>`` examples on the plan-mode followup turn. Matching
+        # those markers as substrings (not as whole words) also rejects real
+        # plans whose heading happens to contain "tag" inside an unrelated word
+        # -- "Tagging strategy", "Stage rollout", "Vintage cleanup" -- so the
+        # rollout view downgrades them to plain ``agent`` entries and the
+        # auto-review gate (``_completed_turn_has_pending_proposed_plan``) lets
+        # auto-PR/auto-QA proceed without surfacing the plan for approval.
+        plan = (
+            "# Tagging strategy\n\n"
+            "1. Add tag CRUD endpoints\n"
+            "2. Update docs"
+        )
+        text = f"<proposed_plan>\n{plan}\n</proposed_plan>"
+        path = self._make(
+            [
+                _line("turn_context", {"collaboration_mode": {"mode": "plan"}}),
+                _line("event_msg", {"type": "user_message", "message": "Discuss it"}),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Sounds good."}],
+                        "phase": "final_answer",
+                    },
+                ),
+                _line("turn_context", {"collaboration_mode": {"mode": "default"}}),
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Plan the tagging work."},
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": text}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+
+        self.assertEqual(entries[-1]["kind"], "plan")
+        self.assertEqual(entries[-1]["text"], plan)
+        self.assertTrue(rollout.entries_await_plan_approval(entries))
+
     def test_final_proposed_plan_replaces_streamed_draft_plan(self) -> None:
         draft_plan = "# Draft Plan\n\nStill streaming."
         final_plan = "# Final Plan\n\nUse the canonical response item."
