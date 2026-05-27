@@ -786,3 +786,35 @@ class LocalMergeTests(SimpleTestCase):
 
             # main must not pick up the conflict markers via the bug path.
             self.assertEqual(_git(repo, "show", "main:README.md"), "hello")
+
+    def test_auto_merge_does_not_mark_group_executable_file_as_user_executable(
+        self,
+    ) -> None:
+        # Git stores a file as ``100755`` only when the owner's execute bit is
+        # set; group- or other-execute bits alone leave the index entry at
+        # ``100644``. ``_worktree_index_entry`` builds the synthetic source
+        # tree the auto-merge diff is computed against, so any bitmask that
+        # is wider than ``S_IXUSR`` invents an executable-bit change that the
+        # target branch never asked for. Reproduce the regression with an
+        # untracked file whose owner has no execute permission but whose
+        # group does -- ``git add`` would have indexed it at ``100644``, so
+        # the auto-merged commit must match that mode rather than promoting
+        # the file to ``100755``.
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            session = root / "session"
+            _init_repo(repo)
+            _git(repo, "worktree", "add", "-b", "session", str(session), "HEAD")
+            script = session / "tool.sh"
+            script.write_text("#!/bin/sh\necho hi\n")
+            os.chmod(script, 0o670)
+
+            result = _merge_reviewed_patch(session, "main")
+
+            self.assertTrue(result.changed)
+            ls_tree = _git(repo, "ls-tree", "main", "tool.sh")
+            self.assertTrue(
+                ls_tree.startswith("100644 "),
+                msg=f"expected mode 100644 in {ls_tree!r}",
+            )
