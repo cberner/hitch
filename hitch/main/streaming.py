@@ -25,7 +25,7 @@ from collections.abc import Generator, Iterator
 from pathlib import Path
 from typing import Any
 
-from hitch.main import codex_events, codex_pool
+from hitch.main import codex_events, codex_pool, system_agents
 from hitch.main.models import (
     CodexInstance,
     SessionDemo,
@@ -221,6 +221,7 @@ def system_workflow_stream(
 ) -> Iterator[bytes]:
     """Heartbeat stream while a hidden system workflow owns the main thread."""
     yield b"retry: 2000\n\n"
+    codex_pool.reconcile_dead_for_workflow(workflow_id, main_thread_id=session_id)
     workflow = _running_system_workflow(session_id, workflow_id)
     yield _heartbeat_frame(
         working=True,
@@ -236,6 +237,7 @@ def system_workflow_stream(
         if codex_pool.latest_id_for_thread(session_id) != baseline_id:
             yield _end_frame("active")
             return
+        codex_pool.reconcile_dead_for_workflow(workflow_id, main_thread_id=session_id)
         workflow = _running_system_workflow(session_id, workflow_id)
         if workflow is None:
             yield _end_frame("workflow")
@@ -542,6 +544,7 @@ def _running_system_workflow(
     session_id: str,
     workflow_id: int,
 ) -> SystemWorkflow | None:
+    system_agents.reconcile_terminal_workflow_instances(workflow_id=workflow_id)
     return SystemWorkflow.objects.filter(
         pk=workflow_id,
         main_thread_id=session_id,

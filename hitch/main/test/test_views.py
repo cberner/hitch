@@ -10148,6 +10148,49 @@ class SessionStreamViewTests(TestCase):
         self.assertIn(b'"label": "CI"', body)
         self.assertIn(b'"statusLabel": "Pending"', body)
 
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    def test_stream_reloads_and_blocks_when_hidden_system_worker_died(
+        self, mock_worker_alive: MagicMock, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-dead-workflow",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_QA_RUNNING,
+        )
+        instance = self._make(
+            pid=12345,
+            thread_id="qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id=instance.thread_id,
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        response = self.client.get(
+            self._stream_url("thread-dead-workflow", workflow=str(workflow.pk))
+        )
+        body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
+
+        self.assertIn(b'"status": "stale"', body)
+        mock_worker_alive.assert_called()
+        mock_spawn.assert_called_once()
+        instance.refresh_from_db()
+        run.refresh_from_db()
+        workflow.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+
     @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
     @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
     def test_system_workflow_heartbeat_clears_empty_pr_progress(self) -> None:

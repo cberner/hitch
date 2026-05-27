@@ -5044,6 +5044,7 @@ def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpRespon
     active_param = request.GET.get("active", "")
     workflow_param = request.GET.get("workflow", "")
     demo_param = request.GET.get("demo", "")
+    codex_pool.reconcile_dead()
     current_latest = codex_pool.latest_id_for_thread(session_id)
     current_latest_str = str(current_latest) if current_latest is not None else ""
     active = _active_instance_for(session_id)
