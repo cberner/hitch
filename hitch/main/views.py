@@ -253,6 +253,11 @@ class _MessageIntent(NamedTuple):
     explicit_plan_mode: bool
 
 
+class _ThreadPlanModeState(NamedTuple):
+    active: bool
+    awaiting_approval: bool
+
+
 class _NewSessionTarget(NamedTuple):
     cwd: str
     project: Project | None
@@ -2933,8 +2938,11 @@ def _render_session_detail(
     # double up every entry in the live DOM. The page reload on stream end
     # restores the canonical view.
     entries = _trim_in_progress_turn(entries, active_instance)
-    default_plan_mode = _session_defaults_to_plan_mode(session_id, entries)
-    _mark_pending_plan_actions(entries)
+    plan_mode_state = _thread_plan_mode_state(
+        thread, entries, active_instance=active_instance
+    )
+    default_plan_mode = plan_mode_state.active
+    _mark_pending_plan_actions(entries, enabled=plan_mode_state.awaiting_approval)
     token_usage = _token_usage_for(thread)
     goal_objective = codex_events.latest_goal_for_thread(session_id)
     task_plan = _task_plan_context(
@@ -6458,16 +6466,34 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             resumed = codex._client.thread_resume(session_id)
             thread = resumed.thread
             thread_entries = list(_entries_for(thread))
-            thread_awaits_plan_approval = _entries_await_plan_approval(thread_entries)
-            thread_defaults_to_plan_mode = _session_defaults_to_plan_mode(
-                session_id, thread_entries
+            thread_plan_state = _thread_plan_mode_state(
+                thread,
+                thread_entries,
+                active_instance=active_instance,
             )
+            thread_awaits_plan_approval = thread_plan_state.awaiting_approval
             if (
+                not collaboration_mode
+                and intent.allow_pending_plan_default
+                and thread_plan_state.active
+                and not thread_awaits_plan_approval
+                and intent.explicit_plan_mode
+                and not plan_mode
+            ):
+                collaboration_mode = _DEFAULT_COLLABORATION_MODE
+            elif (
+                not collaboration_mode
+                and intent.allow_pending_plan_default
+                and thread_plan_state.active
+                and (thread_awaits_plan_approval or not intent.explicit_plan_mode)
+            ):
+                plan_mode = True
+            elif (
                 not collaboration_mode
                 and intent.allow_pending_plan_default
                 and not intent.explicit_plan_mode
             ):
-                plan_mode = thread_defaults_to_plan_mode
+                plan_mode = False
             if (
                 thread_awaits_plan_approval
                 and not collaboration_mode
@@ -6482,7 +6508,12 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 if plan_mode or collaboration_mode == _DEFAULT_COLLABORATION_MODE
                 else None
             )
-            if plan_mode and not collaboration_model and not intent.explicit_plan_mode:
+            if (
+                plan_mode
+                and not collaboration_model
+                and not intent.explicit_plan_mode
+                and not thread_plan_state.active
+            ):
                 plan_mode = False
         cwd = _thread_cwd(thread)
         if not cwd:
@@ -6688,19 +6719,28 @@ def _thread_awaits_plan_approval(thread: Any) -> bool:
     return _entries_await_plan_approval(list(_entries_for(thread)))
 
 
-def _session_defaults_to_plan_mode(
-    session_id: str, entries: list[dict[str, Any]]
-) -> bool:
-    if _entries_await_plan_approval(entries):
-        return True
-    latest = codex_pool.latest_for_thread(session_id)
-    return bool(
-        latest is not None
-        and latest.purpose == CodexInstance.PURPOSE_USER
-        and latest.workflow_id is None
-        and latest.status == CodexInstance.STATUS_COMPLETED
-        and latest.plan_mode
+def _thread_plan_mode_state(
+    thread: Any,
+    entries: list[dict[str, Any]],
+    *,
+    active_instance: CodexInstance | None = None,
+) -> _ThreadPlanModeState:
+    """Return the Plan Mode state Codex recorded for this thread."""
+    awaiting_approval = _entries_await_plan_approval(entries)
+    latest_mode = _latest_rollout_collaboration_mode(thread)
+    active = (
+        awaiting_approval
+        or latest_mode == "plan"
+        or (active_instance is not None and active_instance.plan_mode)
     )
+    return _ThreadPlanModeState(active=active, awaiting_approval=awaiting_approval)
+
+
+def _latest_rollout_collaboration_mode(thread: Any) -> str | None:
+    rollout_path = _rollout_path_for(thread)
+    if rollout_path is None:
+        return None
+    return rollout.latest_collaboration_mode(rollout_path)
 
 
 def _pr_url_for_thread(thread: Any) -> str | None:
@@ -6774,8 +6814,12 @@ def _pending_plan_entry(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
     return rollout.pending_plan_entry(entries)
 
 
-def _mark_pending_plan_actions(entries: list[dict[str, Any]]) -> None:
+def _mark_pending_plan_actions(
+    entries: list[dict[str, Any]], *, enabled: bool = True
+) -> None:
     _clear_plan_actions(entries)
+    if not enabled:
+        return
     pending_plan = _pending_plan_entry(entries)
     if pending_plan is not None:
         pending_plan["show_plan_actions"] = True

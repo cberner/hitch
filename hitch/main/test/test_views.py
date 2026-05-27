@@ -6644,6 +6644,24 @@ class SendMessageViewTests(TestCase):
             ]
         )
 
+    def _make_active_plan_mode_rollout_without_plan(self) -> Path:
+        return self._make_rollout(
+            [
+                _rollout_line("turn_context", {"collaboration_mode": {"mode": "plan"}}),
+                _rollout_line(
+                    "event_msg", {"type": "user_message", "message": "Plan it"}
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "message": "I need to inspect the code first.",
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
     def _assert_follow_up_spawn(
         self,
         mock_spawn: MagicMock,
@@ -6849,6 +6867,7 @@ class SendMessageViewTests(TestCase):
         for label, data, rollout_path, steered_instance, prompt, expected in cases:
             with self.subTest(label=label):
                 CodexInstance.objects.all().delete()
+                SessionMetadata.objects.all().delete()
                 if steered_instance == "latest":
                     instance = CodexInstance.objects.create(
                         pid=0,
@@ -7886,7 +7905,7 @@ class SendMessageViewTests(TestCase):
                 },
             ),
             (
-                "explicit toggle off after pending plan",
+                "explicit toggle off does not leave pending plan mode",
                 {
                     "prompt": "ship it without more planning",
                     "default_plan_mode": "true",
@@ -7895,19 +7914,55 @@ class SendMessageViewTests(TestCase):
                 "pending",
                 "gpt-5.4",
                 False,
-                {"prompt": "ship it without more planning"},
+                {
+                    "prompt": "ship it without more planning",
+                    "model": "gpt-5.4",
+                    "plan_mode": True,
+                },
             ),
             (
-                "pending default without model falls back",
+                "pending default keeps plan mode",
                 {
                     "prompt": "tighten the QA part",
                     "plan_mode": "true",
                     "default_plan_mode": "true",
                 },
                 "pending",
-                None,
+                "gpt-5.4",
                 False,
-                {"prompt": "tighten the QA part"},
+                {
+                    "prompt": "tighten the QA part",
+                    "model": "gpt-5.4",
+                    "plan_mode": True,
+                },
+            ),
+            (
+                "active plan mode without proposed plan stays in plan mode",
+                {"prompt": "now give me the plan"},
+                "active",
+                "gpt-5.4",
+                False,
+                {
+                    "prompt": "now give me the plan",
+                    "model": "gpt-5.4",
+                    "plan_mode": True,
+                },
+            ),
+            (
+                "explicit toggle off leaves active plan mode without proposed plan",
+                {
+                    "prompt": "answer directly",
+                    "default_plan_mode": "true",
+                    "plan_mode_explicit": "true",
+                },
+                "active",
+                "gpt-5.4",
+                False,
+                {
+                    "prompt": "answer directly",
+                    "model": "gpt-5.4",
+                    "collaboration_mode": "default",
+                },
             ),
             (
                 "approval prompt enters default collaboration",
@@ -8000,6 +8055,8 @@ class SendMessageViewTests(TestCase):
                 rollout_path = None
                 if rollout == "pending":
                     rollout_path = str(self._make_pending_plan_rollout())
+                elif rollout == "active":
+                    rollout_path = str(self._make_active_plan_mode_rollout_without_plan())
                 elif rollout == "resolved":
                     rollout_path = str(self._make_resolved_plan_rollout())
                 else:
