@@ -8018,6 +8018,18 @@ class SendMessageViewTests(TestCase):
                 },
             ),
             (
+                "pending default without model falls back",
+                {
+                    "prompt": "tighten the QA part",
+                    "plan_mode": "true",
+                    "default_plan_mode": "true",
+                },
+                "pending",
+                None,
+                False,
+                {"prompt": "tighten the QA part"},
+            ),
+            (
                 "active plan mode without proposed plan stays in plan mode",
                 {"prompt": "now give me the plan"},
                 "active",
@@ -8182,6 +8194,44 @@ class SendMessageViewTests(TestCase):
             mock_codex,
             model="gpt-5.4",
             path=str(self._make_plan_discussion_rollout()),
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "yes, make that the plan"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self._assert_follow_up_spawn(
+            mock_spawn,
+            prompt="yes, make that the plan",
+            model="gpt-5.4",
+            plan_mode=True,
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_plan_mode_state_uses_stored_fallback_when_rollout_unreadable(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path("/repo")]
+        CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="abc",
+            cwd="/repo",
+            prompt="Talk through the shape.",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            plan_mode=True,
+        )
+        self._patch_codex(
+            mock_codex,
+            model="gpt-5.4",
+            path="/nonexistent/rollout.jsonl",
         )
 
         response = self.client.post(

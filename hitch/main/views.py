@@ -2939,7 +2939,10 @@ def _render_session_detail(
     # restores the canonical view.
     entries = _trim_in_progress_turn(entries, active_instance)
     plan_mode_state = _thread_plan_mode_state(
-        thread, entries, active_instance=active_instance
+        session_id,
+        thread,
+        entries,
+        active_instance=active_instance,
     )
     default_plan_mode = plan_mode_state.active
     _mark_pending_plan_actions(entries, enabled=plan_mode_state.awaiting_approval)
@@ -6537,6 +6540,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             thread = resumed.thread
             thread_entries = list(_entries_for(thread))
             thread_plan_state = _thread_plan_mode_state(
+                session_id,
                 thread,
                 thread_entries,
                 active_instance=active_instance,
@@ -6582,7 +6586,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 plan_mode
                 and not collaboration_model
                 and not intent.explicit_plan_mode
-                and not thread_plan_state.active
             ):
                 plan_mode = False
         cwd = _thread_cwd(thread)
@@ -6790,6 +6793,7 @@ def _thread_awaits_plan_approval(thread: Any) -> bool:
 
 
 def _thread_plan_mode_state(
+    session_id: str,
     thread: Any,
     entries: list[dict[str, Any]],
     *,
@@ -6798,12 +6802,29 @@ def _thread_plan_mode_state(
     """Return the Plan Mode state Codex recorded for this thread."""
     awaiting_approval = _entries_await_plan_approval(entries)
     latest_mode = _latest_rollout_collaboration_mode(thread)
+    stored_plan_mode = (
+        _latest_user_instance_ended_in_plan_mode(session_id)
+        if latest_mode is None
+        else False
+    )
     active = (
         awaiting_approval
         or latest_mode == "plan"
+        or stored_plan_mode
         or (active_instance is not None and active_instance.plan_mode)
     )
     return _ThreadPlanModeState(active=active, awaiting_approval=awaiting_approval)
+
+
+def _latest_user_instance_ended_in_plan_mode(session_id: str) -> bool:
+    latest = codex_pool.latest_for_thread(session_id)
+    return bool(
+        latest is not None
+        and latest.purpose == CodexInstance.PURPOSE_USER
+        and latest.workflow_id is None
+        and latest.status == CodexInstance.STATUS_COMPLETED
+        and latest.plan_mode
+    )
 
 
 def _latest_rollout_collaboration_mode(thread: Any) -> str | None:

@@ -676,7 +676,7 @@ def _proposed_plan_texts_by_turn(
         turn_started_awaiting_plan_approval = awaiting_plan_approval
         exits_plan_mode = mode == _COLLABORATION_MODE_DEFAULT and (
             _turn_is_plan_approval(turn_lines)
-            or (not turn_started_awaiting_plan_approval and not allow_plan_mode_followup)
+            or not turn_started_awaiting_plan_approval
         )
         if exits_plan_mode:
             awaiting_plan_approval = False
