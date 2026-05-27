@@ -638,29 +638,27 @@ def _copy_ci_fields(
         if tool == "get_commit_combined_status":
             status = _ci_status_from_statuses(source.get("statuses"))
             if status:
-                # Only ``success`` is a definitive clean observation that
-                # supersedes a prior per-job snapshot. ``_ci_status_from_statuses``
-                # also emits a truthy ``"unknown"`` for an empty statuses list
-                # (the tool returned no data on this commit), which proves
-                # nothing about whether previously-observed failing jobs
-                # actually recovered; clearing on that would degrade an
-                # actionable "Failing CI jobs were observed" gate to a
-                # non-actionable pending/waiting state. ``failure`` /
-                # ``pending`` mean something is non-green at the commit level
-                # without speaking to which jobs, so the prior per-job list
-                # remains the most specific signal the follow-up agent has.
+                # Combined-status covers GitHub's commit Statuses API (external
+                # CI integrations), not workflow runs / check runs -- so a
+                # success here proves nothing about whether a previously-
+                # observed ``fetch_workflow_run_jobs`` failure has recovered.
+                # Update ``ci_status`` only; never clear the per-job lists
+                # from this branch. ``system_agents._ci_gate`` already
+                # short-circuits on non-empty ``failing_jobs`` ahead of
+                # reading ``ci_status``, so leaving a real workflow-run
+                # failure in the list keeps the actionable BLOCKED verdict
+                # the follow-up agent needs.
                 target["ci_status"] = status
-                if status == "success":
-                    target["failing_jobs"] = []
-                    target["pending_jobs"] = []
         elif tool == "fetch_commit_workflow_runs":
             status = _ci_status_from_runs(source.get("workflow_runs"))
             if status:
-                # Same "only clear on definitive success" guard as the
-                # combined-status branch above: workflow-runs observations
-                # don't enumerate jobs, so an ``unknown`` / ``failure`` /
-                # ``pending`` result must not stomp on a prior
-                # ``fetch_workflow_run_jobs`` per-job snapshot.
+                # Workflow-runs observations DO speak for the same check-run
+                # universe that ``fetch_workflow_run_jobs`` enumerates, so a
+                # definitive ``success`` across all runs supersedes a prior
+                # per-job snapshot on the same commit. ``unknown`` /
+                # ``failure`` / ``pending`` don't tell us which jobs are
+                # bad, so the prior per-job list remains the most specific
+                # signal the follow-up agent has.
                 target["ci_status"] = status
                 if status == "success":
                     target["failing_jobs"] = []
