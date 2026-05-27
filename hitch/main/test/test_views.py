@@ -5263,6 +5263,10 @@ class NewSessionViewTests(TestCase):
             project=project,
             title="Improve tests",
             goal="Find useful test coverage increments.",
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            auto_qa_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="release",
         )
         candidate = SessionMetadata.objects.create(
             thread_id="candidate-thread",
@@ -5273,6 +5277,17 @@ class NewSessionViewTests(TestCase):
             autonomous_goal=goal,
             candidate_session=candidate,
             title="Add parser coverage",
+            outcome_metadata={
+                "auto_pr_enabled": False,
+                "auto_qa_enabled": True,
+                "auto_merge_to_local_branch": True,
+                "auto_merge_branch": "release",
+            },
+        )
+        AutonomousGoal.objects.filter(pk=goal.pk).update(
+            auto_qa_enabled=False,
+            auto_merge_to_local_branch=False,
+            auto_merge_branch="",
         )
 
         response = self.client.post(
@@ -5281,6 +5296,7 @@ class NewSessionViewTests(TestCase):
                 "prompt": "Go ahead and implement this proposed session.",
                 "cwd": self.REPO,
                 "proposed_session": str(proposal.pk),
+                "auto_qa": "false",
             },
         )
 
@@ -5292,16 +5308,32 @@ class NewSessionViewTests(TestCase):
         mock_turn.assert_called_once_with(
             thread_id="candidate-thread",
             cwd="/repo-worktree",
-            prompt="Go ahead and implement this proposed session.",
+            prompt=(
+                "First, rebase or otherwise update this worktree onto the current "
+                "project base branch before continuing. Resolve any conflicts, then "
+                "continue with the user's instructions.\n\n"
+                "Go ahead and implement this proposed session."
+            ),
             developer_instructions=None,
             model=None,
             reasoning_effort=None,
             sandbox_policy=None,
             approval_mode="auto_review",
+            auto_qa_enabled=True,
+            stored_model=None,
+            stored_reasoning_effort=None,
+            user_message_index=0,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="release",
         )
         proposal.refresh_from_db()
+        candidate.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
         self.assertEqual(proposal.accepted_session, candidate)
+        self.assertFalse(candidate.is_hidden_system_session)
+        self.assertTrue(candidate.auto_qa_enabled)
+        self.assertTrue(candidate.auto_merge_to_local_branch)
+        self.assertEqual(candidate.auto_merge_branch, "release")
         mock_new_session.assert_not_called()
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
@@ -5445,7 +5477,12 @@ class NewSessionViewTests(TestCase):
         mock_start_spec_critic.assert_called_once_with(
             main_thread_id="candidate-thread",
             cwd="/repo-worktree",
-            prompt="Go ahead and implement this proposed session.",
+            prompt=(
+                "First, rebase or otherwise update this worktree onto the current "
+                "project base branch before continuing. Resolve any conflicts, then "
+                "continue with the user's instructions.\n\n"
+                "Go ahead and implement this proposed session."
+            ),
             sandbox_policy=None,
             approval_mode="auto_review",
             model=None,
@@ -10820,6 +10857,10 @@ class AutonomousGoalViewTests(TestCase):
             relevant_files=["hitch/main/rollout.py"],
             candidate_session=candidate,
             judge_session=judge,
+            outcome_metadata={
+                "auto_pr_enabled": True,
+                "auto_qa_enabled": False,
+            },
         )
         ProposedSession.objects.create(
             project=other_project,
@@ -10842,8 +10883,14 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, "Add parser coverage")
         self.assertContains(response, "This adds focused parser coverage.")
         self.assertContains(response, "hitch/main/rollout.py")
+        self.assertContains(response, 'data-proposed-session-do')
+        self.assertContains(response, f'data-proposed-session-id="{proposal.pk}"')
+        self.assertContains(response, f'data-proposed-session-project="{project.pk}"')
+        self.assertContains(response, 'data-proposed-session-auto-pr="true"')
+        self.assertContains(response, 'data-proposed-session-auto-qa="false"')
         self.assertContains(
-            response, f'href="{reverse("new_session")}?proposed_session={proposal.pk}"'
+            response,
+            'data-proposed-session-prompt="Go ahead and implement this proposed session.',
         )
         self.assertContains(
             response, f'aria-label="Actions for {proposal.title}"'
@@ -10864,8 +10911,7 @@ class AutonomousGoalViewTests(TestCase):
             response, f'value="{ProposedSession.OUTCOME_DISMISSED}"'
         )
         self.assertContains(response, "Judge log")
-        self.assertNotContains(response, 'data-proposed-session-do')
-        self.assertNotContains(response, 'name="proposed_session"')
+        self.assertContains(response, 'name="proposed_session"')
         self.assertNotContains(response, "Other proposal")
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
@@ -10970,11 +11016,10 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Add CLI proposal tests")
         self.assertContains(response, "From coding agent")
-        self.assertContains(
-            response, f'href="{reverse("new_session")}?proposed_session={proposal.pk}"'
-        )
-        self.assertNotContains(response, "Implement tests for the proposed session CLI.")
-        self.assertNotContains(response, 'data-proposed-session-project="')
+        self.assertContains(response, 'data-proposed-session-do')
+        self.assertContains(response, f'data-proposed-session-id="{proposal.pk}"')
+        self.assertContains(response, "Implement tests for the proposed session CLI.")
+        self.assertContains(response, f'data-proposed-session-project="{project.pk}"')
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
@@ -11532,10 +11577,10 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(mock_start.call_count, 1)
         self.assertEqual(mock_start.call_args.kwargs["autonomous_goal"], goal)
-        self.assertFalse(mock_start.call_args.kwargs["use_worktrees"])
+        self.assertTrue(mock_start.call_args.kwargs["use_worktrees"])
 
     @patch("hitch.main.views.system_agents.start_autonomous_goal_workflow")
-    def test_run_single_propagates_worktree_setting(
+    def test_run_single_always_uses_worktrees(
         self, mock_start: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -11605,10 +11650,13 @@ class AutonomousGoalViewTests(TestCase):
         )
         self.assertEqual(
             [call.kwargs["use_worktrees"] for call in mock_start.call_args_list],
-            [False, False],
+            [True, True],
         )
 
-    def test_reject_proposed_session_requires_reason(self) -> None:
+    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    def test_reject_proposed_session_requires_reason(
+        self, mock_cleanup: MagicMock
+    ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
@@ -11628,6 +11676,7 @@ class AutonomousGoalViewTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.content, b"reason is required")
+        mock_cleanup.assert_not_called()
 
     def test_accept_proposed_session_links_candidate_session(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -11704,7 +11753,10 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.content, b"outcome status is invalid")
 
-    def test_dismiss_proposed_session_uses_distinct_outcome(self) -> None:
+    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    def test_dismiss_proposed_session_uses_distinct_outcome(
+        self, mock_cleanup: MagicMock
+    ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
@@ -11715,6 +11767,11 @@ class AutonomousGoalViewTests(TestCase):
         proposal = ProposedSession.objects.create(
             autonomous_goal=goal,
             title="Add parser coverage",
+            candidate_session=SessionMetadata.objects.create(
+                thread_id="candidate-thread",
+                cwd="/repo-worktree",
+                project=project,
+            ),
         )
 
         response = self.client.post(
@@ -11727,3 +11784,40 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_DISMISSED)
         self.assertNotEqual(proposal.outcome_status, ProposedSession.OUTCOME_REJECTED)
         self.assertEqual(proposal.outcome_notes, "")
+        mock_cleanup.assert_called_once_with("/repo-worktree")
+
+    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    def test_reject_proposed_session_cleans_candidate_worktree(
+        self, mock_cleanup: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            title="Add parser coverage",
+            candidate_session=candidate,
+        )
+
+        response = self.client.post(
+            reverse("update_proposed_session_outcome", args=[proposal.pk]),
+            {
+                "outcome_status": ProposedSession.OUTCOME_REJECTED,
+                "reason": "Not useful enough.",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_REJECTED)
+        self.assertEqual(proposal.outcome_notes, "Not useful enough.")
+        mock_cleanup.assert_called_once_with("/repo-worktree")

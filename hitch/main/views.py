@@ -79,6 +79,7 @@ from hitch.main.repos import discover_repos, git_common_dir, same_repo_or_worktr
 from hitch.main.worktrees import (
     WorktreeCleanupError,
     WorktreeCreationError,
+    cleanup_managed_worktree_path,
     cleanup_worktree,
     create_worktree_for_session,
     discover_managed_worktrees,
@@ -2498,10 +2499,9 @@ def run_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpRe
     ).first()
     if autonomous_goal is None:
         raise Http404("autonomous goal not found")
-    use_worktrees = _stored_settings(request).use_worktrees
     system_agents.start_autonomous_goal_workflow(
         autonomous_goal=autonomous_goal,
-        use_worktrees=use_worktrees,
+        use_worktrees=True,
     )
     return redirect("autonomous_goals")
 
@@ -2511,11 +2511,10 @@ def run_autonomous_goals(request: HttpRequest) -> HttpResponse:
     project = _active_project_from_request(request)
     if project is None:
         return HttpResponseBadRequest("active project is required")
-    use_worktrees = _stored_settings(request).use_worktrees
     for autonomous_goal in AutonomousGoal.objects.filter(project=project):
         system_agents.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal,
-            use_worktrees=use_worktrees,
+            use_worktrees=True,
         )
     return redirect("autonomous_goals")
 
@@ -2592,7 +2591,29 @@ def update_proposed_session_outcome(
         )
         update_fields.extend(["accepted_session", "outcome_metadata"])
     proposed_session.save(update_fields=update_fields)
+    if outcome_status in {
+        ProposedSession.OUTCOME_DISMISSED,
+        ProposedSession.OUTCOME_REJECTED,
+    }:
+        _cleanup_proposed_session_candidate_worktree(proposed_session)
     return redirect("inbox")
+
+
+def _cleanup_proposed_session_candidate_worktree(
+    proposed_session: ProposedSession,
+) -> None:
+    if proposed_session.accepted_session_id is not None:
+        return
+    candidate = proposed_session.candidate_session
+    if candidate is None or not candidate.cwd:
+        return
+    try:
+        cleanup_managed_worktree_path(candidate.cwd)
+    except WorktreeCleanupError:
+        logger.exception(
+            "failed to clean up candidate worktree for proposed session %s",
+            proposed_session.pk,
+        )
 
 
 def _validated_autonomous_goal_title(raw_title: str) -> tuple[str, str | None]:
@@ -2759,6 +2780,15 @@ def _attach_proposed_session_display_state(
         proposed_session.session_prompt = _proposed_session_prompt(  # type: ignore[attr-defined]
             proposed_session
         )
+        project = _project_for_proposed_session(proposed_session)
+        proposed_session.accept_project_id = (  # type: ignore[attr-defined]
+            project.pk if project is not None else ""
+        )
+        auto_pr_enabled, auto_qa_enabled = (
+            _auto_review_settings_for_proposed_session(proposed_session)
+        )
+        proposed_session.accept_auto_pr = auto_pr_enabled  # type: ignore[attr-defined]
+        proposed_session.accept_auto_qa = auto_qa_enabled  # type: ignore[attr-defined]
 
 
 def _proposed_session_prompt(proposed_session: ProposedSession) -> str:
@@ -7273,6 +7303,12 @@ def _finish_candidate_proposal_start(
     auto_qa_enabled: bool,
 ) -> HttpResponse:
     candidate_cwd = candidate_session.cwd
+    auto_merge_to_local_branch, auto_merge_branch = (
+        _auto_merge_to_local_branch_for_proposal(
+            proposed_session,
+            auto_qa_enabled=auto_qa_enabled,
+        )
+    )
     session_project = (
         None
         if target.project_cleared
@@ -7284,6 +7320,9 @@ def _finish_candidate_proposal_start(
         project_cleared=target.project_cleared,
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
+        auto_merge_to_local_branch=auto_merge_to_local_branch,
+        auto_merge_branch=auto_merge_branch,
+        is_hidden_system_session=False,
     )
     candidate_session.refresh_from_db()
     _accept_proposed_session_for_session(proposed_session, candidate_session)
@@ -7325,9 +7364,17 @@ def _start_candidate_proposal_session(
         return HttpResponseBadRequest(
             "candidate session cwd is not an allowed repository"
         )
+    spec_critic_should_run = system_agents.spec_critic_should_run(prompt)
+    prompt = _candidate_proposal_continuation_prompt(prompt)
     base_instructions = _base_instructions_for_settings(spawn_settings)
     project = None if target.project_cleared else candidate_session.project or target.project
     developer_instructions = _developer_instructions_for_project(settings, project)
+    auto_merge_to_local_branch, auto_merge_branch = (
+        _auto_merge_to_local_branch_for_proposal(
+            proposed_session,
+            auto_qa_enabled=auto_qa_enabled,
+        )
+    )
     if qa_workflow_activation:
         workflow_kwargs: dict[str, Any] = {
             "main_thread_id": candidate_session.thread_id,
@@ -7350,6 +7397,8 @@ def _start_candidate_proposal_session(
             workflow_kwargs["qa_panel_enabled"] = True
         if qa_activation:
             workflow_kwargs["open_pr_on_lgtm"] = False
+        if auto_merge_branch:
+            workflow_kwargs["auto_merge_branch"] = auto_merge_branch
         system_agents.start_pr_qa_workflow(**workflow_kwargs)
         return _finish_candidate_proposal_start(
             request=request,
@@ -7398,11 +7447,14 @@ def _start_candidate_proposal_session(
         )
         if settings.qa_panel_enabled:
             spawn_kwargs["qa_panel_enabled"] = True
+        if auto_merge_to_local_branch:
+            spawn_kwargs["auto_merge_to_local_branch"] = True
+            spawn_kwargs["auto_merge_branch"] = auto_merge_branch
     if (
         settings.spec_critic_enabled
         and not input_image_paths
         and not plan_mode
-        and system_agents.spec_critic_should_run(prompt)
+        and spec_critic_should_run
     ):
         spec_workflow_kwargs: dict[str, Any] = {
             "main_thread_id": candidate_session.thread_id,
@@ -7424,6 +7476,9 @@ def _start_candidate_proposal_session(
             spec_workflow_kwargs["base_instructions"] = base_instructions
         if web_search_mode:
             spec_workflow_kwargs["web_search_mode"] = web_search_mode
+        if auto_merge_to_local_branch:
+            spec_workflow_kwargs["auto_merge_to_local_branch"] = True
+            spec_workflow_kwargs["auto_merge_branch"] = auto_merge_branch
         if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
             spec_workflow_kwargs["qa_panel_enabled"] = True
         system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
@@ -7461,6 +7516,67 @@ def _start_candidate_proposal_session(
         cookie_updates=cookie_updates,
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
+    )
+
+
+def _candidate_proposal_continuation_prompt(prompt: str) -> str:
+    rebase_instruction = (
+        "First, rebase or otherwise update this worktree onto the current project "
+        "base branch before continuing. Resolve any conflicts, then continue with "
+        "the user's instructions."
+    )
+    prompt = prompt.strip()
+    if not prompt:
+        return rebase_instruction
+    return f"{rebase_instruction}\n\n{prompt}"
+
+
+def _auto_merge_to_local_branch_for_proposal(
+    proposed_session: ProposedSession,
+    *,
+    auto_qa_enabled: bool,
+) -> tuple[bool, str]:
+    if not auto_qa_enabled:
+        return False, ""
+    metadata = _proposal_metadata(proposed_session)
+    if "auto_merge_to_local_branch" in metadata or "auto_merge_branch" in metadata:
+        enabled = metadata.get("auto_merge_to_local_branch") is True
+        branch = str(metadata.get("auto_merge_branch") or "").strip()
+        if enabled and branch:
+            return True, branch
+        return False, ""
+    if proposed_session.autonomous_goal is None:
+        return False, ""
+    autonomous_goal = proposed_session.autonomous_goal
+    if not autonomous_goal.auto_merge_to_local_branch:
+        return False, ""
+    branch = autonomous_goal.auto_merge_branch.strip()
+    if not branch:
+        return False, ""
+    return True, branch
+
+
+def _auto_review_settings_for_proposed_session(
+    proposed_session: ProposedSession,
+) -> tuple[bool, bool]:
+    metadata = _proposal_metadata(proposed_session)
+    if "auto_pr_enabled" in metadata or "auto_qa_enabled" in metadata:
+        auto_pr_enabled = metadata.get("auto_pr_enabled") is True
+        auto_qa_enabled = metadata.get("auto_qa_enabled") is True and not auto_pr_enabled
+        return auto_pr_enabled, auto_qa_enabled
+    autonomous_goal = proposed_session.autonomous_goal
+    if autonomous_goal is None:
+        return False, False
+    auto_pr_enabled = autonomous_goal.autonomy == AutonomousGoal.AUTONOMY_DRAFT_PR
+    auto_qa_enabled = autonomous_goal.auto_qa_enabled and not auto_pr_enabled
+    return auto_pr_enabled, auto_qa_enabled
+
+
+def _proposal_metadata(proposed_session: ProposedSession) -> dict[str, object]:
+    return (
+        proposed_session.outcome_metadata
+        if isinstance(proposed_session.outcome_metadata, dict)
+        else {}
     )
 
 
@@ -7775,6 +7891,10 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest(auto_qa_error)
     if auto_pr_enabled:
         auto_qa_enabled = False
+    if proposed_session is not None and proposed_session.autonomous_goal is not None:
+        auto_pr_enabled, auto_qa_enabled = _auto_review_settings_for_proposed_session(
+            proposed_session
+        )
     web_search_mode, web_search_error = _posted_web_search_override(
         request.POST.get("web_search_mode"),
         default=settings.web_search_mode,

@@ -11,6 +11,7 @@ from hitch.main import worktrees
 from hitch.main.worktrees import (
     WorktreeCleanupError,
     WorktreeCreationError,
+    cleanup_managed_worktree_path,
     cleanup_worktree,
     create_worktree_for_session,
     discover_managed_worktrees,
@@ -213,6 +214,36 @@ class ManagedWorktreeTests(SimpleTestCase):
             self.assertEqual(
                 _git(repo, "branch", "--list", managed_worktree.branch), ""
             )
+
+    def test_cleanup_managed_worktree_path_removes_worktree_and_branch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "source"
+            managed = root / "managed"
+            _init_repo(repo)
+
+            with override_settings(HITCH_WORKTREES_DIR=managed):
+                managed_worktree = create_worktree_for_session(str(repo))
+                cleaned = cleanup_managed_worktree_path(str(managed_worktree.path))
+
+            self.assertTrue(cleaned)
+            self.assertFalse(managed_worktree.path.exists())
+            self.assertEqual(
+                _git(repo, "branch", "--list", managed_worktree.branch), ""
+            )
+
+    def test_cleanup_managed_worktree_path_ignores_unmanaged_path(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            unmanaged = root / "unmanaged"
+            managed = root / "managed"
+            _init_repo(unmanaged)
+
+            with override_settings(HITCH_WORKTREES_DIR=managed):
+                cleaned = cleanup_managed_worktree_path(str(unmanaged))
+
+            self.assertFalse(cleaned)
+            self.assertTrue(unmanaged.exists())
 
     def test_cleanup_reports_git_failure(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

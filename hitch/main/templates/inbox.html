@@ -435,7 +435,17 @@
                         <a class="button secondary" href="{{ proposed_session.judge_log_url }}">Judge log</a>
                         {% endif %}
                         {% else %}
-                        <a class="button" href="{% url 'new_session' %}?proposed_session={{ proposed_session.pk }}">Do it</a>
+                        <button
+                            type="button"
+                            class="button"
+                            data-proposed-session-do
+                            data-proposed-session-id="{{ proposed_session.pk }}"
+                            data-proposed-session-title="{{ proposed_session.title }}"
+                            data-proposed-session-project="{{ proposed_session.accept_project_id }}"
+                            data-proposed-session-prompt="{{ proposed_session.session_prompt }}"
+                            data-proposed-session-auto-pr="{% if proposed_session.autonomous_goal %}{% if proposed_session.accept_auto_pr %}true{% else %}false{% endif %}{% endif %}"
+                            data-proposed-session-auto-qa="{% if proposed_session.autonomous_goal %}{% if proposed_session.accept_auto_qa %}true{% else %}false{% endif %}{% endif %}"
+                        >Do it</button>
                         {% endif %}
                     </div>
                 </li>
@@ -465,15 +475,63 @@
             </div>
         </form>
     </dialog>
+    <dialog class="new-session" data-do-session-dialog aria-labelledby="do-session-title">
+        <form method="post" action="{% url 'new_session' %}" data-do-session-form>
+            {% csrf_token %}
+            <input type="hidden" name="project" data-do-session-project>
+            <input type="hidden" name="proposed_session" data-do-session-id>
+            <input type="hidden" name="auto_pr" data-do-session-auto-pr>
+            <input type="hidden" name="auto_qa" data-do-session-auto-qa>
+            <h2 id="do-session-title">Continue proposed session</h2>
+            <p class="meta" data-do-session-title></p>
+            <label>
+                Message
+                <textarea name="prompt" required autocomplete="off" data-do-session-prompt></textarea>
+            </label>
+            <div class="actions">
+                <button type="button" class="button secondary" data-do-session-cancel>Cancel</button>
+                <button type="submit" class="button">Start</button>
+            </div>
+        </form>
+    </dialog>
     <script>
         (function () {
             {% include "_dialog_script.html" %}
             {% include "_context_menu_script.html" %}
+            const doDialog = document.querySelector("[data-do-session-dialog]");
+            const doForm = doDialog && doDialog.querySelector("[data-do-session-form]");
+            const doTitle = doDialog && doDialog.querySelector("[data-do-session-title]");
+            const doPrompt = doDialog && doDialog.querySelector("[data-do-session-prompt]");
+            const doProject = doDialog && doDialog.querySelector("[data-do-session-project]");
+            const doId = doDialog && doDialog.querySelector("[data-do-session-id]");
+            const doAutoPr = doDialog && doDialog.querySelector("[data-do-session-auto-pr]");
+            const doAutoQa = doDialog && doDialog.querySelector("[data-do-session-auto-qa]");
+            const doCancel = doDialog && doDialog.querySelector("[data-do-session-cancel]");
             const rejectDialog = document.querySelector("[data-reject-session-dialog]");
             const rejectForm = rejectDialog && rejectDialog.querySelector("[data-reject-session-form]");
             const rejectTitle = rejectDialog && rejectDialog.querySelector("[data-reject-session-title]");
             const rejectReason = rejectDialog && rejectDialog.querySelector("textarea[name='reason']");
             const rejectCancel = rejectDialog && rejectDialog.querySelector("[data-reject-session-cancel]");
+            for (const button of document.querySelectorAll("[data-proposed-session-do]")) {
+                button.addEventListener("click", () => {
+                    if (!doForm) return;
+                    if (doTitle) doTitle.textContent = button.dataset.proposedSessionTitle || "";
+                    if (doPrompt) doPrompt.value = button.dataset.proposedSessionPrompt || "";
+                    if (doProject) doProject.value = button.dataset.proposedSessionProject || "";
+                    if (doId) doId.value = button.dataset.proposedSessionId || "";
+                    if (doAutoPr) {
+                        doAutoPr.value = button.dataset.proposedSessionAutoPr || "";
+                        doAutoPr.disabled = !button.dataset.proposedSessionAutoPr;
+                    }
+                    if (doAutoQa) {
+                        doAutoQa.value = button.dataset.proposedSessionAutoQa || "";
+                        doAutoQa.disabled = !button.dataset.proposedSessionAutoQa;
+                    }
+                    showDialog(doDialog);
+                    if (doPrompt) doPrompt.focus();
+                });
+            }
+            if (doCancel) doCancel.addEventListener("click", () => hideDialog(doDialog));
             for (const button of document.querySelectorAll("[data-proposed-session-reject]")) {
                 button.addEventListener("click", () => {
                     if (!rejectForm) return;
