@@ -212,6 +212,42 @@ class IterEntriesTests(TestCase):
         entries = list(rollout.iter_entries(path))
         self.assertEqual(entries[0]["detail"], "ls -la")
 
+    def test_shell_function_call_with_argv_array_renders_joined_command(self) -> None:
+        # Codex's `shell` tool spec (see `core/src/tools/handlers/shell_spec.rs`
+        # in codex-rs) and `container.exec` both carry the command as an
+        # argv-style array of strings, mirroring the payload `local_shell_call`
+        # uses. The function-call path is the route OSS models -- including the
+        # `qwen2.5-coder:0.5b` model the README's `just run_qwen` recipe
+        # configures -- take when they cannot emit `local_shell_call`. Without
+        # joining the parts, every shell invocation that flows through this
+        # path surfaces as a `Command:` row with no detail at all, so the user
+        # cannot see what the agent actually ran.
+        for tool_name, arg_key in (
+            ("shell", "command"),
+            ("container.exec", "cmd"),
+        ):
+            with self.subTest(tool_name=tool_name):
+                arguments = json.dumps({arg_key: ["bash", "-lc", "ls -la"]})
+                path = self._make(
+                    [
+                        _line(
+                            "response_item",
+                            {
+                                "type": "function_call",
+                                "name": tool_name,
+                                "arguments": arguments,
+                                "call_id": f"call-{tool_name}",
+                            },
+                        )
+                    ]
+                )
+                entries = list(rollout.iter_entries(path))
+                self.assertEqual(len(entries), 1)
+                entry = entries[0]
+                self.assertEqual(entry["kind"], "tool_call")
+                self.assertEqual(entry["type"], "commandExecution")
+                self.assertEqual(entry["detail"], "bash -lc ls -la")
+
     def test_function_call_for_non_shell_tool_is_ignored(self) -> None:
         path = self._make(
             [
