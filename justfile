@@ -105,5 +105,14 @@ install-systemd:
   EOF
   systemctl --user daemon-reload
   systemctl --user enable hitch.service
+  # Without lingering the user manager exits at logout and never restarts at
+  # boot, so the deployed service would die with the install session.
+  if ! loginctl show-user "$(id -un)" --property=Linger --value 2>/dev/null | grep -qx yes; then
+    if ! loginctl enable-linger "$(id -un)" 2>/dev/null; then
+      echo "Could not enable lingering automatically. Run:" >&2
+      echo "  sudo loginctl enable-linger $(id -un)" >&2
+      echo "so the service survives logout and starts at boot." >&2
+    fi
+  fi
   echo "Installed ${UNIT_PATH}."
   echo "Start with: systemctl --user start hitch.service"
