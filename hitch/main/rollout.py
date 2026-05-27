@@ -196,11 +196,16 @@ def latest_pr_url(rollout_path: Path) -> str | None:
     for _, turn_lines in _lines_by_turn(lines):
         if not _turn_is_pr_prompt(turn_lines):
             continue
-        final_idx = _find_final_agent_line_idx(turn_lines)
-        if final_idx == -1:
+        if _find_final_agent_line_idx(turn_lines) == -1:
             continue
+        # The model can emit a final-answer message in the same response that
+        # carries the create-PR function_call, so the function_call_output --
+        # written to the rollout when the tool actually completes -- can land
+        # AFTER the final-answer line for the same turn. Scan every entry in
+        # the turn rather than stopping at the final-answer index, or the URL
+        # of the PR the user just opened is silently dropped.
         urls: list[str] = []
-        for entry in turn_lines[:final_idx]:
+        for entry in turn_lines:
             urls.extend(
                 _github_pr_urls_from_value(
                     _github_pr_tool_result_value(entry, function_calls_by_id)
