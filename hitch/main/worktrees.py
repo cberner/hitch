@@ -86,9 +86,7 @@ def cleanup_managed_worktree_path(cwd: str) -> bool:
     path = Path(cwd).expanduser()
     if not _is_managed_worktree_path(path):
         return False
-    branch = (
-        _git(path, ["branch", "--show-current"], error_cls=WorktreeCleanupError) or ""
-    ).strip()
+    branch = _managed_branch_for_path(path)
     common_dir = (
         _git(
             path,
@@ -146,6 +144,19 @@ def _is_managed_worktree_path(path: Path) -> bool:
     except ValueError:
         return False
     return (path / ".git").exists()
+
+
+def _managed_branch_for_path(path: Path) -> str:
+    resolved_path = _resolved_path(path)
+    resolved_base = _resolved_path(Path(settings.HITCH_WORKTREES_DIR).expanduser())
+    try:
+        relative = resolved_path.relative_to(resolved_base)
+    except ValueError as exc:
+        raise WorktreeCleanupError("path is not under managed worktree root") from exc
+    if len(relative.parts) != 2:
+        raise WorktreeCleanupError("managed worktree path is not branch-addressable")
+    repo_slug, suffix = relative.parts
+    return f"hitch/{repo_slug}/{suffix}"
 
 
 def _source_repo_from_common_dir(common_dir: Path) -> Path:

@@ -232,6 +232,28 @@ class ManagedWorktreeTests(SimpleTestCase):
                 _git(repo, "branch", "--list", managed_worktree.branch), ""
             )
 
+    def test_cleanup_managed_worktree_path_preserves_checked_out_user_branch(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "source"
+            managed = root / "managed"
+            _init_repo(repo)
+            _git(repo, "branch", "release")
+
+            with override_settings(HITCH_WORKTREES_DIR=managed):
+                managed_worktree = create_worktree_for_session(str(repo))
+                _git(managed_worktree.path, "checkout", "release")
+                cleaned = cleanup_managed_worktree_path(str(managed_worktree.path))
+
+            self.assertTrue(cleaned)
+            self.assertFalse(managed_worktree.path.exists())
+            self.assertEqual(
+                _git(repo, "branch", "--list", managed_worktree.branch), ""
+            )
+            self.assertIn("release", _git(repo, "branch", "--list", "release"))
+
     def test_cleanup_managed_worktree_path_ignores_unmanaged_path(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
