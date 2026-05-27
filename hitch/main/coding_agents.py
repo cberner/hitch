@@ -110,6 +110,11 @@ def default_codex_base_instructions() -> str:
         "You are running inside HITCH.",
         "- The user expects you to make good engineering calls.",
         "- Treat ambiguous implementation details as part of the job:",
+        # ``hitch.propose_session`` and ``$HITCH_PROPOSE_SESSION_COMMAND`` are
+        # Hitch-specific tooling; leaving the line in pollutes the "default
+        # Codex" prompt with tool references that have no meaning outside the
+        # Hitch worker environment.
+        "- When the user asks you to create proposed sessions",
     )
     lines = [
         line
