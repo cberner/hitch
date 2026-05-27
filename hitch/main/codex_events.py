@@ -638,11 +638,33 @@ def _copy_ci_fields(
         if tool == "get_commit_combined_status":
             status = _ci_status_from_statuses(source.get("statuses"))
             if status:
+                # Only ``success`` is a definitive clean observation that
+                # supersedes a prior per-job snapshot. ``_ci_status_from_statuses``
+                # also emits a truthy ``"unknown"`` for an empty statuses list
+                # (the tool returned no data on this commit), which proves
+                # nothing about whether previously-observed failing jobs
+                # actually recovered; clearing on that would degrade an
+                # actionable "Failing CI jobs were observed" gate to a
+                # non-actionable pending/waiting state. ``failure`` /
+                # ``pending`` mean something is non-green at the commit level
+                # without speaking to which jobs, so the prior per-job list
+                # remains the most specific signal the follow-up agent has.
                 target["ci_status"] = status
+                if status == "success":
+                    target["failing_jobs"] = []
+                    target["pending_jobs"] = []
         elif tool == "fetch_commit_workflow_runs":
             status = _ci_status_from_runs(source.get("workflow_runs"))
             if status:
+                # Same "only clear on definitive success" guard as the
+                # combined-status branch above: workflow-runs observations
+                # don't enumerate jobs, so an ``unknown`` / ``failure`` /
+                # ``pending`` result must not stomp on a prior
+                # ``fetch_workflow_run_jobs`` per-job snapshot.
                 target["ci_status"] = status
+                if status == "success":
+                    target["failing_jobs"] = []
+                    target["pending_jobs"] = []
         elif tool == "fetch_workflow_run_jobs":
             status, failing_jobs, pending_jobs = _ci_status_from_jobs(source.get("jobs"))
             if status:

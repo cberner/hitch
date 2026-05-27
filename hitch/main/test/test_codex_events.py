@@ -1194,6 +1194,231 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
         self.assertEqual(snapshot.get("failing_jobs", []), [])
         self.assertEqual(snapshot.get("pending_jobs", []), [])
 
+    def test_pr_snapshot_clears_stale_failing_jobs_across_ci_tools(
+        self,
+    ) -> None:
+        # A PR turn that observes a failing job via ``fetch_workflow_run_jobs``
+        # and then re-checks the same commit through a different CI tool --
+        # ``get_commit_combined_status`` or ``fetch_commit_workflow_runs`` --
+        # must end with the snapshot reflecting the second observation:
+        # ``ci_status`` ``success`` AND ``failing_jobs`` cleared. Before the
+        # fix only ``fetch_workflow_run_jobs`` wrote ``failing_jobs``/
+        # ``pending_jobs`` (commit 1c14f01 fixed the same-tool re-observation
+        # case), so the cross-tool re-observation produced an update without
+        # those keys. ``_merge_pr_snapshot_update`` therefore kept the first
+        # observation's stale failing list alongside ``ci_status: "success"``,
+        # and ``system_agents._ci_gate`` -- which short-circuits to BLOCKED
+        # whenever ``failing_jobs`` has any items, regardless of ``ci_status``
+        # -- then surfaced the PR as "Failing CI jobs were observed" to the
+        # PR follow-up agent. The follow-up workflow looped feedback rounds
+        # trying to "fix" CI that was already green, burning iterations until
+        # ``max_iterations`` was reached. The cross-tool path triggers in
+        # practice whenever the agent first drills into a specific run's
+        # failing job and then re-confirms via the commit's combined status
+        # (e.g. after a CI auto-retry flips the run to success without a
+        # repo push, so the head-SHA-changed reset never runs).
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_create_pull_request",
+                                    "result": {
+                                        "structuredContent": {
+                                            "url": (
+                                                "https://github.com/cberner/hitch/pull/200"
+                                            ),
+                                            "number": 200,
+                                            "head_sha": "abc123",
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=5,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_fetch_workflow_run_jobs",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "run_id": 42,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "jobs": [
+                                                {
+                                                    "name": "lint",
+                                                    "status": "completed",
+                                                    "conclusion": "success",
+                                                },
+                                                {
+                                                    "name": "test-suite",
+                                                    "status": "completed",
+                                                    "conclusion": "failure",
+                                                },
+                                            ]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_get_commit_combined_status",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "commit_sha": "abc123",
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "statuses": [
+                                                {"state": "success"},
+                                                {"state": "success"},
+                                            ]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["ci_status"], "success")
+        self.assertEqual(snapshot.get("failing_jobs", []), [])
+        self.assertEqual(snapshot.get("pending_jobs", []), [])
+
+    def test_pr_snapshot_preserves_failing_jobs_on_unknown_ci_observation(
+        self,
+    ) -> None:
+        # The cross-tool failing-jobs clear must only fire when the newer
+        # observation establishes a definitive clean state. A combined-status
+        # call that returns no statuses produces ``ci_status="unknown"``
+        # (``_ci_status_from_statuses([])``), which proves nothing about
+        # whether previously-observed failing jobs actually recovered.
+        # Overwriting ``failing_jobs``/``pending_jobs`` on that signal would
+        # degrade the actionable "Failing CI jobs were observed" gate to a
+        # non-actionable pending/waiting state -- the follow-up agent then
+        # stops driving toward a CI fix even though nothing has refuted the
+        # failure. Same shape applies to ``failure``/``pending`` results from
+        # the rollup tools: they don't speak to which jobs are bad, so the
+        # prior per-job list is the most specific signal we have.
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_create_pull_request",
+                                    "result": {
+                                        "structuredContent": {
+                                            "url": (
+                                                "https://github.com/cberner/hitch/pull/201"
+                                            ),
+                                            "number": 201,
+                                            "head_sha": "abc123",
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=5,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_fetch_workflow_run_jobs",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "run_id": 42,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "jobs": [
+                                                {
+                                                    "name": "test-suite",
+                                                    "status": "completed",
+                                                    "conclusion": "failure",
+                                                },
+                                            ]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_get_commit_combined_status",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "commit_sha": "abc123",
+                                    },
+                                    "result": {
+                                        "structuredContent": {"statuses": []}
+                                    },
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["ci_status"], "unknown")
+        self.assertEqual(snapshot.get("failing_jobs", []), ["test-suite"])
+
     def test_pr_snapshot_clears_stale_pending_jobs_on_clean_re_observation(
         self,
     ) -> None:
