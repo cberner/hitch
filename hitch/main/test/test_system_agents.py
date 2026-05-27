@@ -3361,6 +3361,283 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_active_workflow_reconciles_terminal_hidden_run(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_QA_RUNNING,
+        )
+        instance = _instance(
+            thread_id="qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            status=CodexInstance.STATUS_FAILED,
+            error="worker process exited before reporting completion",
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="qa-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        active = system_agents.active_workflow_for_thread("main-thread")
+
+        self.assertIsNone(active)
+        run.refresh_from_db()
+        workflow.refresh_from_db()
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertIn("worker process exited", run.error)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        self.assertIn("worker process exited", workflow.state["error"])
+        mock_spawn.assert_called_once()
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_reconcile_terminal_hidden_run_recovers_missing_run_row(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_QA_RUNNING,
+        )
+        instance = _instance(
+            thread_id="qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            status=CodexInstance.STATUS_FAILED,
+            error="worker process exited before run creation",
+        )
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id="main-thread"
+        )
+
+        self.assertEqual(reconciled, 1)
+        run = SystemAgentRun.objects.get(instance=instance)
+        workflow.refresh_from_db()
+        self.assertEqual(run.workflow, workflow)
+        self.assertEqual(run.agent_kind, system_agents.PR_QA_AGENT_KIND)
+        self.assertEqual(run.thread_id, "qa-thread")
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertIn("worker process exited", run.error)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        self.assertIn("worker process exited", workflow.state["error"])
+        mock_spawn.assert_called_once()
+
+    @patch("hitch.main.system_agents._handle_pr_qa_agent_finished")
+    def test_system_agent_finish_claims_instance_before_routing(
+        self, mock_route: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_QA_RUNNING,
+        )
+        instance = _instance(
+            thread_id="qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="qa-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        handled = system_agents.on_codex_instance_finished(instance)
+        instance.refresh_from_db()
+
+        self.assertTrue(handled)
+        self.assertIsNotNone(instance.workflow_routing_started_at)
+        mock_route.assert_called_once()
+        mock_route.reset_mock()
+
+        handled = system_agents.on_codex_instance_finished(instance)
+
+        self.assertTrue(handled)
+        mock_route.assert_not_called()
+
+    def test_workflow_turn_finish_claims_instance_before_routing(self) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_FEEDBACK_RUNNING,
+        )
+        cases = [
+            (
+                CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+                "hitch.main.system_agents._handle_system_feedback_finished",
+            ),
+            (
+                CodexInstance.PURPOSE_USER,
+                "hitch.main.system_agents._handle_workflow_user_turn_finished",
+            ),
+        ]
+        for purpose, handler in cases:
+            with self.subTest(purpose=purpose), patch(handler) as mock_handler:
+                instance = _instance(
+                    thread_id="main-thread",
+                    purpose=purpose,
+                    workflow_id=workflow.pk,
+                    status=CodexInstance.STATUS_COMPLETED,
+                )
+
+                handled = system_agents.on_codex_instance_finished(instance)
+                instance.refresh_from_db()
+
+                self.assertTrue(handled)
+                self.assertIsNotNone(instance.workflow_routing_started_at)
+                mock_handler.assert_called_once()
+                mock_handler.reset_mock()
+
+                handled = system_agents.on_codex_instance_finished(instance)
+
+                self.assertTrue(handled)
+                mock_handler.assert_not_called()
+
+    @patch("hitch.main.system_agents._handle_system_feedback_finished")
+    def test_reconcile_terminal_workflow_turn_clears_claim_when_routing_raises(
+        self, mock_handler: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_FEEDBACK_RUNNING,
+            state={"next_user_message_index": 1},
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_COMPLETED,
+            user_message_index=0,
+        )
+        mock_handler.side_effect = [RuntimeError("transient"), None]
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id="main-thread"
+        )
+        instance.refresh_from_db()
+
+        self.assertEqual(reconciled, 0)
+        self.assertIsNone(instance.workflow_routing_started_at)
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id="main-thread"
+        )
+        instance.refresh_from_db()
+
+        self.assertEqual(reconciled, 1)
+        self.assertIsNotNone(instance.workflow_routing_started_at)
+        self.assertEqual(mock_handler.call_count, 2)
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.system_agents._spawn_pr_followup_monitor_run")
+    @patch("hitch.main.system_agents._spawn_pr_qa_run")
+    def test_reconcile_terminal_workflow_turns_ignores_prior_completed_turn(
+        self,
+        mock_spawn_qa: MagicMock,
+        mock_spawn_monitor: MagicMock,
+        mock_spawn_turn: MagicMock,
+    ) -> None:
+        cases = [
+            (
+                system_agents.STEP_FEEDBACK_RUNNING,
+                CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+                "QA feedback worker failed: current failed",
+                {},
+            ),
+            (
+                system_agents.STEP_PR_FEEDBACK_RUNNING,
+                CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+                "PR feedback worker failed: current failed",
+                {},
+            ),
+            (
+                system_agents.STEP_USER_STEERING_RUNNING,
+                CodexInstance.PURPOSE_USER,
+                "coding worker failed: current failed",
+                {},
+            ),
+            (
+                system_agents.STEP_PR_PROMPT_RUNNING,
+                CodexInstance.PURPOSE_USER,
+                "PR prompt worker failed: current failed",
+                {
+                    system_agents._PR_HANDOFF_STATE_KEY: {
+                        "url": "https://github.com/cberner/hitch/pull/169",
+                        "repository_full_name": "cberner/hitch",
+                        "pr_number": 169,
+                    }
+                },
+            ),
+        ]
+        for case_index, (step, purpose, expected_error, extra_state) in enumerate(cases):
+            with self.subTest(step=step):
+                mock_spawn_qa.reset_mock()
+                mock_spawn_monitor.reset_mock()
+                mock_spawn_turn.reset_mock()
+                workflow = SystemWorkflow.objects.create(
+                    kind=SystemWorkflow.KIND_PR_QA,
+                    main_thread_id=f"main-thread-{case_index}",
+                    cwd="/repo",
+                    status=SystemWorkflow.STATUS_RUNNING,
+                    step=step,
+                    state={"next_user_message_index": 2, **extra_state},
+                )
+                _instance(
+                    thread_id=workflow.main_thread_id,
+                    purpose=purpose,
+                    workflow_id=workflow.pk,
+                    status=CodexInstance.STATUS_COMPLETED,
+                    user_message_index=0,
+                )
+                _instance(
+                    thread_id=workflow.main_thread_id,
+                    purpose=purpose,
+                    workflow_id=workflow.pk,
+                    status=CodexInstance.STATUS_FAILED,
+                    error="current failed",
+                    user_message_index=1,
+                )
+
+                reconciled = system_agents.reconcile_terminal_workflow_instances(
+                    main_thread_id=workflow.main_thread_id
+                )
+
+                self.assertEqual(reconciled, 1)
+                workflow.refresh_from_db()
+                self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+                self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+                self.assertEqual(workflow.state["error"], expected_error)
+                self.assertTrue(workflow.state["failure_surfaced"])
+                mock_spawn_turn.assert_called_once()
+                mock_spawn_qa.assert_not_called()
+                mock_spawn_monitor.assert_not_called()
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
     @patch("hitch.main.system_agents.codex_pool.interrupt_instance", return_value=None)
     def test_stop_active_workflow_leaves_running_when_interrupt_fails(
         self, mock_interrupt: MagicMock, mock_spawn: MagicMock

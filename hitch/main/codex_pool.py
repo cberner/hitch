@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -905,6 +906,32 @@ def reconcile_dead() -> int:
     pending = CodexInstance.objects.filter(
         status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING)
     )
+    updated = _mark_dead_instances_failed(pending)
+    _reconcile_terminal_workflow_instances()
+    retry_failed_input_image_cleanups()
+    _prune_reaped_workers()
+    return updated
+
+
+def reconcile_dead_for_workflow(
+    workflow_id: int, *, main_thread_id: str | None = None
+) -> int:
+    """Mark dead workers for one workflow without sweeping every session."""
+    _reap_finished_workers()
+    pending = CodexInstance.objects.filter(
+        workflow_id=workflow_id,
+        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+    )
+    updated = _mark_dead_instances_failed(pending)
+    _reconcile_terminal_workflow_instances(
+        main_thread_id=main_thread_id,
+        workflow_id=workflow_id,
+    )
+    _prune_reaped_workers()
+    return updated
+
+
+def _mark_dead_instances_failed(pending: Iterable[CodexInstance]) -> int:
     updated = 0
     now = timezone.now()
     for instance in pending:
@@ -918,8 +945,6 @@ def reconcile_dead() -> int:
         _notify_system_agents_if_needed(instance)
         cleanup_requested_input_images_for(instance)
         updated += 1
-    retry_failed_input_image_cleanups()
-    _prune_reaped_workers()
     return updated
 
 
@@ -971,6 +996,20 @@ def _notify_system_agents_if_needed(instance: CodexInstance) -> None:
             "failed to notify demo workflow for reconciled instance %s",
             instance.pk,
         )
+
+
+def _reconcile_terminal_workflow_instances(
+    *, main_thread_id: str | None = None, workflow_id: int | None = None
+) -> None:
+    try:
+        from hitch.main import system_agents
+
+        system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id=main_thread_id,
+            workflow_id=workflow_id,
+        )
+    except Exception:
+        logger.exception("failed to reconcile terminal workflow instances")
 
 
 def events_dir() -> Path:

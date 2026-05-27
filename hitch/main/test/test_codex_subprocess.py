@@ -1397,6 +1397,55 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertEqual(n, 1)
 
+    @patch("hitch.main.system_agents.reconcile_terminal_workflow_instances")
+    @patch("hitch.main.system_agents.on_codex_instance_finished", return_value=True)
+    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_dead_for_workflow_scopes_pending_rows(
+        self,
+        _mock_worker_alive: MagicMock,
+        _mock_notify: MagicMock,
+        mock_reconcile: MagicMock,
+    ) -> None:
+        target_workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+        )
+        other_workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="other-thread",
+            cwd="/repo",
+        )
+        target = self._make(
+            pid=10,
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+        )
+        other = self._make(
+            pid=11,
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+        )
+        CodexInstance.objects.filter(pk=target.pk).update(
+            workflow_id=target_workflow.pk
+        )
+        CodexInstance.objects.filter(pk=other.pk).update(workflow_id=other_workflow.pk)
+
+        n = codex_pool.reconcile_dead_for_workflow(
+            target_workflow.pk,
+            main_thread_id=target_workflow.main_thread_id,
+        )
+
+        self.assertEqual(n, 1)
+        target.refresh_from_db()
+        other.refresh_from_db()
+        self.assertEqual(target.status, CodexInstance.STATUS_FAILED)
+        self.assertEqual(other.status, CodexInstance.STATUS_RUNNING)
+        mock_reconcile.assert_called_once_with(
+            main_thread_id=target_workflow.main_thread_id,
+            workflow_id=target_workflow.pk,
+        )
+
     @patch("hitch.main.system_agents.on_codex_instance_finished")
     def test_reconcile_does_not_notify_system_agents_for_unassigned_pid(
         self, mock_notify: MagicMock
@@ -5398,7 +5447,10 @@ class StreamForInstanceTests(TestCase):
 
     @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
     @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
-    def test_system_workflow_stream_reports_working(self) -> None:
+    @patch("hitch.main.codex_pool.worker_is_alive", return_value=True)
+    def test_system_workflow_stream_reports_working(
+        self, _mock_worker_alive: MagicMock
+    ) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
             main_thread_id="thread-workflow",
@@ -5460,8 +5512,35 @@ class StreamForInstanceTests(TestCase):
         self.assertIn(b'"working": true', heartbeats[0])
         self.assertIn(b'"statusText": "QA agent working...99 tokens"', heartbeats[0])
 
+    def test_system_workflow_stream_uses_scoped_dead_reconciliation(self) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-workflow",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step="qa_running",
+        )
+
+        with (
+            patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.001),
+            patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001),
+            patch("hitch.main.streaming.codex_pool.reconcile_dead") as mock_global,
+            patch(
+                "hitch.main.streaming.codex_pool.reconcile_dead_for_workflow"
+            ) as mock_scoped,
+        ):
+            frames = list(
+                streaming.system_workflow_stream(
+                    "thread-workflow", baseline_id=None, workflow_id=workflow.pk
+                )
+            )
+
+        self.assertTrue(frames)
+        mock_scoped.assert_any_call(workflow.pk, main_thread_id="thread-workflow")
+        mock_global.assert_not_called()
+
     @patch("hitch.main.streaming._HEARTBEAT_INTERVAL", 0.0)
-    @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.005)
+    @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.05)
     @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
     def test_system_workflow_stream_resends_status_heartbeat(self) -> None:
         workflow = SystemWorkflow.objects.create(

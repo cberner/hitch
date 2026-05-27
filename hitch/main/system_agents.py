@@ -7,11 +7,12 @@ import logging
 import re
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from django.db import IntegrityError, models, transaction
+from django.db.models import QuerySet
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from openai_codex import AppServerError, Codex
@@ -117,6 +118,7 @@ _AUTONOMOUS_GOAL_USE_WORKTREES_STATE_KEY = "use_worktrees"
 _AUTONOMOUS_GOAL_SESSION_CWD_STATE_KEY = "session_cwd"
 _QA_DESIGN_SYNTHESIS_STATE_KEY = "qa_design_synthesis_gate"
 _QA_REVIEW_REVISION_STATE_KEY = "qa_review_revision"
+_WORKFLOW_ROUTE_CLAIM_TIMEOUT = timedelta(minutes=10)
 _QA_DESIGN_SYNTHESIS_MIN_CATEGORY_OVERLAP = 2
 _QA_DESIGN_SYNTHESIS_RECENT_RUN_LIMIT = 50
 _QA_DESIGN_SYNTHESIS_MATCH_LIMIT = 3
@@ -1196,6 +1198,7 @@ def _thread_metadata_value(value: Any) -> str:
 
 
 def active_workflow_for_thread(main_thread_id: str) -> SystemWorkflow | None:
+    reconcile_terminal_workflow_instances(main_thread_id=main_thread_id)
     return (
         SystemWorkflow.objects.filter(
             kind__in=(SystemWorkflow.KIND_PR_QA, SPEC_CRITIC_WORKFLOW_KIND),
@@ -1205,6 +1208,151 @@ def active_workflow_for_thread(main_thread_id: str) -> SystemWorkflow | None:
         .order_by("-created_at")
         .first()
     )
+
+
+def reconcile_terminal_workflow_instances(
+    *, main_thread_id: str | None = None, workflow_id: int | None = None
+) -> int:
+    """Route terminal workflow-owned workers that missed their finish callback."""
+    workflows = list(
+        _running_workflows_for_reconciliation(
+            main_thread_id=main_thread_id,
+            workflow_id=workflow_id,
+        )
+    )
+    if not workflows:
+        return 0
+    reconciled = _reconcile_terminal_system_agent_instances(workflows)
+    reconciled += _reconcile_terminal_workflow_turns(workflows)
+    return reconciled
+
+
+def _running_workflows_for_reconciliation(
+    *, main_thread_id: str | None, workflow_id: int | None
+) -> QuerySet[SystemWorkflow]:
+    workflows = SystemWorkflow.objects.filter(status=SystemWorkflow.STATUS_RUNNING)
+    if main_thread_id is not None:
+        workflows = workflows.filter(main_thread_id=main_thread_id)
+    if workflow_id is not None:
+        workflows = workflows.filter(pk=workflow_id)
+    return workflows.order_by("created_at", "id")
+
+
+def _reconcile_terminal_system_agent_instances(workflows: list[SystemWorkflow]) -> int:
+    filters: models.Q = models.Q(pk__in=[])
+    has_instance_filter = False
+    for workflow in workflows:
+        agent_kinds = _expected_system_agent_kinds_for_step(workflow)
+        if not agent_kinds:
+            continue
+        filters |= models.Q(workflow_id=workflow.pk, agent_kind__in=agent_kinds)
+        has_instance_filter = True
+    if not has_instance_filter:
+        return 0
+    instances = (
+        CodexInstance.objects.filter(
+            filters,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            status__in=(
+                CodexInstance.STATUS_COMPLETED,
+                CodexInstance.STATUS_FAILED,
+            ),
+        )
+        .filter(_unclaimed_workflow_instance_filter())
+        .exclude(agent_kind="")
+        .exclude(agent_kind=demo.DEMO_AGENT_KIND)
+        .exclude(
+            system_agent_runs__status__in=(
+                SystemAgentRun.STATUS_COMPLETED,
+                SystemAgentRun.STATUS_FAILED,
+            )
+        )
+        .order_by("started_at", "id")
+    )
+    reconciled = 0
+    routed_instance_ids: set[int] = set()
+    for instance in instances:
+        if instance.pk in routed_instance_ids:
+            continue
+        routed_instance_ids.add(instance.pk)
+        if _route_terminal_workflow_instance(instance):
+            reconciled += 1
+    return reconciled
+
+
+def _expected_system_agent_kinds_for_step(workflow: SystemWorkflow) -> tuple[str, ...]:
+    if workflow.kind == SystemWorkflow.KIND_PR_QA:
+        if workflow.step == STEP_QA_RUNNING:
+            return _QA_INTERRUPTIBLE_AGENT_KINDS
+        if workflow.step == STEP_PR_MONITORING:
+            return (PR_FOLLOWUP_MONITOR_AGENT_KIND,)
+        return ()
+    if workflow.kind == SPEC_CRITIC_WORKFLOW_KIND:
+        if workflow.step == STEP_SPEC_CRITIC_ANALYZING:
+            return _SPEC_CRITIC_ANALYSIS_AGENT_KINDS
+        if workflow.step == STEP_SPEC_CRITIC_SYNTHESIZING:
+            return (SPEC_SYNTHESIZER_AGENT_KIND,)
+        return ()
+    if workflow.kind == AUTONOMOUS_GOAL_AGENT_KIND:
+        if workflow.step == STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING:
+            return (AUTONOMOUS_GOAL_AGENT_KIND,)
+        if workflow.step == STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING:
+            return (AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,)
+    return ()
+
+
+def _reconcile_terminal_workflow_turns(workflows: list[SystemWorkflow]) -> int:
+    filters: models.Q = models.Q(pk__in=[])
+    has_turn_filter = False
+    for workflow in workflows:
+        if workflow.kind != SystemWorkflow.KIND_PR_QA:
+            continue
+        current_user_message_index = _state_int(workflow, "next_user_message_index") - 1
+        if current_user_message_index < 0:
+            continue
+        if workflow.step in (STEP_FEEDBACK_RUNNING, STEP_PR_FEEDBACK_RUNNING):
+            filters |= models.Q(
+                workflow_id=workflow.pk,
+                purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+                user_message_index=current_user_message_index,
+            )
+            has_turn_filter = True
+        elif workflow.step in (STEP_USER_STEERING_RUNNING, STEP_PR_PROMPT_RUNNING):
+            filters |= models.Q(
+                workflow_id=workflow.pk,
+                purpose=CodexInstance.PURPOSE_USER,
+                user_message_index=current_user_message_index,
+            )
+            has_turn_filter = True
+    if not has_turn_filter:
+        return 0
+    instances = CodexInstance.objects.filter(
+        filters,
+        status__in=(CodexInstance.STATUS_COMPLETED, CodexInstance.STATUS_FAILED),
+    ).filter(_unclaimed_workflow_instance_filter()).order_by("started_at", "id")
+    reconciled = 0
+    for instance in instances:
+        if _route_terminal_workflow_instance(instance):
+            reconciled += 1
+    return reconciled
+
+
+def _unclaimed_workflow_instance_filter() -> models.Q:
+    stale_before = timezone.now() - _WORKFLOW_ROUTE_CLAIM_TIMEOUT
+    return models.Q(workflow_routing_started_at__isnull=True) | models.Q(
+        workflow_routing_started_at__lt=stale_before
+    )
+
+
+def _route_terminal_workflow_instance(instance: CodexInstance) -> bool:
+    try:
+        return on_codex_instance_finished(instance)
+    except Exception:
+        logger.exception(
+            "failed to reconcile terminal workflow instance %s",
+            instance.pk,
+        )
+        return False
 
 
 def stop_active_workflow(main_thread_id: str) -> bool:
@@ -1259,6 +1407,20 @@ def start_user_steering_turn(
 
 def on_codex_instance_finished(instance: CodexInstance) -> bool:
     """Route a terminal worker to its owning system workflow, if any."""
+    route_claimed = False
+    if _workflow_owned_instance_requires_route_claim(instance):
+        if not _claim_workflow_instance_for_routing(instance):
+            return True
+        route_claimed = True
+    try:
+        return _route_finished_codex_instance(instance)
+    except Exception:
+        if route_claimed:
+            _clear_workflow_instance_routing_claim(instance)
+        raise
+
+
+def _route_finished_codex_instance(instance: CodexInstance) -> bool:
     if instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT:
         return _handle_system_agent_finished(instance)
     if instance.purpose == CodexInstance.PURPOSE_SYSTEM_FEEDBACK:
@@ -1272,6 +1434,51 @@ def on_codex_instance_finished(instance: CodexInstance) -> bool:
         return True
     _maybe_start_auto_review_workflow(instance)
     return False
+
+
+def _workflow_owned_instance_requires_route_claim(instance: CodexInstance) -> bool:
+    return instance.workflow_id is not None and instance.purpose in (
+        CodexInstance.PURPOSE_SYSTEM_AGENT,
+        CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+        CodexInstance.PURPOSE_USER,
+    )
+
+
+def _claim_workflow_instance_for_routing(instance: CodexInstance) -> bool:
+    now = timezone.now()
+    claimed = (
+        CodexInstance.objects.filter(
+            pk=instance.pk,
+            workflow_id__isnull=False,
+            purpose__in=(
+                CodexInstance.PURPOSE_SYSTEM_AGENT,
+                CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+                CodexInstance.PURPOSE_USER,
+            ),
+            status__in=(
+                CodexInstance.STATUS_COMPLETED,
+                CodexInstance.STATUS_FAILED,
+            ),
+        )
+        .filter(_unclaimed_workflow_instance_filter())
+        .update(workflow_routing_started_at=now)
+    )
+    if claimed:
+        instance.workflow_routing_started_at = now
+        return True
+    return False
+
+
+def _clear_workflow_instance_routing_claim(instance: CodexInstance) -> None:
+    claimed_at = instance.workflow_routing_started_at
+    if claimed_at is None:
+        return
+    cleared = CodexInstance.objects.filter(
+        pk=instance.pk,
+        workflow_routing_started_at=claimed_at,
+    ).update(workflow_routing_started_at=None)
+    if cleared:
+        instance.workflow_routing_started_at = None
 
 
 def _maybe_start_auto_review_workflow(instance: CodexInstance) -> None:
@@ -1414,32 +1621,38 @@ def _handle_system_agent_finished(instance: CodexInstance) -> bool:
     run = _system_agent_run_for_instance(instance)
     if run is None:
         return False
-    if run.status in (SystemAgentRun.STATUS_COMPLETED, SystemAgentRun.STATUS_FAILED):
-        return True
     workflow = run.workflow
+    _route_system_agent_finished(instance, run, workflow)
+    return True
+
+
+def _route_system_agent_finished(
+    instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
+) -> None:
+    if run.status in (SystemAgentRun.STATUS_COMPLETED, SystemAgentRun.STATUS_FAILED):
+        return
     if workflow.kind == AUTONOMOUS_GOAL_AGENT_KIND:
         _handle_autonomous_goal_agent_finished(instance, run, workflow)
-        return True
+        return
     if (
         workflow.kind == demo.DEMO_WORKFLOW_KIND
         and run.agent_kind == demo.DEMO_AGENT_KIND
         and instance.agent_kind == demo.DEMO_AGENT_KIND
     ):
         _handle_demo_agent_finished(instance, run, workflow)
-        return True
+        return
     if workflow.kind == SPEC_CRITIC_WORKFLOW_KIND:
         _handle_spec_critic_agent_finished(instance, run, workflow)
-        return True
+        return
     if workflow.kind == SystemWorkflow.KIND_PR_QA and run.agent_kind == (
         PR_FOLLOWUP_MONITOR_AGENT_KIND
     ):
         _handle_pr_followup_monitor_finished(instance, run, workflow)
-        return True
+        return
     if workflow.kind != SystemWorkflow.KIND_PR_QA:
         _fail_unsupported_system_agent_run(run, workflow)
-        return True
+        return
     _handle_pr_qa_agent_finished(instance, run, workflow)
-    return True
 
 
 def _handle_demo_agent_finished(
