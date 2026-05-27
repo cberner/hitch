@@ -4394,15 +4394,17 @@ def _merge_pr_handoff_dicts(
                 "latest_commit_sha": canonical_head_sha,
             }
     for key, value in update.items():
-        # ``""`` and ``None`` are "absent" sentinels (a writer with no fresh
-        # observation for the field); empty list/dict updates are explicit
-        # "observed and found none" overwrites that must clear any stale
-        # list left over from an earlier observation -- otherwise the next
-        # monitor/feedback prompt is rendered with ``unresolved_thread_count:
-        # 0`` sitting next to an ``unresolved_threads`` array describing the
-        # already-resolved thread, the same shape 48b0840 fixed at the
-        # per-turn snapshot layer.
-        if value == "" or value is None:
+        # ``None`` and ``""`` are "absent" for every key except
+        # ``review_signal``, which uses ``""`` as the explicit reviews-clear
+        # sentinel (see ``codex_events._copy_review_fields``). Empty
+        # list/dict updates are "observed and found none" overwrites.
+        # Reaction-derived ``thumbs_up`` is held back from the clear since
+        # the reviews tool does not speak for it.
+        if value is None:
+            continue
+        if value == "":
+            if key == "review_signal" and merged.get(key) != "thumbs_up":
+                merged.pop(key, None)
             continue
         merged[key] = value
     return merged
@@ -4477,8 +4479,14 @@ def _compact_pr_handoff(value: Any) -> dict[str, Any]:
             )
         ):
             compact[key] = raw
-        elif isinstance(raw, str) and raw.strip():
-            compact[key] = raw.strip()
+        elif isinstance(raw, str):
+            stripped = raw.strip()
+            if stripped:
+                compact[key] = stripped
+            elif key == "review_signal":
+                # ``""`` is the explicit reviews-clear sentinel; preserve
+                # it so ``_merge_pr_handoff_dicts`` can drop a stale verdict.
+                compact[key] = ""
         elif key in _PR_HANDOFF_LIST_FIELDS and isinstance(raw, list):
             compact[key] = _compact_pr_list(raw)
     return compact

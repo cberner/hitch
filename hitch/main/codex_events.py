@@ -607,6 +607,9 @@ def _copy_review_fields(target: dict[str, Any], source: dict[str, Any]) -> None:
         target["review_signal"] = "approved"
     elif states:
         target["review_signal"] = "commented"
+    else:
+        # ``""`` is the explicit review-signal clear; see _merge_pr_snapshot_update.
+        target["review_signal"] = ""
 
 
 def _copy_reaction_fields(target: dict[str, Any], source: dict[str, Any]) -> None:
@@ -752,13 +755,20 @@ def _merge_pr_snapshot_update(
     if _pr_snapshot_identity_changed(snapshot, values):
         snapshot.clear()
     for key, value in values.items():
-        # ``""`` and ``None`` are "absent" sentinels; empty list/dict from a
-        # ``_copy_*_fields`` writer is an explicit "observed and found none"
-        # signal that must clear any stale list left behind by an earlier
-        # observation in the same turn (e.g. ``unresolved_threads`` from a
-        # later ``list_pull_request_review_threads`` call whose threads are
-        # now all resolved).
-        if value == "" or value is None:
+        # ``None`` is an "absent" sentinel; empty list/dict is an explicit
+        # "observed and found none" clear. ``""`` is "absent" for every
+        # string field except ``review_signal``, which uses it as an
+        # explicit clear so a clean reviews re-observation drops a stale
+        # ``changes_requested`` left over from an earlier observation. The
+        # clear is recorded as ``""`` in the snapshot (not popped) so it
+        # propagates through ``system_agents._merge_pr_handoff_dicts``
+        # cross-worker. Reaction-derived ``thumbs_up`` is held back from
+        # the clear since the reviews tool does not speak for it.
+        if value is None:
+            continue
+        if value == "":
+            if key == "review_signal" and snapshot.get(key) != "thumbs_up":
+                snapshot[key] = ""
             continue
         if (
             key == "review_signal"
