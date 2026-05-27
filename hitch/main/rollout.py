@@ -674,9 +674,11 @@ def _proposed_plan_texts_by_turn(
         mode = modes_by_turn.get(turn_idx)
         is_plan_mode_turn = turn_idx in plan_mode_turns
         turn_started_awaiting_plan_approval = awaiting_plan_approval
-        exits_plan_mode = mode == _COLLABORATION_MODE_DEFAULT and (
-            _turn_is_plan_approval(turn_lines)
-            or not turn_started_awaiting_plan_approval
+        exits_plan_mode = _default_turn_exits_plan_mode(
+            mode,
+            turn_lines,
+            turn_started_awaiting_plan_approval,
+            allow_plan_mode_followup,
         )
         if exits_plan_mode:
             awaiting_plan_approval = False
@@ -763,6 +765,33 @@ def _turn_is_plan_approval(turn_lines: list[dict[str, Any]]) -> bool:
             continue
         payload = entry.get("payload") or {}
         if _user_message_text(payload).strip() == _PLAN_APPROVAL_PROMPT:
+            return True
+    return False
+
+
+def _default_turn_exits_plan_mode(
+    mode: str | None,
+    turn_lines: list[dict[str, Any]],
+    turn_started_awaiting_plan_approval: bool,
+    allow_plan_mode_followup: bool,
+) -> bool:
+    if mode != _COLLABORATION_MODE_DEFAULT:
+        return False
+    if _turn_is_plan_approval(turn_lines):
+        return True
+    if turn_started_awaiting_plan_approval:
+        return False
+    # Older active Plan Mode follow-ups can appear as default turns. If that
+    # one-turn fallback explicitly asks for the plan, keep the plan parser open.
+    return not (allow_plan_mode_followup and _turn_requests_plan(turn_lines))
+
+
+def _turn_requests_plan(turn_lines: list[dict[str, Any]]) -> bool:
+    for entry in turn_lines:
+        if not _is_user_message_line(entry):
+            continue
+        payload = entry.get("payload") or {}
+        if re.search(r"\bplan\b", _user_message_text(payload), re.IGNORECASE):
             return True
     return False
 

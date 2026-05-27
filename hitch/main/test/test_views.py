@@ -378,6 +378,66 @@ class SessionDetailFastPathTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.views.Codex")
+    def test_session_detail_shows_button_for_plan_request_followup(
+        self, mock_codex: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line("turn_context", {"collaboration_mode": {"mode": "plan"}}),
+                _rollout_line("event_msg", {"type": "user_message", "message": "Plan it"}),
+                _rollout_line(
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "message": "No proposed plan yet.",
+                        "phase": "final_answer",
+                    },
+                ),
+                _rollout_line("turn_context", {"collaboration_mode": {"mode": "default"}}),
+                _rollout_line(
+                    "event_msg",
+                    {
+                        "type": "user_message",
+                        "message": "Give me the plan and I'll approve it",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": (
+                                    "<proposed_plan>\n# Plan\n\nImplement it.\n"
+                                    "</proposed_plan>"
+                                ),
+                            }
+                        ],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        SessionMetadata.objects.create(
+            thread_id="plan-followup",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_updated_at=datetime(2025, 1, 5, tzinfo=UTC),
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "plan-followup"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Approve plan")
+        self.assertContains(response, 'name="plan_action" value="approve"')
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
     def test_session_detail_falls_back_when_indexed_rollout_has_no_transcript(
         self, mock_codex: MagicMock
     ) -> None:
