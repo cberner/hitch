@@ -47,6 +47,14 @@ class CodingAgentsTests(SimpleTestCase):
         self.assertIn("You are Codex", base_instructions)
         self.assertNotIn("You are running inside HITCH", base_instructions)
         self.assertNotIn("The user expects you to make good engineering calls", base_instructions)
+        # The HITCH propose-session tool guidance routes the agent through
+        # ``hitch.propose_session`` / ``$HITCH_PROPOSE_SESSION_COMMAND``, both
+        # of which only exist inside Hitch. Leaving the line in pollutes the
+        # "Codex default" prompt the user explicitly opted into, surfacing
+        # HITCH-specific tool references and env vars to a session that
+        # expects vanilla Codex behavior.
+        self.assertNotIn("hitch.propose_session", base_instructions)
+        self.assertNotIn("HITCH_PROPOSE_SESSION_COMMAND", base_instructions)
 
 
 def _model(
