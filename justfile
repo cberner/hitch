@@ -92,9 +92,9 @@ install-systemd:
   Environment=ADDITIONAL_ALLOWED_HOSTS=${DOMAIN}
   # Re-sync to the install-time branch and apply migrations on every (re)start
   # so a crash loop picks up fixes pushed since the last successful boot.
-  ExecStartPre=${GIT_BIN} -C ${REPO_DIR} pull --ff-only origin ${BRANCH}
-  ExecStartPre=${UV_BIN} run ./manage.py migrate --settings hitch.settings.dev
-  ExecStart=${UV_BIN} run ./manage.py runserver --settings hitch.settings.dev
+  ExecStartPre="${GIT_BIN}" -C "${REPO_DIR}" pull --ff-only origin ${BRANCH}
+  ExecStartPre="${UV_BIN}" run ./manage.py migrate --settings hitch.settings.dev
+  ExecStart="${UV_BIN}" run ./manage.py runserver --settings hitch.settings.dev
   Restart=always
   RestartSec=2
   RestartSteps=5
