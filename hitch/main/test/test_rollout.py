@@ -1559,6 +1559,45 @@ class IterEntriesTests(TestCase):
         self.assertEqual(entries[-1]["kind"], "agent")
         self.assertEqual(entries[-1]["text"], text)
 
+    def test_plan_request_after_active_plan_mode_renders_pending_plan(self) -> None:
+        text = "<proposed_plan>\n# Plan\n\nImplement it.\n</proposed_plan>"
+        path = self._make(
+            [
+                _line("turn_context", {"collaboration_mode": {"mode": "plan"}}),
+                _line("event_msg", {"type": "user_message", "message": "Plan it"}),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "message": "No proposed plan yet.",
+                        "phase": "final_answer",
+                    },
+                ),
+                _line("turn_context", {"collaboration_mode": {"mode": "default"}}),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "user_message",
+                        "message": "Give me the plan and I'll approve it",
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": text}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+
+        self.assertEqual(entries[-1]["kind"], "plan")
+        self.assertEqual(entries[-1]["text"], "# Plan\n\nImplement it.")
+
     def test_non_markdown_proposed_plan_after_plan_mode_session_stays_agent_text(
         self,
     ) -> None:
