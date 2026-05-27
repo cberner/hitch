@@ -6699,6 +6699,87 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.codex_pool.steer_instance")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
+    def test_steers_active_workflow_user_turn(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_steer: MagicMock,
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="abc",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_USER_STEERING_RUNNING,
+        )
+        instance = CodexInstance.objects.create(
+            pid=123,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="user steering",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_USER,
+            workflow_id=workflow.pk,
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "also lint"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_steer.assert_called_once_with(
+            instance.pk,
+            expected_thread_id="abc",
+            prompt="also lint",
+        )
+        mock_spawn.assert_not_called()
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views.codex_pool.steer_instance")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_blocks_active_workflow_system_feedback_worker_steering(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_steer: MagicMock,
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="abc",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_FEEDBACK_RUNNING,
+        )
+        instance = CodexInstance.objects.create(
+            pid=123,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="fix QA feedback",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            workflow_id=workflow.pk,
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "also lint", "active_instance": str(instance.pk)},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(
+            response, "PR workflow is running for this session", status_code=400
+        )
+        mock_steer.assert_not_called()
+        mock_spawn.assert_not_called()
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views.codex_pool.steer_instance")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
     def test_steers_active_instance_with_uploaded_image(
         self,
         mock_codex: MagicMock,
@@ -8283,17 +8364,56 @@ class SendMessageViewTests(TestCase):
         )
         self.assertNotIn("You are running inside HITCH", base_instructions)
 
+    @patch("hitch.main.views.system_agents.start_user_steering_turn")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
-    def test_running_pr_workflow_blocks_normal_follow_up(
-        self, mock_codex: MagicMock, mock_spawn: MagicMock
+    def test_running_qa_workflow_routes_normal_follow_up_to_user_steering(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_start_steering: MagicMock,
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="abc",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step="qa_running",
+        )
+        mock_start_steering.return_value = SimpleNamespace()
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "please also do this"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.headers["Location"],
+            reverse("session", kwargs={"session_id": "abc"}),
+        )
+        mock_start_steering.assert_called_once_with(
+            workflow,
+            prompt="please also do this",
+        )
+        mock_codex.assert_not_called()
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.views.system_agents.start_user_steering_turn")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_running_pr_workflow_non_qa_step_blocks_normal_follow_up(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_start_steering: MagicMock,
     ) -> None:
         SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
             main_thread_id="abc",
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
-            step="qa_running",
+            step=system_agents.STEP_FEEDBACK_RUNNING,
         )
 
         response = self.client.post(
@@ -8305,6 +8425,7 @@ class SendMessageViewTests(TestCase):
         self.assertContains(
             response, "PR workflow is running for this session", status_code=400
         )
+        mock_start_steering.assert_not_called()
         mock_codex.assert_not_called()
         mock_spawn.assert_not_called()
 

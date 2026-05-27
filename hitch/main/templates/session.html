@@ -2352,7 +2352,7 @@
           action="{{ send_message_url }}"
           data-composer
           data-stream-url="{{ stream_url }}"
-          data-workflow-locked="{% if active_system_workflow %}true{% else %}false{% endif %}"
+          data-workflow-locked="{% if workflow_composer_locked %}true{% else %}false{% endif %}"
           data-plan-mode="{{ default_plan_mode|yesno:'true,false' }}"
           data-initial-plan-mode="{{ default_plan_mode|yesno:'true,false' }}">
         {% csrf_token %}
@@ -2396,12 +2396,12 @@
             {% endif %}
             <textarea name="prompt"
                       rows="1"
-                      {% if active_system_workflow %}disabled{% endif %}
+                      {% if workflow_composer_locked %}disabled{% endif %}
                       autocomplete="off"
-                      placeholder="{% if active_system_workflow %}{{ workflow_composer_label }} is running…{% elif active_worker %}Add instructions…{% else %}Send a message…{% endif %}"
-                      aria-label="{% if active_system_workflow %}{{ workflow_composer_label }} is running{% elif active_worker %}Add instructions{% else %}Send a message{% endif %}"
+                      placeholder="{% if workflow_composer_locked %}{{ workflow_composer_label }} is running…{% elif active_worker or workflow_accepts_steering %}Add instructions…{% else %}Send a message…{% endif %}"
+                      aria-label="{% if workflow_composer_locked %}{{ workflow_composer_label }} is running{% elif active_worker or workflow_accepts_steering %}Add instructions{% else %}Send a message{% endif %}"
                       data-composer-input></textarea>
-            <button type="submit" data-composer-submit {% if active_system_workflow %}disabled{% endif %}>{% if active_system_workflow %}Waiting{% elif active_worker %}Steer{% else %}Send{% endif %}</button>
+            <button type="submit" data-composer-submit {% if workflow_composer_locked %}disabled{% endif %}>{% if workflow_composer_locked %}Waiting{% elif active_worker or workflow_accepts_steering %}Steer{% else %}Send{% endif %}</button>
             {% if active_worker or active_system_workflow %}
             {% if active_worker %}
             <button type="submit" class="stop" form="stop-session-form" formnovalidate data-composer-stop aria-label="Stop the running turn">Stop</button>

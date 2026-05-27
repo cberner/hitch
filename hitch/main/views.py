@@ -2953,6 +2953,14 @@ def _render_session_detail(
     active_worker_status_text = _active_worker_status_text(active_instance)
     workflow_status_text = _workflow_status_text(active_system_workflow)
     pr_workflow_progress = streaming.pr_workflow_progress(active_system_workflow)
+    workflow_accepts_steering = _workflow_accepts_qa_pause_steering(
+        active_system_workflow
+    ) or _workflow_accepts_active_turn_steering(
+        active_system_workflow, active_instance
+    )
+    workflow_composer_locked = active_system_workflow is not None and not (
+        workflow_accepts_steering
+    )
     live_status_text = active_worker_status_text or (
         workflow_status_text
         if active_system_workflow is not None and active_instance is None
@@ -3004,6 +3012,8 @@ def _render_session_detail(
             "show_active_worker_transcript": show_active_worker_transcript,
             "active_system_workflow": active_system_workflow,
             "workflow_composer_label": _workflow_composer_label(active_system_workflow),
+            "workflow_accepts_steering": workflow_accepts_steering,
+            "workflow_composer_locked": workflow_composer_locked,
             "demo_start_disabled": (
                 active_system_workflow is not None or active_instance is not None
             ),
@@ -4761,6 +4771,34 @@ def _workflow_composer_label(workflow: SystemWorkflow | None) -> str:
     return "Hitch workflow"
 
 
+def _workflow_accepts_qa_pause_steering(workflow: SystemWorkflow | None) -> bool:
+    return (
+        workflow is not None
+        and workflow.kind == SystemWorkflow.KIND_PR_QA
+        and workflow.status == SystemWorkflow.STATUS_RUNNING
+        and workflow.step == system_agents.STEP_QA_RUNNING
+    )
+
+
+def _workflow_accepts_active_turn_steering(
+    workflow: SystemWorkflow | None, active: CodexInstance | None
+) -> bool:
+    return (
+        workflow is not None
+        and active is not None
+        and workflow.kind == SystemWorkflow.KIND_PR_QA
+        and workflow.status == SystemWorkflow.STATUS_RUNNING
+        and workflow.step == system_agents.STEP_USER_STEERING_RUNNING
+        and active.workflow_id == workflow.pk
+        and active.purpose == CodexInstance.PURPOSE_USER
+        and active.thread_id == workflow.main_thread_id
+        and active.status in {
+            CodexInstance.STATUS_STARTING,
+            CodexInstance.STATUS_RUNNING,
+        }
+    )
+
+
 def _active_worker_status_text(active: CodexInstance | None) -> str:
     if active is not None and active.agent_kind == demo.DEMO_AGENT_KIND:
         return "Demo agent is working"
@@ -6378,10 +6416,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     if qa_workflow_activation:
         plan_mode = False
     active_system_workflow = system_agents.active_workflow_for_thread(session_id)
-    if active_system_workflow is not None:
-        if qa_workflow_activation:
-            return redirect("session", session_id=session_id)
-        return HttpResponseBadRequest("PR workflow is running for this session")
     if qa_workflow_activation and has_input_images:
         return HttpResponseBadRequest(
             "image attachments are not supported for PR workflow requests"
@@ -6400,6 +6434,26 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         active_instance = codex_pool.latest_active_for_thread(session_id)
         if active_instance is not None and qa_workflow_activation:
             return HttpResponseBadRequest("PR workflow requires an idle session")
+    if active_system_workflow is not None and qa_workflow_activation:
+        return redirect("session", session_id=session_id)
+    workflow_active_instance = active_instance
+    if active_system_workflow is not None and raw_active and instance_id is not None:
+        workflow_active_instance = CodexInstance.objects.filter(pk=instance_id).first()
+    if active_system_workflow is not None:
+        if has_input_images:
+            return HttpResponseBadRequest(
+                "image attachments are not supported while QA workflow is running"
+            )
+        workflow_accepts_active_steering = _workflow_accepts_active_turn_steering(
+            active_system_workflow, workflow_active_instance
+        )
+        workflow_accepts_qa_pause = (
+            active_instance is None
+            and not raw_active
+            and _workflow_accepts_qa_pause_steering(active_system_workflow)
+        )
+        if not (workflow_accepts_active_steering or workflow_accepts_qa_pause):
+            return HttpResponseBadRequest("PR workflow is running for this session")
 
     input_image_paths, input_image_error = _save_posted_input_images(request)
     if input_image_error is not None:
@@ -6447,6 +6501,22 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 return redirect("session", session_id=session_id)
             _cleanup_saved_input_images(steer_image_paths)
             steer_image_paths = []
+        if active_system_workflow is not None:
+            if (
+                active_instance is None
+                and not raw_active
+                and _workflow_accepts_qa_pause_steering(active_system_workflow)
+            ):
+                started = system_agents.start_user_steering_turn(
+                    active_system_workflow,
+                    prompt=prompt,
+                )
+                if started is not None:
+                    return redirect("session", session_id=session_id)
+                _cleanup_saved_input_images(input_image_paths)
+                return HttpResponseBadRequest("QA workflow could not be paused")
+            _cleanup_saved_input_images(input_image_paths)
+            return HttpResponseBadRequest("PR workflow is running for this session")
         # If steering is unavailable or races a terminal worker, preserve the
         # submitted prompt by treating it as an ordinary follow-up turn.
         # ``raw_active`` posts still do not retarget a different active worker.
