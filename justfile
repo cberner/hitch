@@ -52,3 +52,52 @@ qa-browser-check: qa-browser-setup
 
 sync:
   uv sync --all-groups
+
+# Install a per-user systemd unit that serves Hitch from this repo. Prompts for
+# the public domain name, wires it into ADDITIONAL_ALLOWED_HOSTS, and re-pulls
+# master + applies migrations on every (re)start so a crash loop self-heals.
+install-systemd:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  read -r -p "Domain name (e.g. hitch.example.com): " DOMAIN
+  if [ -z "${DOMAIN}" ]; then
+    echo "A domain name is required." >&2
+    exit 1
+  fi
+  REPO_DIR="$(pwd)"
+  UV_BIN="$(command -v uv)"
+  GIT_BIN="$(command -v git)"
+  if [ -z "${UV_BIN}" ] || [ -z "${GIT_BIN}" ]; then
+    echo "uv and git must both be on PATH." >&2
+    exit 1
+  fi
+  UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+  mkdir -p "${UNIT_DIR}"
+  UNIT_PATH="${UNIT_DIR}/hitch.service"
+  cat > "${UNIT_PATH}" <<EOF
+  [Unit]
+  Description=Hitch server (${REPO_DIR})
+  After=network-online.target
+  Wants=network-online.target
+
+  [Service]
+  Type=simple
+  WorkingDirectory=${REPO_DIR}
+  Environment=ADDITIONAL_ALLOWED_HOSTS=${DOMAIN}
+  # Re-sync to master and apply migrations on every (re)start so a crash loop
+  # picks up fixes pushed since the last successful boot.
+  ExecStartPre=${GIT_BIN} -C ${REPO_DIR} pull --ff-only origin master
+  ExecStartPre=${UV_BIN} run ./manage.py migrate --settings hitch.settings.dev
+  ExecStart=${UV_BIN} run ./manage.py runserver --settings hitch.settings.dev
+  Restart=always
+  RestartSec=2
+  RestartSteps=5
+  RestartMaxDelaySec=30
+
+  [Install]
+  WantedBy=default.target
+  EOF
+  systemctl --user daemon-reload
+  systemctl --user enable hitch.service
+  echo "Installed ${UNIT_PATH}."
+  echo "Start with: systemctl --user start hitch.service"
