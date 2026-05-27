@@ -1528,6 +1528,122 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
         self.assertEqual(snapshot["ci_status"], "unknown")
         self.assertEqual(snapshot.get("failing_jobs", []), ["test-suite"])
 
+    def test_pr_snapshot_clears_stale_failing_jobs_when_workflow_runs_pending(
+        self,
+    ) -> None:
+        # When a failed workflow job is re-run on the same commit, GitHub
+        # resets that workflow run to queued/in-progress on the same
+        # ``run_id``. ``fetch_commit_workflow_runs`` therefore observes
+        # ``[{"status": "in_progress"}]`` (no completed-failure runs), and
+        # ``_ci_status_from_runs`` returns ``"pending"`` -- the rerun
+        # supersedes the previously-observed failure even though the new
+        # observation is not yet a definitive clean state. Without clearing
+        # the prior per-job ``failing_jobs`` list, ``_ci_gate`` keeps short-
+        # circuiting to BLOCKED on "Failing CI jobs were observed" instead
+        # of returning the "CI is still running" pending gate that the
+        # ``pending`` ci_status would otherwise drive, so the follow-up
+        # agent keeps pushing fixes for a job that is already being
+        # re-evaluated. The head-SHA-changed reset in
+        # ``_merge_pr_handoff_dicts`` does not help here because no new
+        # commit was pushed -- the same commit is being re-tested. Clear
+        # at the source so a rerun-pending observation drops the stale
+        # failing list. ``pending_jobs`` stays put because workflow-runs
+        # observations don't enumerate jobs.
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_create_pull_request",
+                                    "result": {
+                                        "structuredContent": {
+                                            "url": (
+                                                "https://github.com/cberner/hitch/pull/203"
+                                            ),
+                                            "number": 203,
+                                            "head_sha": "abc123",
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=5,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_fetch_workflow_run_jobs",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "run_id": 42,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "jobs": [
+                                                {
+                                                    "name": "test-suite",
+                                                    "status": "completed",
+                                                    "conclusion": "failure",
+                                                },
+                                            ]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_fetch_commit_workflow_runs",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "commit_sha": "abc123",
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "workflow_runs": [
+                                                {
+                                                    "status": "in_progress",
+                                                    "conclusion": "",
+                                                },
+                                            ]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["ci_status"], "pending")
+        self.assertEqual(snapshot.get("failing_jobs", []), [])
+
     def test_pr_snapshot_clears_stale_pending_jobs_on_clean_re_observation(
         self,
     ) -> None:
