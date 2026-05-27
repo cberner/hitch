@@ -89,6 +89,57 @@ class LatestPrUrlTests(TestCase):
 
         self.assertEqual(rollout.latest_pr_url(path), url)
 
+    def test_detects_pr_url_when_function_call_output_follows_final_message(
+        self,
+    ) -> None:
+        # OpenAI's Responses API can return a function_call and an assistant
+        # final-answer message in a single output (the "issue the call and
+        # narrate it" pattern). The Codex SDK records response items in
+        # arrival order, so the function_call_output -- written when the tool
+        # actually completes -- lands in the rollout AFTER the final-answer
+        # message for the same turn. The session-page PR pill reads the URL
+        # from this output, so dropping it leaves the rendered turn with no
+        # link to the PR the user just opened.
+        url = "https://github.com/cberner/hitch/pull/95"
+        path = self._make(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_create_pull_request",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {"type": "output_text", "text": "Opening the PR now."}
+                        ],
+                        "phase": "final_answer",
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps({"url": url}),
+                    },
+                ),
+            ]
+        )
+
+        self.assertEqual(rollout.latest_pr_url(path), url)
+
     def test_completed_pr_turn_without_url_clears_earlier_url(self) -> None:
         stale_url = "https://github.com/cberner/hitch/pull/93"
         path = self._make(
