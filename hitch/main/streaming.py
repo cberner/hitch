@@ -73,6 +73,7 @@ _QA_AGENT_KIND = "pr_qa"
 _PR_MONITOR_AGENT_KIND = "pr_followup_monitor"
 _STEP_QA_RUNNING = "qa_running"
 _STEP_FEEDBACK_RUNNING = "feedback_running"
+_STEP_USER_STEERING_RUNNING = "user_steering_running"
 _STEP_PR_PROMPT_RUNNING = "pr_prompt_running"
 _STEP_PR_MONITORING = "pr_monitoring"
 _STEP_PR_FEEDBACK_RUNNING = "pr_feedback_running"
@@ -435,6 +436,8 @@ def system_workflow_status_text(workflow: SystemWorkflow | None) -> str:
         return "PR agent is opening and following up..."
     if workflow.step == _STEP_PR_FEEDBACK_RUNNING:
         return "PR follow-up agent is fixing feedback..."
+    if workflow.step == _STEP_USER_STEERING_RUNNING:
+        return "Coding agent is working..."
     if workflow.step == _STEP_PR_MONITORING:
         instance = _running_system_agent_instance(workflow.pk)
         if instance is not None and instance.agent_kind == _PR_MONITOR_AGENT_KIND:

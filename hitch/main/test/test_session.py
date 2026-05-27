@@ -2910,13 +2910,45 @@ class SessionViewActiveWorkerTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "QA agent working...4.2K tokens")
-        self.assertContains(response, 'data-workflow-locked="true"')
-        self.assertContains(response, "QA workflow is running")
+        self.assertContains(response, 'data-workflow-locked="false"')
+        self.assertContains(response, "Add instructions")
+        self.assertContains(response, ">Steer</button>")
         self.assertContains(response, 'aria-label="Stop the QA workflow"')
         self.assertContains(
             response,
             f'data-stream-url="{stream_path}?baseline=&amp;active=&amp;workflow={workflow.pk}&amp;demo="',
         )
+
+    @patch("hitch.main.views.Codex")
+    def test_workflow_system_feedback_worker_keeps_composer_locked(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _patch_thread(self, mock_codex, _thread([]))
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-1",
+            cwd="/tmp/demo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_FEEDBACK_RUNNING,
+        )
+        _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+            pid=_LIVE_PID,
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-workflow-locked="true"')
+        self.assertContains(response, "QA workflow is running")
+        self.assertContains(response, "disabled")
+        self.assertContains(response, ">Waiting</button>")
+        self.assertNotContains(response, ">Steer</button>")
 
     @patch("hitch.main.views.Codex")
     def test_completed_qa_approval_is_shown_in_transcript(

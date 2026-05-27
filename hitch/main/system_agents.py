@@ -90,6 +90,7 @@ QA_WORKFLOW_MAX_ITERATIONS = 10
 PR_QA_WORKFLOW_MAX_ITERATIONS = QA_WORKFLOW_MAX_ITERATIONS + 3
 STEP_QA_RUNNING = "qa_running"
 STEP_FEEDBACK_RUNNING = "feedback_running"
+STEP_USER_STEERING_RUNNING = "user_steering_running"
 STEP_BLOCKED = "blocked"
 STEP_MAX_ITERATIONS_REACHED = "max_iterations_reached"
 STEP_QA_APPROVED = "qa_approved"
@@ -115,6 +116,7 @@ _AUTO_PROPOSAL_UNKNOWN_DEFAULT_BRANCH_SHA = "__unknown__"
 _AUTONOMOUS_GOAL_USE_WORKTREES_STATE_KEY = "use_worktrees"
 _AUTONOMOUS_GOAL_SESSION_CWD_STATE_KEY = "session_cwd"
 _QA_DESIGN_SYNTHESIS_STATE_KEY = "qa_design_synthesis_gate"
+_QA_REVIEW_REVISION_STATE_KEY = "qa_review_revision"
 _QA_DESIGN_SYNTHESIS_MIN_CATEGORY_OVERLAP = 2
 _QA_DESIGN_SYNTHESIS_RECENT_RUN_LIMIT = 50
 _QA_DESIGN_SYNTHESIS_MATCH_LIMIT = 3
@@ -692,6 +694,7 @@ _QA_PANEL_LANES: tuple[_QaPanelLane, ...] = (
 )
 _QA_PANEL_LANE_KINDS = tuple(lane.agent_kind for lane in _QA_PANEL_LANES)
 _QA_VERDICT_AGENT_KINDS = (PR_QA_AGENT_KIND, PR_QA_PANEL_SYNTHESIZER_AGENT_KIND)
+_QA_INTERRUPTIBLE_AGENT_KINDS = _QA_VERDICT_AGENT_KINDS + _QA_PANEL_LANE_KINDS
 _QA_PANEL_SYNTHESIZER_STARTED_KEY = "qa_panel_synthesizer_started_iteration"
 
 
@@ -1234,6 +1237,26 @@ def stop_active_workflow(main_thread_id: str) -> bool:
     return True
 
 
+def start_user_steering_turn(
+    workflow: SystemWorkflow, *, prompt: str
+) -> CodexInstance | None:
+    """Pause a running QA review and run a visible user follow-up turn."""
+    prompt = prompt.strip()
+    if not prompt:
+        return None
+    if not _claim_user_steering_turn(workflow):
+        return None
+    _interrupt_running_qa_runs_for_user_steer(workflow)
+    try:
+        return _spawn_workflow_turn(workflow, prompt=prompt)
+    except Exception as exc:
+        _block_workflow(
+            workflow,
+            f"failed to start coding turn after user steering: {exc!r}",
+        )
+        raise
+
+
 def on_codex_instance_finished(instance: CodexInstance) -> bool:
     """Route a terminal worker to its owning system workflow, if any."""
     if instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT:
@@ -1472,6 +1495,13 @@ def _handle_system_feedback_finished(instance: CodexInstance) -> None:
 def _handle_pr_qa_agent_finished(
     instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
 ) -> None:
+    if not _run_matches_current_qa_review(workflow, run):
+        _fail_run(
+            run,
+            "stale QA review superseded by a user steering message",
+            block_workflow=False,
+        )
+        return
     if (
         workflow.status != SystemWorkflow.STATUS_RUNNING
         or workflow.step != STEP_QA_RUNNING
@@ -1698,8 +1728,28 @@ def _handle_workflow_user_turn_finished(instance: CodexInstance) -> None:
         return
     if workflow.status != SystemWorkflow.STATUS_RUNNING:
         return
+    if workflow.step == STEP_USER_STEERING_RUNNING:
+        _handle_user_steering_finished(instance, workflow)
+        return
     if workflow.step == STEP_PR_PROMPT_RUNNING:
         _handle_pr_prompt_finished(instance, workflow)
+
+
+def _handle_user_steering_finished(
+    instance: CodexInstance, workflow: SystemWorkflow
+) -> None:
+    if instance.status != CodexInstance.STATUS_COMPLETED:
+        _block_workflow(workflow, f"coding worker failed: {instance.error}")
+        return
+    workflow.step = STEP_QA_RUNNING
+    workflow.save(update_fields=["step", "updated_at"])
+    try:
+        if _state_bool(workflow, "qa_panel_enabled"):
+            _spawn_pr_qa_panel_runs(workflow)
+        else:
+            _spawn_pr_qa_run(workflow)
+    except Exception as exc:
+        _block_workflow(workflow, f"failed to restart QA agent: {exc!r}")
 
 
 def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow) -> None:
@@ -2287,6 +2337,7 @@ def _spawn_pr_qa_run(workflow: SystemWorkflow) -> SystemAgentRun:
         agent_kind=PR_QA_AGENT_KIND,
         display_author=QA_DISPLAY_AUTHOR,
         output_schema=_QA_OUTPUT_SCHEMA,
+        user_message_index=_qa_review_revision(workflow),
     )
     run, _created = SystemAgentRun.objects.get_or_create(
         instance=instance,
@@ -2295,7 +2346,11 @@ def _spawn_pr_qa_run(workflow: SystemWorkflow) -> SystemAgentRun:
             "agent_kind": PR_QA_AGENT_KIND,
             "thread_id": instance.thread_id,
             "status": SystemAgentRun.STATUS_RUNNING,
-            "input": {"cwd": workflow.cwd, "diff_chars": len(diff_text)},
+            "input": {
+                "cwd": workflow.cwd,
+                "diff_chars": len(diff_text),
+                "qa_review_revision": _qa_review_revision(workflow),
+            },
         },
     )
     return run
@@ -2325,6 +2380,7 @@ def _spawn_pr_qa_panel_runs(workflow: SystemWorkflow) -> list[SystemAgentRun]:
                 agent_kind=lane.agent_kind,
                 display_author=QA_PANEL_DISPLAY_AUTHOR,
                 output_schema=_QA_PANEL_LANE_OUTPUT_SCHEMA,
+                user_message_index=_qa_review_revision(workflow),
             )
             run, _created = SystemAgentRun.objects.get_or_create(
                 instance=instance,
@@ -2337,6 +2393,7 @@ def _spawn_pr_qa_panel_runs(workflow: SystemWorkflow) -> list[SystemAgentRun]:
                         "cwd": workflow.cwd,
                         "diff_chars": len(diff_text),
                         "iteration": workflow.iteration,
+                        "qa_review_revision": _qa_review_revision(workflow),
                         "lane": lane.label,
                         "focus": lane.focus,
                     },
@@ -2384,6 +2441,7 @@ def _spawn_qa_panel_synthesizer_run(workflow: SystemWorkflow) -> SystemAgentRun:
         agent_kind=PR_QA_PANEL_SYNTHESIZER_AGENT_KIND,
         display_author=QA_PANEL_DISPLAY_AUTHOR,
         output_schema=_QA_OUTPUT_SCHEMA,
+        user_message_index=_qa_review_revision(workflow),
     )
     run, _created = SystemAgentRun.objects.get_or_create(
         instance=instance,
@@ -2396,6 +2454,7 @@ def _spawn_qa_panel_synthesizer_run(workflow: SystemWorkflow) -> SystemAgentRun:
                 "cwd": workflow.cwd,
                 "diff_chars": len(diff_text),
                 "iteration": workflow.iteration,
+                "qa_review_revision": _qa_review_revision(workflow),
                 "lane_count": len(_QA_PANEL_LANES),
             },
         },
@@ -3342,7 +3401,10 @@ def _qa_panel_lane_outputs(workflow: SystemWorkflow) -> list[dict[str, Any]]:
     )
     outputs: list[dict[str, Any]] = []
     for run in runs:
-        if _qa_panel_run_iteration(run) != workflow.iteration:
+        if (
+            _qa_panel_run_iteration(run) != workflow.iteration
+            or not _run_matches_current_qa_review(workflow, run)
+        ):
             continue
         output = run.output if isinstance(run.output, dict) else {}
         lane = run.input.get("lane") if isinstance(run.input, dict) else ""
@@ -3395,6 +3457,7 @@ def _qa_panel_lanes_complete(workflow: SystemWorkflow) -> bool:
             status=SystemAgentRun.STATUS_COMPLETED,
         )
         if _qa_panel_run_iteration(run) == workflow.iteration
+        and _run_matches_current_qa_review(workflow, run)
     }
     return completed_kinds == set(_QA_PANEL_LANE_KINDS)
 
@@ -3402,6 +3465,21 @@ def _qa_panel_lanes_complete(workflow: SystemWorkflow) -> bool:
 def _qa_panel_run_iteration(run: SystemAgentRun) -> int:
     value = run.input.get("iteration") if isinstance(run.input, dict) else 0
     return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _qa_review_revision(workflow: SystemWorkflow) -> int:
+    return _state_int(workflow, _QA_REVIEW_REVISION_STATE_KEY)
+
+
+def _system_agent_run_qa_review_revision(run: SystemAgentRun) -> int:
+    value = run.input.get("qa_review_revision") if isinstance(run.input, dict) else 0
+    return value if isinstance(value, int) and value >= 0 else 0
+
+
+def _run_matches_current_qa_review(
+    workflow: SystemWorkflow, run: SystemAgentRun
+) -> bool:
+    return _system_agent_run_qa_review_revision(run) == _qa_review_revision(workflow)
 
 
 def _mark_running_panel_runs_failed(workflow: SystemWorkflow, error: str) -> None:
@@ -3412,6 +3490,44 @@ def _mark_running_panel_runs_failed(workflow: SystemWorkflow, error: str) -> Non
         ).select_related("instance")
     )
     _mark_system_agent_runs_failed(_interrupt_system_agent_runs(runs), error)
+
+
+def _claim_user_steering_turn(workflow: SystemWorkflow) -> bool:
+    with transaction.atomic():
+        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        if (
+            locked.kind != SystemWorkflow.KIND_PR_QA
+            or locked.status != SystemWorkflow.STATUS_RUNNING
+            or locked.step != STEP_QA_RUNNING
+        ):
+            return False
+        next_revision = _state_int(locked, _QA_REVIEW_REVISION_STATE_KEY) + 1
+        state = {
+            **locked.state,
+            _QA_REVIEW_REVISION_STATE_KEY: next_revision,
+        }
+        state.pop(_QA_PANEL_SYNTHESIZER_STARTED_KEY, None)
+        locked.step = STEP_USER_STEERING_RUNNING
+        locked.state = state
+        locked.save(update_fields=["step", "state", "updated_at"])
+        workflow.step = locked.step
+        workflow.state = locked.state
+    return True
+
+
+def _interrupt_running_qa_runs_for_user_steer(workflow: SystemWorkflow) -> None:
+    runs = list(
+        workflow.agent_runs.filter(
+            agent_kind__in=_QA_INTERRUPTIBLE_AGENT_KINDS,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+        .select_related("instance")
+        .order_by("created_at", "id")
+    )
+    interrupted_runs = _interrupt_system_agent_runs(runs)
+    _mark_system_agent_runs_failed(
+        interrupted_runs, "QA workflow paused for user steering"
+    )
 
 
 def _interrupt_system_agent_runs(runs: list[SystemAgentRun]) -> list[SystemAgentRun]:
@@ -5351,7 +5467,26 @@ def _system_agent_run_for_instance(instance: CodexInstance) -> SystemAgentRun | 
             "agent_kind": instance.agent_kind,
             "thread_id": instance.thread_id,
             "status": SystemAgentRun.STATUS_RUNNING,
-            "input": {"cwd": instance.cwd},
+            "input": _recovered_system_agent_run_input(instance, workflow),
         },
     )
     return run
+
+
+def _recovered_system_agent_run_input(
+    instance: CodexInstance, workflow: SystemWorkflow
+) -> dict[str, Any]:
+    run_input: dict[str, Any] = {"cwd": instance.cwd}
+    if workflow.kind != SystemWorkflow.KIND_PR_QA:
+        return run_input
+    if instance.agent_kind not in _QA_INTERRUPTIBLE_AGENT_KINDS:
+        return run_input
+    revision = instance.user_message_index
+    run_input["qa_review_revision"] = (
+        revision if revision is not None else 0
+    )
+    if instance.agent_kind in _QA_PANEL_LANE_KINDS or (
+        instance.agent_kind == PR_QA_PANEL_SYNTHESIZER_AGENT_KIND
+    ):
+        run_input["iteration"] = workflow.iteration
+    return run_input
