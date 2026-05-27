@@ -1080,11 +1080,17 @@ def looks_like_plan_text(text: str) -> bool:
     return matched_sections >= 2
 
 
+# Whole-word match keeps real plan headings whose words happen to embed a
+# marker -- "Tagging strategy", "Stage rollout", "Vintage cleanup" -- from
+# being downgraded to plain agent entries by the literal-example fallback.
+_LITERAL_PLAN_EXAMPLE_MARKERS_RE = re.compile(
+    r"\b(?:example|xml|tag|syntax|literal)\b"
+)
+
+
 def _looks_like_literal_plan_example(lines: list[str]) -> bool:
     heading = lines[0].strip("#*_:- ").lower()
-    return any(
-        marker in heading for marker in ("example", "xml", "tag", "syntax", "literal")
-    )
+    return _LITERAL_PLAN_EXAMPLE_MARKERS_RE.search(heading) is not None
 
 
 def _looks_like_simple_plan_heading(lines: list[str]) -> bool:
