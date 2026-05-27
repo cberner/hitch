@@ -1455,6 +1455,7 @@ def _launch_systemd_worker(
     worker_argv: list[str],
     env: dict[str, str],
 ) -> WorkerLaunch:
+    _ensure_systemd_worker_slice()
     with tempfile.TemporaryFile() as stderr_file:
         proc = _popen_detached(
             _systemd_scope_argv(
@@ -1467,6 +1468,68 @@ def _launch_systemd_worker(
         )
         _raise_for_immediate_systemd_run_failure(proc, scope_unit, stderr_file)
     return WorkerLaunch(pid=proc.pid, proc=proc, scope_unit=scope_unit)
+
+
+def _worker_slice() -> str:
+    return str(getattr(settings, "CODEX_WORKER_SLICE", "") or "").strip()
+
+
+def _systemd_worker_slice_properties() -> list[str]:
+    properties: list[str] = []
+    memory_high = str(
+        getattr(settings, "CODEX_WORKER_SLICE_MEMORY_HIGH", "") or ""
+    ).strip()
+    memory_max = str(
+        getattr(settings, "CODEX_WORKER_SLICE_MEMORY_MAX", "") or ""
+    ).strip()
+    if memory_high or memory_max:
+        properties.append("MemoryAccounting=yes")
+    if memory_high:
+        properties.append(f"MemoryHigh={memory_high}")
+    if memory_max:
+        properties.append(f"MemoryMax={memory_max}")
+    return properties
+
+
+def _ensure_systemd_worker_slice() -> None:
+    slice_unit = _worker_slice()
+    if not slice_unit:
+        return
+    properties = _systemd_worker_slice_properties()
+    if not properties:
+        return
+    systemctl = shutil.which("systemctl")
+    if systemctl is None:
+        raise RuntimeError("systemctl is required to configure Codex worker slice")
+    try:
+        result = subprocess.run(
+            [
+                systemctl,
+                "--user",
+                "set-property",
+                "--runtime",
+                slice_unit,
+                *properties,
+            ],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=2,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(
+            f"failed to configure Codex worker slice {slice_unit}"
+        ) from exc
+    if result.returncode == 0:
+        return
+    detail = result.stderr.decode("utf-8", errors="replace").strip()
+    message = f"failed to configure Codex worker slice {slice_unit}"
+    if detail:
+        message = f"{message}: {detail}"
+    else:
+        message = f"{message}: exited with status {result.returncode}"
+    raise RuntimeError(message)
 
 
 def _worker_argv(
@@ -1535,6 +1598,9 @@ def _systemd_scope_argv(
         "--collect",
         f"--unit={scope_unit.removesuffix('.scope')}",
     ]
+    worker_slice = _worker_slice()
+    if worker_slice:
+        argv.append(f"--slice={worker_slice}")
     memory_high = str(getattr(settings, "CODEX_WORKER_MEMORY_HIGH", "") or "").strip()
     if memory_high:
         argv.append(f"--property=MemoryHigh={memory_high}")

@@ -129,10 +129,21 @@ CODEX_EVENTS_DIR = Path.home() / ".hitch" / "codex_events"
 
 # Worker isolation policy: "auto" uses systemd scopes only when the user
 # manager is reachable, "systemd" fails closed, and "direct" preserves the
-# legacy process-group launch path for non-systemd environments.
+# legacy process-group launch path for non-systemd environments. The defaults
+# reserve memory for the Django server on a 16G host even when QA panel lanes run
+# concurrently.
 CODEX_WORKER_ISOLATION = os.environ.get("HITCH_CODEX_WORKER_ISOLATION", "auto")
-CODEX_WORKER_MEMORY_HIGH = os.environ.get("HITCH_CODEX_WORKER_MEMORY_HIGH", "4G")
-CODEX_WORKER_MEMORY_MAX = os.environ.get("HITCH_CODEX_WORKER_MEMORY_MAX", "12G")
+CODEX_WORKER_SLICE = os.environ.get(
+    "HITCH_CODEX_WORKER_SLICE", "hitch-codex-workers.slice"
+)
+CODEX_WORKER_SLICE_MEMORY_HIGH = os.environ.get(
+    "HITCH_CODEX_WORKER_SLICE_MEMORY_HIGH", "8G"
+)
+CODEX_WORKER_SLICE_MEMORY_MAX = os.environ.get(
+    "HITCH_CODEX_WORKER_SLICE_MEMORY_MAX", "10G"
+)
+CODEX_WORKER_MEMORY_HIGH = os.environ.get("HITCH_CODEX_WORKER_MEMORY_HIGH", "2G")
+CODEX_WORKER_MEMORY_MAX = os.environ.get("HITCH_CODEX_WORKER_MEMORY_MAX", "4G")
 CODEX_WORKER_OOM_SCORE_ADJ = os.environ.get(
     "HITCH_CODEX_WORKER_OOM_SCORE_ADJ", "0" if TESTING else "1000"
 )
