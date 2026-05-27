@@ -427,6 +427,15 @@ def _thread_cwd(thread: Any) -> str | None:
 
 
 def _thread_is_archived(thread: Any) -> bool:
+    # Codex's ``Thread`` exposes archive state as a boolean; trust it over the
+    # path heuristic. ``thread_list(archived=True)`` can return threads whose
+    # rollout file still lives in the active-storage tree (the archive flag is
+    # set before -- or independently of -- moving the rollout file), so
+    # falling through to the path check would silently cache them as active
+    # and surface them in the wrong session list.
+    archived = getattr(thread, "archived", None)
+    if isinstance(archived, bool):
+        return archived
     path = getattr(thread, "path", None)
     if not isinstance(path, str) or not path:
         return False

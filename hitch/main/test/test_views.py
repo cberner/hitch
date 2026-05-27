@@ -3316,6 +3316,33 @@ class IndexViewTests(TestCase):
             ).exists()
         )
 
+    def test_upsert_thread_uses_codex_sdk_archived_flag(self) -> None:
+        # Regression: ``session_index._thread_is_archived`` consulted only
+        # the rollout file path, never the Codex SDK ``archived`` boolean
+        # (unlike its views.py twin). The archive flag flips independently
+        # of -- and before -- the rollout file is moved into
+        # ``archived_sessions/``, so ``thread_list(archived=True)`` can
+        # return a thread whose path still lives in the active-storage
+        # tree. The path heuristic then cached it as
+        # ``codex_archived=False`` and surfaced the just-archived session
+        # in the active list, where users could not unarchive or hide it.
+        freshly_archived = SimpleNamespace(
+            id="freshly-archived",
+            name="Freshly archived",
+            preview="",
+            cwd="/repo",
+            path="/codex/sessions/2026/05/27/rollout-fresh.jsonl",
+            created_at=1736078400,
+            updated_at=1736078400,
+            thread_source=None,
+            archived=True,
+        )
+
+        metadata = session_index.upsert_thread(freshly_archived, projects=[])
+
+        assert metadata is not None
+        self.assertTrue(metadata.codex_archived)
+
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_archived_and_active_sessions_are_globally_paginated(
