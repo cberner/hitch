@@ -21,6 +21,12 @@ logger = logging.getLogger(__name__)
 DISPLAY_TITLE_MAX_LEN = 80
 THREAD_LIST_FETCH_LIMIT = 100
 ARCHIVED_SESSIONS_DIR = "archived_sessions"
+# Codex's archived rollouts live at most four levels below the
+# ``archived_sessions/`` directory (``archived_sessions/YYYY/MM/DD/rollout-*.jsonl``);
+# five gives a small cushion for future structural changes without re-opening
+# the false-positive case where a user's CODEX_HOME unrelatedly traverses an
+# ``archived_sessions`` parent.
+_ARCHIVED_SESSIONS_ANCESTOR_DEPTH = 5
 STALE_AFTER = timedelta(seconds=30)
 HIDDEN_SYSTEM_THREAD_SOURCE = "subagent"
 AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE = "You are Hitch's autonomous goal agent."
@@ -424,7 +430,17 @@ def _thread_is_archived(thread: Any) -> bool:
     path = getattr(thread, "path", None)
     if not isinstance(path, str) or not path:
         return False
-    return ARCHIVED_SESSIONS_DIR in Path(path).parts
+    # Walk the rollout file's immediate ancestry rather than scanning the full
+    # path. Codex nests archived rollouts at most a handful of date-segmented
+    # levels deep under ``archived_sessions/``; matching ``archived_sessions``
+    # anywhere in ``Path(path).parts`` would falsely flag every active
+    # session whose ``CODEX_HOME`` happens to traverse an unrelated parent
+    # directory of that name (e.g. an org-wide
+    # ``/data/archived_sessions/<user>/.codex`` layout).
+    return any(
+        parent.name == ARCHIVED_SESSIONS_DIR
+        for parent in list(Path(path).parents)[:_ARCHIVED_SESSIONS_ANCESTOR_DEPTH]
+    )
 
 
 def _metadata_value(value: Any) -> str:

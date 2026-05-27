@@ -371,6 +371,12 @@ _SESSION_PAGE_SIZE = 50
 _THREAD_LIST_FETCH_LIMIT = 100
 _THREAD_LIST_USE_STATE_DB_ONLY = True
 _ARCHIVED_SESSIONS_DIR = "archived_sessions"
+# Codex's archived rollouts live at most four levels below the
+# ``archived_sessions/`` directory (``archived_sessions/YYYY/MM/DD/rollout-*.jsonl``);
+# five gives a small cushion for future structural changes without re-opening
+# the false-positive case where a user's CODEX_HOME unrelatedly traverses an
+# ``archived_sessions`` parent.
+_ARCHIVED_SESSIONS_ANCESTOR_DEPTH = 5
 _INPUT_IMAGE_FIELD = "input_images"
 _INPUT_IMAGE_MAX_COUNT = 4
 _INPUT_IMAGE_MAX_BYTES = 20 * 1024 * 1024
@@ -3188,7 +3194,14 @@ def _thread_is_archived(thread: Any) -> bool:
     path = getattr(thread, "path", None)
     if not isinstance(path, str) or not path:
         return False
-    return _ARCHIVED_SESSIONS_DIR in Path(path).parts
+    # Walk only the rollout file's immediate ancestry. Scanning the full path
+    # for ``archived_sessions`` would false-positive every active session
+    # whose ``CODEX_HOME`` happens to traverse an unrelated directory of
+    # that name (e.g. ``/data/archived_sessions/<user>/.codex/sessions/...``).
+    return any(
+        parent.name == _ARCHIVED_SESSIONS_DIR
+        for parent in list(Path(path).parents)[:_ARCHIVED_SESSIONS_ANCESTOR_DEPTH]
+    )
 
 
 def _session_detail_metadata(session_id: str) -> SessionMetadata | None:

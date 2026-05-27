@@ -3285,6 +3285,39 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    def test_active_session_not_hidden_when_codex_home_traverses_archived_sessions_dir(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        # Regression: a user whose Codex storage path happens to traverse an
+        # unrelated parent directory named ``archived_sessions`` -- e.g. an
+        # org-wide ``/data/archived_sessions/<user>/.codex`` layout, or a
+        # personal HOME under ``/Users/archived_sessions`` -- previously had
+        # every active session silently flipped to archived (and therefore
+        # hidden) because ``_thread_is_archived`` scanned the FULL path for
+        # the ``archived_sessions`` component instead of only the
+        # rollout file's immediate ancestry.
+        active = _session(
+            "active",
+            name="Active session",
+            path=(
+                "/data/archived_sessions/projects/me/.codex/sessions/"
+                "2026/05/15/rollout-active.jsonl"
+            ),
+        )
+        _setup_codex(mock_codex, threads=[active])
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+
+        self.assertContains(response, "Active session")
+        self.assertTrue(
+            SessionMetadata.objects.filter(
+                thread_id="active", codex_archived=False
+            ).exists()
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
     def test_archived_and_active_sessions_are_globally_paginated(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
