@@ -887,11 +887,16 @@ class LaunchWorkerProcessTests(TestCase):
         CODEX_WORKER_ISOLATION="systemd",
         CODEX_WORKER_MEMORY_HIGH="4G",
         CODEX_WORKER_MEMORY_MAX="12G",
+        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
     )
+    @patch("hitch.main.codex_pool._ensure_systemd_worker_slice")
     @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
     @patch("hitch.main.codex_pool.subprocess.Popen")
     def test_systemd_launches_worker_in_memory_capped_scope(
-        self, mock_popen: MagicMock, mock_which: MagicMock
+        self,
+        mock_popen: MagicMock,
+        mock_which: MagicMock,
+        mock_ensure_slice: MagicMock,
     ) -> None:
         proc = MagicMock()
         proc.pid = 999
@@ -909,6 +914,7 @@ class LaunchWorkerProcessTests(TestCase):
             ["/usr/bin/systemd-run", "--user", "--scope", "--quiet", "--collect"],
         )
         self.assertIn("--unit=hitch-codex-worker-7", argv)
+        self.assertIn("--slice=hitch-codex-workers.slice", argv)
         self.assertIn("--property=MemoryHigh=4G", argv)
         self.assertIn("--property=MemoryMax=12G", argv)
         separator = argv.index("--")
@@ -923,6 +929,66 @@ class LaunchWorkerProcessTests(TestCase):
         )
         proc.wait.assert_called_once_with(timeout=0.25)
         mock_which.assert_called_once_with("systemd-run")
+        mock_ensure_slice.assert_called_once_with()
+
+    @override_settings(
+        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
+        CODEX_WORKER_SLICE_MEMORY_HIGH="8G",
+        CODEX_WORKER_SLICE_MEMORY_MAX="10G",
+    )
+    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.codex_pool.subprocess.run")
+    def test_configures_worker_slice_aggregate_memory_cap(
+        self, mock_run: MagicMock, mock_which: MagicMock
+    ) -> None:
+        mock_run.return_value = SimpleNamespace(returncode=0, stderr=b"")
+
+        codex_pool._ensure_systemd_worker_slice()
+
+        argv = mock_run.call_args.args[0]
+        self.assertEqual(
+            argv[:5],
+            [
+                "/usr/bin/systemctl",
+                "--user",
+                "set-property",
+                "--runtime",
+                "hitch-codex-workers.slice",
+            ],
+        )
+        self.assertIn("MemoryAccounting=yes", argv)
+        self.assertIn("MemoryHigh=8G", argv)
+        self.assertIn("MemoryMax=10G", argv)
+        mock_which.assert_called_once_with("systemctl")
+
+    @override_settings(CODEX_WORKER_SLICE="")
+    @patch("hitch.main.codex_pool.shutil.which")
+    @patch("hitch.main.codex_pool.subprocess.run")
+    def test_skips_worker_slice_configuration_when_disabled(
+        self, mock_run: MagicMock, mock_which: MagicMock
+    ) -> None:
+        codex_pool._ensure_systemd_worker_slice()
+
+        mock_run.assert_not_called()
+        mock_which.assert_not_called()
+
+    @override_settings(
+        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
+        CODEX_WORKER_SLICE_MEMORY_HIGH="8G",
+        CODEX_WORKER_SLICE_MEMORY_MAX="10G",
+    )
+    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.codex_pool.subprocess.run")
+    def test_worker_slice_configuration_failure_is_fatal(
+        self, mock_run: MagicMock, _mock_which: MagicMock
+    ) -> None:
+        mock_run.return_value = SimpleNamespace(
+            returncode=1,
+            stderr=b"Failed to connect to bus\n",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "Failed to connect to bus"):
+            codex_pool._ensure_systemd_worker_slice()
 
     @override_settings(CODEX_WORKER_ISOLATION="systemd")
     @patch("hitch.main.codex_pool.shutil.which", return_value=None)
@@ -957,12 +1023,14 @@ class LaunchWorkerProcessTests(TestCase):
 
     @override_settings(CODEX_WORKER_ISOLATION="auto")
     @patch("hitch.main.codex_pool._systemd_user_manager_available", return_value=True)
+    @patch("hitch.main.codex_pool._ensure_systemd_worker_slice")
     @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
     @patch("hitch.main.codex_pool.subprocess.Popen")
     def test_auto_launch_uses_systemd_when_user_manager_available(
         self,
         mock_popen: MagicMock,
         _mock_which: MagicMock,
+        mock_ensure_slice: MagicMock,
         mock_user_manager: MagicMock,
     ) -> None:
         proc = MagicMock()
@@ -977,15 +1045,18 @@ class LaunchWorkerProcessTests(TestCase):
         self.assertEqual(launch.scope_unit, "hitch-codex-worker-7.scope")
         self.assertEqual(argv[0], "/usr/bin/systemd-run")
         mock_user_manager.assert_called_once_with()
+        mock_ensure_slice.assert_called_once_with()
 
     @override_settings(CODEX_WORKER_ISOLATION="auto")
     @patch("hitch.main.codex_pool._systemd_user_manager_available", return_value=True)
+    @patch("hitch.main.codex_pool._ensure_systemd_worker_slice")
     @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
     @patch("hitch.main.codex_pool.subprocess.Popen")
     def test_auto_launch_fails_closed_when_systemd_run_fails(
         self,
         mock_popen: MagicMock,
         _mock_which: MagicMock,
+        _mock_ensure_slice: MagicMock,
         _mock_user_manager: MagicMock,
     ) -> None:
         failed_proc = MagicMock()
@@ -1005,10 +1076,14 @@ class LaunchWorkerProcessTests(TestCase):
         self.assertEqual(mock_popen.call_count, 1)
 
     @override_settings(CODEX_WORKER_ISOLATION="systemd")
+    @patch("hitch.main.codex_pool._ensure_systemd_worker_slice")
     @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
     @patch("hitch.main.codex_pool.subprocess.Popen")
     def test_systemd_launch_fails_promptly_when_wrapper_exits_nonzero(
-        self, mock_popen: MagicMock, _mock_which: MagicMock
+        self,
+        mock_popen: MagicMock,
+        _mock_which: MagicMock,
+        _mock_ensure_slice: MagicMock,
     ) -> None:
         proc = MagicMock()
         proc.wait.return_value = 1
