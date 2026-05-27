@@ -92,6 +92,7 @@
                 value="{{ project.pk }}"{% if project.pk == current_project_id %} selected{% endif %}
                 data-project-name="{{ project.name }}"
                 data-project-repo-path="{{ project.repo_path }}"
+                data-project-extra-system-prompt="{{ project.extra_system_prompt }}"
                 data-project-auto-pr-mode="{{ project.auto_pr_mode }}"
             >{{ project.name }}</option>
             {% endfor %}

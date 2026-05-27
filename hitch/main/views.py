@@ -621,6 +621,7 @@ def _settings_context(
             {"id": value, "display_name": label}
             for value, label in Project.AUTO_PR_CHOICES
         ],
+        "project_extra_system_prompt_max_len": _EXTRA_SYSTEM_PROMPT_MAX_LEN,
         "project_auto_pr_follow_global": Project.AUTO_PR_FOLLOW_GLOBAL,
         "project_auto_pr_on": Project.AUTO_PR_ON,
         "project_auto_pr_off": Project.AUTO_PR_OFF,
@@ -4617,6 +4618,19 @@ def _effective_auto_pr_enabled(
     return global_enabled
 
 
+def _developer_instructions_for_project(
+    settings: SettingsValues, project: Project | None
+) -> str:
+    return "\n\n".join(
+        part
+        for part in (
+            settings.extra_system_prompt.strip(),
+            project.extra_system_prompt.strip() if project is not None else "",
+        )
+        if part
+    )
+
+
 def _associate_existing_sessions_with_project(project: Project, request: HttpRequest) -> None:
     settings = _stored_settings(request)
     config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
@@ -5966,11 +5980,14 @@ def edit_project(request: HttpRequest) -> HttpResponse:
     if project is None:
         return HttpResponseBadRequest("project is required")
     name = request.POST.get("name", "").strip()
+    extra_system_prompt = request.POST.get("extra_system_prompt", "").strip()
     auto_pr_mode = request.POST.get("auto_pr_mode", "").strip()
     if not name:
         return HttpResponseBadRequest("project name is required")
     if len(name) > _PROJECT_NAME_MAX_LEN:
         return HttpResponseBadRequest("project name is too long")
+    if len(extra_system_prompt) > _EXTRA_SYSTEM_PROMPT_MAX_LEN:
+        return HttpResponseBadRequest("extra system prompt is too long")
     if auto_pr_mode not in _VALID_PROJECT_AUTO_PR_MODES:
         return HttpResponseBadRequest("invalid project auto-PR setting")
 
@@ -5978,6 +5995,9 @@ def edit_project(request: HttpRequest) -> HttpResponse:
     if project.name != name:
         project.name = name
         updates.append("name")
+    if project.extra_system_prompt != extra_system_prompt:
+        project.extra_system_prompt = extra_system_prompt
+        updates.append("extra_system_prompt")
     if project.auto_pr_mode != auto_pr_mode:
         project.auto_pr_mode = auto_pr_mode
         updates.append("auto_pr_mode")
@@ -6620,6 +6640,24 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         sandbox_policy = _effective_sandbox_policy(settings)
         approval_mode = _effective_approval_mode(settings)
         previous_instance = codex_pool.latest_for_thread(session_id)
+        session_project = None
+        if previous_instance is None:
+            metadata = (
+                SessionMetadata.objects.select_related("project")
+                .filter(thread_id=session_id)
+                .first()
+            )
+            if metadata is not None and (
+                metadata.project_id is not None or metadata.project_cleared
+            ):
+                session_project = metadata.project
+            else:
+                session_project = _project_for_cwd(cwd, list(Project.objects.all()))
+        developer_instructions = (
+            previous_instance.developer_instructions
+            if previous_instance is not None
+            else _developer_instructions_for_project(settings, session_project)
+        )
         configured_web_search_mode = _valid_web_search_mode_or_default(
             settings.web_search_mode
         )
@@ -6656,11 +6694,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             auto_merge_to_local_branch = False
             auto_merge_branch = ""
         if qa_workflow_activation:
-            developer_instructions = (
-                previous_instance.developer_instructions
-                if previous_instance is not None
-                else settings.extra_system_prompt
-            )
             workflow_model = (
                 _string_value(getattr(resumed, "model", None)) or settings.model
             )
@@ -6708,6 +6741,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             spawn_kwargs["web_search_mode"] = web_search_mode
         if base_instructions:
             spawn_kwargs["base_instructions"] = base_instructions
+        if previous_instance is None and developer_instructions:
+            spawn_kwargs["developer_instructions"] = developer_instructions
         if settings.enable_memories:
             spawn_kwargs["enable_memories"] = True
         if auto_pr_enabled or auto_qa_enabled:
@@ -6766,12 +6801,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 "approval_mode": approval_mode,
                 "model": workflow_model or None,
                 "reasoning_effort": workflow_reasoning_effort or None,
-                "developer_instructions": (
-                    previous_instance.developer_instructions
-                    if previous_instance is not None
-                    else settings.extra_system_prompt
-                )
-                or None,
+                "developer_instructions": developer_instructions or None,
                 "enable_memories": settings.enable_memories,
                 "initial_user_message_index": _count_user_entries(thread_entries),
                 "auto_pr_enabled": auto_pr_enabled,
@@ -7296,6 +7326,8 @@ def _start_candidate_proposal_session(
             "candidate session cwd is not an allowed repository"
         )
     base_instructions = _base_instructions_for_settings(spawn_settings)
+    project = None if target.project_cleared else candidate_session.project or target.project
+    developer_instructions = _developer_instructions_for_project(settings, project)
     if qa_workflow_activation:
         workflow_kwargs: dict[str, Any] = {
             "main_thread_id": candidate_session.thread_id,
@@ -7304,7 +7336,7 @@ def _start_candidate_proposal_session(
             "approval_mode": settings.approval_mode,
             "model": settings.model or None,
             "reasoning_effort": settings.reasoning_effort or None,
-            "developer_instructions": settings.extra_system_prompt or None,
+            "developer_instructions": developer_instructions or None,
             "enable_memories": settings.enable_memories,
             "initial_user_message_index": _candidate_thread_user_message_index(
                 candidate_session.thread_id, settings
@@ -7338,7 +7370,7 @@ def _start_candidate_proposal_session(
         "thread_id": candidate_session.thread_id,
         "cwd": candidate_cwd,
         "prompt": prompt,
-        "developer_instructions": settings.extra_system_prompt or None,
+        "developer_instructions": developer_instructions or None,
         "model": settings.model or None,
         "reasoning_effort": settings.reasoning_effort or None,
         "sandbox_policy": settings.sandbox_policy or None,
@@ -7380,7 +7412,7 @@ def _start_candidate_proposal_session(
             "approval_mode": settings.approval_mode,
             "model": settings.model or None,
             "reasoning_effort": settings.reasoning_effort or None,
-            "developer_instructions": settings.extra_system_prompt or None,
+            "developer_instructions": developer_instructions or None,
             "enable_memories": settings.enable_memories,
             "initial_user_message_index": _candidate_thread_user_message_index(
                 candidate_session.thread_id, settings
@@ -7724,6 +7756,9 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
     )
     cookie_updates = resolved_settings.cookie_updates
     source_project = target.project
+    source_developer_instructions = _developer_instructions_for_project(
+        settings, None if target.project_cleared else source_project
+    )
     default_auto_pr_enabled = _effective_auto_pr_enabled(
         None if target.project_cleared else source_project,
         global_enabled=settings.auto_pr_enabled,
@@ -7785,7 +7820,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         create_thread_kwargs: dict[str, Any] = {
             "cwd": session_cwd,
             "name": thread_name,
-            "developer_instructions": settings.extra_system_prompt or None,
+            "developer_instructions": source_developer_instructions or None,
             "model": settings.model or None,
             "enable_memories": settings.enable_memories,
         }
@@ -7801,7 +7836,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             "approval_mode": settings.approval_mode,
             "model": settings.model or None,
             "reasoning_effort": settings.reasoning_effort or None,
-            "developer_instructions": settings.extra_system_prompt or None,
+            "developer_instructions": source_developer_instructions or None,
             "enable_memories": settings.enable_memories,
             "initial_user_message_index": 0,
         }
@@ -7847,6 +7882,9 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         if target.project_cleared
         else _project_for_cwd(session_cwd, projects) or source_project
     )
+    developer_instructions = _developer_instructions_for_project(
+        settings, session_project
+    )
     input_image_paths, input_image_error = _save_posted_input_images(request)
     if input_image_error is not None:
         if managed_worktree is not None:
@@ -7864,7 +7902,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
     spawn_kwargs: dict[str, Any] = {
         "cwd": session_cwd,
         "prompt": prompt,
-        "developer_instructions": settings.extra_system_prompt or None,
+        "developer_instructions": developer_instructions or None,
         "model": settings.model or None,
         "reasoning_effort": settings.reasoning_effort or None,
         "sandbox_policy": settings.sandbox_policy or None,
@@ -7902,7 +7940,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
                 if proposed_session is not None
                 else prompt.split("\n", 1)[0]
             ),
-            "developer_instructions": settings.extra_system_prompt or None,
+            "developer_instructions": developer_instructions or None,
             "model": settings.model or None,
             "enable_memories": settings.enable_memories,
         }
@@ -7929,7 +7967,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             "approval_mode": settings.approval_mode,
             "model": settings.model or None,
             "reasoning_effort": settings.reasoning_effort or None,
-            "developer_instructions": settings.extra_system_prompt or None,
+            "developer_instructions": developer_instructions or None,
             "enable_memories": settings.enable_memories,
             "initial_user_message_index": 0,
             "auto_pr_enabled": auto_pr_enabled,

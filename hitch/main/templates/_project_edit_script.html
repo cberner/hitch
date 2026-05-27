@@ -5,6 +5,7 @@
             const projectEditId = projectEditDialog && projectEditDialog.querySelector("[data-project-edit-id]");
             const projectEditName = projectEditDialog && projectEditDialog.querySelector("[data-project-edit-name]");
             const projectEditRepo = projectEditDialog && projectEditDialog.querySelector("[data-project-edit-repo]");
+            const projectEditExtraSystemPrompt = projectEditDialog && projectEditDialog.querySelector("[data-project-edit-extra-system-prompt]");
             const projectEditAutoPrMode = projectEditDialog && projectEditDialog.querySelector("[data-project-edit-auto-pr-mode]");
             function selectedProjectOption() {
                 if (!settingsProjectSelect) return null;
@@ -20,6 +21,7 @@
                 if (projectEditId) projectEditId.value = option.value;
                 if (projectEditName) projectEditName.value = option.dataset.projectName || "";
                 if (projectEditRepo) projectEditRepo.value = option.dataset.projectRepoPath || "";
+                if (projectEditExtraSystemPrompt) projectEditExtraSystemPrompt.value = option.dataset.projectExtraSystemPrompt || "";
                 if (projectEditAutoPrMode) {
                     projectEditAutoPrMode.value = option.dataset.projectAutoPrMode || "follow_global";
                 }
