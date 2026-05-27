@@ -465,7 +465,10 @@ def _worktree_index_entry(
         return None
     if not path.is_file():
         raise LocalBranchMergeError("auto merge does not support submodule changes")
-    mode = "100755" if path.stat().st_mode & 0o111 else "100644"
+    # ``S_IXUSR`` only: git stores ``100755`` solely on owner-execute, so a
+    # wider mask would synthesise spurious ``100644`` → ``100755`` mode
+    # changes for files whose group- or other-execute bits are set.
+    mode = "100755" if path.stat().st_mode & 0o100 else "100644"
     blob_sha = _git(
         source_repo,
         ["hash-object", "-w", "--no-filters", "--", relpath],
