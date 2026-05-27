@@ -1341,8 +1341,8 @@ class IterEntriesTests(TestCase):
         self.assertEqual(entries[-1]["kind"], "plan")
         self.assertEqual(entries[-1]["text"], plan)
 
-    def test_task_started_after_user_does_not_mark_next_turn(self) -> None:
-        text = "<proposed_plan>\n# XML Example\n\nliteral example\n</proposed_plan>"
+    def test_plan_mode_stays_active_until_approval(self) -> None:
+        text = "<proposed_plan>\n# Plan\n\nImplement it.\n</proposed_plan>"
         path = self._make(
             [
                 _line("event_msg", {"type": "user_message", "message": "Plan it"}),
@@ -1358,7 +1358,10 @@ class IterEntriesTests(TestCase):
                         "phase": "final_answer",
                     },
                 ),
-                _line("event_msg", {"type": "user_message", "message": "Show XML"}),
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Turn that into a plan."},
+                ),
                 _line(
                     "response_item",
                     {
@@ -1373,8 +1376,8 @@ class IterEntriesTests(TestCase):
 
         entries = list(rollout.iter_entries(path))
 
-        self.assertEqual(entries[-1]["kind"], "agent")
-        self.assertEqual(entries[-1]["text"], text)
+        self.assertEqual(entries[-1]["kind"], "plan")
+        self.assertEqual(entries[-1]["text"], "# Plan\n\nImplement it.")
 
     def test_plan_mode_followup_fallback_expires_after_one_turn(self) -> None:
         text = "<proposed_plan>\n# Plan XML Example\n\nliteral example\n</proposed_plan>"
@@ -1462,6 +1465,86 @@ class IterEntriesTests(TestCase):
                 _line(
                     "event_msg",
                     {"type": "user_message", "message": "Show the tags"},
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": text}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+
+        self.assertEqual(entries[-1]["kind"], "agent")
+        self.assertEqual(entries[-1]["text"], text)
+
+    def test_approval_turn_treats_proposed_plan_markup_as_agent_text(self) -> None:
+        text = "<proposed_plan>\n# XML Example\n\nliteral example\n</proposed_plan>"
+        path = self._make(
+            [
+                _line("turn_context", {"collaboration_mode": {"mode": "plan"}}),
+                _line("event_msg", {"type": "user_message", "message": "Plan it"}),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "<proposed_plan>\n# Plan\n\nDo it\n</proposed_plan>",
+                            }
+                        ],
+                        "phase": "final_answer",
+                    },
+                ),
+                _line("turn_context", {"collaboration_mode": {"mode": "default"}}),
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Implement the plan."},
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": text}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+        entries = list(rollout.iter_entries(path))
+        plan_entries = [entry for entry in entries if entry["kind"] == "plan"]
+
+        self.assertEqual(len(plan_entries), 1)
+        self.assertEqual(entries[-1]["kind"], "agent")
+        self.assertEqual(entries[-1]["text"], text)
+
+    def test_default_mode_turn_exits_active_plan_mode_without_approval(self) -> None:
+        text = "<proposed_plan>\n# XML Example\n\nliteral example\n</proposed_plan>"
+        path = self._make(
+            [
+                _line("turn_context", {"collaboration_mode": {"mode": "plan"}}),
+                _line("event_msg", {"type": "user_message", "message": "Plan it"}),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "message": "No proposed plan yet.",
+                        "phase": "final_answer",
+                    },
+                ),
+                _line("turn_context", {"collaboration_mode": {"mode": "default"}}),
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": "answer directly"},
                 ),
                 _line(
                     "response_item",

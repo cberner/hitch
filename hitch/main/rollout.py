@@ -67,6 +67,9 @@ _PR_PROMPT_ALIASES = frozenset(
         ),
     }
 )
+_PLAN_APPROVAL_PROMPT = "Implement the plan."
+_COLLABORATION_MODE_PLAN = "plan"
+_COLLABORATION_MODE_DEFAULT = "default"
 
 
 def iter_entries(rollout_path: Path) -> Iterator[dict[str, Any]]:
@@ -139,6 +142,17 @@ def latest_token_usage(rollout_path: Path) -> dict[str, int] | None:
         "context_tokens": _coerce_int(latest_context.get("total_tokens")),
         "model_context_window": latest_context_window,
     }
+
+
+def latest_collaboration_mode(rollout_path: Path) -> str | None:
+    """Return the last collaboration mode Codex recorded in the rollout."""
+    lines = _load_rollout_lines(rollout_path)
+    if lines is None:
+        return None
+    modes = _collaboration_modes_by_turn(lines)
+    if not modes:
+        return None
+    return modes[max(modes)]
 
 
 def token_usage_history(rollout_path: Path) -> list[dict[str, int]]:
@@ -585,51 +599,52 @@ def _agent_response_phase(entry: dict[str, Any]) -> str | None:
 
 
 def _plan_mode_turns(lines: list[dict[str, Any]]) -> set[int]:
-    plan_turns: set[int] = set()
-    pending_plan_mode = False
+    return {
+        turn_idx
+        for turn_idx, mode in _collaboration_modes_by_turn(lines).items()
+        if mode == _COLLABORATION_MODE_PLAN
+    }
+
+
+def _collaboration_modes_by_turn(lines: list[dict[str, Any]]) -> dict[int, str]:
+    modes: dict[int, str] = {}
+    pending_mode: str | None = None
     turn_idx = -1
     current_turn_accepts_mode = False
     for entry in lines:
-        if entry.get("type") == "turn_context":
-            is_plan = _turn_context_is_plan(entry)
+        mode = _collaboration_mode_from_line(entry)
+        if mode is not None:
             if current_turn_accepts_mode:
-                _set_plan_turn_mode(plan_turns, turn_idx, is_plan)
+                modes[turn_idx] = mode
             else:
-                pending_plan_mode = is_plan
-            continue
-        if _is_task_started_line(entry):
-            mode = _task_started_collaboration_mode(entry)
-            if mode is not None:
-                is_plan = mode == "plan"
-                if current_turn_accepts_mode:
-                    _set_plan_turn_mode(plan_turns, turn_idx, is_plan)
-                else:
-                    pending_plan_mode = is_plan
+                pending_mode = mode
             continue
         if _is_user_message_line(entry):
             turn_idx += 1
             current_turn_accepts_mode = True
-            if pending_plan_mode:
-                plan_turns.add(turn_idx)
-            pending_plan_mode = False
+            if pending_mode is not None:
+                modes[turn_idx] = pending_mode
+            pending_mode = None
             continue
         current_turn_accepts_mode = False
-    return plan_turns
+    return modes
 
 
-def _set_plan_turn_mode(plan_turns: set[int], turn_idx: int, is_plan: bool) -> None:
-    if is_plan:
-        plan_turns.add(turn_idx)
-    else:
-        plan_turns.discard(turn_idx)
+def _collaboration_mode_from_line(entry: dict[str, Any]) -> str | None:
+    if entry.get("type") == "turn_context":
+        return _turn_context_collaboration_mode(entry)
+    if _is_task_started_line(entry):
+        return _task_started_collaboration_mode(entry)
+    return None
 
 
-def _turn_context_is_plan(entry: dict[str, Any]) -> bool:
+def _turn_context_collaboration_mode(entry: dict[str, Any]) -> str | None:
     payload = entry.get("payload") or {}
     mode_data = payload.get("collaboration_mode") or payload.get("collaborationMode")
     if not isinstance(mode_data, dict):
-        return False
-    return mode_data.get("mode") == "plan"
+        return None
+    mode = mode_data.get("mode")
+    return mode if isinstance(mode, str) else None
 
 
 def _is_task_started_line(entry: dict[str, Any]) -> bool:
@@ -652,10 +667,20 @@ def _proposed_plan_texts_by_turn(
 ) -> tuple[dict[int, set[str]], dict[int, set[str]]]:
     by_turn: dict[int, set[str]] = {}
     event_by_turn: dict[int, set[str]] = {}
+    modes_by_turn = _collaboration_modes_by_turn(lines)
     awaiting_plan_approval = False
     allow_plan_mode_followup = False
     for turn_idx, turn_lines in _lines_by_turn(lines):
+        mode = modes_by_turn.get(turn_idx)
         is_plan_mode_turn = turn_idx in plan_mode_turns
+        turn_started_awaiting_plan_approval = awaiting_plan_approval
+        exits_plan_mode = mode == _COLLABORATION_MODE_DEFAULT and (
+            _turn_is_plan_approval(turn_lines)
+            or (not turn_started_awaiting_plan_approval and not allow_plan_mode_followup)
+        )
+        if exits_plan_mode:
+            awaiting_plan_approval = False
+            allow_plan_mode_followup = False
         event_turn_texts: set[str] = set()
         response_turn_texts: set[str] = set()
         for entry in turn_lines:
@@ -665,6 +690,7 @@ def _proposed_plan_texts_by_turn(
                 is_plan_mode_turn,
                 awaiting_plan_approval,
                 allow_plan_mode_followup,
+                exits_plan_mode,
             ):
                 continue
             if source == "event":
@@ -678,12 +704,17 @@ def _proposed_plan_texts_by_turn(
             by_turn[turn_idx] = turn_texts
         if event_turn_texts:
             event_by_turn[turn_idx] = event_turn_texts
-        if completed_plan_texts_by_turn.get(turn_idx) or turn_texts:
+        if not exits_plan_mode and (
+            completed_plan_texts_by_turn.get(turn_idx) or turn_texts
+        ):
             awaiting_plan_approval = True
-        elif _turn_has_agent_response(turn_lines):
+        elif not exits_plan_mode and _turn_has_agent_response(turn_lines):
             awaiting_plan_approval = False
         allow_plan_mode_followup = bool(
-            is_plan_mode_turn and not turn_texts and _turn_has_agent_response(turn_lines)
+            not exits_plan_mode
+            and is_plan_mode_turn
+            and not turn_texts
+            and _turn_has_agent_response(turn_lines)
         )
     return by_turn, event_by_turn
 
@@ -722,6 +753,16 @@ def _turn_has_agent_response(turn_lines: list[dict[str, Any]]) -> bool:
         if payload.get("phase") == "commentary":
             continue
         if entry.get("type") == "event_msg" and payload.get("type") == "agent_message":
+            return True
+    return False
+
+
+def _turn_is_plan_approval(turn_lines: list[dict[str, Any]]) -> bool:
+    for entry in turn_lines:
+        if not _is_user_message_line(entry):
+            continue
+        payload = entry.get("payload") or {}
+        if _user_message_text(payload).strip() == _PLAN_APPROVAL_PROMPT:
             return True
     return False
 
@@ -972,8 +1013,9 @@ def _should_render_proposed_plan(
     is_plan_mode_turn: bool,
     awaiting_plan_approval: bool,
     allow_plan_mode_followup: bool,
+    exits_plan_mode: bool,
 ) -> bool:
-    if plan_text is None:
+    if plan_text is None or exits_plan_mode:
         return False
     if is_plan_mode_turn:
         return True
