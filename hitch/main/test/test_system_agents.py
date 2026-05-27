@@ -3755,7 +3755,8 @@ class SpecCriticWorkflowTests(TestCase):
             {
                 "mergeable": True,
                 "draft": False,
-                "review_signal": "thumbs_up",
+                "review_signal": "",
+                "has_thumbs_up_reaction": True,
                 "unresolved_thread_count": 0,
                 "ci_status": "success",
             }
@@ -3965,7 +3966,14 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(statuses["review"], "pending")
         self.assertFalse(system_agents._pr_gates_all_passed(gates))
 
-    def test_pr_gate_evaluator_treats_comments_as_pending_not_approval(self) -> None:
+    def test_pr_gate_evaluator_blocks_on_commented_review_without_thumbs_up(
+        self,
+    ) -> None:
+        # A reviewer left a non-approving ``COMMENTED`` review on the PR.
+        # Per the user-facing precedence the gate treats that as blocking
+        # feedback unless a ``+1`` reaction stands in for an approval --
+        # otherwise a review whose author flagged it as "comments only"
+        # would silently sit in the pending state forever.
         gates = system_agents._evaluate_pr_gates(
             {
                 "mergeable": True,
@@ -3978,7 +3986,68 @@ class SpecCriticWorkflowTests(TestCase):
         )
         statuses = {gate["key"]: gate["status"] for gate in gates}
 
-        self.assertEqual(statuses["review"], "pending")
+        self.assertEqual(statuses["review"], "blocked")
+        self.assertFalse(system_agents._pr_gates_all_passed(gates))
+
+    def test_pr_gate_evaluator_thumbs_up_overrides_commented_review(
+        self,
+    ) -> None:
+        gates = system_agents._evaluate_pr_gates(
+            {
+                "mergeable": True,
+                "draft": False,
+                "review_signal": "commented",
+                "has_thumbs_up_reaction": True,
+                "review_count": 1,
+                "unresolved_thread_count": 0,
+                "ci_status": "success",
+            }
+        )
+        statuses = {gate["key"]: gate["status"] for gate in gates}
+
+        self.assertEqual(statuses["review"], "passed")
+        self.assertTrue(system_agents._pr_gates_all_passed(gates))
+
+    def test_pr_gate_evaluator_explicit_approval_outranks_thumbs_up(
+        self,
+    ) -> None:
+        # When both an explicit ``APPROVED`` review and a +1 reaction are
+        # observed, the gate's passed message reflects the formal verdict
+        # rather than the reaction so the persisted status text matches
+        # what reviewers actually did on the PR.
+        gates = system_agents._evaluate_pr_gates(
+            {
+                "mergeable": True,
+                "draft": False,
+                "review_signal": "approved",
+                "has_thumbs_up_reaction": True,
+                "review_count": 1,
+                "unresolved_thread_count": 0,
+                "ci_status": "success",
+            }
+        )
+        review_gate = next(gate for gate in gates if gate["key"] == "review")
+
+        self.assertEqual(review_gate["status"], "passed")
+        self.assertEqual(review_gate["summary"], "Review approval detected.")
+
+    def test_pr_gate_evaluator_changes_requested_outranks_thumbs_up(
+        self,
+    ) -> None:
+        gates = system_agents._evaluate_pr_gates(
+            {
+                "mergeable": True,
+                "draft": False,
+                "review_signal": "changes_requested",
+                "has_thumbs_up_reaction": True,
+                "review_count": 1,
+                "unresolved_thread_count": 0,
+                "ci_status": "success",
+            }
+        )
+        review_gate = next(gate for gate in gates if gate["key"] == "review")
+
+        self.assertEqual(review_gate["status"], "blocked")
         self.assertFalse(system_agents._pr_gates_all_passed(gates))
 
     def test_pr_handoff_head_change_clears_gate_observations(self) -> None:
@@ -4105,7 +4174,7 @@ class SpecCriticWorkflowTests(TestCase):
                     "head_sha": "abc123",
                     "mergeable": True,
                     "draft": False,
-                    "review_signal": "commented",
+                    "review_signal": "",
                     "unresolved_thread_count": 1,
                     "unresolved_threads": [
                         {"id": "thread-A", "path": "x.py", "line": 12}
@@ -4123,7 +4192,7 @@ class SpecCriticWorkflowTests(TestCase):
                 "head_sha": "abc123",
                 "mergeable": True,
                 "draft": False,
-                "review_signal": "commented",
+                "review_signal": "",
                 "unresolved_thread_count": 0,
                 "unresolved_threads": [],
                 "ci_status": "success",
@@ -4176,16 +4245,19 @@ class SpecCriticWorkflowTests(TestCase):
     def test_pr_handoff_merge_keeps_reaction_thumbs_up_when_reviews_clear(
         self,
     ) -> None:
-        # A reviews observation that yields no signal must not stomp on a
-        # reaction-derived ``thumbs_up`` already persisted from an earlier
-        # +1 reaction observation: the reviews tool only speaks for the
-        # review-derived signals (changes_requested / approved / commented).
+        # A reviews observation that yields no signal clears
+        # ``review_signal`` (the reviews tool is the authority on that
+        # field) but must leave the reaction-derived
+        # ``has_thumbs_up_reaction`` untouched -- a later reviews-clear
+        # cannot speak for a +1 the reactions tool already observed, and
+        # the gate's precedence falls back to that boolean when no formal
+        # verdict is recorded.
         merged = system_agents._merge_pr_handoff_dicts(
             {
                 "url": "https://github.com/cberner/hitch/pull/177",
                 "pr_number": 177,
                 "head_sha": "abc123",
-                "review_signal": "thumbs_up",
+                "has_thumbs_up_reaction": True,
             },
             {
                 "url": "https://github.com/cberner/hitch/pull/177",
@@ -4196,8 +4268,74 @@ class SpecCriticWorkflowTests(TestCase):
             },
         )
 
-        self.assertEqual(merged["review_signal"], "thumbs_up")
+        self.assertNotIn("review_signal", merged)
+        self.assertIs(merged["has_thumbs_up_reaction"], True)
         self.assertEqual(merged["review_count"], 0)
+
+    def test_pr_handoff_merge_re_observation_replaces_stale_review_verdict(
+        self,
+    ) -> None:
+        # A PR follow-up monitor that re-observes both the reviews list and
+        # reactions is authoritative for the resulting handoff: when the
+        # formal review state changed (the previous ``approved`` verdict
+        # was dismissed) and only a ``+1`` reaction remains, the persisted
+        # handoff must reflect ``review_signal: ""`` AND
+        # ``has_thumbs_up_reaction: True``. A stale ``approved`` left over
+        # from an earlier worker would keep telling the next monitor that
+        # GitHub still reports an explicit review approval.
+        merged = system_agents._merge_pr_handoff_dicts(
+            {
+                "url": "https://github.com/cberner/hitch/pull/179",
+                "pr_number": 179,
+                "head_sha": "abc123",
+                "review_signal": "approved",
+                "review_count": 1,
+            },
+            {
+                "url": "https://github.com/cberner/hitch/pull/179",
+                "pr_number": 179,
+                "head_sha": "abc123",
+                "review_signal": "",
+                "review_count": 0,
+                "has_thumbs_up_reaction": True,
+                "reaction_count": 1,
+            },
+        )
+
+        self.assertNotIn("review_signal", merged)
+        self.assertEqual(merged["review_count"], 0)
+        self.assertIs(merged["has_thumbs_up_reaction"], True)
+        self.assertEqual(merged["reaction_count"], 1)
+
+    def test_pr_handoff_merge_back_compat_translates_legacy_thumbs_up_signal(
+        self,
+    ) -> None:
+        # Older monitor-agent outputs and older persisted snapshots encoded
+        # the +1 reaction as ``review_signal: "thumbs_up"``. The new
+        # snapshot/handoff schema splits the reaction off onto its own
+        # boolean so the gate can apply the explicit-verdict precedence,
+        # so ``_compact_pr_handoff`` must translate legacy values at the
+        # boundary; otherwise a worker upgraded mid-deploy would leave a
+        # ``thumbs_up`` review_signal that no longer matches the gate's
+        # vocabulary.
+        merged = system_agents._merge_pr_handoff_dicts(
+            {
+                "url": "https://github.com/cberner/hitch/pull/178",
+                "pr_number": 178,
+                "head_sha": "abc123",
+            },
+            system_agents._compact_pr_handoff(
+                {
+                    "url": "https://github.com/cberner/hitch/pull/178",
+                    "pr_number": 178,
+                    "head_sha": "abc123",
+                    "review_signal": "thumbs_up",
+                }
+            ),
+        )
+
+        self.assertNotIn("review_signal", merged)
+        self.assertIs(merged["has_thumbs_up_reaction"], True)
 
     def test_compact_pr_handoff_preserves_explicit_review_signal_clear(
         self,

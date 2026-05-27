@@ -796,7 +796,12 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
         assert snapshot is not None
         self.assertEqual(snapshot["review_count"], 2)
         self.assertEqual(snapshot["reaction_count"], 1)
+        # ``review_signal`` records the formal-review verdict (CR wins
+        # over APPROVED in the same observation); the +1 reaction lives
+        # on its own boolean so the gate can fall back to it only when
+        # no explicit verdict exists.
         self.assertEqual(snapshot["review_signal"], "changes_requested")
+        self.assertIs(snapshot["has_thumbs_up_reaction"], True)
 
     def test_ci_status_reports_failure_when_some_workflow_runs_still_pending(
         self,
@@ -1877,12 +1882,13 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
     def test_pr_snapshot_review_clear_preserves_reaction_thumbs_up(
         self,
     ) -> None:
-        # When a +1 reaction observation already recorded ``thumbs_up`` and a
-        # follow-up reviews observation yields no actionable signal, the
-        # snapshot must keep the reaction-derived approval rather than
-        # stomping it with a reviews-driven clear -- the reviews tool only
-        # speaks for review-derived signals (changes_requested / approved /
-        # commented), not for the reactions-driven thumbs_up signal.
+        # ``review_signal`` tracks the formal-review verdict only;
+        # ``has_thumbs_up_reaction`` tracks the +1 emoji separately. A
+        # follow-up reviews observation that yields no actionable signal
+        # is free to clear ``review_signal`` (the reviews tool is the
+        # authority on that field), but it must not strip the
+        # reaction-derived thumbs-up the gate's precedence falls back to
+        # when no formal verdict exists.
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "events.jsonl"
             path.write_text(
@@ -1964,7 +1970,170 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
         assert snapshot is not None
         self.assertEqual(snapshot["review_count"], 0)
         self.assertEqual(snapshot["reaction_count"], 1)
-        self.assertEqual(snapshot["review_signal"], "thumbs_up")
+        self.assertEqual(snapshot["review_signal"], "")
+        self.assertIs(snapshot["has_thumbs_up_reaction"], True)
+
+    def test_pr_snapshot_clears_thumbs_up_on_reactions_re_observation(
+        self,
+    ) -> None:
+        # The reactions tool returns the live state of reactions on the PR.
+        # When a follow-up observation no longer sees the +1 (the reactor
+        # removed their emoji), the snapshot must record ``False`` so the
+        # gate doesn't keep falling back to a thumbs-up signal that no
+        # longer exists in GitHub.
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_get_pr_reactions",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "pr_number": 201,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "reactions": [{"content": "+1"}]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_get_pr_reactions",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "pr_number": 201,
+                                    },
+                                    "result": {
+                                        "structuredContent": {"reactions": []}
+                                    },
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["reaction_count"], 0)
+        self.assertIs(snapshot["has_thumbs_up_reaction"], False)
+
+    def test_pr_snapshot_dismissed_approval_keeps_thumbs_up_visible(
+        self,
+    ) -> None:
+        # An ``APPROVED`` review, then a ``+1`` reaction, then the formal
+        # approval dismissed: the persisted snapshot must show
+        # ``review_signal == ""`` (the latest reviews observation is
+        # authoritative for the review verdict) AND
+        # ``has_thumbs_up_reaction == True`` (the +1 still stands), so the
+        # gate's precedence can fall back to the thumbs-up signal instead
+        # of stomping it with the reviews-clear.
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_list_pull_request_reviews",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "pr_number": 202,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "reviews": [{"state": "APPROVED"}]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_get_pr_reactions",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "pr_number": 202,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "reactions": [{"content": "+1"}]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_list_pull_request_reviews",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "pr_number": 202,
+                                    },
+                                    "result": {
+                                        "structuredContent": {"reviews": []}
+                                    },
+                                },
+                            },
+                            recorded_at=30,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["review_signal"], "")
+        self.assertEqual(snapshot["review_count"], 0)
+        self.assertIs(snapshot["has_thumbs_up_reaction"], True)
 
     def test_pr_snapshot_ignores_other_threads_and_non_github_tools(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

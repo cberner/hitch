@@ -623,8 +623,15 @@ def _copy_reaction_fields(target: dict[str, Any], source: dict[str, Any]) -> Non
         and isinstance((content := reaction.get("content")), str)
     ]
     target["reaction_count"] = len(reactions)
-    if "+1" in contents and target.get("review_signal") != "changes_requested":
-        target["review_signal"] = "thumbs_up"
+    # Track ``+1`` reaction observations on their own field so the gate can
+    # apply the user-visible precedence (explicit ``approved`` / ``changes_
+    # requested`` reviews win, then ``thumbs_up`` reactions stand in for an
+    # approval, then plain ``commented`` reviews fall back to "still needs
+    # changes"). Keeping it separate from ``review_signal`` means a later
+    # reviews-clear can't strip out the +1 we already observed, and a
+    # reactions re-observation that no longer sees the emoji explicitly
+    # records ``False`` so the snapshot reflects the live PR state.
+    target["has_thumbs_up_reaction"] = "+1" in contents
 
 
 def _copy_ci_fields(
@@ -794,19 +801,15 @@ def _merge_pr_snapshot_update(
         # ``changes_requested`` left over from an earlier observation. The
         # clear is recorded as ``""`` in the snapshot (not popped) so it
         # propagates through ``system_agents._merge_pr_handoff_dicts``
-        # cross-worker. Reaction-derived ``thumbs_up`` is held back from
-        # the clear since the reviews tool does not speak for it.
+        # cross-worker. Reaction-derived ``+1`` observations live on
+        # ``has_thumbs_up_reaction`` (a separate boolean) so the reviews
+        # tool can clear ``review_signal`` without touching the reaction
+        # signal, and the gate can combine them via the precedence rule.
         if value is None:
             continue
         if value == "":
-            if key == "review_signal" and snapshot.get(key) != "thumbs_up":
+            if key == "review_signal":
                 snapshot[key] = ""
-            continue
-        if (
-            key == "review_signal"
-            and value == "thumbs_up"
-            and snapshot.get("review_signal") == "changes_requested"
-        ):
             continue
         snapshot[key] = value
 

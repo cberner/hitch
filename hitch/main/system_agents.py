@@ -168,6 +168,7 @@ _PR_GATE_OBSERVATION_FIELDS = frozenset(
         "review_count",
         "review_signal",
         "reaction_count",
+        "has_thumbs_up_reaction",
         "ci_status",
         "failing_jobs",
         "pending_jobs",
@@ -207,11 +208,14 @@ _PR_HANDOFF_FIELDS = (
     "review_count",
     "review_signal",
     "reaction_count",
+    "has_thumbs_up_reaction",
     "ci_status",
     "failing_jobs",
     "pending_jobs",
 )
-_PR_HANDOFF_BOOLEAN_FIELDS = frozenset({"merged", "mergeable", "draft"})
+_PR_HANDOFF_BOOLEAN_FIELDS = frozenset(
+    {"merged", "mergeable", "draft", "has_thumbs_up_reaction"}
+)
 _PR_HANDOFF_INTEGER_FIELDS = frozenset(
     {
         "pr_number",
@@ -3291,8 +3295,11 @@ def _pr_followup_monitor_prompt(
         "pending for queued, running, or completed-without-conclusion checks; use "
         "failure for failed, errored, cancelled, timed-out, "
         "or action-required checks. Normalize review_signal to one of approved, "
-        "thumbs_up, changes_requested, commented, or none. For unresolved_threads, "
-        "failing_jobs, and "
+        "changes_requested, commented, or none -- it carries the formal-review "
+        "verdict only. Report a ``+1`` reaction on the PR by setting "
+        "has_thumbs_up_reaction to true (false when you re-checked reactions and "
+        "found no +1); leave it null if you did not look at reactions. For "
+        "unresolved_threads, failing_jobs, and "
         "pending_jobs, prefer safe structured identifier objects with path, line, "
         "url, id, name, status, or conclusion fields. For each structured list "
         "item include every safe identifier key from the schema, using null for "
@@ -3307,6 +3314,7 @@ def _pr_followup_monitor_prompt(
         'any updated PR fields you observed in '
         '"pr", including url, repository_full_name, pr_number, state, merged, '
         "mergeable, draft, head, head_sha, review_signal, "
+        "has_thumbs_up_reaction, "
         "unresolved_thread_count, and ci_status when available."
     )
 
@@ -4514,12 +4522,16 @@ def _merge_pr_handoff_dicts(
         # ``review_signal``, which uses ``""`` as the explicit reviews-clear
         # sentinel (see ``codex_events._copy_review_fields``). Empty
         # list/dict updates are "observed and found none" overwrites.
-        # Reaction-derived ``thumbs_up`` is held back from the clear since
-        # the reviews tool does not speak for it.
+        # Reaction-derived ``+1`` observations live on
+        # ``has_thumbs_up_reaction``; the boolean falls through to the
+        # generic assign below since both ``False`` (no +1 observed) and
+        # ``True`` (+1 observed) are meaningful overwrites the gate uses
+        # to apply the explicit-approval > thumbs-up > commented
+        # precedence.
         if value is None:
             continue
         if value == "":
-            if key == "review_signal" and merged.get(key) != "thumbs_up":
+            if key == "review_signal":
                 merged.pop(key, None)
             continue
         merged[key] = value
@@ -4605,7 +4617,28 @@ def _compact_pr_handoff(value: Any) -> dict[str, Any]:
                 compact[key] = ""
         elif key in _PR_HANDOFF_LIST_FIELDS and isinstance(raw, list):
             compact[key] = _compact_pr_list(raw)
+    _back_compat_translate_thumbs_up_review_signal(compact)
     return compact
+
+
+def _back_compat_translate_thumbs_up_review_signal(compact: dict[str, Any]) -> None:
+    """Map legacy ``review_signal == "thumbs_up"`` to ``has_thumbs_up_reaction``.
+
+    Older Codex worker snapshots and older monitor-agent outputs encoded the
+    +1 reaction as ``review_signal = "thumbs_up"``; the field now belongs
+    exclusively to formal review states (``approved`` / ``changes_requested``
+    / ``commented`` / ``""``) and the reaction lives on its own boolean.
+    Translate inbound legacy payloads at the handoff boundary so persisted
+    state, monitor-agent outputs, and the new gate logic agree.
+    """
+    raw_signal = compact.get("review_signal")
+    if (
+        isinstance(raw_signal, str)
+        and _normalize_review_signal(raw_signal) == "thumbs_up"
+    ):
+        compact["review_signal"] = ""
+        if "has_thumbs_up_reaction" not in compact:
+            compact["has_thumbs_up_reaction"] = True
 
 
 def _compact_pr_list(items: list[Any]) -> list[Any]:
@@ -4689,7 +4722,17 @@ def _merge_conflicts_gate(handoff: dict[str, Any]) -> dict[str, Any]:
 
 
 def _review_gate(handoff: dict[str, Any]) -> dict[str, Any]:
+    # Precedence: an explicit ``changes_requested`` or ``approved`` review
+    # wins (formal verdicts carry the reviewer's identity and a timestamped
+    # state transition on the PR); failing that, a ``+1`` reaction stands
+    # in for an approval (so a typical "looks good, +1" workflow doesn't
+    # leave the gate pending forever); failing both, a plain ``commented``
+    # review is treated as still-needs-changes since the reviewer left
+    # feedback without explicitly approving. Mergeability/draft/unresolved-
+    # thread checks short-circuit any of those, mirroring the blockers
+    # GitHub itself surfaces.
     signal = _normalize_review_signal(handoff.get("review_signal"))
+    has_thumbs_up = handoff.get("has_thumbs_up_reaction") is True
     unresolved_count = handoff.get("unresolved_thread_count")
     unresolved_threads = handoff.get("unresolved_threads")
     draft = handoff.get("draft")
@@ -4737,19 +4780,45 @@ def _review_gate(handoff: dict[str, Any]) -> dict[str, Any]:
             _PR_GATE_PENDING,
             "Waiting to confirm the PR is ready for review.",
         )
-    if signal in {"approved", "thumbs_up"} and unresolved_count == 0:
+    if signal == "approved" and unresolved_count == 0:
         return _pr_gate(
             _PR_GATE_REVIEW,
             "Review",
             _PR_GATE_PASSED,
             "Review approval detected.",
         )
-    if signal in {"approved", "thumbs_up"}:
+    if signal == "approved":
         return _pr_gate(
             _PR_GATE_REVIEW,
             "Review",
             _PR_GATE_PENDING,
             "Approval detected; waiting to confirm review threads are clear.",
+        )
+    if has_thumbs_up and unresolved_count == 0:
+        return _pr_gate(
+            _PR_GATE_REVIEW,
+            "Review",
+            _PR_GATE_PASSED,
+            "Thumbs-up reaction detected.",
+        )
+    if has_thumbs_up:
+        return _pr_gate(
+            _PR_GATE_REVIEW,
+            "Review",
+            _PR_GATE_PENDING,
+            "Thumbs-up reaction detected; waiting to confirm review threads are clear.",
+        )
+    if signal == "commented":
+        return _pr_gate(
+            _PR_GATE_REVIEW,
+            "Review",
+            _PR_GATE_BLOCKED,
+            "A reviewer commented without approving.",
+            _review_feedback(
+                handoff,
+                "Address the reviewer's comments and request a re-review.",
+            ),
+            actionable=True,
         )
     return _pr_gate(
         _PR_GATE_REVIEW,
