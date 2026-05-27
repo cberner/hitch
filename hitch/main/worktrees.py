@@ -81,6 +81,29 @@ def cleanup_worktree(worktree: ManagedWorktree) -> None:
         )
 
 
+def cleanup_managed_worktree_path(cwd: str) -> bool:
+    """Remove a Hitch-managed worktree by path if ``cwd`` points at one."""
+    path = Path(cwd).expanduser()
+    if not _is_managed_worktree_path(path):
+        return False
+    branch = (
+        _git(path, ["branch", "--show-current"], error_cls=WorktreeCleanupError) or ""
+    ).strip()
+    common_dir = (
+        _git(
+            path,
+            ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            error_cls=WorktreeCleanupError,
+        )
+        or ""
+    ).strip()
+    if not branch or not common_dir:
+        raise WorktreeCleanupError("managed worktree metadata is incomplete")
+    source_repo = _source_repo_from_common_dir(Path(common_dir))
+    cleanup_worktree(ManagedWorktree(path=path, branch=branch, source_repo=source_repo))
+    return True
+
+
 def discover_managed_worktrees() -> list[Path]:
     """Return Hitch-managed worktree roots."""
     base = Path(settings.HITCH_WORKTREES_DIR).expanduser()
@@ -113,6 +136,22 @@ def _resolved_path(path: Path) -> Path:
         return path.resolve()
     except OSError:
         return path
+
+
+def _is_managed_worktree_path(path: Path) -> bool:
+    resolved_path = _resolved_path(path)
+    resolved_base = _resolved_path(Path(settings.HITCH_WORKTREES_DIR).expanduser())
+    try:
+        resolved_path.relative_to(resolved_base)
+    except ValueError:
+        return False
+    return (path / ".git").exists()
+
+
+def _source_repo_from_common_dir(common_dir: Path) -> Path:
+    if common_dir.name == ".git":
+        return common_dir.parent
+    return common_dir
 
 
 def _has_commit(repo: Path, ref: str) -> bool:

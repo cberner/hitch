@@ -41,7 +41,6 @@ from hitch.main.repos import default_branch_checkout_commit_hash
 from hitch.main.worktrees import (
     ManagedWorktree,
     WorktreeCleanupError,
-    WorktreeCreationError,
     cleanup_worktree,
     create_worktree_for_session,
 )
@@ -476,14 +475,22 @@ _AUTONOMOUS_GOAL_CANDIDATE_OUTPUT_SCHEMA: dict[str, Any] = {
                 "title",
                 "summary",
                 "impact",
+                "implemented_changes",
                 "implementation_direction",
+                "verification",
+                "rough_edges",
+                "suggested_continuation",
                 "relevant_files",
             ],
             "properties": {
                 "title": {"type": "string"},
                 "summary": {"type": "string"},
                 "impact": {"type": "string"},
+                "implemented_changes": {"type": "string"},
                 "implementation_direction": {"type": "string"},
+                "verification": {"type": "string"},
+                "rough_edges": {"type": "string"},
+                "suggested_continuation": {"type": "string"},
                 "relevant_files": {"type": "array", "items": {"type": "string"}},
             },
         },
@@ -862,7 +869,7 @@ def _maybe_start_auto_proposal_workflow(autonomous_goal_id: int) -> bool:
             autonomous_goal=autonomous_goal,
             auto_proposal=True,
             default_branch_sha=default_branch_sha,
-            use_worktrees=False,
+            use_worktrees=True,
         )
     if created:
         _spawn_autonomous_goal_candidate_or_block(workflow, autonomous_goal)
@@ -2449,6 +2456,12 @@ def _handle_autonomous_goal_agent_finished(
     if _confidence_meets_threshold(
         judgment["confidence"], autonomous_goal.confidence_threshold
     ):
+        auto_pr_enabled = autonomous_goal.autonomy == AutonomousGoal.AUTONOMY_DRAFT_PR
+        auto_qa_enabled = autonomous_goal.auto_qa_enabled and not auto_pr_enabled
+        auto_merge_branch = _autonomous_goal_auto_merge_branch_for_implementation(
+            autonomous_goal
+        )
+        auto_merge_to_local_branch = bool(auto_qa_enabled and auto_merge_branch)
         proposal = ProposedSession.objects.create(
             project=autonomous_goal.project,
             autonomous_goal=autonomous_goal,
@@ -2456,7 +2469,7 @@ def _handle_autonomous_goal_agent_finished(
             title=str(candidate.get("title", autonomous_goal.title))[
                 :_AUTONOMOUS_GOAL_TITLE_MAX_LEN
             ],
-            summary=judgment["summary"],
+            summary=_autonomous_goal_proposal_summary(candidate, judgment),
             prompt=_autonomous_goal_proposed_session_prompt(
                 autonomous_goal, candidate, judgment
             ),
@@ -2469,6 +2482,15 @@ def _handle_autonomous_goal_agent_finished(
             outcome_metadata={
                 "autonomous_goal_autonomy": autonomous_goal.autonomy,
                 "automation_status": "proposed",
+                "auto_pr_enabled": auto_pr_enabled,
+                "auto_qa_enabled": auto_qa_enabled,
+                "auto_merge_to_local_branch": auto_merge_to_local_branch,
+                "auto_merge_branch": auto_merge_branch,
+                "implemented_changes": str(
+                    candidate.get("implemented_changes", "")
+                ).strip(),
+                "verification": str(candidate.get("verification", "")).strip(),
+                "rough_edges": str(candidate.get("rough_edges", "")).strip(),
             },
         )
         _record_autonomous_goal_proposal_created(autonomous_goal)
@@ -2478,49 +2500,22 @@ def _handle_autonomous_goal_agent_finished(
             "proposal_id": proposal.pk,
             "autonomy": autonomous_goal.autonomy,
         }
-        if autonomous_goal.autonomy != AutonomousGoal.AUTONOMY_PROPOSE_ONLY:
-            automation_error = _autonomous_goal_implementation_automation_error(
-                workflow, autonomous_goal
-            )
-            if automation_error:
-                _record_proposal_automation_failure(
-                    proposal,
-                    autonomous_goal.autonomy,
-                    automation_error,
-                )
-                _block_workflow(
-                    workflow,
-                    automation_error,
-                    surface_to_thread=False,
-                )
-                return
-            try:
-                implementation = _start_autonomous_goal_implementation_session(
-                    workflow, autonomous_goal, proposal
-                )
-            except Exception as exc:
-                _record_proposal_automation_failure(
-                    proposal,
-                    autonomous_goal.autonomy,
-                    f"failed to start implementation session: {exc!r}",
-                )
-                _block_workflow(
-                    workflow,
-                    f"failed to start autonomous goal implementation: {exc!r}",
-                    surface_to_thread=False,
-                )
-                return
-            workflow.step = STEP_AUTONOMOUS_GOAL_DRAFT_STARTED
-            workflow.status = SystemWorkflow.STATUS_COMPLETED
-            workflow.state = {
-                **workflow.state,
-                "implementation_session_id": implementation.pk,
-                "implementation_thread_id": implementation.thread_id,
-            }
-            workflow.save(update_fields=["status", "step", "state", "updated_at"])
-            return
         workflow.step = STEP_AUTONOMOUS_GOAL_PROPOSED
     else:
+        _create_autonomous_goal_skipped_notice(
+            workflow,
+            autonomous_goal,
+            title=f"No proposal from {autonomous_goal.title}"[
+                :_AUTONOMOUS_GOAL_TITLE_MAX_LEN
+            ],
+            summary=judgment["summary"],
+            metadata={
+                "automation_status": "skipped",
+                "skip_reason": "judge_confidence_below_threshold",
+                "judge_confidence": judgment["confidence"],
+                "judge_rationale": judgment["rationale"],
+            },
+        )
         _record_autonomous_goal_no_proposal(autonomous_goal, workflow)
         workflow.step = STEP_AUTONOMOUS_GOAL_SKIPPED
     workflow.status = SystemWorkflow.STATUS_COMPLETED
@@ -2974,33 +2969,6 @@ def _spawn_spec_critic_implementation_turn(
     )
 
 
-def _autonomous_goal_implementation_automation_error(
-    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
-) -> str:
-    if workflow.state.get("auto_proposal") is not True:
-        return ""
-    if _autonomous_goal_in_flight_automation_exists(autonomous_goal):
-        return "another automated autonomous goal implementation is already running for this project"
-    expected_sha = _state_string(workflow, "default_branch_sha")
-    if not expected_sha:
-        return "auto-proposal workflow is missing its default branch snapshot"
-    current_sha = default_branch_checkout_commit_hash(workflow.cwd)
-    if current_sha != expected_sha:
-        return "checkout no longer matches the auto-proposal default branch snapshot"
-    return ""
-
-
-def _autonomous_goal_candidate_checkout_cwd(
-    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
-) -> str:
-    candidate_session = _session_metadata_from_state(workflow, "candidate_session_id")
-    if candidate_session is None or not candidate_session.cwd:
-        return ""
-    if candidate_session.cwd == autonomous_goal.project.repo_path:
-        return ""
-    return candidate_session.cwd
-
-
 def _autonomous_goal_auto_merge_branch_for_implementation(
     autonomous_goal: AutonomousGoal,
 ) -> str:
@@ -3011,153 +2979,6 @@ def _autonomous_goal_auto_merge_branch_for_implementation(
     if not autonomous_goal.auto_merge_to_local_branch:
         return ""
     return autonomous_goal.auto_merge_branch.strip()
-
-
-def _start_autonomous_goal_implementation_session(
-    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal, proposal: ProposedSession
-) -> SessionMetadata:
-    auto_pr_enabled = autonomous_goal.autonomy == AutonomousGoal.AUTONOMY_DRAFT_PR
-    auto_qa_enabled = autonomous_goal.auto_qa_enabled and not auto_pr_enabled
-    auto_merge_branch = _autonomous_goal_auto_merge_branch_for_implementation(
-        autonomous_goal
-    )
-    auto_merge_to_local_branch = bool(auto_merge_branch)
-    candidate_checkout_cwd = _autonomous_goal_candidate_checkout_cwd(
-        workflow, autonomous_goal
-    )
-    implementation_cwd = candidate_checkout_cwd or autonomous_goal.project.repo_path
-    managed_worktree = None
-    if auto_merge_to_local_branch and not candidate_checkout_cwd:
-        try:
-            managed_worktree = create_worktree_for_session(
-                autonomous_goal.project.repo_path,
-                base_ref=f"refs/heads/{auto_merge_branch}",
-                disable_hooks=True,
-            )
-        except WorktreeCreationError as exc:
-            raise RuntimeError(f"failed to create auto-merge worktree: {exc}") from exc
-        implementation_cwd = str(managed_worktree.path)
-    prompt = proposal.prompt.strip() or _fallback_proposed_session_prompt(proposal)
-    try:
-        instance = codex_pool.spawn_new_session(
-            cwd=implementation_cwd,
-            prompt=prompt,
-            thread_name=proposal.title,
-            sandbox_policy=AUTONOMOUS_GOAL_IMPLEMENTATION_SANDBOX_POLICY,
-            approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
-            web_search_mode=_workflow_web_search_mode(workflow),
-            auto_pr_enabled=auto_pr_enabled,
-            auto_qa_enabled=auto_qa_enabled,
-            auto_merge_to_local_branch=auto_merge_to_local_branch,
-            auto_merge_branch=auto_merge_branch,
-            user_message_index=0,
-        )
-    except Exception:
-        if managed_worktree is not None:
-            try:
-                cleanup_worktree(managed_worktree)
-            except WorktreeCleanupError:
-                logger.exception(
-                    "failed to clean up auto-merge worktree %s",
-                    managed_worktree.path,
-                )
-        raise
-    metadata = session_index.upsert_local_session(
-        thread_id=instance.thread_id,
-        cwd=implementation_cwd,
-        project=autonomous_goal.project,
-        name=proposal.title,
-        preview=prompt,
-        auto_pr_enabled=auto_pr_enabled,
-        auto_qa_enabled=auto_qa_enabled,
-        auto_merge_to_local_branch=auto_merge_to_local_branch,
-        auto_merge_branch=auto_merge_branch,
-    )
-    _record_proposal_automation_success(
-        proposal,
-        metadata,
-        autonomy=autonomous_goal.autonomy,
-        auto_pr_enabled=auto_pr_enabled,
-        auto_qa_enabled=auto_qa_enabled,
-        auto_merge_to_local_branch=auto_merge_to_local_branch,
-        auto_merge_branch=auto_merge_branch,
-    )
-    return metadata
-
-
-def _fallback_proposed_session_prompt(proposal: ProposedSession) -> str:
-    parts = ["Go ahead and implement this proposed session.", "", proposal.title]
-    if proposal.summary:
-        parts.extend(["", f"Summary:\n{proposal.summary}"])
-    files = _string_list(proposal.relevant_files)
-    if files:
-        parts.extend(["", "Relevant files:", *[f"- {file}" for file in files]])
-    return "\n".join(parts)
-
-
-def _record_proposal_automation_success(
-    proposal: ProposedSession,
-    implementation: SessionMetadata,
-    *,
-    autonomy: str,
-    auto_pr_enabled: bool,
-    auto_qa_enabled: bool,
-    auto_merge_to_local_branch: bool = False,
-    auto_merge_branch: str = "",
-) -> None:
-    proposal.outcome_status = ProposedSession.OUTCOME_ACCEPTED
-    proposal.accepted_session = implementation
-    note = "Autonomous goal autonomy started an implementation session automatically."
-    if auto_merge_to_local_branch:
-        note = (
-            f"{note} Auto-QA will merge approved changes into "
-            f"{auto_merge_branch}."
-        )
-    elif auto_pr_enabled:
-        note = f"{note} Auto-PR will run after that session completes."
-    elif auto_qa_enabled:
-        note = f"{note} Auto-QA will run after that session completes."
-    proposal.outcome_notes = note
-    proposal.outcome_metadata = _proposal_outcome_metadata(
-        proposal,
-        {
-            "accepted_by": AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY,
-            "autonomous_goal_autonomy": autonomy,
-            "automation_status": "implementation_started",
-            "accepted_session_id": implementation.pk,
-            "accepted_thread_id": implementation.thread_id,
-            "implementation_session_id": implementation.pk,
-            "implementation_thread_id": implementation.thread_id,
-            "auto_pr_enabled": auto_pr_enabled,
-            "auto_qa_enabled": auto_qa_enabled,
-            "auto_merge_to_local_branch": auto_merge_to_local_branch,
-            "auto_merge_branch": auto_merge_branch or None,
-        },
-    )
-    proposal.save(
-        update_fields=[
-            "outcome_status",
-            "outcome_notes",
-            "outcome_metadata",
-            "accepted_session",
-            "updated_at",
-        ]
-    )
-
-
-def _record_proposal_automation_failure(
-    proposal: ProposedSession, autonomy: str, error: str
-) -> None:
-    proposal.outcome_notes = error
-    proposal.outcome_metadata = _proposal_outcome_metadata(
-        proposal,
-        {
-            "autonomous_goal_autonomy": autonomy,
-            "automation_status": "implementation_start_failed",
-            "automation_error": error,
-        },
-    )
-    proposal.save(update_fields=["outcome_notes", "outcome_metadata", "updated_at"])
 
 
 def _proposal_outcome_metadata(
@@ -3922,9 +3743,11 @@ def _autonomous_goal_candidate_prompt(
     memory_context = _autonomous_goal_memory_context(autonomous_goal)
     session_cwd = _autonomous_goal_session_cwd(workflow)
     code_change_guidance = (
-        "Make code changes when they help turn the proposal into real, "
-        "reviewable progress; leave any changes in this session checkout so "
-        "the user can accept and continue from them. "
+        "Make code changes that turn the proposal into real, reviewable "
+        "progress; leave any changes in this session checkout so the user can "
+        "accept and continue from them. Do not run QA loops or polish this "
+        "as a finished PR; the continuation session will do that after user "
+        "approval. "
         if _autonomous_goal_candidate_allows_code_changes(workflow)
         else "Do not make code changes. "
     )
@@ -3944,15 +3767,22 @@ def _autonomous_goal_candidate_prompt(
         f"{memory_context.text}\n\n"
         "Return only JSON matching this shape: "
         '{"proposal": {"title": string, "summary": string, "impact": string, '
-        '"implementation_direction": string, "relevant_files": [string]} | null, '
+        '"implemented_changes": string, "implementation_direction": string, '
+        '"verification": string, "rough_edges": string, '
+        '"suggested_continuation": string, "relevant_files": [string]} | null, '
         '"message": string, "next_steps_summary": string, '
         '"memory_relevant_files": [string]}. If you find a concrete proposal, '
         'put it in "proposal" and leave "message" empty. If you find nothing '
         'worth proposing, set "proposal" to null and put a concise user-facing '
         'explanation in "message". The title should be concise. The summary '
         "should explain the proposed session. Impact should describe the likely "
-        "user-visible or engineering benefit. Implementation direction should "
-        "be specific enough for the user to continue the work in this session. "
+        "user-visible or engineering benefit. Implemented changes should "
+        "summarize the concrete code changes already made in this hidden "
+        "rollout. Implementation direction should be specific enough for the "
+        "user to continue the work in this session. Verification should list "
+        "checks you attempted, or say not run. Rough edges should call out "
+        "known incompleteness. Suggested continuation should be the editable "
+        "message to send if the user accepts the proposal. "
         "The next_steps_summary is durable memory for future autonomous-goal runs: "
         "mention what you inspected or selected, specific files or areas involved, "
         "what you proposed or skipped, and what a future run should try next. "
@@ -3974,6 +3804,9 @@ class _AutonomousGoalMemoryPromptContext:
 def _autonomous_goal_proposed_session_prompt(
     autonomous_goal: AutonomousGoal, candidate: dict[str, Any], judgment: dict[str, str]
 ) -> str:
+    suggested = candidate.get("suggested_continuation")
+    if isinstance(suggested, str) and suggested.strip():
+        return suggested.strip()
     parts = [
         "Go ahead and implement this proposed session.",
         "",
@@ -3995,10 +3828,35 @@ def _autonomous_goal_proposed_session_prompt(
                 f"Implementation guidance:\n{implementation_direction.strip()}",
             ]
         )
+    for label, key in (
+        ("Implemented so far", "implemented_changes"),
+        ("Impact", "impact"),
+        ("Verification", "verification"),
+        ("Known rough edges", "rough_edges"),
+    ):
+        value = candidate.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.extend(["", f"{label}:\n{value.strip()}"])
     files = _string_list(candidate.get("relevant_files"))
     if files:
         parts.extend(["", "Relevant files:", *[f"- {file}" for file in files]])
     return "\n".join(parts)
+
+
+def _autonomous_goal_proposal_summary(
+    candidate: dict[str, Any], judgment: dict[str, str]
+) -> str:
+    parts = []
+    for label, value in (
+        ("Summary", judgment.get("summary", "")),
+        ("Implemented", candidate.get("implemented_changes")),
+        ("Impact", candidate.get("impact")),
+        ("Verification", candidate.get("verification")),
+        ("Rough edges", candidate.get("rough_edges")),
+    ):
+        if isinstance(value, str) and value.strip():
+            parts.append(f"{label}: {value.strip()}")
+    return "\n\n".join(parts)
 
 
 @dataclass(frozen=True)
@@ -4584,14 +4442,28 @@ def _parse_autonomous_goal_candidate_proposal(
     title = parsed.get("title")
     summary = parsed.get("summary")
     impact = parsed.get("impact")
+    implemented_changes = parsed.get("implemented_changes")
     implementation_direction = parsed.get("implementation_direction")
+    verification = parsed.get("verification")
+    rough_edges = parsed.get("rough_edges")
+    suggested_continuation = parsed.get("suggested_continuation")
     if not isinstance(title, str):
         return None
     if not isinstance(summary, str):
         return None
     if not isinstance(impact, str):
         return None
+    if implemented_changes is not None and not isinstance(implemented_changes, str):
+        return None
     if not isinstance(implementation_direction, str):
+        return None
+    if verification is not None and not isinstance(verification, str):
+        return None
+    if rough_edges is not None and not isinstance(rough_edges, str):
+        return None
+    if suggested_continuation is not None and not isinstance(
+        suggested_continuation, str
+    ):
         return None
     title = title.strip()
     if not title:
@@ -4600,7 +4472,17 @@ def _parse_autonomous_goal_candidate_proposal(
         "title": title,
         "summary": summary.strip(),
         "impact": impact.strip(),
+        "implemented_changes": (
+            implemented_changes.strip() if isinstance(implemented_changes, str) else ""
+        ),
         "implementation_direction": implementation_direction.strip(),
+        "verification": verification.strip() if isinstance(verification, str) else "",
+        "rough_edges": rough_edges.strip() if isinstance(rough_edges, str) else "",
+        "suggested_continuation": (
+            suggested_continuation.strip()
+            if isinstance(suggested_continuation, str)
+            else ""
+        ),
         "relevant_files": _string_list(parsed.get("relevant_files")),
     }
 
@@ -5293,6 +5175,33 @@ def _create_autonomous_goal_failure_notice(
             "automation_status": "failed",
             "automation_error": error,
         },
+    )
+
+
+def _create_autonomous_goal_skipped_notice(
+    workflow: SystemWorkflow,
+    autonomous_goal: AutonomousGoal,
+    *,
+    title: str,
+    summary: str,
+    metadata: dict[str, object] | None = None,
+) -> None:
+    if ProposedSession.objects.filter(
+        source_workflow=workflow,
+        inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
+        outcome_status=ProposedSession.OUTCOME_UNSET,
+    ).exists():
+        return
+    ProposedSession.objects.create(
+        project=autonomous_goal.project,
+        autonomous_goal=autonomous_goal,
+        source_workflow=workflow,
+        title=title,
+        inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
+        summary=summary,
+        candidate_session=_session_metadata_from_state(workflow, "candidate_session_id"),
+        judge_session=_session_metadata_from_state(workflow, "judge_session_id"),
+        outcome_metadata=metadata or {},
     )
 
 

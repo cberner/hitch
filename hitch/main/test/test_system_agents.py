@@ -4564,6 +4564,12 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         self.mock_auto_proposals_paused_by_quota = self.quota_patcher.start()
         self.addCleanup(self.quota_patcher.stop)
+        self.worktree_patcher = patch(
+            "hitch.main.system_agents.create_worktree_for_session",
+            return_value=MagicMock(path=Path("/repo-worktree")),
+        )
+        self.mock_create_worktree = self.worktree_patcher.start()
+        self.addCleanup(self.worktree_patcher.stop)
 
     def test_autonomous_goal_candidate_parser_accepts_wrapped_proposal(self) -> None:
         parsed = system_agents._parse_autonomous_goal_candidate_output(
@@ -4573,7 +4579,11 @@ class AutonomousGoalWorkflowTests(TestCase):
                         "title": "Add parser coverage",
                         "summary": "Cover parser edge cases.",
                         "impact": "Fewer regressions.",
+                        "implemented_changes": "Added parser tests.",
                         "implementation_direction": "Add focused tests.",
+                        "verification": "Not run.",
+                        "rough_edges": "Needs cleanup.",
+                        "suggested_continuation": "Polish and test this parser work.",
                         "relevant_files": ["hitch/main/rollout.py"],
                     },
                     "message": "",
@@ -4588,6 +4598,13 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertIsNotNone(parsed)
         assert parsed is not None
         self.assertEqual(parsed["proposal"]["title"], "Add parser coverage")
+        self.assertEqual(
+            parsed["proposal"]["implemented_changes"], "Added parser tests."
+        )
+        self.assertEqual(
+            parsed["proposal"]["suggested_continuation"],
+            "Polish and test this parser work.",
+        )
         self.assertEqual(parsed["message"], "")
         self.assertEqual(
             parsed["next_steps_summary"],
@@ -4671,6 +4688,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertIn("Keep docs current", kwargs["prompt"])
         self.assertIn("make high progress", kwargs["prompt"])
         self.assertIn("Do not make code changes", kwargs["prompt"])
+        self.assertIn('"implemented_changes": string', kwargs["prompt"])
+        self.assertIn('"verification": string', kwargs["prompt"])
         self.assertIn('"proposal" to null', kwargs["prompt"])
         self.assertIn("Autonomous goal memory from previous candidate runs", kwargs["prompt"])
         self.assertIn("next_steps_summary", kwargs["prompt"])
@@ -4713,6 +4732,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         self.assertIn("Repository cwd: /repo-worktree", kwargs["prompt"])
         self.assertIn("Make code changes", kwargs["prompt"])
+        self.assertIn("Do not run QA loops", kwargs["prompt"])
         metadata = SessionMetadata.objects.get(thread_id="candidate-thread")
         self.assertEqual(metadata.cwd, "/repo-worktree")
         run = SystemAgentRun.objects.get(thread_id="candidate-thread")
@@ -4776,6 +4796,9 @@ class AutonomousGoalWorkflowTests(TestCase):
             system_agents._autonomous_goal_main_thread_id(autonomous_goal.pk),
         )
         self.assertTrue(workflow.state["auto_proposal"])
+        self.assertTrue(workflow.state["use_worktrees"])
+        self.assertEqual(workflow.state["session_cwd"], "/repo-worktree")
+        self.mock_create_worktree.assert_called_with("/repo")
         mock_spawn.assert_called_once()
 
     @patch("hitch.main.system_agents.default_branch_checkout_commit_hash")
@@ -6002,7 +6025,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(autonomous_goal.auto_proposal_last_no_proposal_sha, "")
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_draft_patch_autonomy_starts_implementation_session(
+    def test_draft_patch_autonomy_leaves_proposal_pending_for_candidate_session(
         self, mock_spawn: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -6064,10 +6087,6 @@ class AutonomousGoalWorkflowTests(TestCase):
             thread_id="judge-thread",
             instance=instance,
         )
-        mock_spawn.return_value = _instance(
-            thread_id="implementation-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-        )
         AutonomousGoal.objects.filter(pk=autonomous_goal.pk).update(
             web_search_mode=AutonomousGoal.WEB_SEARCH_LIVE
         )
@@ -6077,39 +6096,26 @@ class AutonomousGoalWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
         self.assertEqual(
-            workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_DRAFT_STARTED
+            workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED
         )
         proposal = ProposedSession.objects.get()
-        implementation = SessionMetadata.objects.get(thread_id="implementation-thread")
-        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
-        self.assertEqual(proposal.accepted_session, implementation)
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertIsNone(proposal.accepted_session)
+        self.assertEqual(proposal.candidate_session, candidate_metadata)
         self.assertEqual(
             proposal.outcome_metadata["autonomous_goal_autonomy"],
             AutonomousGoal.AUTONOMY_DRAFT_PATCH,
         )
         self.assertEqual(
             proposal.outcome_metadata["automation_status"],
-            "implementation_started",
+            "proposed",
         )
         self.assertFalse(proposal.outcome_metadata["auto_pr_enabled"])
         self.assertFalse(proposal.outcome_metadata["auto_qa_enabled"])
-        self.assertFalse(implementation.auto_pr_enabled)
-        self.assertFalse(implementation.auto_qa_enabled)
-        kwargs = mock_spawn.call_args.kwargs
-        self.assertEqual(kwargs["cwd"], "/repo")
-        self.assertEqual(kwargs["thread_name"], "Add parser coverage")
-        self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
-        self.assertEqual(kwargs["web_search_mode"], AutonomousGoal.WEB_SEARCH_CACHED)
-        self.assertEqual(
-            kwargs["sandbox_policy"],
-            system_agents.AUTONOMOUS_GOAL_IMPLEMENTATION_SANDBOX_POLICY,
-        )
-        self.assertFalse(kwargs["auto_pr_enabled"])
-        self.assertFalse(kwargs["auto_qa_enabled"])
-        self.assertIn("Implementation guidance:\nAdd focused tests.", kwargs["prompt"])
+        mock_spawn.assert_not_called()
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_draft_patch_autonomy_starts_implementation_in_candidate_worktree(
+    def test_draft_pr_autonomy_records_auto_pr_from_judge_completion(
         self, mock_spawn: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -6118,7 +6124,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             title="Improve tests",
             goal="Find useful test coverage increments.",
             confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
-            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PR,
         )
         candidate_metadata = SessionMetadata.objects.create(
             thread_id="candidate-thread",
@@ -6176,12 +6182,12 @@ class AutonomousGoalWorkflowTests(TestCase):
 
         system_agents.on_codex_instance_finished(instance)
 
-        kwargs = mock_spawn.call_args.kwargs
-        self.assertEqual(kwargs["cwd"], "/repo-worktree")
-        implementation = SessionMetadata.objects.get(thread_id="implementation-thread")
-        self.assertEqual(implementation.cwd, "/repo-worktree")
+        mock_spawn.assert_not_called()
         proposal = ProposedSession.objects.get()
-        self.assertEqual(proposal.accepted_session, implementation)
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertEqual(proposal.candidate_session, candidate_metadata)
+        self.assertTrue(proposal.outcome_metadata["auto_pr_enabled"])
+        self.assertFalse(proposal.outcome_metadata["auto_qa_enabled"])
 
     @patch("hitch.main.system_agents.create_worktree_for_session")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -6218,14 +6224,9 @@ class AutonomousGoalWorkflowTests(TestCase):
             ),
             agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
         )
-        implementation_instance = _instance(
-            thread_id="implementation-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-        )
         mock_spawn.side_effect = [
             candidate_instance,
             judge_instance,
-            implementation_instance,
         ]
 
         workflow = system_agents.start_autonomous_goal_workflow(
@@ -6259,23 +6260,18 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow.refresh_from_db()
         self.assertEqual(workflow.state["session_cwd"], "/repo-worktree")
-        implementation_kwargs = mock_spawn.call_args.kwargs
-        self.assertEqual(implementation_kwargs["cwd"], "/repo-worktree")
-        self.assertTrue(implementation_kwargs["auto_qa_enabled"])
-        self.assertTrue(implementation_kwargs["auto_merge_to_local_branch"])
-        self.assertEqual(implementation_kwargs["auto_merge_branch"], "release")
-        implementation = SessionMetadata.objects.get(thread_id="implementation-thread")
-        self.assertEqual(implementation.cwd, "/repo-worktree")
-        self.assertTrue(implementation.auto_qa_enabled)
-        self.assertTrue(implementation.auto_merge_to_local_branch)
-        self.assertEqual(implementation.auto_merge_branch, "release")
+        proposal = ProposedSession.objects.get()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertTrue(proposal.outcome_metadata["auto_qa_enabled"])
+        self.assertTrue(proposal.outcome_metadata["auto_merge_to_local_branch"])
+        self.assertEqual(proposal.outcome_metadata["auto_merge_branch"], "release")
 
     @patch(
         "hitch.main.system_agents.default_branch_checkout_commit_hash",
         return_value=None,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_auto_draft_patch_revalidates_checkout_before_implementation(
+    def test_auto_draft_patch_does_not_revalidate_until_user_continuation(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -6329,19 +6325,19 @@ class AutonomousGoalWorkflowTests(TestCase):
         system_agents.on_codex_instance_finished(instance)
 
         workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED)
         proposal = ProposedSession.objects.get()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
-        self.assertIn("checkout no longer matches", proposal.outcome_notes)
         self.assertEqual(
             proposal.outcome_metadata["automation_status"],
-            "implementation_start_failed",
+            "proposed",
         )
-        mock_default_sha.assert_called_once_with("/repo")
+        mock_default_sha.assert_not_called()
         mock_spawn.assert_not_called()
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_draft_patch_auto_qa_setting_enables_auto_qa_for_implementation(
+    def test_draft_patch_auto_qa_setting_is_recorded_for_pending_proposal(
         self, mock_spawn: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -6390,26 +6386,16 @@ class AutonomousGoalWorkflowTests(TestCase):
             thread_id="judge-thread",
             instance=instance,
         )
-        mock_spawn.return_value = _instance(
-            thread_id="implementation-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            auto_qa_enabled=True,
-        )
-
         system_agents.on_codex_instance_finished(instance)
 
         proposal = ProposedSession.objects.get()
-        implementation = SessionMetadata.objects.get(thread_id="implementation-thread")
-        self.assertFalse(mock_spawn.call_args.kwargs["auto_pr_enabled"])
-        self.assertTrue(mock_spawn.call_args.kwargs["auto_qa_enabled"])
-        self.assertFalse(implementation.auto_pr_enabled)
-        self.assertTrue(implementation.auto_qa_enabled)
+        mock_spawn.assert_not_called()
         self.assertFalse(proposal.outcome_metadata["auto_pr_enabled"])
         self.assertTrue(proposal.outcome_metadata["auto_qa_enabled"])
-        self.assertIn("Auto-QA will run", proposal.outcome_notes)
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_draft_pr_autonomy_enables_auto_pr_for_implementation(
+    def test_draft_pr_autonomy_records_auto_pr_for_pending_proposal(
         self, mock_spawn: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -6459,31 +6445,17 @@ class AutonomousGoalWorkflowTests(TestCase):
             thread_id="judge-thread",
             instance=instance,
         )
-        mock_spawn.return_value = _instance(
-            thread_id="implementation-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            auto_pr_enabled=True,
-        )
-
         system_agents.on_codex_instance_finished(instance)
 
         proposal = ProposedSession.objects.get()
-        implementation = SessionMetadata.objects.get(thread_id="implementation-thread")
-        self.assertTrue(mock_spawn.call_args.kwargs["auto_pr_enabled"])
-        self.assertFalse(mock_spawn.call_args.kwargs["auto_qa_enabled"])
-        self.assertEqual(
-            mock_spawn.call_args.kwargs["web_search_mode"],
-            AutonomousGoal.WEB_SEARCH_DISABLED,
-        )
-        self.assertTrue(implementation.auto_pr_enabled)
-        self.assertFalse(implementation.auto_qa_enabled)
+        mock_spawn.assert_not_called()
         self.assertTrue(proposal.outcome_metadata["auto_pr_enabled"])
         self.assertFalse(proposal.outcome_metadata["auto_qa_enabled"])
-        self.assertIn("Auto-PR will run", proposal.outcome_notes)
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
 
     @patch("hitch.main.system_agents.create_worktree_for_session")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_autonomous_goal_auto_merge_config_propagates_to_implementation(
+    def test_autonomous_goal_auto_merge_config_is_recorded_for_pending_proposal(
         self, mock_spawn: MagicMock, mock_worktree: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -6534,48 +6506,22 @@ class AutonomousGoalWorkflowTests(TestCase):
             thread_id="judge-thread",
             instance=instance,
         )
-        mock_spawn.return_value = _instance(
-            thread_id="implementation-thread",
-            purpose=CodexInstance.PURPOSE_USER,
-            auto_qa_enabled=True,
-            auto_merge_to_local_branch=True,
-            auto_merge_branch="main",
-        )
         mock_worktree.return_value = MagicMock(path=Path("/repo-worktree"))
 
         system_agents.on_codex_instance_finished(instance)
 
-        mock_worktree.assert_called_once_with(
-            "/repo", base_ref="refs/heads/main", disable_hooks=True
-        )
-        kwargs = mock_spawn.call_args.kwargs
-        self.assertEqual(kwargs["cwd"], "/repo-worktree")
-        self.assertTrue(kwargs["auto_qa_enabled"])
-        self.assertTrue(kwargs["auto_merge_to_local_branch"])
-        self.assertEqual(kwargs["auto_merge_branch"], "main")
+        mock_worktree.assert_not_called()
+        mock_spawn.assert_not_called()
         proposal = ProposedSession.objects.get()
-        implementation = SessionMetadata.objects.get(thread_id="implementation-thread")
-        self.assertEqual(implementation.cwd, "/repo-worktree")
-        self.assertTrue(implementation.auto_merge_to_local_branch)
-        self.assertEqual(implementation.auto_merge_branch, "main")
-        self.assertTrue(proposal.outcome_metadata["auto_merge_to_local_branch"])
-        self.assertEqual(proposal.outcome_metadata["auto_merge_branch"], "main")
-        self.assertIn(
-            "Auto-QA will merge approved changes into main", proposal.outcome_notes
-        )
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertTrue(proposal.outcome_metadata["auto_qa_enabled"])
 
-    @patch("hitch.main.system_agents.cleanup_worktree")
-    @patch("hitch.main.system_agents.create_worktree_for_session")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_autonomous_goal_auto_merge_spawn_failure_cleans_up_worktree(
+    def test_autonomous_goal_auto_merge_does_not_spawn_before_acceptance(
         self,
         mock_spawn: MagicMock,
-        mock_worktree: MagicMock,
-        mock_cleanup: MagicMock,
     ) -> None:
         mock_spawn.side_effect = RuntimeError("app-server unavailable")
-        managed_worktree = MagicMock(path=Path("/repo-worktree"))
-        mock_worktree.return_value = managed_worktree
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         autonomous_goal = AutonomousGoal.objects.create(
             project=project,
@@ -6627,18 +6573,15 @@ class AutonomousGoalWorkflowTests(TestCase):
 
         system_agents.on_codex_instance_finished(instance)
 
-        mock_cleanup.assert_called_once_with(managed_worktree)
+        mock_spawn.assert_not_called()
         workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
         proposal = ProposedSession.objects.get()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
         self.assertIsNone(proposal.accepted_session)
-        self.assertIn(
-            "failed to start implementation session", proposal.outcome_notes
-        )
         self.assertEqual(
             proposal.outcome_metadata["automation_status"],
-            "implementation_start_failed",
+            "proposed",
         )
 
     @patch("hitch.main.system_agents.start_pr_qa_workflow")
@@ -6723,7 +6666,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_draft_patch_start_failure_leaves_visible_proposal(
+    def test_draft_patch_pending_proposal_ignores_spawn_failure(
         self, mock_spawn: MagicMock
     ) -> None:
         mock_spawn.side_effect = RuntimeError("app-server unavailable")
@@ -6776,15 +6719,16 @@ class AutonomousGoalWorkflowTests(TestCase):
         system_agents.on_codex_instance_finished(instance)
 
         workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED)
         proposal = ProposedSession.objects.get()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
         self.assertIsNone(proposal.accepted_session)
-        self.assertIn("failed to start implementation session", proposal.outcome_notes)
         self.assertEqual(
             proposal.outcome_metadata["automation_status"],
-            "implementation_start_failed",
+            "proposed",
         )
+        mock_spawn.assert_not_called()
 
     def test_candidate_failure_creates_visible_notice(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -6860,6 +6804,16 @@ class AutonomousGoalWorkflowTests(TestCase):
             goal="Find useful test coverage increments.",
             confidence_threshold=AutonomousGoal.CONFIDENCE_VERY_HIGH,
         )
+        candidate_metadata = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+        )
+        judge_metadata = SessionMetadata.objects.create(
+            thread_id="judge-thread",
+            cwd="/repo-worktree",
+            project=project,
+        )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             main_thread_id=system_agents._autonomous_goal_main_thread_id(
@@ -6872,6 +6826,8 @@ class AutonomousGoalWorkflowTests(TestCase):
                 "autonomous_goal_id": autonomous_goal.pk,
                 "auto_proposal": True,
                 "default_branch_sha": "a" * 40,
+                "candidate_session_id": candidate_metadata.pk,
+                "judge_session_id": judge_metadata.pk,
                 "candidate": {"title": "Maybe add tests", "relevant_files": []},
             },
         )
@@ -6901,7 +6857,16 @@ class AutonomousGoalWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
         self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_SKIPPED)
-        self.assertFalse(ProposedSession.objects.exists())
+        notice = ProposedSession.objects.get()
+        self.assertEqual(notice.inbox_kind, ProposedSession.INBOX_KIND_NOTICE)
+        self.assertEqual(notice.candidate_session, candidate_metadata)
+        self.assertEqual(notice.judge_session, judge_metadata)
+        self.assertEqual(notice.summary, "Useful but not certain.")
+        self.assertEqual(notice.outcome_metadata["automation_status"], "skipped")
+        self.assertEqual(
+            notice.outcome_metadata["skip_reason"],
+            "judge_confidence_below_threshold",
+        )
         autonomous_goal.refresh_from_db()
         self.assertEqual(autonomous_goal.auto_proposal_last_no_proposal_sha, "a" * 40)
 
