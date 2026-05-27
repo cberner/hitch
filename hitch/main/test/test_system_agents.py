@@ -1411,10 +1411,6 @@ class SpecCriticWorkflowTests(TestCase):
                     },
                 },
                 {
-                    "type": "turn_context",
-                    "payload": {"collaboration_mode": {"mode": "default"}},
-                },
-                {
                     "type": "event_msg",
                     "payload": {"type": "user_message", "message": "Make the plan."},
                 },

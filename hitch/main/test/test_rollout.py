@@ -1024,7 +1024,6 @@ class IterEntriesTests(TestCase):
                         "phase": "final_answer",
                     },
                 ),
-                _line("turn_context", {"collaboration_mode": {"mode": "default"}}),
                 _line(
                     "event_msg",
                     {"type": "user_message", "message": "Turn that into the plan."},
@@ -1072,7 +1071,6 @@ class IterEntriesTests(TestCase):
                         "phase": "final_answer",
                     },
                 ),
-                _line("turn_context", {"collaboration_mode": {"mode": "default"}}),
                 _line(
                     "event_msg",
                     {"type": "user_message", "message": "Turn that into steps."},
@@ -1116,7 +1114,6 @@ class IterEntriesTests(TestCase):
                         "phase": "final_answer",
                     },
                 ),
-                _line("turn_context", {"collaboration_mode": {"mode": "default"}}),
                 _line(
                     "event_msg",
                     {"type": "user_message", "message": "Turn that into a plan."},
@@ -1163,7 +1160,6 @@ class IterEntriesTests(TestCase):
                         "phase": "final_answer",
                     },
                 ),
-                _line("turn_context", {"collaboration_mode": {"mode": "default"}}),
                 _line(
                     "event_msg",
                     {"type": "user_message", "message": "Show the tags."},
@@ -1528,7 +1524,7 @@ class IterEntriesTests(TestCase):
         self.assertEqual(entries[-1]["text"], text)
 
     def test_default_mode_turn_exits_active_plan_mode_without_approval(self) -> None:
-        text = "<proposed_plan>\n# XML Example\n\nliteral example\n</proposed_plan>"
+        text = "<proposed_plan>\n# Plan\n\nImplement it.\n</proposed_plan>"
         path = self._make(
             [
                 _line("turn_context", {"collaboration_mode": {"mode": "plan"}}),
