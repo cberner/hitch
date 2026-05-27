@@ -655,14 +655,26 @@ def _copy_ci_fields(
                 # Workflow-runs observations DO speak for the same check-run
                 # universe that ``fetch_workflow_run_jobs`` enumerates, so a
                 # definitive ``success`` across all runs supersedes a prior
-                # per-job snapshot on the same commit. ``unknown`` /
-                # ``failure`` / ``pending`` don't tell us which jobs are
-                # bad, so the prior per-job list remains the most specific
-                # signal the follow-up agent has.
+                # per-job snapshot on the same commit. ``pending`` -- with no
+                # failed completed runs -- means a previously-observed
+                # failing workflow is being re-run on the same commit, so
+                # the earlier ``failing_jobs`` list is now obsolete and
+                # leaving it intact would have ``_ci_gate`` keep BLOCKING
+                # on "Failing CI jobs were observed" instead of waiting for
+                # the rerun via the "CI is still running" pending gate; clear
+                # the failing list on pending too. ``pending_jobs`` stays put
+                # because workflow-runs observations don't enumerate jobs,
+                # so the prior per-job pending list remains the most specific
+                # signal we have to carry into the next agent's feedback.
+                # ``unknown`` / ``failure`` keep both lists as-is: ``failure``
+                # already has the per-job list as its best detail, and
+                # ``unknown`` proves nothing.
                 target["ci_status"] = status
                 if status == "success":
                     target["failing_jobs"] = []
                     target["pending_jobs"] = []
+                elif status == "pending":
+                    target["failing_jobs"] = []
         elif tool == "fetch_workflow_run_jobs":
             status, failing_jobs, pending_jobs = _ci_status_from_jobs(source.get("jobs"))
             if status:
