@@ -55,7 +55,8 @@ sync:
 
 # Install a per-user systemd unit that serves Hitch from this repo. Prompts for
 # the public domain name, wires it into ADDITIONAL_ALLOWED_HOSTS, and re-pulls
-# master + applies migrations on every (re)start so a crash loop self-heals.
+# the install-time branch + applies migrations on every (re)start so a crash
+# loop self-heals.
 install-systemd:
   #!/usr/bin/env bash
   set -euo pipefail
@@ -71,6 +72,11 @@ install-systemd:
     echo "uv and git must both be on PATH." >&2
     exit 1
   fi
+  BRANCH="$("${GIT_BIN}" -C "${REPO_DIR}" symbolic-ref --quiet --short HEAD || true)"
+  if [ -z "${BRANCH}" ]; then
+    echo "HEAD is detached; check out the branch to deploy from before installing." >&2
+    exit 1
+  fi
   UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
   mkdir -p "${UNIT_DIR}"
   UNIT_PATH="${UNIT_DIR}/hitch.service"
@@ -84,9 +90,9 @@ install-systemd:
   Type=simple
   WorkingDirectory=${REPO_DIR}
   Environment=ADDITIONAL_ALLOWED_HOSTS=${DOMAIN}
-  # Re-sync to master and apply migrations on every (re)start so a crash loop
-  # picks up fixes pushed since the last successful boot.
-  ExecStartPre=${GIT_BIN} -C ${REPO_DIR} pull --ff-only origin master
+  # Re-sync to the install-time branch and apply migrations on every (re)start
+  # so a crash loop picks up fixes pushed since the last successful boot.
+  ExecStartPre=${GIT_BIN} -C ${REPO_DIR} pull --ff-only origin ${BRANCH}
   ExecStartPre=${UV_BIN} run ./manage.py migrate --settings hitch.settings.dev
   ExecStart=${UV_BIN} run ./manage.py runserver --settings hitch.settings.dev
   Restart=always
