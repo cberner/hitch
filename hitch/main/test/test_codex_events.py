@@ -1313,6 +1313,209 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
         self.assertEqual(snapshot.get("pending_jobs", []), [])
         self.assertEqual(snapshot.get("failing_jobs", []), [])
 
+    def test_pr_snapshot_clears_stale_review_signal_on_clean_re_observation(
+        self,
+    ) -> None:
+        # A PR turn that observes a CHANGES_REQUESTED review and then re-checks
+        # the reviews after the reviewer dropped their verdict (the tool now
+        # returns no actionable reviews) must end with the snapshot reflecting
+        # the second observation -- ``review_count`` zero AND ``review_signal``
+        # cleared. Before the fix ``_copy_review_fields`` only wrote
+        # ``review_signal`` when the new list still produced a state, so the
+        # clean second observation emitted an update without the key.
+        # ``_merge_pr_snapshot_update`` therefore kept the stale
+        # ``"changes_requested"`` from the first observation alongside
+        # ``review_count=0``, and ``system_agents._review_gate`` -- which
+        # short-circuits to BLOCKED whenever ``review_signal`` is
+        # ``"changes_requested"`` regardless of ``review_count`` -- then
+        # surfaced the PR as "A reviewer requested changes." to the PR
+        # follow-up agent. The follow-up workflow looped feedback rounds
+        # trying to "address" feedback that the PR no longer carries, burning
+        # iterations until ``max_iterations`` was reached. Same shape as the
+        # ``unresolved_threads`` bug 48b0840 fixed at the merge layer, but
+        # for the review-state signal that drives the Review gate verdict.
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_create_pull_request",
+                                    "result": {
+                                        "structuredContent": {
+                                            "url": (
+                                                "https://github.com/cberner/hitch/pull/174"
+                                            ),
+                                            "number": 174,
+                                            "head_sha": "abc123",
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=5,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_list_pull_request_reviews",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "pr_number": 174,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "reviews": [
+                                                {"state": "CHANGES_REQUESTED"},
+                                            ]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_list_pull_request_reviews",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "pr_number": 174,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "reviews": []
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["review_count"], 0)
+        # The clear is recorded as an explicit ``""`` (rather than popping the
+        # key) so the cross-worker handoff merge in
+        # ``system_agents._merge_pr_handoff_dicts`` can drop the stale
+        # persisted verdict from an earlier monitor/feedback run.
+        self.assertEqual(snapshot["review_signal"], "")
+
+    def test_pr_snapshot_review_clear_preserves_reaction_thumbs_up(
+        self,
+    ) -> None:
+        # When a +1 reaction observation already recorded ``thumbs_up`` and a
+        # follow-up reviews observation yields no actionable signal, the
+        # snapshot must keep the reaction-derived approval rather than
+        # stomping it with a reviews-driven clear -- the reviews tool only
+        # speaks for review-derived signals (changes_requested / approved /
+        # commented), not for the reactions-driven thumbs_up signal.
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_create_pull_request",
+                                    "result": {
+                                        "structuredContent": {
+                                            "url": (
+                                                "https://github.com/cberner/hitch/pull/175"
+                                            ),
+                                            "number": 175,
+                                            "head_sha": "abc123",
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=5,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_get_pr_reactions",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "pr_number": 175,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "reactions": [{"content": "+1"}]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_list_pull_request_reviews",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "pr_number": 175,
+                                    },
+                                    "result": {
+                                        "structuredContent": {"reviews": []}
+                                    },
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["review_count"], 0)
+        self.assertEqual(snapshot["reaction_count"], 1)
+        self.assertEqual(snapshot["review_signal"], "thumbs_up")
+
     def test_pr_snapshot_ignores_other_threads_and_non_github_tools(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "events.jsonl"

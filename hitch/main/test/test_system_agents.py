@@ -3738,6 +3738,80 @@ class SpecCriticWorkflowTests(TestCase):
         }
         self.assertEqual(statuses["review"], "pending")
 
+    def test_pr_handoff_merge_clears_stale_review_signal_cross_worker(
+        self,
+    ) -> None:
+        # The snapshot layer records a clean reviews re-observation with
+        # ``review_signal=""`` so a follow-up monitor/feedback worker can
+        # drop the stale ``"changes_requested"`` persisted by the previous
+        # worker. Without this propagation the persisted handoff keeps the
+        # old verdict, the Review gate stays blocked, and the PR follow-up
+        # loops feedback rounds trying to address feedback the PR no longer
+        # carries until ``max_iterations`` fails the run.
+        merged = system_agents._merge_pr_handoff_dicts(
+            {
+                "url": "https://github.com/cberner/hitch/pull/176",
+                "pr_number": 176,
+                "head_sha": "abc123",
+                "review_signal": "changes_requested",
+            },
+            {
+                "url": "https://github.com/cberner/hitch/pull/176",
+                "pr_number": 176,
+                "head_sha": "abc123",
+                "review_signal": "",
+                "review_count": 0,
+            },
+        )
+
+        self.assertNotIn("review_signal", merged)
+        self.assertEqual(merged["review_count"], 0)
+
+    def test_pr_handoff_merge_keeps_reaction_thumbs_up_when_reviews_clear(
+        self,
+    ) -> None:
+        # A reviews observation that yields no signal must not stomp on a
+        # reaction-derived ``thumbs_up`` already persisted from an earlier
+        # +1 reaction observation: the reviews tool only speaks for the
+        # review-derived signals (changes_requested / approved / commented).
+        merged = system_agents._merge_pr_handoff_dicts(
+            {
+                "url": "https://github.com/cberner/hitch/pull/177",
+                "pr_number": 177,
+                "head_sha": "abc123",
+                "review_signal": "thumbs_up",
+            },
+            {
+                "url": "https://github.com/cberner/hitch/pull/177",
+                "pr_number": 177,
+                "head_sha": "abc123",
+                "review_signal": "",
+                "review_count": 0,
+            },
+        )
+
+        self.assertEqual(merged["review_signal"], "thumbs_up")
+        self.assertEqual(merged["review_count"], 0)
+
+    def test_compact_pr_handoff_preserves_explicit_review_signal_clear(
+        self,
+    ) -> None:
+        # ``_compact_pr_handoff`` filters empty strings out of most fields
+        # because their writers never emit ``""``, but the explicit reviews
+        # clear emitted by ``codex_events._copy_review_fields`` must survive
+        # so it can drive the cross-worker pop in ``_merge_pr_handoff_dicts``.
+        compact = system_agents._compact_pr_handoff(
+            {
+                "url": "https://github.com/cberner/hitch/pull/178",
+                "pr_number": 178,
+                "review_signal": "",
+                "state": "",
+            }
+        )
+
+        self.assertEqual(compact["review_signal"], "")
+        self.assertNotIn("state", compact)
+
 
 class AutoProposalQuotaPauseTests(TestCase):
     def test_rate_limit_window_pauses_below_half_linear_remaining_threshold(
