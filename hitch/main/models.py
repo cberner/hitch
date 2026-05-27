@@ -37,6 +37,7 @@ class Project(models.Model):
     name = models.CharField(max_length=200)
     repo_path = models.CharField(max_length=4096, unique=True)
     git_common_dir = models.CharField(max_length=4096, blank=True, default="")
+    extra_system_prompt = models.TextField(blank=True, default="")
     auto_pr_mode = models.CharField(
         max_length=16,
         choices=AUTO_PR_CHOICES,

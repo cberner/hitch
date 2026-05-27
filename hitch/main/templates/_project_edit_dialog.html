@@ -13,6 +13,10 @@
             <input type="text" value="{% if current_project %}{{ current_project.repo_path }}{% endif %}" readonly data-project-edit-repo>
         </label>
         <label>
+            Extra developer prompt
+            <textarea class="extra-system-prompt" name="extra_system_prompt" maxlength="{{ project_extra_system_prompt_max_len }}" autocomplete="off" data-project-edit-extra-system-prompt>{% if current_project %}{{ current_project.extra_system_prompt }}{% endif %}</textarea>
+        </label>
+        <label>
             Auto-PR
             <select name="auto_pr_mode" required data-project-edit-auto-pr-mode>
                 {% for option in project_auto_pr_options %}

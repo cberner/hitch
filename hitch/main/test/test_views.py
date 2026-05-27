@@ -4474,6 +4474,7 @@ class ProjectViewTests(TestCase):
             data={
                 "project": str(project.pk),
                 "name": "Renamed",
+                "extra_system_prompt": "  Prefer project fixtures.  ",
                 "auto_pr_mode": Project.AUTO_PR_ON,
             },
         )
@@ -4481,6 +4482,7 @@ class ProjectViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         project.refresh_from_db()
         self.assertEqual(project.name, "Renamed")
+        self.assertEqual(project.extra_system_prompt, "Prefer project fixtures.")
         self.assertEqual(project.auto_pr_mode, Project.AUTO_PR_ON)
 
     def test_edit_project_rejects_invalid_posts(self) -> None:
@@ -4502,6 +4504,16 @@ class ProjectViewTests(TestCase):
                     "auto_pr_mode": Project.AUTO_PR_ON,
                 },
                 "project name is required",
+            ),
+            (
+                {
+                    "project": str(project.pk),
+                    "name": "Renamed",
+                    "extra_system_prompt": "x"
+                    * (views._EXTRA_SYSTEM_PROMPT_MAX_LEN + 1),
+                    "auto_pr_mode": Project.AUTO_PR_ON,
+                },
+                "extra system prompt is too long",
             ),
             (
                 {
@@ -5830,6 +5842,76 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
+    def test_new_session_merges_global_and_project_developer_prompts(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        project = Project.objects.create(
+            name="Hitch",
+            repo_path=self.REPO,
+            extra_system_prompt="Use project fixtures.",
+        )
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-project-prompt")
+        _setup_codex(mock_codex, models=[])
+        _seed_cookies(
+            self.client,
+            **{
+                _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt(
+                    "Always run focused tests."
+                )
+            },
+        )
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "do thing", "project": str(project.pk)},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self._assert_new_session_spawn(
+            mock_spawn,
+            developer_instructions=(
+                "Always run focused tests.\n\nUse project fixtures."
+            ),
+        )
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_ignores_project_prompt_for_bare_repo_override(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        project = Project.objects.create(
+            name="Hitch",
+            repo_path=self.REPO,
+            extra_system_prompt="Use project fixtures.",
+        )
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-bare")
+        _setup_codex(mock_codex, models=[])
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "do thing",
+                "cwd": self.REPO,
+                "project": views._BARE_REPO_PROJECT_VALUE,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self._assert_new_session_spawn(mock_spawn)
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
     def test_new_session_web_search_override(
         self,
         mock_discover: MagicMock,
@@ -7104,6 +7186,45 @@ class SendMessageViewTests(TestCase):
             prompt="follow-up question",
             sandbox_policy=None,
             approval_mode="auto_review",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_first_follow_up_uses_project_developer_prompt(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        project = Project.objects.create(
+            name="Hitch",
+            repo_path="/repo",
+            extra_system_prompt="Use project fixtures.",
+        )
+        SessionMetadata.objects.create(thread_id="abc", cwd="/repo", project=project)
+        _seed_cookies(
+            self.client,
+            **{
+                _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt(
+                    "Always run focused tests."
+                )
+            },
+        )
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self._assert_follow_up_spawn(
+            mock_spawn,
+            developer_instructions=(
+                "Always run focused tests.\n\nUse project fixtures."
+            ),
         )
 
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
