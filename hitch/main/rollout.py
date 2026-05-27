@@ -1184,9 +1184,18 @@ def _extract_command(arguments: Any) -> str:
     if not isinstance(args, dict):
         return arguments
     # `exec_command` uses `cmd`; the legacy `shell`/`shell_command` tools use
-    # `command`.
+    # `command`. Codex's `shell` tool spec and `container.exec` carry the
+    # command as an argv-style array (see ``core/src/tools/handlers/shell_spec.rs``
+    # in codex-rs) -- mirroring the payload ``local_shell_call`` uses -- so
+    # join those parts into the same single-line detail the local-shell
+    # renderer produces; otherwise every shell invocation routed through this
+    # function-call path would surface as a ``Command:`` row with no detail.
     value = args.get("cmd") or args.get("command")
-    return value if isinstance(value, str) else ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return " ".join(str(part) for part in value)
+    return ""
 
 
 def _function_call_status(output_payload: dict[str, Any] | None) -> str | None:
