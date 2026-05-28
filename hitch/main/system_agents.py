@@ -930,6 +930,13 @@ def _autonomous_goal_in_flight_automation_exists(autonomous_goal: AutonomousGoal
             | models.Q(
                 outcome_metadata__accepted_by=LEGACY_AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY
             )
+            | (
+                models.Q(autonomous_goal__isnull=False)
+                & (
+                    models.Q(outcome_metadata__auto_pr_enabled=True)
+                    | models.Q(outcome_metadata__auto_qa_enabled=True)
+                )
+            )
         )
         .exclude(accepted_session__thread_id="")
         .values_list("accepted_session__thread_id", flat=True)

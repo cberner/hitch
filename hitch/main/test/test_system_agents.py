@@ -5070,6 +5070,54 @@ class AutonomousGoalWorkflowTests(TestCase):
         return_value="a" * 40,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_blocks_user_accepted_auto_review_proposal(
+        self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        blocker_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve docs",
+            goal="Find useful documentation increments.",
+            auto_proposal_enabled=True,
+        )
+        implementation = SessionMetadata.objects.create(
+            thread_id="implementation-thread",
+            cwd="/repo",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=blocker_goal,
+            title="Accepted auto-QA proposal",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            accepted_session=implementation,
+            outcome_metadata={
+                "accepted_by": "user",
+                "auto_qa_enabled": True,
+            },
+        )
+        _instance(
+            thread_id="implementation-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+            status=CodexInstance.STATUS_RUNNING,
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 0)
+        mock_spawn.assert_not_called()
+
+    @patch(
+        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_blocks_in_flight_pr_qa_for_automation(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:
