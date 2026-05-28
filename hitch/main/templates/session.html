@@ -292,6 +292,26 @@
         }
         .meta .meta-item { display: inline-flex; align-items: center; gap: 0.3rem; min-width: 0; }
         .meta .meta-label { color: var(--text-faint); }
+        .stage-badge {
+            border: 1px solid var(--border-strong);
+            border-radius: 999px;
+            padding: 0.08rem 0.5rem;
+            color: var(--text);
+            background: var(--surface-2);
+            font-size: 0.74rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .stage-badge[data-tone="active"],
+        .stage-badge[data-tone="done"] {
+            border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+            color: var(--accent);
+        }
+        .stage-badge[data-tone="warning"] {
+            border-color: var(--status-warn-fg);
+            color: var(--status-warn-fg);
+            background: var(--status-warn-bg);
+        }
         .meta code {
             background: var(--surface-2);
             color: var(--text);
@@ -2093,6 +2113,7 @@
             </div>
             {% endif %}
             <p class="meta">
+                {% if session_stage %}<span class="meta-item"><span class="meta-label">stage</span><span class="stage-badge" data-tone="{{ session_stage.tone }}">{{ session_stage.label }}</span></span>{% endif %}
                 <span class="meta-item"><span class="meta-label">id</span><code>{{ thread.id }}</code></span>
                 <span class="meta-item"><span class="meta-label">cwd</span><code>{{ thread.cwd }}</code></span>
                 <span class="meta-item"><span class="meta-label">updated</span><time data-ts="{{ thread.updated_at }}">{{ thread.updated_at }}</time></span>

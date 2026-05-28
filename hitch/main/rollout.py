@@ -23,6 +23,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from hitch.main import codex_events
+
 logger = logging.getLogger(__name__)
 
 # Function names codex assigns to shell-like tools (see
@@ -208,6 +210,40 @@ def latest_pr_url(rollout_path: Path) -> str | None:
             )
         latest = urls[-1] if urls else None
     return latest
+
+
+def latest_pr_snapshot(rollout_path: Path) -> dict[str, Any] | None:
+    """Return the latest GitHub PR state observed in a rollout file."""
+    return latest_pr_observation_result(rollout_path).snapshot
+
+
+def latest_pr_observation_result(rollout_path: Path) -> codex_events.PrObservationResult:
+    """Return latest PR state plus whether later normal work superseded it."""
+    lines = _load_rollout_lines(rollout_path)
+    if lines is None:
+        return codex_events.PrObservationResult(snapshot=None)
+    turns: list[codex_events.PrObservationTurn] = []
+    for _, turn_lines in _lines_by_turn(lines):
+        is_pr_prompt = _turn_is_pr_prompt(turn_lines)
+        final_idx = _find_final_agent_line_idx(turn_lines)
+        observation_lines = (
+            turn_lines[:final_idx]
+            if is_pr_prompt and final_idx != -1
+            else turn_lines
+        )
+        turns.append(
+            codex_events.PrObservationTurn(
+                is_pr_prompt=is_pr_prompt,
+                is_completed=final_idx != -1,
+                items=tuple(_github_mcp_items_from_lines(observation_lines)),
+                has_lifecycle_activity=(
+                    not is_pr_prompt
+                    and final_idx != -1
+                    and _turn_has_lifecycle_activity(turn_lines)
+                ),
+            )
+        )
+    return codex_events.pr_observation_result_from_turns(turns)
 
 
 def _load_rollout_lines(rollout_path: Path) -> list[dict[str, Any]] | None:
@@ -556,9 +592,80 @@ def _github_pr_tool_result_value(
     return None
 
 
+def _github_mcp_items_from_lines(lines: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+    function_calls_by_id = _function_calls_by_id(lines)
+    for entry in lines:
+        payload = entry.get("payload") or {}
+        if entry.get("type") == "event_msg" and payload.get("type") == "mcp_tool_call_end":
+            invocation = payload.get("invocation") or {}
+            if not isinstance(invocation, dict):
+                continue
+            server = invocation.get("server")
+            tool = invocation.get("tool")
+            if not _github_pr_observation_tool_used(server, tool):
+                continue
+            yield {
+                "type": "mcpToolCall",
+                "server": server,
+                "tool": tool,
+                "arguments": invocation.get("arguments") or {},
+                "result": payload.get("result"),
+            }
+            continue
+        if entry.get("type") != "response_item" or payload.get("type") != "function_call_output":
+            continue
+        call_id = payload.get("call_id")
+        call = function_calls_by_id.get(call_id) if isinstance(call_id, str) else None
+        if call is None or not _github_pr_observation_tool_used(call.get("name")):
+            continue
+        yield {
+            "type": "mcpToolCall",
+            "server": "github",
+            "tool": call.get("name"),
+            "arguments": _json_dict(call.get("arguments")),
+            "result": payload.get("output"),
+        }
+
+
 def _github_pr_tool_used(*parts: Any) -> bool:
     detail = " / ".join(part for part in parts if isinstance(part, str))
     return _GITHUB_PR_TOOL_RE.search(detail) is not None
+
+
+def _github_pr_observation_tool_used(*parts: Any) -> bool:
+    detail = " / ".join(part for part in parts if isinstance(part, str)).lower()
+    if "github" not in detail:
+        return False
+    normalized = detail.replace("-", "_")
+    return any(
+        token in normalized
+        for token in (
+            "create_pr",
+            "create_pull_request",
+            "get_pr_info",
+            "fetch_pr",
+            "merge_pull_request",
+            "fetch_pr_comments",
+            "list_pull_request_review_threads",
+            "list_pull_request_reviews",
+            "get_pr_reactions",
+            "get_commit_combined_status",
+            "fetch_commit_workflow_runs",
+            "fetch_workflow_run_jobs",
+        )
+    )
+
+
+def _json_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _github_pr_urls_from_value(value: Any) -> list[str]:
@@ -589,6 +696,13 @@ def _is_agent_response_line(entry: dict[str, Any]) -> bool:
         entry.get("type") == "response_item"
         and payload.get("type") == "message"
         and payload.get("role") == "assistant"
+    )
+
+
+def _turn_has_lifecycle_activity(turn_lines: list[dict[str, Any]]) -> bool:
+    return any(
+        _is_user_message_line(entry) or _is_agent_response_line(entry)
+        for entry in turn_lines
     )
 
 

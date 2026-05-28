@@ -56,6 +56,7 @@ from hitch.main import (
     demo,
     rollout,
     session_index,
+    session_stage,
     streaming,
     system_agents,
 )
@@ -539,6 +540,9 @@ _GITHUB_PR_TOOL_RE = re.compile(
 )
 _GITHUB_PR_URL_RE = re.compile(
     r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+"
+)
+_GITHUB_PR_IDENTITY_RE = re.compile(
+    r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([0-9]+)"
 )
 
 # Friendly labels for non-message thread item types. Anything not in this map
@@ -1356,6 +1360,16 @@ def _session_row_for_metadata(
         "is_archived": metadata.codex_archived,
         "project": metadata.project,
     }
+    if not system_only:
+        row.update(
+            {
+                "codex_path": metadata.codex_path,
+                "has_activity": bool(metadata.codex_preview),
+                "stage_main_updated_at": metadata.codex_updated_at,
+                "stage_cache_key": metadata.derived_stage,
+                "stage_cache_mtime_ns": metadata.derived_stage_source_mtime_ns,
+            }
+        )
     if system_only:
         run = runs_by_thread_id.get(metadata.thread_id)
         instance = run.instance if run is not None else instances_by_thread_id.get(metadata.thread_id)
@@ -2030,6 +2044,24 @@ def _session_row_for_thread(
         "is_archived": _thread_is_archived(thread),
         "project": session_project,
     }
+    if not system_only:
+        metadata = metadata_by_thread.get(thread_id)
+        codex_path = _string_value(getattr(thread, "path", None))
+        if not codex_path and metadata is not None:
+            codex_path = metadata.codex_path
+        row.update(
+            {
+                "codex_path": codex_path,
+                "has_activity": bool(getattr(thread, "preview", None)),
+                "stage_main_updated_at": getattr(thread, "updated_at", None),
+                "stage_cache_key": metadata.derived_stage if metadata is not None else "",
+                "stage_cache_mtime_ns": (
+                    metadata.derived_stage_source_mtime_ns
+                    if metadata is not None
+                    else 0
+                ),
+            }
+        )
     if system_only:
         run = runs_by_thread_id.get(thread_id)
         instance = (
@@ -2053,6 +2085,192 @@ def _session_row_for_thread(
             }
         )
     return row
+
+
+def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
+    thread_ids = [
+        session["id"] for session in sessions if isinstance(session.get("id"), str)
+    ]
+    workflows_by_thread_id = _latest_pr_workflows_by_thread_id(thread_ids)
+    active_instances_by_thread_id = _active_instances_by_thread_id(thread_ids)
+    for session in sessions:
+        session_id = session.get("id")
+        if not isinstance(session_id, str):
+            continue
+        rollout_state = _rollout_file_state_from_value(session.get("codex_path"))
+        workflow = workflows_by_thread_id.get(session_id)
+        active_instance = active_instances_by_thread_id.get(session_id)
+        cached_stage = _cached_stage_for_session_row(session, rollout_state)
+        if active_instance is None and workflow is None and cached_stage is not None:
+            session["stage"] = cached_stage.as_context()
+            continue
+        rollout_path = rollout_state.path if rollout_state is not None else None
+        entries = _stage_entries_for_rollout_path(rollout_path)
+        if not entries and session.get("has_activity"):
+            entries = [{"kind": "user"}]
+        pr_observation = _pr_observation_result_for_rollout_path(rollout_path)
+        stage_workflow = _workflow_after_main_lifecycle(
+            workflow,
+            pr_observation,
+            main_updated_at=session.get("stage_main_updated_at"),
+        )
+        stage = session_stage.derive_stage(
+            entries=entries,
+            active_instance=active_instance,
+            workflow=stage_workflow,
+            pr_snapshot=pr_observation.snapshot,
+            workflow_pr_snapshot=system_agents.pr_handoff_for_workflow(stage_workflow),
+        )
+        session["stage"] = stage.as_context()
+        _update_cached_stage(
+            session_id,
+            stage,
+            rollout_state.mtime_ns if rollout_state is not None else 0,
+        )
+
+
+def _latest_pr_workflows_by_thread_id(
+    thread_ids: Iterable[str],
+) -> dict[str, SystemWorkflow]:
+    ids = [thread_id for thread_id in dict.fromkeys(thread_ids) if thread_id]
+    if not ids:
+        return {}
+    workflows = (
+        SystemWorkflow.objects.filter(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id__in=ids,
+        )
+        .order_by("main_thread_id", "-updated_at", "-pk")
+    )
+    by_thread_id: dict[str, SystemWorkflow] = {}
+    for workflow in workflows:
+        by_thread_id.setdefault(workflow.main_thread_id, workflow)
+    return by_thread_id
+
+
+def _active_instances_by_thread_id(
+    thread_ids: Iterable[str],
+) -> dict[str, CodexInstance]:
+    ids = [thread_id for thread_id in dict.fromkeys(thread_ids) if thread_id]
+    if not ids:
+        return {}
+    active_instances = (
+        CodexInstance.objects.filter(
+            thread_id__in=ids,
+            status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+        )
+        .order_by("thread_id", "-started_at", "-pk")
+    )
+    by_thread_id: dict[str, CodexInstance] = {}
+    for instance in active_instances:
+        by_thread_id.setdefault(instance.thread_id, instance)
+    return by_thread_id
+
+
+def _cached_stage_for_session_row(
+    session: Mapping[str, Any],
+    rollout_state: _RolloutFileState | None,
+) -> session_stage.SessionStage | None:
+    if rollout_state is None:
+        return None
+    cached = session_stage.stage_for_key(_string_value(session.get("stage_cache_key")))
+    if cached is None:
+        return None
+    return (
+        cached
+        if session.get("stage_cache_mtime_ns") == rollout_state.mtime_ns
+        else None
+    )
+
+
+def _update_cached_stage(
+    session_id: str, stage: session_stage.SessionStage, source_mtime_ns: int
+) -> None:
+    SessionMetadata.objects.filter(thread_id=session_id).exclude(
+        derived_stage=stage.key,
+        derived_stage_source_mtime_ns=source_mtime_ns,
+    ).update(
+        derived_stage=stage.key,
+        derived_stage_source_mtime_ns=source_mtime_ns,
+    )
+
+
+def _latest_pr_workflow_for_thread(session_id: str) -> SystemWorkflow | None:
+    return (
+        SystemWorkflow.objects.filter(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id=session_id,
+        )
+        .order_by("-updated_at", "-pk")
+        .first()
+    )
+
+
+def _stage_entries_for_rollout_path(rollout_path: Path | None) -> list[dict[str, Any]]:
+    if rollout_path is None:
+        return []
+    try:
+        return list(rollout.iter_entries(rollout_path))
+    except Exception:
+        logger.exception("failed to parse rollout %s for session stage", rollout_path)
+        return []
+
+
+def _pr_snapshot_for_rollout_path(rollout_path: Path | None) -> dict[str, Any] | None:
+    return _pr_observation_result_for_rollout_path(rollout_path).snapshot
+
+
+def _pr_observation_result_for_rollout_path(
+    rollout_path: Path | None,
+) -> codex_events.PrObservationResult:
+    if rollout_path is None:
+        return codex_events.PrObservationResult(snapshot=None)
+    try:
+        return rollout.latest_pr_observation_result(rollout_path)
+    except Exception:
+        logger.exception("failed to parse rollout %s for PR stage snapshot", rollout_path)
+        return codex_events.PrObservationResult(snapshot=None)
+
+
+def _workflow_after_main_lifecycle(
+    workflow: SystemWorkflow | None,
+    pr_observation: codex_events.PrObservationResult,
+    *,
+    main_updated_at: Any = None,
+) -> SystemWorkflow | None:
+    """Keep completed PR workflows only when main work has not superseded them."""
+    if workflow is None or workflow.status == SystemWorkflow.STATUS_RUNNING:
+        return workflow
+    if pr_observation.superseded_by_lifecycle:
+        return None
+    main_updated_seconds = _updated_at_seconds(main_updated_at)
+    workflow_updated_seconds = _updated_at_seconds(workflow.updated_at)
+    main_is_newer = (
+        main_updated_seconds is not None
+        and workflow_updated_seconds is not None
+        and main_updated_seconds > workflow_updated_seconds
+    )
+    if main_is_newer and _pr_snapshot_identity(pr_observation.snapshot) is not None:
+        return None
+    if pr_observation.snapshot is None and main_is_newer:
+        return None
+    return workflow
+
+
+def _pr_snapshot_identity(snapshot: Mapping[str, Any] | None) -> tuple[str, int] | None:
+    if not snapshot:
+        return None
+    url = _string_value(snapshot.get("url"))
+    if url:
+        match = _GITHUB_PR_IDENTITY_RE.search(url)
+        if match is not None:
+            owner, repo, number = match.groups()
+            return f"{owner}/{repo}", int(number)
+    repo = _string_value(snapshot.get("repository_full_name"))
+    number = snapshot.get("pr_number")
+    if repo and isinstance(number, int) and not isinstance(number, bool):
+        return repo, number
+    return None
 
 
 def _project_for_thread_cached(
@@ -2183,6 +2401,7 @@ def index(request: HttpRequest) -> HttpResponse:
                 current_project=current_project,
                 system_only=False,
             )
+    _attach_session_stage_context(session_page.sessions)
     settings_context = _settings_context(current_settings, models_data)
     response = render(
         request,
@@ -2941,6 +3160,35 @@ def _render_session_detail(
         metadata_by_thread[session_id] = metadata
     session_project = _project_for_thread(thread, metadata_by_thread, projects)
     pr_url = _pr_url_for_thread(thread)
+    latest_pr_workflow = _latest_pr_workflow_for_thread(session_id)
+    stage_workflow = active_system_workflow or latest_pr_workflow
+    stage_pr_workflow = (
+        active_system_workflow
+        if active_system_workflow is not None
+        and active_system_workflow.kind == SystemWorkflow.KIND_PR_QA
+        else latest_pr_workflow
+    )
+    stage_context: dict[str, str] | None = None
+    if not read_only:
+        pr_observation = _pr_observation_result_for_thread(thread)
+        main_updated_at = getattr(thread, "updated_at", None)
+        stage_workflow = _workflow_after_main_lifecycle(
+            stage_workflow, pr_observation, main_updated_at=main_updated_at
+        )
+        stage_pr_workflow = _workflow_after_main_lifecycle(
+            stage_pr_workflow, pr_observation, main_updated_at=main_updated_at
+        )
+        stage = session_stage.derive_stage(
+            entries=entries,
+            active_instance=active_instance,
+            workflow=stage_workflow,
+            pr_snapshot=pr_observation.snapshot,
+            workflow_pr_snapshot=system_agents.pr_handoff_for_workflow(stage_pr_workflow),
+        )
+        _update_cached_stage(
+            session_id, stage, _rollout_mtime_ns(_rollout_path_for(thread))
+        )
+        stage_context = stage.as_context()
     show_active_worker_transcript = _show_active_worker_transcript(active_instance)
     active_demo_worker = (
         active_instance is not None and active_instance.agent_kind == demo.DEMO_AGENT_KIND
@@ -3064,6 +3312,7 @@ def _render_session_detail(
             "plan_approval_prompt": _PLAN_APPROVAL_PROMPT,
             "plan_revision_prompt": _PLAN_REVISION_PROMPT,
             "pr_url": pr_url,
+            "session_stage": stage_context,
             "goal_objective": goal_objective,
             "task_plan": task_plan,
             "diff_view": diff_view,
@@ -6905,6 +7154,48 @@ def _pr_url_for_thread(thread: Any) -> str | None:
     return rollout.latest_pr_url(rollout_path) if rollout_path is not None else None
 
 
+def _pr_snapshot_for_thread(thread: Any) -> dict[str, Any] | None:
+    return _pr_observation_result_for_thread(thread).snapshot
+
+
+def _pr_observation_result_for_thread(thread: Any) -> codex_events.PrObservationResult:
+    turns = getattr(thread, "turns", []) or []
+    if not turns:
+        return _pr_observation_result_for_rollout_path(_rollout_path_for(thread))
+    observation_turns: list[codex_events.PrObservationTurn] = []
+    for turn in getattr(thread, "turns", []) or []:
+        items = [thread_item.root for thread_item in getattr(turn, "items", []) or []]
+        is_pr_prompt = _is_pr_prompt_turn(items)
+        final_idx = _find_final_agent_idx(items)
+        observed_items = items[:final_idx] if is_pr_prompt and final_idx != -1 else items
+        observation_turns.append(
+            codex_events.PrObservationTurn(
+                is_pr_prompt=is_pr_prompt,
+                is_completed=final_idx != -1,
+                items=tuple(_mcp_tool_items_for_items(observed_items)),
+                has_lifecycle_activity=(
+                    not is_pr_prompt
+                    and final_idx != -1
+                    and _turn_has_lifecycle_activity(items)
+                ),
+            )
+        )
+    return codex_events.pr_observation_result_from_turns(observation_turns)
+
+
+def _mcp_tool_items_for_items(items: Iterable[Any]) -> Iterator[dict[str, Any]]:
+    for item in items:
+        if _value_for(item, "type") != "mcpToolCall":
+            continue
+        yield {
+            "type": "mcpToolCall",
+            "server": _string_value(_value_for(item, "server")),
+            "tool": _string_value(_value_for(item, "tool")),
+            "arguments": _plain_sdk_value(_value_for(item, "arguments")) or {},
+            "result": _plain_sdk_value(_value_for(item, "result")),
+        }
+
+
 def _is_pr_prompt_turn(items: list[Any]) -> bool:
     for item in items:
         if _value_for(item, "type") != "userMessage":
@@ -6912,6 +7203,12 @@ def _is_pr_prompt_turn(items: list[Any]) -> bool:
         if _user_message_text(item).strip() in _PR_PROMPT_ALIASES:
             return True
     return False
+
+
+def _turn_has_lifecycle_activity(items: list[Any]) -> bool:
+    return any(
+        _value_for(item, "type") in {"userMessage", "agentMessage"} for item in items
+    )
 
 
 def _github_pr_tool_call_used(item: Any) -> bool:
@@ -6941,6 +7238,9 @@ def _pr_urls_from_value(value: Any) -> list[str]:
     text = _string_value(_value_for(value, "text"))
     if text:
         return _GITHUB_PR_URL_RE.findall(text)
+    dumped = _sdk_model_dump_value(value)
+    if dumped is not value:
+        return _pr_urls_from_value(dumped)
     urls = []
     for attr in ("url", "display_url", "displayUrl", "structured_content", "content"):
         urls.extend(_pr_urls_from_value(_value_for(value, attr)))
@@ -8306,6 +8606,29 @@ def _value_for(value: Any, key: str) -> Any:
     if isinstance(value, dict):
         return value.get(key)
     return getattr(value, key, None)
+
+
+def _plain_sdk_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _plain_sdk_value(child) for key, child in value.items()}
+    if isinstance(value, list):
+        return [_plain_sdk_value(child) for child in value]
+    if isinstance(value, tuple):
+        return [_plain_sdk_value(child) for child in value]
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    return _sdk_model_dump_value(value)
+
+
+def _sdk_model_dump_value(value: Any) -> Any:
+    model_dump = getattr(value, "model_dump", None)
+    if not callable(model_dump):
+        return value
+    try:
+        dumped = model_dump(by_alias=True)
+    except TypeError:
+        dumped = model_dump()
+    return _plain_sdk_value(dumped) if dumped is not value else value
 
 
 def _sequence_value(value: Any) -> list[Any]:

@@ -587,6 +587,44 @@ class SessionViewTests(TestCase):
         )
 
     @patch("hitch.main.views.Codex")
+    def test_stage_reads_sdk_mcp_result_model(self, mock_codex: MagicMock) -> None:
+        url = "https://github.com/cberner/hitch/pull/94"
+        sdk_result = SimpleNamespace(
+            model_dump=lambda by_alias=False: {
+                "structuredContent": {
+                    "url": url,
+                    "state": "closed",
+                    "merged": False,
+                }
+            }
+        )
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message(system_agents.PR_SLASH_PROMPT),
+                        _mcp_tool_call("github", "_create_pull_request", sdk_result),
+                        _agent_message("Closed."),
+                    ]
+                )
+            ]
+        )
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            f'<a href="{url}" role="menuitem" target="_blank" rel="noopener noreferrer">Open PR</a>',
+            html=True,
+        )
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="done">Done: Closed</span>',
+        )
+
+    @patch("hitch.main.views.Codex")
     def test_hides_open_pr_menu_link_without_detected_pr(
         self, mock_codex: MagicMock
     ) -> None:
@@ -597,6 +635,53 @@ class SessionViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, "Open PR")
+
+    @patch("hitch.main.views.Codex")
+    def test_stage_clears_sdk_pr_snapshot_when_latest_pr_turn_has_no_pr(
+        self, mock_codex: MagicMock
+    ) -> None:
+        stale_url = "https://github.com/cberner/hitch/pull/93"
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message(system_agents.PR_SLASH_PROMPT),
+                        _mcp_tool_call(
+                            "github",
+                            "_create_pull_request",
+                            {
+                                "url": stale_url,
+                                "state": "closed",
+                                "merged": False,
+                            },
+                        ),
+                        _agent_message("Closed."),
+                    ]
+                ),
+                _turn(
+                    [
+                        _user_message(system_agents.PR_SLASH_PROMPT),
+                        _mcp_tool_call(
+                            "github",
+                            "_create_pull_request",
+                            {"content": []},
+                        ),
+                        _agent_message("No PR."),
+                    ]
+                ),
+            ]
+        )
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "Open PR")
+        self.assertNotContains(response, "Done: Closed")
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">Implementation</span>',
+        )
 
     @patch("hitch.main.views.Codex")
     def test_local_image_entries_redact_server_paths(self, mock_codex: MagicMock) -> None:
@@ -3192,6 +3277,9 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(
             response, "QA agent approved the diff and merged it into main."
         )
+        self.assertContains(
+            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+        )
         self.assertContains(response, "Commit: abc123")
         self.assertContains(response, "No qualifying findings.")
         self.assertLess(
@@ -3241,6 +3329,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, '<details class="system-prompt">', html=False)
         self.assertContains(response, "<summary>System prompt</summary>", html=False)
         self.assertContains(response, "Review &lt;diff&gt;.")
+        self.assertNotContains(response, '<span class="meta-label">stage</span>')
         self.assertNotContains(response, "No messages in this session yet.")
         self.assertNotContains(response, 'class="composer"')
 

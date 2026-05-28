@@ -373,8 +373,410 @@ class SessionDetailFastPathTests(TestCase):
         self.assertContains(response, "gpt-5.4")
         self.assertContains(response, "high")
         self.assertContains(response, f'href="{pr_url}"')
+        self.assertContains(
+            response, '<span class="stage-badge" data-tone="active">PR</span>'
+        )
         self.assertContains(response, f'data-ts="{now.timestamp()}"')
         self.assertNotContains(response, "Jan. 5, 2025")
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_inactive_session_detail_derives_done_stage_from_pr_state(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        pr_url = "https://github.com/cberner/hitch/pull/94"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_create_pull_request",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps({"url": pr_url, "state": "open"}),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_fetch_pr",
+                        "arguments": json.dumps(
+                            {"repo_full_name": "cberner/hitch", "pr_number": 94}
+                        ),
+                        "call_id": "call-fetch",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-fetch",
+                        "output": json.dumps(
+                            {"url": pr_url, "state": "closed", "merged": True}
+                        ),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Merged."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        metadata = SessionMetadata.objects.create(
+            thread_id="merged-pr",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Merged PR",
+            codex_preview="Open a PR",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "merged-pr"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+        )
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.derived_stage, "done_merged")
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_inactive_session_detail_ignores_stale_completed_pr_workflow(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        pr_url = "https://github.com/cberner/hitch/pull/98"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_fetch_pr",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps(
+                            {"url": pr_url, "state": "closed", "merged": False}
+                        ),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Closed."}],
+                        "phase": "final_answer",
+                    },
+                ),
+                _rollout_line("event_msg", {"type": "user_message", "message": "Next"}),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Implemented."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        metadata = SessionMetadata.objects.create(
+            thread_id="stale-workflow-detail",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Stale workflow detail",
+            codex_preview="Next",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+        SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="stale-workflow-detail",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_READY,
+            state={
+                "pr_handoff": {"url": pr_url, "state": "closed", "merged": False}
+            },
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "stale-workflow-detail"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">Implementation</span>',
+        )
+        self.assertNotContains(response, "Done: Closed")
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.derived_stage, "implementation")
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_inactive_session_detail_prefers_newer_main_pr_over_stale_workflow(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        pr_url = "https://github.com/cberner/hitch/pull/94"
+        now = datetime.now(UTC)
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_fetch_pr",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps({"url": pr_url, "state": "open"}),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Opened."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        metadata = SessionMetadata.objects.create(
+            thread_id="newer-main-pr-detail",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Newer main PR detail",
+            codex_preview="Open a PR",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="newer-main-pr-detail",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_READY,
+            state={
+                "pr_handoff": {
+                    "url": "https://github.com/cberner/hitch/pull/93",
+                    "state": "closed",
+                    "merged": False,
+                }
+            },
+        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=now - timedelta(minutes=5)
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "newer-main-pr-detail"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">PR</span>',
+        )
+        self.assertNotContains(response, "Done: Closed")
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.derived_stage, "pr")
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_inactive_session_detail_prefers_newer_main_pr_state_over_workflow(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        pr_url = "https://github.com/cberner/hitch/pull/94"
+        now = datetime.now(UTC)
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_fetch_pr",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps({"url": pr_url, "state": "open"}),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Reopened."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        metadata = SessionMetadata.objects.create(
+            thread_id="newer-main-pr-state-detail",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Newer main PR state detail",
+            codex_preview="Open a PR",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="newer-main-pr-state-detail",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_READY,
+            state={
+                "pr_handoff": {
+                    "url": pr_url,
+                    "state": "closed",
+                    "merged": False,
+                }
+            },
+        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=now - timedelta(minutes=5)
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "newer-main-pr-state-detail"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">PR</span>',
+        )
+        self.assertNotContains(response, "Done: Closed")
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.derived_stage, "pr")
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_inactive_session_detail_ignores_workflow_only_stale_pr_handoff(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line("event_msg", {"type": "user_message", "message": "Next"}),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Implemented."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        metadata = SessionMetadata.objects.create(
+            thread_id="workflow-only-stale-detail",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Workflow-only stale detail",
+            codex_preview="Next",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="workflow-only-stale-detail",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_READY,
+            state={
+                "pr_handoff": {
+                    "url": "https://github.com/cberner/hitch/pull/99",
+                    "state": "closed",
+                    "merged": False,
+                }
+            },
+        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=now - timedelta(minutes=5)
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "workflow-only-stale-detail"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">Implementation</span>',
+        )
+        self.assertNotContains(response, "Done: Closed")
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.derived_stage, "implementation")
         mock_codex.assert_not_called()
 
     @patch("hitch.main.views.Codex")
@@ -661,6 +1063,614 @@ class IndexViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Cached session")
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cached_session_list_shows_derived_stage_badge(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_create_pull_request",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps(
+                            {
+                                "url": "https://github.com/cberner/hitch/pull/94",
+                                "state": "closed",
+                                "merged": False,
+                            }
+                        ),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Closed."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        metadata = SessionMetadata.objects.create(
+            thread_id="closed-pr",
+            cwd="/repo",
+            codex_display_title="Closed PR",
+            codex_preview="Open a PR",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Closed PR")
+        self.assertContains(
+            response, '<span class="stage-badge" data-tone="done">Done: Closed</span>'
+        )
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.derived_stage, "done_closed")
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cached_session_list_active_instance_overrides_terminal_stage(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        _worker_is_alive: MagicMock,
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_create_pull_request",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps(
+                            {
+                                "url": "https://github.com/cberner/hitch/pull/94",
+                                "state": "closed",
+                                "merged": False,
+                            }
+                        ),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Closed."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="active-after-pr",
+            cwd="/repo",
+            codex_display_title="Active after PR",
+            codex_preview="Follow up",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+            derived_stage="done_closed",
+            derived_stage_source_mtime_ns=rollout_path.stat().st_mtime_ns,
+        )
+        CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="active-after-pr",
+            cwd="/repo",
+            prompt="Follow up",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Active after PR")
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">Implementation</span>',
+        )
+        self.assertNotContains(response, "Done: Closed")
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cached_session_list_ignores_stage_cache_without_rollout(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        metadata = SessionMetadata.objects.create(
+            thread_id="cached-active",
+            cwd="/repo",
+            codex_display_title="Cached active session",
+            codex_preview="Implement the change",
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+            derived_stage="new",
+            derived_stage_source_mtime_ns=0,
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Cached active session")
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">Implementation</span>',
+        )
+        self.assertNotContains(
+            response, '<span class="stage-badge" data-tone="default">New</span>'
+        )
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.derived_stage, "implementation")
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cached_session_list_survives_malformed_stage_rollout(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        rollout_path = _make_rollout(
+            self,
+            [
+                json.dumps(
+                    {
+                        "timestamp": "2025-01-05T12:00:00Z",
+                        "type": "event_msg",
+                        "payload": ["schema drift"],
+                    }
+                )
+            ],
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="malformed-rollout",
+            cwd="/repo",
+            codex_display_title="Malformed rollout",
+            codex_preview="Implement the change",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Malformed rollout")
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">Implementation</span>',
+        )
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cached_session_list_ignores_stale_completed_pr_workflow(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        pr_url = "https://github.com/cberner/hitch/pull/98"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_fetch_pr",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps(
+                            {"url": pr_url, "state": "closed", "merged": False}
+                        ),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Closed."}],
+                        "phase": "final_answer",
+                    },
+                ),
+                _rollout_line("event_msg", {"type": "user_message", "message": "Next"}),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Implemented."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="stale-workflow",
+            cwd="/repo",
+            codex_display_title="Stale workflow",
+            codex_preview="Next",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+        )
+        SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="stale-workflow",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_READY,
+            state={
+                "pr_handoff": {"url": pr_url, "state": "closed", "merged": False}
+            },
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Stale workflow")
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">Implementation</span>',
+        )
+        self.assertNotContains(response, "Done: Closed")
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cached_session_list_prefers_newer_main_pr_over_stale_workflow(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_fetch_pr",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps(
+                            {
+                                "url": "https://github.com/cberner/hitch/pull/94",
+                                "state": "open",
+                            }
+                        ),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Opened."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="newer-main-pr",
+            cwd="/repo",
+            codex_display_title="Newer main PR",
+            codex_preview="Open a PR",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="newer-main-pr",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_READY,
+            state={
+                "pr_handoff": {
+                    "url": "https://github.com/cberner/hitch/pull/93",
+                    "state": "closed",
+                    "merged": False,
+                }
+            },
+        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=now - timedelta(minutes=5)
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Newer main PR")
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">PR</span>',
+        )
+        self.assertNotContains(response, "Done: Closed")
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cached_session_list_prefers_newer_main_pr_state_over_workflow(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        pr_url = "https://github.com/cberner/hitch/pull/94"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_fetch_pr",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps({"url": pr_url, "state": "open"}),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Reopened."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="newer-main-pr-state",
+            cwd="/repo",
+            codex_display_title="Newer main PR state",
+            codex_preview="Open a PR",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="newer-main-pr-state",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_READY,
+            state={
+                "pr_handoff": {
+                    "url": pr_url,
+                    "state": "closed",
+                    "merged": False,
+                }
+            },
+        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=now - timedelta(minutes=5)
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Newer main PR state")
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">PR</span>',
+        )
+        self.assertNotContains(response, "Done: Closed")
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cached_session_list_ignores_workflow_only_stale_pr_handoff(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line("event_msg", {"type": "user_message", "message": "Next"}),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Implemented."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="workflow-only-stale",
+            cwd="/repo",
+            codex_display_title="Workflow-only stale",
+            codex_preview="Next",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="workflow-only-stale",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_READY,
+            state={
+                "pr_handoff": {
+                    "url": "https://github.com/cberner/hitch/pull/99",
+                    "state": "closed",
+                    "merged": False,
+                }
+            },
+        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=now - timedelta(minutes=5)
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Workflow-only stale")
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">Implementation</span>',
+        )
+        self.assertNotContains(response, "Done: Closed")
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
