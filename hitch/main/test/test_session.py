@@ -3300,6 +3300,106 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertLess(body.index("Done"), body.index("QA agent approved the diff."))
 
     @patch("hitch.main.views.Codex")
+    def test_qa_approval_feedback_renders_markdown_findings(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # Multi-finding feedback: lists, bold severity tags, inline-code paths
+        # must reach the user formatted rather than as raw markdown syntax.
+        _patch_thread(
+            self,
+            mock_codex,
+            _thread([_turn([_user_message("Change it"), _agent_message("Done")])]),
+        )
+        feedback = (
+            "Findings:\n\n"
+            "- **CRITICAL**: SQL injection in `users.py:42`\n"
+            "- **MAJOR**: Missing test for `delete_user`\n"
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-1",
+            cwd="/tmp/demo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_QA_APPROVED,
+            state={"next_user_message_index": 1, "last_feedback": feedback},
+        )
+        instance = _make_codex_instance(
+            thread_id="hidden-thread",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="hidden-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+            output={"feedback": feedback, "lgtm": True},
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('<div class="body markdown">', body)
+        self.assertIn("<strong>CRITICAL</strong>", body)
+        self.assertIn("<strong>MAJOR</strong>", body)
+        self.assertIn("<code>users.py:42</code>", body)
+        # The raw markdown syntax must not leak through to the rendered page.
+        self.assertNotIn("**CRITICAL**", body)
+        self.assertNotIn("- **MAJOR**", body)
+
+    @patch("hitch.main.views.Codex")
+    def test_qa_approval_feedback_renders_single_finding_markdown(
+        self, mock_codex: MagicMock
+    ) -> None:
+        # ``looks_like_markdown`` needs two bullets, so single-finding
+        # feedback would otherwise stay as raw ``-``/``**``/backticks; the
+        # transcript must still surface the formatted finding.
+        _patch_thread(
+            self,
+            mock_codex,
+            _thread([_turn([_user_message("Change it"), _agent_message("Done")])]),
+        )
+        feedback = "- **P1**: issue in `views.py`"
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="thread-1",
+            cwd="/tmp/demo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_QA_APPROVED,
+            state={"next_user_message_index": 1, "last_feedback": feedback},
+        )
+        instance = _make_codex_instance(
+            thread_id="hidden-thread",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="hidden-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+            output={"feedback": feedback, "lgtm": True},
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        body = response.content.decode()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn('<div class="body markdown">', body)
+        self.assertIn("<strong>P1</strong>", body)
+        self.assertIn("<code>views.py</code>", body)
+        self.assertNotIn("**P1**", body)
+
+    @patch("hitch.main.views.Codex")
     def test_completed_local_merge_approval_shows_branch_and_commit(
         self, mock_codex: MagicMock
     ) -> None:
