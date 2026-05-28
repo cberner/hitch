@@ -140,6 +140,62 @@ class LatestPrUrlTests(TestCase):
 
         self.assertEqual(rollout.latest_pr_url(path), url)
 
+    def test_pr_snapshot_when_function_call_output_follows_final_message(
+        self,
+    ) -> None:
+        # Same Responses-API shape as the URL test above, but checked against
+        # ``latest_pr_snapshot``: the session stage and any closed/merged
+        # state read this snapshot, so dropping the post-final
+        # ``function_call_output`` leaves the page showing a PR link with no
+        # identity in the snapshot -- the stage falls back to
+        # ``IMPLEMENTATION`` instead of ``PR``/``DONE_*`` and the derived
+        # stage cache stores the wrong value.
+        url = "https://github.com/cberner/hitch/pull/96"
+        path = self._make(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_create_pull_request",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Closed it."}],
+                        "phase": "final_answer",
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps(
+                            {"url": url, "state": "closed", "merged": False}
+                        ),
+                    },
+                ),
+            ]
+        )
+
+        snapshot = rollout.latest_pr_snapshot(path)
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["url"], url)
+        self.assertEqual(snapshot["state"], "closed")
+        self.assertIs(snapshot["merged"], False)
+
     def test_completed_pr_turn_without_url_clears_earlier_url(self) -> None:
         stale_url = "https://github.com/cberner/hitch/pull/93"
         path = self._make(

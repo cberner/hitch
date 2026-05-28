@@ -7143,8 +7143,18 @@ def _pr_url_for_thread(thread: Any) -> str | None:
         final_idx = _find_final_agent_idx(items)
         if final_idx == -1:
             continue
+        # The model can emit the create_pull_request MCP call in the same
+        # response that also carries the final-answer ``agentMessage``: the
+        # tool runs after that response, so the completed ``mcpToolCall`` item
+        # lands in the turn AFTER the final-answer item. ``items[:final_idx]``
+        # would silently drop that result and the session page would render
+        # no PR pill for the PR the user just opened. Iterate every item in
+        # the turn after confirming a final-answer exists; the ``-1`` guard
+        # above keeps incomplete turns out. Mirrors the fix applied to
+        # ``rollout.latest_pr_url`` for the function_call_output-after-final
+        # shape on the rollout path.
         urls: list[str] = []
-        for item in items[:final_idx]:
+        for item in items:
             if _github_pr_tool_call_used(item):
                 urls.extend(_pr_urls_from_value(_value_for(item, "result")))
         return urls[-1] if urls else None
@@ -7167,12 +7177,19 @@ def _pr_observation_result_for_thread(thread: Any) -> codex_events.PrObservation
         items = [thread_item.root for thread_item in getattr(turn, "items", []) or []]
         is_pr_prompt = _is_pr_prompt_turn(items)
         final_idx = _find_final_agent_idx(items)
-        observed_items = items[:final_idx] if is_pr_prompt and final_idx != -1 else items
+        # Scan the whole turn rather than ``items[:final_idx]``: the create_
+        # pull_request ``mcpToolCall`` (and any other GitHub MCP result) can
+        # land AFTER the final-answer ``agentMessage`` when the model emits
+        # the call and narrates it in the same response. Slicing here would
+        # leave ``pr_observation.snapshot`` missing the PR identity even
+        # though ``_pr_url_for_thread`` recovers the link, so the session
+        # stage badge and ``derived_stage`` cache fall back to
+        # ``IMPLEMENTATION`` and any ``closed``/``merged`` state is dropped.
         observation_turns.append(
             codex_events.PrObservationTurn(
                 is_pr_prompt=is_pr_prompt,
                 is_completed=final_idx != -1,
-                items=tuple(_mcp_tool_items_for_items(observed_items)),
+                items=tuple(_mcp_tool_items_for_items(items)),
                 has_lifecycle_activity=(
                     not is_pr_prompt
                     and final_idx != -1

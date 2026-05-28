@@ -23,7 +23,12 @@ from hitch.main.models import (
     SystemAgentRun,
     SystemWorkflow,
 )
-from hitch.main.views import _pr_url_for_thread, _tool_call_detail, _tool_call_status
+from hitch.main.views import (
+    _pr_snapshot_for_thread,
+    _pr_url_for_thread,
+    _tool_call_detail,
+    _tool_call_status,
+)
 
 # Used for active-worker rendering tests so the session view's
 # ``reconcile_dead`` sweep doesn't mark the row failed before the assertions
@@ -346,6 +351,73 @@ class PrUrlDetectionTests(TestCase):
         )
 
         self.assertIsNone(_pr_url_for_thread(thread))
+
+    def test_detects_pr_url_when_mcp_tool_call_follows_final_message(self) -> None:
+        # The model can emit the create_pull_request MCP call in the same
+        # response that carries the final-answer message: the tool runs after
+        # that response, so the completed ``mcpToolCall`` item lands in
+        # ``turn.items`` AFTER the final-answer message for the same turn.
+        # ``items[:final_idx]`` would silently drop that result and the
+        # session page would render no PR pill for the PR the user just
+        # opened. Mirrors the ``rollout.latest_pr_url`` regression test for
+        # the function_call_output-after-final-answer shape.
+        url = "https://github.com/cberner/hitch/pull/94"
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message(system_agents.PR_SLASH_PROMPT),
+                        _agent_message("Opening the PR now.", phase="final_answer"),
+                        _mcp_tool_call(
+                            "github",
+                            "_create_pull_request",
+                            {"structuredContent": {"url": url}},
+                        ),
+                    ]
+                )
+            ]
+        )
+
+        self.assertEqual(_pr_url_for_thread(thread), url)
+
+    def test_pr_snapshot_when_mcp_tool_call_follows_final_message(self) -> None:
+        # ``_pr_observation_result_for_thread`` reads the PR identity that
+        # the session-stage badge and the cached ``derived_stage`` both
+        # depend on. With the post-final ``mcpToolCall`` dropped, the URL
+        # pill could still render (from ``_pr_url_for_thread``) while the
+        # snapshot stayed empty -- so the stage fell back to
+        # ``IMPLEMENTATION`` and any ``closed``/``merged`` state from
+        # ``structuredContent`` was lost.
+        url = "https://github.com/cberner/hitch/pull/95"
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message(system_agents.PR_SLASH_PROMPT),
+                        _agent_message("Closed it.", phase="final_answer"),
+                        _mcp_tool_call(
+                            "github",
+                            "_create_pull_request",
+                            {
+                                "structuredContent": {
+                                    "url": url,
+                                    "state": "closed",
+                                    "merged": False,
+                                }
+                            },
+                        ),
+                    ]
+                )
+            ]
+        )
+
+        snapshot = _pr_snapshot_for_thread(thread)
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["url"], url)
+        self.assertEqual(snapshot["state"], "closed")
+        self.assertIs(snapshot["merged"], False)
 
 
 class SessionViewTests(TestCase):
