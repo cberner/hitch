@@ -16,7 +16,22 @@ ALLOWED_HOSTS = ["localhost", "127.0.0.1", ".demo.localhost"]
 ALLOWED_HOSTS += [h.strip() for h in os.environ.get("ADDITIONAL_ALLOWED_HOSTS", "").split(",") if h.strip()]
 INTERNAL_IPS = ["localhost", "127.0.0.1"]
 
-if not common.TESTING:
+DEBUG_TOOLBAR_CONFIG = {
+    "SHOW_COLLAPSED": True,
+    # Session pages carry large parsed transcripts. Rendering the template
+    # context in Debug Toolbar can expand those objects into multi-GB strings.
+    "SHOW_TEMPLATE_CONTEXT": False,
+}
+
+_DEBUG_TOOLBAR_DEFAULT = (
+    "0" if os.environ.get("ADDITIONAL_ALLOWED_HOSTS", "").strip() else "1"
+)
+_DEBUG_TOOLBAR_ENABLED = (
+    os.environ.get("HITCH_ENABLE_DEBUG_TOOLBAR", _DEBUG_TOOLBAR_DEFAULT).strip().lower()
+    not in {"0", "false", "no", "off"}
+)
+
+if not common.TESTING and _DEBUG_TOOLBAR_ENABLED:
     INSTALLED_APPS = [
         *common.INSTALLED_APPS,
         "debug_toolbar",
@@ -26,9 +41,6 @@ if not common.TESTING:
         "debug_toolbar.middleware.DebugToolbarMiddleware",
         *common.MIDDLEWARE[2:],
     ]
-    DEBUG_TOOLBAR_CONFIG = {
-        "SHOW_COLLAPSED": True,
-    }
 
 # Trust every allowed host for CSRF over either scheme: a developer fronting
 # the dev server with an HTTPS tunnel or LAN proxy shouldn't have to repeat
