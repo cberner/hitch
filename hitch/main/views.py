@@ -5258,10 +5258,15 @@ def _qa_approval_entries(session_id: str) -> Iterator[tuple[int, dict[str, Any]]
                 if isinstance(prompt_index, int) and not isinstance(prompt_index, bool)
                 else max(next_user_message_index - 1, 0)
             )
+        # ``_finalize_agent_entry`` would skip single-finding feedback
+        # (``looks_like_markdown`` needs two bullets), so render the body
+        # directly: QA feedback per the agent prompt carries structured
+        # findings and must reach the user formatted even for one finding.
         yield insert_index, {
             "kind": "agent",
             "display_author": system_agents.QA_DISPLAY_AUTHOR,
             "text": text,
+            "html": render_markdown(text),
             "timestamp": int(workflow.updated_at.timestamp()),
         }
 
