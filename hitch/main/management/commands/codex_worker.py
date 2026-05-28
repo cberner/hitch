@@ -1266,9 +1266,7 @@ def _wait_for_user_input_response(request_id: int) -> dict[str, Any]:
             return response
         time.sleep(_APPROVAL_POLL_INTERVAL)
 
-    fallback: dict[str, Any] = {"answers": {}}
-    _record_default_user_input_response(request_id, fallback)
-    return fallback
+    return _record_default_user_input_response(request_id, {"answers": {}})
 
 
 def _user_input_response_value(request_id: int) -> Any:
@@ -1286,14 +1284,32 @@ def _user_input_response_value(request_id: int) -> Any:
 
 def _record_default_user_input_response(
     request_id: int, response: dict[str, Any]
-) -> None:
+) -> dict[str, Any]:
+    """Record the no-answer fallback and return the response codex must see.
+
+    The conditional ``response__isnull=True`` UPDATE serialises against a
+    user who submits at the deadline boundary: if it matches zero rows the
+    row already carries the user's real answer, so round-trip that back to
+    codex instead of clobbering it with the empty fallback. Mirrors the
+    ``decision=""`` guard in ``_wait_for_decision``.
+    """
     from django.db import connection
 
     try:
-        UserInputRequest.objects.filter(pk=request_id, response__isnull=True).update(
+        updated = UserInputRequest.objects.filter(
+            pk=request_id, response__isnull=True
+        ).update(
             response=response,
             responded_at=timezone.now(),
         )
+        if updated:
+            return response
+        stored = (
+            UserInputRequest.objects.values_list("response", flat=True)
+            .filter(pk=request_id)
+            .first()
+        )
+        return stored if isinstance(stored, dict) else response
     finally:
         connection.close()
 

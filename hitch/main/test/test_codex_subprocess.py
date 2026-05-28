@@ -4722,6 +4722,40 @@ class ApprovalHandlerTests(TestCase):
         self.assertEqual(input_request.response, {"answers": {}})
         self.assertIsNotNone(input_request.responded_at)
 
+    @patch(
+        "hitch.main.management.commands.codex_worker._APPROVAL_WAIT_SECONDS", 0.0
+    )
+    def test_wait_for_user_input_response_honours_user_pick_at_timeout_boundary(
+        self,
+    ) -> None:
+        """When the user's answer lands in the window between the last empty
+        poll and the timeout's conditional default-write, the write matches
+        zero rows. The handler must round-trip the user's recorded answer
+        rather than returning the empty fallback -- otherwise codex acts on
+        ``{"answers": {}}`` even though the user answered (and the browser
+        already showed the answer as accepted). Mirrors
+        ``test_wait_for_decision_honours_user_pick_at_timeout_boundary``."""
+        from hitch.main.management.commands.codex_worker import (
+            _wait_for_user_input_response,
+        )
+
+        # The user's answer is already persisted by the time the wait loop
+        # reaches its timeout default-write: this is what the deadline-boundary
+        # race looks like once the POST commits.
+        input_request = UserInputRequest.objects.create(
+            instance=self._make_instance(),
+            method="request_user_input",
+            params={},
+            response={"answers": {"scope": "UI"}},
+        )
+
+        self.assertEqual(
+            _wait_for_user_input_response(input_request.pk),
+            {"answers": {"scope": "UI"}},
+        )
+        input_request.refresh_from_db()
+        self.assertEqual(input_request.response, {"answers": {"scope": "UI"}})
+
     def test_interactive_handler_ignores_unknown_methods(self) -> None:
         """Approval methods we don't recognise (future SDK additions) must
         return ``{}`` without creating a stray row — the SDK treats ``{}``
