@@ -4,7 +4,7 @@ import tempfile
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast, override
+from typing import Any, cast, override
 from unittest.mock import MagicMock, patch
 
 from django.core import signing
@@ -1364,6 +1364,22 @@ class SessionViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         # The topbar title contains the clipped title, not the full 200-char preview.
         self.assertIn('<div class="topbar-title">' + "x" * 80 + "...</div>", body)
+
+    @patch("hitch.main.views.Codex")
+    def test_session_template_receives_slim_thread_context(
+        self, mock_codex: MagicMock
+    ) -> None:
+        thread = _thread([_turn([_user_message("hi")])])
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        template_thread = cast(Any, response).context["thread"]
+        self.assertEqual(template_thread.id, "thread-1")
+        self.assertEqual(template_thread.cwd, "/tmp/demo")
+        self.assertEqual(template_thread.updated_at, 1700000000)
+        self.assertFalse(hasattr(template_thread, "turns"))
 
     @patch("hitch.main.views.Codex")
     def test_renders_messages_tool_calls_and_timestamps(

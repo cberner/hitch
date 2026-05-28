@@ -258,6 +258,12 @@ class _ThreadPlanModeState(NamedTuple):
     awaiting_approval: bool
 
 
+class _SessionTemplateThread(NamedTuple):
+    id: str
+    cwd: str
+    updated_at: Any
+
+
 class _NewSessionTarget(NamedTuple):
     cwd: str
     project: Project | None
@@ -2988,7 +2994,7 @@ def _render_session_detail(
         request,
         "session.html",
         {
-            "thread": thread,
+            "thread": _session_template_thread(thread),
             "entries": entries,
             "display_title": display_title or _display_title(thread),
             "read_only": read_only,
@@ -7246,6 +7252,15 @@ def _thread_cwd(thread: Any) -> str | None:
         return raw or None
     root = getattr(raw, "root", None)
     return root if isinstance(root, str) and root else None
+
+
+def _session_template_thread(thread: Any) -> _SessionTemplateThread:
+    updated_at = getattr(thread, "updated_at", "")
+    return _SessionTemplateThread(
+        id=_string_value(getattr(thread, "id", "")),
+        cwd=_thread_cwd(thread) or "",
+        updated_at="" if updated_at is None else updated_at,
+    )
 
 
 def _allowed_session_cwds() -> set[str]:
