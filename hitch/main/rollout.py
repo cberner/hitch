@@ -231,16 +231,17 @@ def latest_pr_observation_result(rollout_path: Path) -> codex_events.PrObservati
     for _, turn_lines in _lines_by_turn(lines):
         is_pr_prompt = _turn_is_pr_prompt(turn_lines)
         final_idx = _find_final_agent_line_idx(turn_lines)
-        observation_lines = (
-            turn_lines[:final_idx]
-            if is_pr_prompt and final_idx != -1
-            else turn_lines
-        )
+        # Scan every entry in a PR-prompt turn, not just lines before the
+        # final-answer message: the same Responses-API shape behind the
+        # ``latest_pr_url`` fix lands the ``function_call_output`` /
+        # ``mcp_tool_call_end`` AFTER the final-answer line, so slicing here
+        # would silently drop the create_pull_request result from the
+        # snapshot. ``final_idx != -1`` still guards out incomplete turns.
         turns.append(
             codex_events.PrObservationTurn(
                 is_pr_prompt=is_pr_prompt,
                 is_completed=final_idx != -1,
-                items=tuple(_github_mcp_items_from_lines(observation_lines)),
+                items=tuple(_github_mcp_items_from_lines(turn_lines)),
                 has_lifecycle_activity=(
                     not is_pr_prompt
                     and final_idx != -1
