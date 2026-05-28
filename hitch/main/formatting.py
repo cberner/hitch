@@ -30,8 +30,13 @@ _RENDERER = (
 
 _FENCED_CODE = re.compile(r"^```", re.MULTILINE)
 _ATX_HEADING = re.compile(r"^#{1,6} \S", re.MULTILINE)
-_BULLET_LIST = re.compile(r"^[-*+] \S", re.MULTILINE)
-_NUMBERED_LIST = re.compile(r"^\d+\. \S", re.MULTILINE)
+# CommonMark renders list items indented 0-3 spaces -- 4+ spaces is a code
+# block -- with any mix of spaces and tabs between the marker and the first
+# non-blank character. Matching that here keeps the detector in sync with the
+# renderer so a nested or under-a-heading list does not silently fall back to
+# plain-text rendering.
+_BULLET_LIST = re.compile(r"^ {0,3}[-*+][ \t]+\S", re.MULTILINE)
+_NUMBERED_LIST = re.compile(r"^ {0,3}\d{1,9}\.[ \t]+\S", re.MULTILINE)
 _MARKDOWN_LINK = re.compile(r"\[[^\]\n]+\]\((?:https?://|mailto:)[^\s)]+\)")
 _TABLE_SEPARATOR = re.compile(r"^\|\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$", re.MULTILINE)
 

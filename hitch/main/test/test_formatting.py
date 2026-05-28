@@ -22,6 +22,23 @@ class LooksLikeMarkdownTests(SimpleTestCase):
             ("two bullet items", "- first\n- second", True),
             ("two numbered items", "1. first\n2. second", True),
             ("asterisk bullet list", "* a\n* b", True),
+            (
+                "indented bullets under intro line",
+                "Here are the items:\n  - first\n  - second",
+                True,
+            ),
+            (
+                "indented numbered items under intro line",
+                "Sequence:\n  1. first\n  2. second",
+                True,
+            ),
+            (
+                "four-space indented bullets are a code block, not a list",
+                "Code:\n    - this is\n    - rendered as code",
+                False,
+            ),
+            ("tab after bullet marker", "-\tfirst\n-\tsecond", True),
+            ("two spaces after bullet marker", "-  first\n-  second", True),
             ("markdown HTTPS link", "See [docs](https://example.com/d) for more.", True),
             ("markdown HTTP link", "See [docs](http://example.com).", True),
             ("array indexing is not a link", "Call Array[0](foo) to fetch.", False),
