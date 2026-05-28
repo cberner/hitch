@@ -477,7 +477,288 @@ class LatestTaskPlanFromEventPathsTests(SimpleTestCase):
                 thread_id="thread-1",
             )
 
+            self.assertIsNone(snapshot)
+
+
+class PrSnapshotFromObservationTurnsTests(SimpleTestCase):
+    def test_non_pr_github_calls_do_not_establish_pr_identity(self) -> None:
+        snapshot = codex_events.pr_snapshot_from_observation_turns(
+            [
+                codex_events.PrObservationTurn(
+                    is_pr_prompt=False,
+                    is_completed=True,
+                    items=(
+                        {
+                            "type": "mcpToolCall",
+                            "server": "codex_apps",
+                            "tool": "github_fetch_pr",
+                            "arguments": {
+                                "repo_full_name": "cberner/hitch",
+                                "pr_number": 93,
+                            },
+                            "result": {
+                                "structuredContent": {
+                                    "url": (
+                                        "https://github.com/cberner/hitch/pull/93"
+                                    ),
+                                    "state": "closed",
+                                }
+                            },
+                        },
+                    ),
+                )
+            ]
+        )
+
         self.assertIsNone(snapshot)
+
+    def test_non_pr_github_calls_update_current_pr_only(self) -> None:
+        current_url = "https://github.com/cberner/hitch/pull/94"
+        unrelated_url = "https://github.com/cberner/hitch/pull/93"
+
+        snapshot = codex_events.pr_snapshot_from_observation_turns(
+            [
+                codex_events.PrObservationTurn(
+                    is_pr_prompt=True,
+                    is_completed=True,
+                    items=(
+                        {
+                            "type": "mcpToolCall",
+                            "server": "codex_apps",
+                            "tool": "github_create_pull_request",
+                            "result": {
+                                "structuredContent": {
+                                    "url": current_url,
+                                    "state": "open",
+                                }
+                            },
+                        },
+                    ),
+                ),
+                codex_events.PrObservationTurn(
+                    is_pr_prompt=False,
+                    is_completed=True,
+                    items=(
+                        {
+                            "type": "mcpToolCall",
+                            "server": "codex_apps",
+                            "tool": "github_fetch_pr",
+                            "arguments": {
+                                "repo_full_name": "cberner/hitch",
+                                "pr_number": 93,
+                            },
+                            "result": {
+                                "structuredContent": {
+                                    "url": unrelated_url,
+                                    "state": "closed",
+                                }
+                            },
+                        },
+                        {
+                            "type": "mcpToolCall",
+                            "server": "codex_apps",
+                            "tool": "github_fetch_pr",
+                            "arguments": {
+                                "repo_full_name": "cberner/hitch",
+                                "pr_number": 94,
+                            },
+                            "result": {
+                                "structuredContent": {
+                                    "url": current_url,
+                                    "state": "closed",
+                                    "merged": False,
+                                }
+                            },
+                        },
+                    ),
+                ),
+            ]
+        )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["url"], current_url)
+        self.assertEqual(snapshot["state"], "closed")
+
+    def test_completed_non_pr_lifecycle_turn_clears_previous_pr_identity(self) -> None:
+        result = codex_events.pr_observation_result_from_turns(
+            [
+                codex_events.PrObservationTurn(
+                    is_pr_prompt=True,
+                    is_completed=True,
+                    items=(
+                        {
+                            "type": "mcpToolCall",
+                            "server": "codex_apps",
+                            "tool": "github_fetch_pr",
+                            "result": {
+                                "structuredContent": {
+                                    "url": (
+                                        "https://github.com/cberner/hitch/pull/94"
+                                    ),
+                                    "state": "closed",
+                                }
+                            },
+                        },
+                    ),
+                ),
+                codex_events.PrObservationTurn(
+                    is_pr_prompt=False,
+                    is_completed=True,
+                    items=(),
+                    has_lifecycle_activity=True,
+                ),
+            ]
+        )
+
+        self.assertIsNone(result.snapshot)
+        self.assertTrue(result.superseded_by_lifecycle)
+
+    def test_irrelevant_non_pr_mcp_call_does_not_prevent_lifecycle_clear(self) -> None:
+        result = codex_events.pr_observation_result_from_turns(
+            [
+                codex_events.PrObservationTurn(
+                    is_pr_prompt=True,
+                    is_completed=True,
+                    items=(
+                        {
+                            "type": "mcpToolCall",
+                            "server": "codex_apps",
+                            "tool": "github_fetch_pr",
+                            "result": {
+                                "structuredContent": {
+                                    "url": (
+                                        "https://github.com/cberner/hitch/pull/94"
+                                    ),
+                                    "state": "closed",
+                                }
+                            },
+                        },
+                    ),
+                ),
+                codex_events.PrObservationTurn(
+                    is_pr_prompt=False,
+                    is_completed=True,
+                    items=(
+                        {
+                            "type": "mcpToolCall",
+                            "server": "linear",
+                            "tool": "create_issue",
+                            "result": {
+                                "structuredContent": {"identifier": "ENG-123"}
+                            },
+                        },
+                    ),
+                    has_lifecycle_activity=True,
+                ),
+            ]
+        )
+
+        self.assertIsNone(result.snapshot)
+        self.assertTrue(result.superseded_by_lifecycle)
+
+    def test_unrelated_non_pr_ci_check_does_not_prevent_lifecycle_clear(self) -> None:
+        result = codex_events.pr_observation_result_from_turns(
+            [
+                codex_events.PrObservationTurn(
+                    is_pr_prompt=True,
+                    is_completed=True,
+                    items=(
+                        {
+                            "type": "mcpToolCall",
+                            "server": "codex_apps",
+                            "tool": "github_fetch_pr",
+                            "result": {
+                                "structuredContent": {
+                                    "url": (
+                                        "https://github.com/cberner/hitch/pull/94"
+                                    ),
+                                    "state": "open",
+                                    "head_sha": "abc123",
+                                }
+                            },
+                        },
+                    ),
+                ),
+                codex_events.PrObservationTurn(
+                    is_pr_prompt=False,
+                    is_completed=True,
+                    items=(
+                        {
+                            "type": "mcpToolCall",
+                            "server": "codex_apps",
+                            "tool": "github_get_commit_combined_status",
+                            "arguments": {
+                                "repo_full_name": "cberner/hitch",
+                                "commit_sha": "unrelated",
+                            },
+                            "result": {
+                                "structuredContent": {
+                                    "statuses": [{"state": "success"}]
+                                }
+                            },
+                        },
+                    ),
+                    has_lifecycle_activity=True,
+                ),
+            ]
+        )
+
+        self.assertIsNone(result.snapshot)
+        self.assertTrue(result.superseded_by_lifecycle)
+
+    def test_non_pr_ci_check_for_current_pr_keeps_pr_epoch(self) -> None:
+        result = codex_events.pr_observation_result_from_turns(
+            [
+                codex_events.PrObservationTurn(
+                    is_pr_prompt=True,
+                    is_completed=True,
+                    items=(
+                        {
+                            "type": "mcpToolCall",
+                            "server": "codex_apps",
+                            "tool": "github_fetch_pr",
+                            "result": {
+                                "structuredContent": {
+                                    "url": (
+                                        "https://github.com/cberner/hitch/pull/94"
+                                    ),
+                                    "state": "open",
+                                    "head_sha": "abc123",
+                                }
+                            },
+                        },
+                    ),
+                ),
+                codex_events.PrObservationTurn(
+                    is_pr_prompt=False,
+                    is_completed=True,
+                    items=(
+                        {
+                            "type": "mcpToolCall",
+                            "server": "codex_apps",
+                            "tool": "github_get_commit_combined_status",
+                            "arguments": {
+                                "repo_full_name": "cberner/hitch",
+                                "commit_sha": "abc123",
+                            },
+                            "result": {
+                                "structuredContent": {
+                                    "statuses": [{"state": "success"}]
+                                }
+                            },
+                        },
+                    ),
+                    has_lifecycle_activity=True,
+                ),
+            ]
+        )
+
+        self.assertIsNotNone(result.snapshot)
+        assert result.snapshot is not None
+        self.assertEqual(result.snapshot["ci_status"], "success")
+        self.assertEqual(result.snapshot["latest_commit_sha"], "abc123")
+        self.assertFalse(result.superseded_by_lifecycle)
 
 
 class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):

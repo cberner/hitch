@@ -22,6 +22,8 @@
             --accent-soft: rgba(79, 143, 102, 0.10);
             --accent-fg: #ffffff;
             --danger: #b94f42;
+            --success: #2f7d63;
+            --warn: #9a6a12;
             --shadow: 0 1px 2px rgba(28, 37, 46, 0.05);
             --shadow-lg: 0 8px 24px rgba(28, 37, 46, 0.10);
             --radius: 12px;
@@ -44,6 +46,8 @@
                 --accent-soft: rgba(111, 178, 134, 0.14);
                 --accent-fg: #0c1814;
                 --danger: #d97062;
+                --success: #7cc6a2;
+                --warn: #e6bd63;
                 --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
                 --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
             }
@@ -392,6 +396,28 @@
             color: var(--text-muted);
             font-size: 0.72rem;
         }
+        .session-meta .stage-badge {
+            border: 1px solid var(--border-strong);
+            border-radius: 999px;
+            padding: 0.05rem 0.45rem;
+            color: var(--text);
+            background: var(--surface-2);
+            font-size: 0.72rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .session-meta .stage-badge[data-tone="active"] {
+            border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+            color: var(--accent);
+        }
+        .session-meta .stage-badge[data-tone="done"] {
+            border-color: color-mix(in srgb, var(--success) 45%, var(--border));
+            color: var(--success);
+        }
+        .session-meta .stage-badge[data-tone="warning"] {
+            border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+            color: var(--warn);
+        }
         .session-row-menu {
             position: relative;
             flex: 0 0 auto;
@@ -703,6 +729,7 @@
                     <a class="session-link" href="{% if session.detail_url %}{{ session.detail_url }}{% else %}{% url 'session' session_id=session.id %}{% endif %}">
                         <div class="session-title" data-session-title>{{ session.display_title }}</div>
                         <div class="session-meta">
+                            {% if session.stage %}<span class="stage-badge" data-tone="{{ session.stage.tone }}">{{ session.stage.label }}</span>{% endif %}
                             <span class="meta-item"><span class="meta-label">cwd</span><code>{{ session.cwd }}</code></span>
                             {% if session.project %}<span class="meta-item"><span class="meta-label">project</span>{{ session.project.name }}</span>{% endif %}
                             {% if session.system_kind %}<span class="meta-item"><span class="meta-label">agent</span>{{ session.system_kind }}</span>{% endif %}

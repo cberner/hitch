@@ -343,6 +343,8 @@ class SessionMetadata(models.Model):
     codex_last_synced_at = models.DateTimeField(null=True, blank=True, db_index=True)
     usage_last_checked_at = models.DateTimeField(null=True, blank=True, db_index=True)
     is_hidden_system_session = models.BooleanField(default=False, db_index=True)
+    derived_stage = models.CharField(max_length=32, blank=True, default="", db_index=True)
+    derived_stage_source_mtime_ns = models.PositiveBigIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

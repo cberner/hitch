@@ -4793,6 +4793,12 @@ def _pr_handoff_from_workflow(workflow: SystemWorkflow) -> dict[str, Any]:
     return _compact_pr_handoff(workflow.state.get(_PR_HANDOFF_STATE_KEY))
 
 
+def pr_handoff_for_workflow(workflow: SystemWorkflow | None) -> dict[str, Any]:
+    if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
+        return {}
+    return _pr_handoff_from_workflow(workflow)
+
+
 def _compact_pr_handoff(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}

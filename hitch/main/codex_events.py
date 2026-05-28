@@ -83,6 +83,24 @@ class _PrSnapshotUpdate:
     values: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class PrObservationTurn:
+    """A completed session turn with the PR-observation items it produced."""
+
+    is_pr_prompt: bool
+    is_completed: bool
+    items: tuple[dict[str, Any], ...]
+    has_lifecycle_activity: bool = False
+
+
+@dataclass(frozen=True)
+class PrObservationResult:
+    """The current PR epoch after replaying completed session turns."""
+
+    snapshot: dict[str, Any] | None
+    superseded_by_lifecycle: bool = False
+
+
 def latest_goal_for_thread(thread_id: str) -> str:
     """Return the latest known goal objective for ``thread_id``, or ``""``.
 
@@ -242,10 +260,97 @@ def latest_pr_snapshot_from_event_paths(
     if not updates:
         return None
 
+    return _pr_snapshot_from_updates(sorted(updates, key=lambda item: item.order))
+
+
+def pr_snapshot_from_completed_mcp_items(
+    items: Iterable[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Recover the latest GitHub PR state from completed MCP tool-call items."""
+    updates = _pr_snapshot_updates_from_completed_items(items)
+    return _pr_snapshot_from_updates(updates)
+
+
+def _pr_snapshot_updates_from_completed_items(
+    items: Iterable[dict[str, Any]],
+) -> list[_PrSnapshotUpdate]:
+    updates: list[_PrSnapshotUpdate] = []
+    for fallback_order, item in enumerate(items, start=1):
+        update = _pr_snapshot_update_from_completed_item(
+            item,
+            order=(0, 0, fallback_order),
+            observed_at="",
+        )
+        if update is not None:
+            updates.append(update)
+    return updates
+
+
+def _pr_snapshot_from_updates(
+    updates: Iterable[_PrSnapshotUpdate],
+) -> dict[str, Any] | None:
     snapshot: dict[str, Any] = {}
-    for update in sorted(updates, key=lambda item: item.order):
+    for update in updates:
         _merge_pr_snapshot_update(snapshot, update)
     return _finalize_pr_snapshot(snapshot)
+
+
+def pr_snapshot_from_observation_turns(
+    turns: Iterable[PrObservationTurn],
+) -> dict[str, Any] | None:
+    return pr_observation_result_from_turns(turns).snapshot
+
+
+def pr_observation_result_from_turns(
+    turns: Iterable[PrObservationTurn],
+) -> PrObservationResult:
+    """Recover PR state with completed /pr turns acting as lifecycle boundaries.
+
+    A completed ``/pr`` turn establishes the current PR epoch. Later normal
+    turns may refresh that same PR, but unrelated or unsupported MCP calls do
+    not keep the epoch alive; a completed normal lifecycle turn with no accepted
+    PR observation clears it.
+    """
+    updates_since_clear: list[_PrSnapshotUpdate] = []
+    current_snapshot: dict[str, Any] | None = None
+    superseded_by_lifecycle = False
+    for turn in turns:
+        turn_updates = _pr_snapshot_updates_from_completed_items(turn.items)
+        if not turn.is_pr_prompt:
+            if not _pr_snapshot_has_identity(current_snapshot):
+                continue
+            accepted_updates = [
+                update
+                for update in turn_updates
+                if _pr_update_belongs_to_current_pr(current_snapshot, update)
+            ]
+            if (
+                not accepted_updates
+                and turn.is_completed
+                and turn.has_lifecycle_activity
+            ):
+                updates_since_clear = []
+                current_snapshot = None
+                superseded_by_lifecycle = True
+                continue
+            updates_since_clear.extend(accepted_updates)
+            current_snapshot = _pr_snapshot_from_updates(updates_since_clear)
+            continue
+        if not turn.is_completed:
+            continue
+        turn_snapshot = _pr_snapshot_from_updates(turn_updates)
+        if not _pr_snapshot_has_identity(turn_snapshot):
+            updates_since_clear = []
+            current_snapshot = None
+            superseded_by_lifecycle = True
+            continue
+        updates_since_clear.extend(turn_updates)
+        current_snapshot = _pr_snapshot_from_updates(updates_since_clear)
+        superseded_by_lifecycle = False
+    return PrObservationResult(
+        snapshot=current_snapshot,
+        superseded_by_lifecycle=superseded_by_lifecycle,
+    )
 
 
 def _goal_event_from_line(
@@ -423,11 +528,23 @@ def _pr_snapshot_update_from_event(
     item = payload.get("item")
     if not isinstance(item, dict) or item.get("type") != "mcpToolCall":
         return None
+    return _pr_snapshot_update_from_completed_item(
+        item,
+        order=_event_order(event, fallback_order),
+        observed_at=_event_observed_at(event),
+    )
+
+
+def _pr_snapshot_update_from_completed_item(
+    item: dict[str, Any], *, order: tuple[int, int, int], observed_at: Any
+) -> _PrSnapshotUpdate | None:
+    if item.get("type") != "mcpToolCall":
+        return None
     tool = _normalized_github_tool(item)
     if not tool:
         return None
 
-    values: dict[str, Any] = {"last_observed_at": _event_observed_at(event)}
+    values: dict[str, Any] = {"last_observed_at": observed_at}
     _copy_pr_identity_from_args(values, item.get("arguments"))
     result_values = _mcp_result_values(item.get("result"))
     if tool in _PR_INFO_TOOLS:
@@ -455,7 +572,7 @@ def _pr_snapshot_update_from_event(
     if len(values) <= 1:
         return None
     return _PrSnapshotUpdate(
-        order=_event_order(event, fallback_order),
+        order=order,
         values=values,
     )
 
@@ -466,6 +583,8 @@ def _normalized_github_tool(item: dict[str, Any]) -> str:
     raw_server = item.get("server")
     server = raw_server if isinstance(raw_server, str) else ""
     normalized = tool.lower().replace("-", "_")
+    if normalized.startswith("mcp__codex_apps__github_"):
+        return normalized.removeprefix("mcp__codex_apps__github_").lstrip("_")
     if normalized.startswith("github_"):
         return normalized.removeprefix("github_").lstrip("_")
     if "github" in server.lower():
@@ -490,27 +609,39 @@ def _copy_pr_identity_from_args(target: dict[str, Any], raw_args: Any) -> None:
 
 
 def _mcp_result_values(raw_result: Any) -> list[dict[str, Any]]:
-    values: list[dict[str, Any]] = []
-    if isinstance(raw_result, dict):
-        for key in ("structuredContent", "structured_content"):
-            structured = raw_result.get(key)
-            if isinstance(structured, dict):
-                values.append(structured)
-        content = raw_result.get("content")
-        if isinstance(content, list):
-            for item in content:
-                if not isinstance(item, dict):
-                    continue
-                parsed = _json_dict_from_text(item.get("text"))
-                if parsed is not None:
-                    values.append(parsed)
-        if not values:
-            values.append(raw_result)
-    else:
+    raw_result = _unwrap_mcp_result_envelope(raw_result)
+    if raw_result is None:
+        return []
+    if isinstance(raw_result, str):
         parsed = _json_dict_from_text(raw_result)
-        if parsed is not None:
-            values.append(parsed)
-    return values
+        return _mcp_result_values(parsed) if parsed is not None else []
+    if not isinstance(raw_result, dict):
+        return []
+
+    values: list[dict[str, Any]] = []
+    for key in ("structuredContent", "structured_content"):
+        structured = raw_result.get(key)
+        if isinstance(structured, dict):
+            values.extend(_mcp_result_values(structured))
+    content = raw_result.get("content")
+    if isinstance(content, list):
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            values.extend(_mcp_result_values(item.get("text")))
+    if values:
+        return values
+    return [raw_result]
+
+
+def _unwrap_mcp_result_envelope(raw_result: Any) -> Any:
+    if not isinstance(raw_result, dict):
+        return raw_result
+    if "Ok" in raw_result:
+        return raw_result.get("Ok")
+    if "Err" in raw_result:
+        return None
+    return raw_result
 
 
 def _json_dict_from_text(value: Any) -> dict[str, Any] | None:
@@ -850,6 +981,57 @@ def _finalize_pr_snapshot(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     ):
         return None
     return snapshot
+
+
+def _pr_snapshot_has_identity(snapshot: dict[str, Any] | None) -> bool:
+    if not snapshot:
+        return False
+    if isinstance(snapshot.get("url"), str) and snapshot["url"]:
+        return True
+    return (
+        isinstance(snapshot.get("repository_full_name"), str)
+        and bool(snapshot["repository_full_name"])
+        and isinstance(snapshot.get("pr_number"), int)
+        and not isinstance(snapshot.get("pr_number"), bool)
+    )
+
+
+def _pr_snapshot_matches_current_pr(
+    current: dict[str, Any] | None, update: dict[str, Any] | None
+) -> bool:
+    if current is None or update is None:
+        return False
+    if not _pr_snapshot_has_identity(current) or not _pr_snapshot_has_identity(update):
+        return False
+    return not _pr_snapshot_identity_changed(current, update)
+
+
+def _pr_update_belongs_to_current_pr(
+    current: dict[str, Any] | None, update: _PrSnapshotUpdate
+) -> bool:
+    if not _pr_snapshot_has_identity(current):
+        return False
+    update_snapshot = _finalize_pr_snapshot(dict(update.values))
+    if _pr_snapshot_has_identity(update_snapshot):
+        return _pr_snapshot_matches_current_pr(current, update_snapshot)
+    update_repo = _string_from_any(update.values.get("repository_full_name"))
+    current_repo = (
+        _string_from_any(current.get("repository_full_name")) if current else ""
+    )
+    if update_repo and current_repo and update_repo != current_repo:
+        return False
+    update_commit = _string_from_any(update.values.get("latest_commit_sha"))
+    return bool(update_commit and update_commit in _pr_commit_shas(current))
+
+
+def _pr_commit_shas(snapshot: dict[str, Any] | None) -> set[str]:
+    if not snapshot:
+        return set()
+    return {
+        commit
+        for key in ("latest_commit_sha", "head_sha", "merge_commit_sha")
+        if (commit := _string_from_any(snapshot.get(key)))
+    }
 
 
 def _copy_identity_from_pr_url(target: dict[str, Any], url: str) -> None:

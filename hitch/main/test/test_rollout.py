@@ -135,6 +135,262 @@ class LatestPrUrlTests(TestCase):
         )
 
         self.assertIsNone(rollout.latest_pr_url(path))
+        self.assertIsNone(rollout.latest_pr_snapshot(path))
+
+    def test_pr_snapshot_reads_ok_wrapped_mcp_result(self) -> None:
+        url = "https://github.com/cberner/hitch/pull/94"
+        path = self._make(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "mcp_tool_call_end",
+                        "invocation": {
+                            "server": "github",
+                            "tool": "_create_pull_request",
+                        },
+                        "result": {
+                            "Ok": {"url": url, "state": "closed", "merged": False}
+                        },
+                    },
+                ),
+                _line("event_msg", {"type": "agent_message", "message": "Closed."}),
+            ]
+        )
+
+        self.assertEqual(
+            rollout.latest_pr_snapshot(path),
+            {
+                "url": url,
+                "state": "closed",
+                "merged": False,
+                "repository_full_name": "cberner/hitch",
+                "pr_number": 94,
+                "source_tool": "create_pull_request",
+            },
+        )
+
+    def test_pr_snapshot_reads_ok_wrapped_function_call_output_string(self) -> None:
+        url = "https://github.com/cberner/hitch/pull/95"
+        path = self._make(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_create_pull_request",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps(
+                            {"Ok": {"url": url, "state": "closed", "merged": False}}
+                        ),
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Closed."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+        self.assertEqual(
+            rollout.latest_pr_snapshot(path),
+            {
+                "url": url,
+                "state": "closed",
+                "merged": False,
+                "repository_full_name": "cberner/hitch",
+                "pr_number": 95,
+                "source_tool": "create_pull_request",
+            },
+        )
+
+    def test_pr_snapshot_reads_mcp_prefixed_response_item_tool_name(self) -> None:
+        url = "https://github.com/cberner/hitch/pull/96"
+        path = self._make(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "mcp__codex_apps__github_fetch_pr",
+                        "arguments": json.dumps(
+                            {"repo_full_name": "cberner/hitch", "pr_number": 96}
+                        ),
+                        "call_id": "call-pr",
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps(
+                            {"url": url, "state": "closed", "merged": False}
+                        ),
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Closed."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+        self.assertEqual(
+            rollout.latest_pr_snapshot(path),
+            {
+                "url": url,
+                "state": "closed",
+                "merged": False,
+                "repository_full_name": "cberner/hitch",
+                "pr_number": 96,
+                "source_tool": "fetch_pr",
+            },
+        )
+
+    def test_pr_snapshot_clears_after_later_non_pr_work_turn(self) -> None:
+        url = "https://github.com/cberner/hitch/pull/97"
+        path = self._make(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_create_pull_request",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps(
+                            {"url": url, "state": "closed", "merged": False}
+                        ),
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Closed."}],
+                        "phase": "final_answer",
+                    },
+                ),
+                _line("event_msg", {"type": "user_message", "message": "Plan it"}),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Plan."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+        self.assertIsNone(rollout.latest_pr_snapshot(path))
+
+    def test_unrelated_non_pr_ci_check_does_not_keep_pr_snapshot(self) -> None:
+        url = "https://github.com/cberner/hitch/pull/98"
+        path = self._make(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _func_call("call-pr", None, name="github_fetch_pr"),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps(
+                            {"url": url, "state": "open", "head_sha": "abc123"}
+                        ),
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Opened."}],
+                        "phase": "final_answer",
+                    },
+                ),
+                _line("event_msg", {"type": "user_message", "message": "Plan it"}),
+                _func_call(
+                    "call-ci",
+                    json.dumps(
+                        {
+                            "repo_full_name": "cberner/hitch",
+                            "commit_sha": "unrelated",
+                        }
+                    ),
+                    name="github_get_commit_combined_status",
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-ci",
+                        "output": json.dumps(
+                            {"statuses": [{"state": "success"}]}
+                        ),
+                    },
+                ),
+                _line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Plan."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+        self.assertIsNone(rollout.latest_pr_snapshot(path))
 
     def test_ignores_non_github_pr_mcp_output_with_pr_url(self) -> None:
         url = "https://github.com/cberner/hitch/pull/94"
