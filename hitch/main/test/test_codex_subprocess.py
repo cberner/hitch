@@ -1054,6 +1054,31 @@ class LaunchWorkerProcessTests(TestCase):
         self.assertNotIn("--property=MemoryAccounting=yes", argv)
         self.assertFalse([arg for arg in argv if arg.startswith("--property=Memory")])
 
+    @override_settings(
+        CODEX_WORKER_MEMORY_HIGH="2G",
+        CODEX_WORKER_MEMORY_MAX="",
+        CODEX_WORKER_MEMORY_SWAP_MAX="0",
+        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
+    )
+    def test_per_worker_scope_keeps_swap_for_soft_only_throttle(self) -> None:
+        # MemoryHigh is a soft throttle that usage may exceed (graceful
+        # degradation, no OOM); with no hard MemoryMax there is no ceiling for a
+        # swap cap to make "true", so swap must NOT be disabled out from under a
+        # config that deliberately avoided fail-fast OOMs. Accounting and the
+        # soft throttle itself still apply.
+        argv = codex_pool._systemd_scope_argv(
+            systemd_run="/usr/bin/systemd-run",
+            scope_unit="hitch-codex-worker-7.scope",
+            worker_argv=["python", "manage.py", "codex_worker"],
+        )
+
+        self.assertIn("--property=MemoryAccounting=yes", argv)
+        self.assertIn("--property=MemoryHigh=2G", argv)
+        self.assertNotIn("--property=MemoryMax=", argv)
+        self.assertFalse(
+            [arg for arg in argv if arg.startswith("--property=MemorySwapMax")]
+        )
+
     @override_settings(CODEX_WORKER_SLICE="")
     @patch("hitch.main.codex_pool.shutil.which")
     @patch("hitch.main.codex_pool.subprocess.run")
@@ -1309,6 +1334,20 @@ class SwapCapHierarchyWarningTests(TestCase):
             override_settings(**self.BASE),
             self.assertNoLogs("hitch.main.codex_pool", level="WARNING"),
         ):
+            codex_pool._warn_on_swap_cap_hierarchy()
+
+    @override_settings(
+        CODEX_WORKER_MEMORY_HIGH="2G",
+        CODEX_WORKER_MEMORY_MAX="",
+        CODEX_WORKER_MEMORY_SWAP_MAX="1G",
+        CODEX_WORKER_SLICE_MEMORY_MAX="10G",
+        CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0",
+    )
+    def test_silent_when_worker_is_soft_only_throttle(self) -> None:
+        # A high-only worker has no hard MemoryMax, so its swap cap is never
+        # emitted (mirrors _memory_cgroup_properties) and there is no effective
+        # cushion for the slice to nullify — nothing to warn about.
+        with self.assertNoLogs("hitch.main.codex_pool", level="WARNING"):
             codex_pool._warn_on_swap_cap_hierarchy()
 
     @override_settings(
