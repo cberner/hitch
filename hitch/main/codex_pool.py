@@ -43,6 +43,9 @@ logger = logging.getLogger(__name__)
 _TRACKED_WORKER_PROCS: dict[int, tuple[int, subprocess.Popen[bytes]]] = {}
 _REAPED_WORKERS: set[tuple[int, int]] = set()
 _TRACKED_WORKER_PROCS_LOCK = threading.Lock()
+# Latches once the per-process swap-cap hierarchy check has run; see
+# ``_ensure_systemd_worker_slice``.
+_swap_hierarchy_warned = False
 _VALID_WEB_SEARCH_MODES = frozenset(mode.value for mode in WebSearchMode)
 _MAX_INPUT_ATTACHMENT_PATHS_PER_INSTANCE = 16
 _MAX_INPUT_ATTACHMENT_PATHS_PER_THREAD = 64
@@ -1556,10 +1559,116 @@ def _systemd_worker_slice_properties() -> list[str]:
     )
 
 
+# Powers-of-1024 suffixes systemd accepts for absolute memory sizes. Used only
+# for the best-effort swap-cap comparison below; percentages and "infinity"
+# deliberately fall outside this map so we skip numeric comparison for them.
+_MEMORY_SUFFIX_FACTORS = {
+    "K": 1024,
+    "M": 1024**2,
+    "G": 1024**3,
+    "T": 1024**4,
+    "P": 1024**5,
+    "E": 1024**6,
+}
+
+
+def _parse_memory_bytes(value: str) -> int | None:
+    """Best-effort parse of a systemd memory value to an integer byte count.
+
+    Returns ``None`` for anything we cannot compare numerically — empty,
+    ``infinity``, percentages, decimals, or unrecognized suffixes — so callers
+    fall back to the unambiguous ``== "0"`` check rather than guessing.
+    """
+    text = value.strip()
+    if not text:
+        return None
+    if text[-1].isdigit():
+        try:
+            return int(text)
+        except ValueError:
+            return None
+    factor = _MEMORY_SUFFIX_FACTORS.get(text[-1].upper())
+    if factor is None:
+        return None
+    try:
+        return int(text[:-1]) * factor
+    except ValueError:
+        return None
+
+
+def _effective_swap_cap(
+    high_setting: str, max_setting: str, swap_setting: str
+) -> str | None:
+    """Return the ``MemorySwapMax`` value a unit will actually enforce, if any.
+
+    Mirrors :func:`_memory_cgroup_properties`: the swap cap is only emitted
+    (hence enforced) when a memory limit rides along, so an otherwise-unbounded
+    unit reports ``None`` — it leaves swap unlimited regardless of the setting.
+    """
+    high = str(getattr(settings, high_setting, "") or "").strip()
+    hard = str(getattr(settings, max_setting, "") or "").strip()
+    swap = str(getattr(settings, swap_setting, "") or "").strip()
+    if swap and (high or hard):
+        return swap
+    return None
+
+
+def _warn_on_swap_cap_hierarchy() -> None:
+    """Warn when the slice's parent swap cap nullifies the per-worker cushion.
+
+    cgroup v2 swap limits are hierarchical, so a worker cannot use more swap
+    than its enclosing slice allows. An operator who raises only
+    ``CODEX_WORKER_MEMORY_SWAP_MAX`` to grant a cushion — leaving the slice at
+    the fail-fast ``0`` default — gets no cushion at all, silently. Surface
+    that mismatch so the slice cap gets raised to match.
+    """
+    worker_swap = _effective_swap_cap(
+        "CODEX_WORKER_MEMORY_HIGH",
+        "CODEX_WORKER_MEMORY_MAX",
+        "CODEX_WORKER_MEMORY_SWAP_MAX",
+    )
+    # No effective cap, or a hard-zero cap, means there is no cushion to defend.
+    if worker_swap is None or worker_swap == "0":
+        return
+    slice_swap = _effective_swap_cap(
+        "CODEX_WORKER_SLICE_MEMORY_HIGH",
+        "CODEX_WORKER_SLICE_MEMORY_MAX",
+        "CODEX_WORKER_SLICE_MEMORY_SWAP_MAX",
+    )
+    # No enforced parent cap leaves slice swap unlimited; the cushion stands.
+    if slice_swap is None:
+        return
+    worker_bytes = _parse_memory_bytes(worker_swap)
+    slice_bytes = _parse_memory_bytes(slice_swap)
+    if worker_bytes is not None and slice_bytes is not None:
+        parent_is_stricter = slice_bytes < worker_bytes
+    else:
+        # Can't compare magnitudes (percentages, decimals, infinity); only the
+        # hard-zero parent is unambiguously stricter than a non-zero cushion.
+        parent_is_stricter = slice_swap == "0"
+    if not parent_is_stricter:
+        return
+    logger.warning(
+        "CODEX_WORKER_MEMORY_SWAP_MAX=%r is nullified by the stricter parent "
+        "slice CODEX_WORKER_SLICE_MEMORY_SWAP_MAX=%r: cgroup swap limits are "
+        "hierarchical, so the per-worker swap cushion is ineffective until the "
+        "slice cap is raised to at least match it.",
+        worker_swap,
+        slice_swap,
+    )
+
+
 def _ensure_systemd_worker_slice() -> None:
+    global _swap_hierarchy_warned
     slice_unit = _worker_slice()
     if not slice_unit:
         return
+    # Running inside a slice means its parent swap cap applies; check the
+    # hierarchy once per process so a misconfigured cushion doesn't go
+    # unnoticed without spamming the log on every worker launch.
+    if not _swap_hierarchy_warned:
+        _swap_hierarchy_warned = True
+        _warn_on_swap_cap_hierarchy()
     properties = _systemd_worker_slice_properties()
     if not properties:
         return

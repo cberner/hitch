@@ -1238,6 +1238,133 @@ class LaunchWorkerProcessTests(TestCase):
                         self.assertEqual(argv[argv.index(flag) + 1], expected_value)
 
 
+class SwapCapHierarchyWarningTests(TestCase):
+    """The per-worker swap cushion is meaningless if the parent slice forbids
+    swap: cgroup v2 swap limits are hierarchical, so a worker can never exceed
+    its enclosing slice's MemorySwapMax. Raising only the worker setting is a
+    silent no-op, so _warn_on_swap_cap_hierarchy surfaces the mismatch.
+    """
+
+    BASE = {
+        "CODEX_WORKER_MEMORY_MAX": "4G",
+        "CODEX_WORKER_SLICE_MEMORY_MAX": "10G",
+    }
+
+    @override_settings(
+        CODEX_WORKER_MEMORY_SWAP_MAX="1G", CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0"
+    )
+    def test_warns_when_zero_slice_cap_nullifies_worker_cushion(self) -> None:
+        with (
+            override_settings(**self.BASE),
+            self.assertLogs("hitch.main.codex_pool", level="WARNING") as logs,
+        ):
+            codex_pool._warn_on_swap_cap_hierarchy()
+        self.assertTrue(
+            any("hierarchical" in line and "1G" in line for line in logs.output),
+            logs.output,
+        )
+
+    @override_settings(
+        CODEX_WORKER_MEMORY_SWAP_MAX="1G", CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="512M"
+    )
+    def test_warns_when_slice_cap_smaller_than_worker_cushion(self) -> None:
+        # 512M < 1G, so the parent still clips the per-worker cushion even
+        # though it is not a hard zero.
+        with (
+            override_settings(**self.BASE),
+            self.assertLogs("hitch.main.codex_pool", level="WARNING") as logs,
+        ):
+            codex_pool._warn_on_swap_cap_hierarchy()
+        self.assertTrue(any("512M" in line for line in logs.output), logs.output)
+
+    @override_settings(
+        CODEX_WORKER_MEMORY_SWAP_MAX="1G", CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="2G"
+    )
+    def test_silent_when_slice_cap_accommodates_worker_cushion(self) -> None:
+        with (
+            override_settings(**self.BASE),
+            self.assertNoLogs("hitch.main.codex_pool", level="WARNING"),
+        ):
+            codex_pool._warn_on_swap_cap_hierarchy()
+
+    @override_settings(
+        CODEX_WORKER_MEMORY_SWAP_MAX="1G", CODEX_WORKER_SLICE_MEMORY_SWAP_MAX=""
+    )
+    def test_silent_when_slice_swap_is_unlimited(self) -> None:
+        # An empty slice cap leaves the parent's swap unlimited, so the worker
+        # cushion applies unhindered and there is nothing to warn about.
+        with (
+            override_settings(**self.BASE),
+            self.assertNoLogs("hitch.main.codex_pool", level="WARNING"),
+        ):
+            codex_pool._warn_on_swap_cap_hierarchy()
+
+    @override_settings(
+        CODEX_WORKER_MEMORY_SWAP_MAX="0", CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0"
+    )
+    def test_silent_for_fail_fast_defaults(self) -> None:
+        # The shipped 0/0 default forbids swap everywhere by design; there is no
+        # cushion to defend, so it must not warn.
+        with (
+            override_settings(**self.BASE),
+            self.assertNoLogs("hitch.main.codex_pool", level="WARNING"),
+        ):
+            codex_pool._warn_on_swap_cap_hierarchy()
+
+    @override_settings(
+        CODEX_WORKER_MEMORY_HIGH="",
+        CODEX_WORKER_MEMORY_MAX="",
+        CODEX_WORKER_MEMORY_SWAP_MAX="1G",
+        CODEX_WORKER_SLICE_MEMORY_MAX="10G",
+        CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0",
+    )
+    def test_silent_when_worker_has_no_memory_limit(self) -> None:
+        # Without a worker memory limit the swap cap is never emitted onto the
+        # scope (mirrors _memory_cgroup_properties), so there is no cushion that
+        # the slice could nullify.
+        with self.assertNoLogs("hitch.main.codex_pool", level="WARNING"):
+            codex_pool._warn_on_swap_cap_hierarchy()
+
+    def test_parse_memory_bytes_handles_units_and_rejects_ambiguous(self) -> None:
+        self.assertEqual(codex_pool._parse_memory_bytes("0"), 0)
+        self.assertEqual(codex_pool._parse_memory_bytes("1024"), 1024)
+        self.assertEqual(codex_pool._parse_memory_bytes("2G"), 2 * 1024**3)
+        self.assertEqual(codex_pool._parse_memory_bytes("512m"), 512 * 1024**2)
+        # Decimals, percentages, infinity, and empty are not comparable.
+        for ambiguous in ("", "1.5G", "20%", "infinity"):
+            self.assertIsNone(codex_pool._parse_memory_bytes(ambiguous), ambiguous)
+
+    @override_settings(
+        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
+        CODEX_WORKER_MEMORY_MAX="4G",
+        CODEX_WORKER_SLICE_MEMORY_MAX="10G",
+        CODEX_WORKER_MEMORY_SWAP_MAX="1G",
+        CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0",
+    )
+    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.codex_pool.subprocess.run")
+    def test_ensure_slice_warns_once_per_process(
+        self, mock_run: MagicMock, _mock_which: MagicMock
+    ) -> None:
+        mock_run.return_value = SimpleNamespace(returncode=0, stderr=b"")
+        original = codex_pool._swap_hierarchy_warned
+        codex_pool._swap_hierarchy_warned = False
+        try:
+            with self.assertLogs("hitch.main.codex_pool", level="WARNING") as logs:
+                codex_pool._ensure_systemd_worker_slice()
+                # A second launch must not re-emit the same warning.
+                codex_pool._ensure_systemd_worker_slice()
+                # assertLogs fails if nothing is logged, so emit a sentinel to
+                # assert against rather than relying on the warning count alone.
+                codex_pool.logger.warning("sentinel")
+        finally:
+            codex_pool._swap_hierarchy_warned = original
+        hierarchy_warnings = [
+            line for line in logs.output if "hierarchical" in line
+        ]
+        self.assertEqual(len(hierarchy_warnings), 1, logs.output)
+
+
 class IsAliveTests(TestCase):
     def test_known_pid_states(self) -> None:
         self.assertTrue(codex_pool.is_alive(os.getpid()))
