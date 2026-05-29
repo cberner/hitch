@@ -760,6 +760,194 @@ class PrSnapshotFromObservationTurnsTests(SimpleTestCase):
         self.assertEqual(result.snapshot["latest_commit_sha"], "abc123")
         self.assertFalse(result.superseded_by_lifecycle)
 
+    def _pr_open_turn(self) -> "codex_events.PrObservationTurn":
+        return codex_events.PrObservationTurn(
+            is_pr_prompt=True,
+            is_completed=True,
+            items=(
+                {
+                    "type": "mcpToolCall",
+                    "server": "codex_apps",
+                    "tool": "github_fetch_pr",
+                    "result": {
+                        "structuredContent": {
+                            "url": "https://github.com/cberner/hitch/pull/94",
+                            "state": "open",
+                            "head_sha": "abc123",
+                        }
+                    },
+                },
+            ),
+        )
+
+    @staticmethod
+    def _fetch_run_jobs_item(run_id: int) -> dict[str, object]:
+        return {
+            "type": "mcpToolCall",
+            "server": "codex_apps",
+            "tool": "github_fetch_workflow_run_jobs",
+            "arguments": {"run_id": run_id},
+            "result": {
+                "structuredContent": {
+                    "jobs": [
+                        {
+                            "name": "test-suite",
+                            "status": "completed",
+                            "conclusion": "failure",
+                        }
+                    ]
+                }
+            },
+        }
+
+    def test_fetch_workflow_run_jobs_for_current_pr_keeps_pr_epoch(self) -> None:
+        # ``fetch_workflow_run_jobs`` carries only a ``run_id`` -- no PR
+        # identity and no commit SHA. A follow-up turn that drills into a run
+        # already seen for the current PR (its id captured from a commit-
+        # correlated ``fetch_commit_workflow_runs``) must stay attributed to
+        # that PR; treating it as unrelated work would wipe the live PR epoch
+        # and drop the PR-follow-up workflow (and the CI failure) from view.
+        result = codex_events.pr_observation_result_from_turns(
+            [
+                self._pr_open_turn(),
+                codex_events.PrObservationTurn(
+                    is_pr_prompt=False,
+                    is_completed=True,
+                    items=(
+                        {
+                            "type": "mcpToolCall",
+                            "server": "codex_apps",
+                            "tool": "github_fetch_commit_workflow_runs",
+                            "arguments": {
+                                "repo_full_name": "cberner/hitch",
+                                "commit_sha": "abc123",
+                            },
+                            "result": {
+                                "structuredContent": {
+                                    "workflow_runs": [
+                                        {
+                                            "id": 42,
+                                            "status": "completed",
+                                            "conclusion": "failure",
+                                        }
+                                    ]
+                                }
+                            },
+                        },
+                        self._fetch_run_jobs_item(42),
+                    ),
+                    has_lifecycle_activity=True,
+                ),
+            ]
+        )
+
+        self.assertIsNotNone(result.snapshot)
+        assert result.snapshot is not None
+        self.assertEqual(result.snapshot["pr_number"], 94)
+        self.assertEqual(result.snapshot["ci_status"], "failure")
+        self.assertEqual(result.snapshot["failing_jobs"], ["test-suite"])
+        self.assertFalse(result.superseded_by_lifecycle)
+
+    def test_fetch_workflow_run_jobs_for_unknown_run_supersedes_epoch(self) -> None:
+        # A job check for a ``run_id`` never seen among the current PR's runs
+        # carries no correlation signal, so it must NOT be attributed to the
+        # current PR -- it is unrelated work that supersedes the epoch.
+        result = codex_events.pr_observation_result_from_turns(
+            [
+                self._pr_open_turn(),
+                codex_events.PrObservationTurn(
+                    is_pr_prompt=False,
+                    is_completed=True,
+                    items=(self._fetch_run_jobs_item(999),),
+                    has_lifecycle_activity=True,
+                ),
+            ]
+        )
+
+        self.assertIsNone(result.snapshot)
+        self.assertTrue(result.superseded_by_lifecycle)
+
+    def test_run_ids_are_cleared_when_pr_head_advances(self) -> None:
+        # After a new push advances the head, run ids captured for the old head
+        # must not keep correlating: a later drill into the superseded run must
+        # not overwrite the new head's CI with the old commit's failure.
+        def runs_item(commit_sha: str, run_id: int, conclusion: str) -> dict[str, object]:
+            return {
+                "type": "mcpToolCall",
+                "server": "codex_apps",
+                "tool": "github_fetch_commit_workflow_runs",
+                "arguments": {"commit_sha": commit_sha},
+                "result": {
+                    "structuredContent": {
+                        "workflow_runs": [
+                            {
+                                "id": run_id,
+                                "status": "completed",
+                                "conclusion": conclusion,
+                            }
+                        ]
+                    }
+                },
+            }
+
+        def head_item(head_sha: str) -> dict[str, object]:
+            return {
+                "type": "mcpToolCall",
+                "server": "codex_apps",
+                "tool": "github_fetch_pr",
+                "result": {
+                    "structuredContent": {
+                        "url": "https://github.com/cberner/hitch/pull/94",
+                        "state": "open",
+                        "head_sha": head_sha,
+                    }
+                },
+            }
+
+        turns = [
+            codex_events.PrObservationTurn(
+                is_pr_prompt=True, is_completed=True, items=(head_item("head1"),)
+            ),
+            codex_events.PrObservationTurn(
+                is_pr_prompt=False,
+                is_completed=True,
+                has_lifecycle_activity=True,
+                items=(
+                    runs_item("head1", 42, "failure"),
+                    self._fetch_run_jobs_item(42),
+                ),
+            ),
+            # A push advances the head and its CI is green.
+            codex_events.PrObservationTurn(
+                is_pr_prompt=False,
+                is_completed=True,
+                has_lifecycle_activity=True,
+                items=(head_item("head2"), runs_item("head2", 77, "success")),
+            ),
+        ]
+
+        result = codex_events.pr_observation_result_from_turns(turns)
+        self.assertIsNotNone(result.snapshot)
+        assert result.snapshot is not None
+        self.assertEqual(result.snapshot["head_sha"], "head2")
+        self.assertEqual(result.snapshot["ci_status"], "success")
+        self.assertEqual(result.snapshot["workflow_run_ids"], [77])
+
+        # A later turn drilling into the superseded run 42 no longer correlates.
+        stale_result = codex_events.pr_observation_result_from_turns(
+            [
+                *turns,
+                codex_events.PrObservationTurn(
+                    is_pr_prompt=False,
+                    is_completed=True,
+                    has_lifecycle_activity=True,
+                    items=(self._fetch_run_jobs_item(42),),
+                ),
+            ]
+        )
+        self.assertIsNone(stale_result.snapshot)
+        self.assertTrue(stale_result.superseded_by_lifecycle)
+
 
 class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
     def test_recovers_latest_pr_handoff_from_github_mcp_results(self) -> None:
