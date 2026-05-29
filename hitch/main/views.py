@@ -3640,39 +3640,51 @@ def _token_usage_snapshot_for(
 ) -> dict[str, Any] | None:
     thread_id = getattr(thread, "id", None)
     if not isinstance(thread_id, str) or not thread_id:
-        usage = _latest_token_usage_numbers_for(thread)
+        usage, daily_usage = _parse_token_usage_and_daily(_rollout_path_for(thread))
         if usage is None:
             return None
-        return {"usage": usage, "daily_usage": _daily_token_usage_for(thread)}
-    rollout_path = _rollout_path_for(thread)
+        return {"usage": usage, "daily_usage": daily_usage}
+    # Capture the rollout's mtime once, before parsing, and stamp the cache with
+    # it. Re-stat'ing after the read would let a concurrent append mark the
+    # cache "current" while it holds pre-append numbers, so the stale value
+    # would never be refreshed for a session that then goes idle. Stamping the
+    # pre-read mtime instead means any append during parsing surfaces as a
+    # mismatch on the next read and triggers a re-parse.
+    rollout_state = _rollout_file_state_from_value(getattr(thread, "path", None))
     cached = (
         ArchivedSessionTokenUsage.objects.filter(thread_id=thread_id).first()
         if cached_usage is _MISSING_TOKEN_USAGE_CACHE
         else cached_usage
     )
     cached = cached if isinstance(cached, ArchivedSessionTokenUsage) else None
+    rollout_path = rollout_state.path if rollout_state is not None else None
     if (
         cached is not None
-        and _cached_token_usage_is_current(cached, rollout_path)
+        and _cached_token_usage_is_current_for_state(cached, rollout_state)
         and _cached_token_usage_has_daily_usage(cached, rollout_path)
     ):
         return {
             "usage": _token_usage_from_cache(cached),
             "daily_usage": _daily_token_usage_from_cache(cached),
         }
-    usage = _latest_token_usage_numbers_for(thread)
+    usage, daily_usage = _parse_token_usage_and_daily(rollout_path)
     if usage is None:
-        if cached is None or not _cached_token_usage_is_current(cached, rollout_path):
+        if cached is None or not _cached_token_usage_is_current_for_state(
+            cached, rollout_state
+        ):
             return None
         return {
             "usage": _token_usage_from_cache(cached),
             "daily_usage": _daily_token_usage_from_cache(cached),
         }
-    daily_usage = _daily_token_usage_for(thread)
     cached, _created = ArchivedSessionTokenUsage.objects.update_or_create(
         thread_id=thread_id,
         defaults={
-            **_token_usage_cache_defaults(rollout_path, usage),
+            **_token_usage_cache_defaults(
+                rollout_path,
+                rollout_state.mtime_ns if rollout_state is not None else 0,
+                usage,
+            ),
             "daily_usage": daily_usage,
         },
     )
@@ -3687,6 +3699,24 @@ def _latest_token_usage_numbers_for(thread: Any) -> dict[str, int] | None:
     if usage is None:
         return None
     return {key: usage.get(key, 0) for key in _TOKEN_USAGE_KEYS}
+
+
+def _parse_token_usage_and_daily(
+    rollout_path: Path | None,
+) -> tuple[dict[str, int] | None, dict[str, dict[str, int]]]:
+    """Parse the headline usage and per-day breakdown from one rollout read.
+
+    Both figures come from a single in-memory snapshot so they cannot disagree
+    about the file's contents the way two independent reads can when an append
+    lands between them.
+    """
+    if rollout_path is None:
+        return None, {}
+    raw_usage, history = rollout.token_usage_snapshot(rollout_path)
+    if raw_usage is None:
+        return None, {}
+    usage = {key: raw_usage.get(key, 0) for key in _TOKEN_USAGE_KEYS}
+    return usage, _daily_token_usage_from_history(history)
 
 
 def _rollout_path_for(thread: Any) -> Path | None:
@@ -3722,16 +3752,15 @@ def _rollout_mtime_ns(rollout_path: Path | None) -> int:
     return rollout_state.mtime_ns if rollout_state is not None else 0
 
 
-def _cached_token_usage_is_current(
-    cache: ArchivedSessionTokenUsage, rollout_path: Path | None
+def _cached_token_usage_is_current_for_state(
+    cache: ArchivedSessionTokenUsage, rollout_state: _RolloutFileState | None
 ) -> bool:
-    if rollout_path is None:
+    # ``rollout_state is None`` means the path is missing/unreadable; there is
+    # nothing to compare against, so treat the cache as current rather than
+    # discarding the only numbers we have.
+    if rollout_state is None:
         return True
-    rollout_state = _rollout_file_state_for_path(rollout_path)
-    return (
-        rollout_state is not None
-        and _cached_token_usage_matches_rollout_state(cache, rollout_state)
-    )
+    return _cached_token_usage_matches_rollout_state(cache, rollout_state)
 
 
 def _cached_token_usage_matches_rollout_state(
@@ -3763,11 +3792,14 @@ def _cached_token_usage_has_counts(cache: ArchivedSessionTokenUsage) -> bool:
 
 
 def _token_usage_cache_defaults(
-    rollout_path: Path | None, usage: dict[str, int]
+    rollout_path: Path | None, rollout_mtime_ns: int, usage: dict[str, int]
 ) -> dict[str, str | int]:
+    # ``rollout_mtime_ns`` must be captured before the rollout was parsed, never
+    # re-stat'd here: a fresh stat could record an mtime newer than the parsed
+    # content and mask a concurrent append as a cache hit.
     return {
         "rollout_path": str(rollout_path) if rollout_path is not None else "",
-        "rollout_mtime_ns": _rollout_mtime_ns(rollout_path),
+        "rollout_mtime_ns": rollout_mtime_ns,
         "input_tokens": usage["input_tokens"],
         "cached_input_tokens": usage["cached_input_tokens"],
         "output_tokens": usage["output_tokens"],
@@ -3810,12 +3842,18 @@ def _coerce_usage_int(value: Any) -> int:
 
 
 def _daily_token_usage_for(thread: Any) -> dict[str, dict[str, int]]:
-    usage_by_date: dict[str, dict[str, int]] = {}
     rollout_path = _rollout_path_for(thread)
     if rollout_path is None:
-        return usage_by_date
+        return {}
+    return _daily_token_usage_from_history(rollout.token_usage_history(rollout_path))
+
+
+def _daily_token_usage_from_history(
+    history: list[dict[str, int]],
+) -> dict[str, dict[str, int]]:
+    usage_by_date: dict[str, dict[str, int]] = {}
     previous = _empty_raw_token_usage()
-    for event in rollout.token_usage_history(rollout_path):
+    for event in history:
         date_key = datetime.fromtimestamp(event["timestamp"], UTC).date().isoformat()
         bucket = usage_by_date.setdefault(date_key, _empty_lifetime_token_usage())
         input_delta = max(event["input_tokens"] - previous["input_tokens"], 0)
@@ -4477,7 +4515,9 @@ def _refresh_usage_token_cache_best_effort(
                         if snapshot is None and _rollout_file_parses_as_jsonl(
                             rollout_path
                         ):
-                            _write_zero_token_usage_cache(item.thread_id, rollout_path)
+                            _write_zero_token_usage_cache(
+                                item.thread_id, rollout_path, rollout_state.mtime_ns
+                            )
                     except Exception:
                         logger.exception(
                             "failed to refresh token usage for %s", item.thread_id
@@ -4596,12 +4636,14 @@ def _rollout_file_parses_as_jsonl(rollout_path: Path) -> bool:
     return True
 
 
-def _write_zero_token_usage_cache(thread_id: str, rollout_path: Path) -> None:
+def _write_zero_token_usage_cache(
+    thread_id: str, rollout_path: Path, rollout_mtime_ns: int
+) -> None:
     ArchivedSessionTokenUsage.objects.update_or_create(
         thread_id=thread_id,
         defaults={
             **_token_usage_cache_defaults(
-                rollout_path, {key: 0 for key in _TOKEN_USAGE_KEYS}
+                rollout_path, rollout_mtime_ns, {key: 0 for key in _TOKEN_USAGE_KEYS}
             ),
             "daily_usage": {},
         },

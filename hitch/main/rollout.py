@@ -194,6 +194,12 @@ def latest_token_usage(rollout_path: Path) -> dict[str, int] | None:
     lines = _load_rollout_lines(rollout_path)
     if lines is None:
         return None
+    return _latest_token_usage_from_lines(lines)
+
+
+def _latest_token_usage_from_lines(
+    lines: list[dict[str, Any]],
+) -> dict[str, int] | None:
     cumulative = {key: 0 for key in _CUMULATIVE_TOKEN_KEYS}
     previous = {key: 0 for key in _CUMULATIVE_TOKEN_KEYS}
     latest_context: dict[str, Any] = {}
@@ -222,6 +228,25 @@ def latest_token_usage(rollout_path: Path) -> dict[str, int] | None:
     }
 
 
+def token_usage_snapshot(
+    rollout_path: Path,
+) -> tuple[dict[str, int] | None, list[dict[str, int]]]:
+    """Return ``(cumulative usage, per-event history)`` from a single file read.
+
+    Deriving both the headline total and the per-event history from the same
+    in-memory snapshot is what makes the `_iter_token_count_events` consistency
+    guarantee actually hold: two independent reads can straddle a concurrent
+    append and disagree about the file's contents. A caller persisting these to
+    a cache must stamp it with the rollout mtime captured *before* this read, so
+    a racing append surfaces as staleness on the next read rather than being
+    masked behind a post-write mtime.
+    """
+    lines = _load_rollout_lines(rollout_path)
+    if lines is None:
+        return None, []
+    return _latest_token_usage_from_lines(lines), _token_usage_history_from_lines(lines)
+
+
 def latest_collaboration_mode(rollout_path: Path) -> str | None:
     """Return the last collaboration mode Codex recorded in the rollout."""
     lines = _load_rollout_lines(rollout_path)
@@ -238,6 +263,12 @@ def token_usage_history(rollout_path: Path) -> list[dict[str, int]]:
     lines = _load_rollout_lines(rollout_path)
     if lines is None:
         return []
+    return _token_usage_history_from_lines(lines)
+
+
+def _token_usage_history_from_lines(
+    lines: list[dict[str, Any]],
+) -> list[dict[str, int]]:
     history: list[dict[str, int]] = []
     for timestamp, total, _info in _iter_token_count_events(lines):
         history.append(
