@@ -144,6 +144,16 @@ CODEX_WORKER_SLICE_MEMORY_MAX = os.environ.get(
 )
 CODEX_WORKER_MEMORY_HIGH = os.environ.get("HITCH_CODEX_WORKER_MEMORY_HIGH", "2G")
 CODEX_WORKER_MEMORY_MAX = os.environ.get("HITCH_CODEX_WORKER_MEMORY_MAX", "4G")
+# Swap caps make MemoryMax a true ceiling: cgroup v2 only counts RAM toward
+# MemoryMax, so without a swap cap a runaway worker is pushed to swap rather
+# than OOM-killed and thrashes the host indefinitely instead of failing the
+# turn. "0" forbids swap so the cap fires; raise it to grant a swap cushion.
+CODEX_WORKER_MEMORY_SWAP_MAX = os.environ.get(
+    "HITCH_CODEX_WORKER_MEMORY_SWAP_MAX", "0"
+)
+CODEX_WORKER_SLICE_MEMORY_SWAP_MAX = os.environ.get(
+    "HITCH_CODEX_WORKER_SLICE_MEMORY_SWAP_MAX", "0"
+)
 CODEX_WORKER_OOM_SCORE_ADJ = os.environ.get(
     "HITCH_CODEX_WORKER_OOM_SCORE_ADJ", "0" if TESTING else "1000"
 )
