@@ -7738,6 +7738,9 @@ def _start_candidate_proposal_session(
         if auto_merge_branch:
             workflow_kwargs["auto_merge_branch"] = auto_merge_branch
         system_agents.start_pr_qa_workflow(**workflow_kwargs)
+        # Persist the proposal-derived auto-review configuration so subsequent
+        # turns in this session keep honoring it. Hardcoding ``False`` here would
+        # silently drop a goal's auto-QA/auto-merge settings after the first turn.
         return _finish_candidate_proposal_start(
             request=request,
             proposed_session=proposed_session,
@@ -7746,8 +7749,8 @@ def _start_candidate_proposal_session(
             target=target,
             settings=settings,
             cookie_updates=cookie_updates,
-            auto_pr_enabled=False,
-            auto_qa_enabled=False,
+            auto_pr_enabled=auto_pr_enabled,
+            auto_qa_enabled=auto_qa_enabled,
         )
 
     input_image_paths, input_image_error = _save_posted_input_images(request)
@@ -8287,6 +8290,26 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         if base_instructions:
             create_thread_kwargs["base_instructions"] = base_instructions
         thread_id = codex_pool.create_session_thread(**create_thread_kwargs)
+        # Only proposal acceptances carry forward auto-review/auto-merge, and
+        # only the settings the proposal itself requested. A bare ``/qa`` or
+        # ``/pr`` (no proposal) is a one-off review, and a coding-agent proposal
+        # leaves these inputs empty, so in both cases the resolved
+        # ``auto_*_enabled`` here are just the user's global/form defaults.
+        # Persisting those would silently auto-review every later follow-up in
+        # the session, so derive the stored flags from the proposal only.
+        if proposed_session is not None:
+            session_auto_pr_enabled, session_auto_qa_enabled = (
+                _auto_review_settings_for_proposed_session(proposed_session)
+            )
+            auto_merge_to_local_branch, auto_merge_branch = (
+                _auto_merge_to_local_branch_for_proposal(
+                    proposed_session, auto_qa_enabled=session_auto_qa_enabled
+                )
+            )
+        else:
+            session_auto_pr_enabled = False
+            session_auto_qa_enabled = False
+            auto_merge_to_local_branch, auto_merge_branch = False, ""
         workflow_kwargs: dict[str, Any] = {
             "main_thread_id": thread_id,
             "cwd": session_cwd,
@@ -8306,15 +8329,21 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             workflow_kwargs["qa_panel_enabled"] = True
         if qa_activation:
             workflow_kwargs["open_pr_on_lgtm"] = False
+        if auto_merge_branch:
+            workflow_kwargs["auto_merge_branch"] = auto_merge_branch
         system_agents.start_pr_qa_workflow(**workflow_kwargs)
+        # Persist the proposal-derived auto-review configuration so subsequent
+        # turns keep honoring it instead of reverting to manual review.
         session_metadata = session_index.upsert_local_session(
             thread_id=thread_id,
             cwd=session_cwd,
             project=source_project,
             project_cleared=target.project_cleared,
             name=thread_name,
-            auto_pr_enabled=False,
-            auto_qa_enabled=False,
+            auto_pr_enabled=session_auto_pr_enabled,
+            auto_qa_enabled=session_auto_qa_enabled,
+            auto_merge_to_local_branch=auto_merge_to_local_branch,
+            auto_merge_branch=auto_merge_branch,
         )
         _accept_proposed_session_for_session(proposed_session, session_metadata)
         remembered_values = settings._replace(last_selected_repo=cwd)
