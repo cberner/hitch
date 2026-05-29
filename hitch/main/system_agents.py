@@ -4540,7 +4540,17 @@ def _parse_pr_monitor_output(raw_output: str) -> dict[str, Any] | None:
 def _strip_json_markdown_fence(raw_output: str) -> str:
     text = raw_output.strip()
     if text.startswith("```"):
-        lines = text.splitlines()
+        # Markdown code fences are delimited by ``\n`` only. Split on ``\n``
+        # rather than ``str.splitlines``, which would also break on form feed,
+        # vertical tab, and the Unicode line/paragraph/NEL separators -- all
+        # of which are valid *inside* a JSON string value. ``splitlines`` tears
+        # such a payload apart and the ``"\n".join`` below then rewrites the
+        # separator as a literal newline, turning an otherwise-valid agent
+        # verdict into invalid JSON and blocking the workflow. A trailing ``\r``
+        # is dropped so a CRLF-fenced reply parses identically to an LF one.
+        lines = [
+            line[:-1] if line.endswith("\r") else line for line in text.split("\n")
+        ]
         if lines and lines[0].startswith("```"):
             lines = lines[1:]
         if lines and lines[-1].startswith("```"):
