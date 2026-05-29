@@ -36,9 +36,19 @@ _ATX_HEADING = re.compile(r"^#{1,6} \S", re.MULTILINE)
 # renderer so a nested or under-a-heading list does not silently fall back to
 # plain-text rendering.
 _BULLET_LIST = re.compile(r"^ {0,3}[-*+][ \t]+\S", re.MULTILINE)
-_NUMBERED_LIST = re.compile(r"^ {0,3}\d{1,9}\.[ \t]+\S", re.MULTILINE)
+# CommonMark ordered lists accept either ``.`` or ``)`` after the number, so the
+# detector must match both delimiters; otherwise a ``1)``-style list (a very
+# common agent phrasing) renders as raw plain text while the renderer would have
+# produced an ``<ol>``. The captured number drives the paragraph-interruption
+# rule in ``_has_ordered_list``.
+_NUMBERED_LIST = re.compile(r"^ {0,3}(\d{1,9})[.)][ \t]+\S")
 _MARKDOWN_LINK = re.compile(r"\[[^\]\n]+\]\((?:https?://|mailto:)[^\s)]+\)")
-_TABLE_SEPARATOR = re.compile(r"^\|\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$", re.MULTILINE)
+# Characters that may appear on a GFM table delimiter row (cells of dashes with
+# optional alignment colons, separated/bounded by pipes, plus padding). A line
+# built only from these and containing both a pipe and a dash is a delimiter-row
+# *candidate* -- see ``_has_table`` for why detection ultimately defers to the
+# renderer rather than validating the row precisely here.
+_TABLE_DELIMITER_CHARS = frozenset("|:- \t")
 
 
 def looks_like_markdown(text: str) -> bool:
@@ -55,11 +65,78 @@ def looks_like_markdown(text: str) -> bool:
         return True
     if len(_BULLET_LIST.findall(text)) >= 2:
         return True
-    if len(_NUMBERED_LIST.findall(text)) >= 2:
+    if _has_ordered_list(text):
         return True
     if _MARKDOWN_LINK.search(text):
         return True
-    return bool(_TABLE_SEPARATOR.search(text))
+    return _has_table(text)
+
+
+def _has_table(text: str) -> bool:
+    """True iff the renderer actually emits a ``<table>`` for ``text``.
+
+    GFM's table rule hinges on matching header/delimiter column counts, the
+    header's indentation, surrounding block context, one- vs. multi-column
+    layout, and leading-pipe vs. pipeless delimiters -- mirroring all of that by
+    hand drifts from the renderer and resurfaces as detector/renderer-parity
+    bugs. Instead we cheaply spot a delimiter-row candidate (so ordinary prose
+    never triggers a render) and let markdown-it itself decide. The page renders
+    the reply again for display, but only when a candidate is present, which is
+    fine for a single-user tool.
+    """
+    if not any(_is_table_delimiter_candidate(line) for line in text.split("\n")):
+        return False
+    return "<table" in render_markdown(text)
+
+
+def _is_table_delimiter_candidate(line: str) -> bool:
+    # ``strip`` drops the trailing ``\r`` of a CRLF line and any padding, so the
+    # gate is line-ending agnostic. A pipe rules out a bare ``---`` rule and a
+    # dash rules out a plain ``| cell |`` data/header row; both are required so
+    # only a delimiter-shaped line opens the (renderer-backed) table check.
+    line = line.strip()
+    return bool(line) and "|" in line and "-" in line and set(line) <= _TABLE_DELIMITER_CHARS
+
+
+def _has_ordered_list(text: str) -> bool:
+    """True iff ``text`` holds an ordered list of >=2 items the renderer emits.
+
+    CommonMark only lets an ordered list interrupt a paragraph when its first
+    item is numbered 1, so a run like ``2)``/``3)`` glued straight onto a
+    preceding prose line stays *inside* that paragraph rather than becoming an
+    ``<ol>``. Mirroring that rule keeps the detector from reflowing such text as
+    markdown, which would otherwise collapse its intended line breaks. A blank
+    line (or the start of the text) removes the paragraph to interrupt, so an
+    item may then begin at any number; once a list is open, later items continue
+    it regardless of their number.
+    """
+    count = 0
+    in_list = False
+    paragraph_open = False
+    for line in text.split("\n"):
+        match = _NUMBERED_LIST.match(line)
+        if match is not None:
+            if in_list or not paragraph_open or int(match.group(1)) == 1:
+                count += 1
+                if count >= 2:
+                    return True
+                in_list = True
+                paragraph_open = False
+            else:
+                # Can't interrupt the open paragraph; the marker is plain text.
+                in_list = False
+            continue
+        if not line.strip():
+            # A blank line ends both the paragraph and any open list run; the
+            # next item starts fresh (and may legitimately begin above 1).
+            in_list = False
+            paragraph_open = False
+        elif not in_list:
+            # Ordinary prose; a numbered marker on the next line could only
+            # start a list if it begins at 1. (Lines while ``in_list`` are lazy
+            # continuations and leave the list open.)
+            paragraph_open = True
+    return False
 
 
 def render_markdown(text: str) -> SafeString:
