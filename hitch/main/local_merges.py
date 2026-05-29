@@ -156,8 +156,14 @@ def build_auto_merge_review_patch(
     source_repo = _repo_root(Path(source_cwd))
     target_ref = f"refs/heads/{branch}"
     target_sha = _target_branch_sha(source_repo, target_ref)
-    merge_base_sha = _git(source_repo, ["merge-base", "HEAD", target_ref]).strip()
-    if not merge_base_sha:
+    # ``git merge-base`` exits non-zero (not just empty stdout) when the histories
+    # share no common ancestor, so check the return code rather than letting the
+    # generic check=True failure mask the clearer message.
+    merge_base_result = _run_git(
+        source_repo, ["merge-base", "HEAD", target_ref], check=False
+    )
+    merge_base_sha = merge_base_result.stdout.strip()
+    if merge_base_result.returncode != 0 or not merge_base_sha:
         raise LocalBranchMergeError(
             "source worktree and target branch have no merge base"
         )
@@ -678,6 +684,10 @@ def _remove_worktree(repo: Path, target: Path, *, hooks_path: Path) -> None:
         check=False,
     )
     shutil.rmtree(target, ignore_errors=True)
+    # If ``worktree remove`` failed (or only the directory was reaped) git keeps a
+    # stale admin entry under .git/worktrees/<name>; prune it so repeated
+    # auto-merges don't accumulate orphaned metadata.
+    _run_git(repo, ["worktree", "prune"], hooks_path=hooks_path, check=False)
 
 
 def _same_path(left: Path, right: Path) -> bool:
