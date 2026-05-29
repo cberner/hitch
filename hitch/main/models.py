@@ -744,6 +744,11 @@ class ArchivedSessionTokenUsage(models.Model):
     context_tokens = models.PositiveBigIntegerField(default=0)
     model_context_window = models.PositiveBigIntegerField(default=0)
     daily_usage = models.JSONField(default=dict, blank=True)
+    # Version of the rollout-parsing logic that produced these counts. Rows
+    # whose version is below the current one are recomputed even when the
+    # rollout file is byte-for-byte unchanged, so a counting-logic fix reaches
+    # immutable archived sessions. Legacy rows default to 0.
+    usage_logic_version = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
