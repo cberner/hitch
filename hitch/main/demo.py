@@ -1018,7 +1018,9 @@ def _rewrite_body(body: bytes, content_type: str, path_prefix: str) -> bytes:
     encoding = "utf-8"
     match = re.search(r"charset=([^;\s]+)", content_type, re.IGNORECASE)
     if match:
-        encoding = match.group(1)
+        # Charset values may be quoted (charset="utf-8"); strip so the lookup
+        # doesn't fail and silently skip rewriting.
+        encoding = match.group(1).strip().strip("\"'") or "utf-8"
     try:
         text = body.decode(encoding)
     except (LookupError, UnicodeDecodeError):

@@ -350,6 +350,15 @@ class DemoProxyTests(TestCase):
         self.assertIn(b'fetch("//api.example.com/status")', rewritten)
         self.assertIn(b'import x from "//cdn.example.com/mod.js"', rewritten)
 
+    def test_rewrite_body_handles_quoted_charset(self) -> None:
+        # A quoted charset token must not break decoding and skip rewriting.
+        rewritten = demo._rewrite_body(
+            b'<a href="/page">link</a>',
+            'text/html; charset="utf-8"',
+            "/sessions/thread-1/demo/",
+        )
+        self.assertIn(b'href="/sessions/thread-1/demo/page"', rewritten)
+
     def test_proxy_streams_sse(self) -> None:
         response = self.client.get(
             reverse(
