@@ -4538,6 +4538,71 @@ class IndexViewTests(TestCase):
             usage["output_tokens"],
         )
 
+    def test_token_usage_snapshot_stamps_pre_read_mtime_on_concurrent_append(
+        self,
+    ) -> None:
+        # The cache must be stamped with the rollout mtime captured BEFORE the
+        # parse, not a fresh stat taken after it. A turn appended while the
+        # snapshot is computed would otherwise leave the cache holding
+        # pre-append numbers but stamped with the post-append mtime, so the
+        # stale value reads back as "current" and never refreshes once the
+        # session goes idle.
+        from hitch.main import rollout
+
+        rollout_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=100,
+                    cached_input_tokens=10,
+                    output_tokens=20,
+                    total_tokens=120,
+                )
+            ],
+        )
+        pre_mtime = 1_000_000_000
+        post_mtime = 2_000_000_000
+        os.utime(rollout_path, ns=(pre_mtime, pre_mtime))
+        thread = _session("racing", path=str(rollout_path))
+
+        original_load = rollout._load_rollout_lines
+        appended = {"done": False}
+
+        def load_then_append(path: Path) -> Any:
+            lines = original_load(path)
+            if not appended["done"]:
+                appended["done"] = True
+                with open(path, "a", encoding="utf-8") as handle:
+                    handle.write(
+                        "\n"
+                        + _token_count_line(
+                            input_tokens=500,
+                            cached_input_tokens=50,
+                            output_tokens=200,
+                            total_tokens=700,
+                        )
+                    )
+                os.utime(path, ns=(post_mtime, post_mtime))
+            return lines
+
+        with patch.object(
+            rollout, "_load_rollout_lines", side_effect=load_then_append
+        ):
+            snapshot = views._token_usage_snapshot_for(thread)
+
+        assert snapshot is not None
+        # The snapshot reflects the content actually parsed (pre-append).
+        self.assertEqual(snapshot["usage"]["input_tokens"], 100)
+
+        cache = ArchivedSessionTokenUsage.objects.get(thread_id="racing")
+        self.assertEqual(cache.rollout_mtime_ns, pre_mtime)
+
+        # The next read sees the mismatch and re-parses the appended file rather
+        # than serving the stale cached numbers.
+        refreshed = views._token_usage_snapshot_for(thread)
+        assert refreshed is not None
+        self.assertEqual(refreshed["usage"]["input_tokens"], 500)
+
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_hides_archived_sessions_by_default(
