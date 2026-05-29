@@ -6169,8 +6169,13 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest("extra system prompt is too long")
     # The character cap above does not bound the encoded cookie size, so a
     # multibyte prompt can still overflow the browser cookie limit and be
-    # dropped, silently losing the setting. Reject it up front instead.
-    if not _extra_system_prompt_cookie_fits(extra_system_prompt):
+    # silently dropped. For anonymous users the cookie is the only store, so
+    # that means the setting is lost — reject it up front. Authenticated users
+    # persist to the DB (the cookie is just a best-effort mirror), so a value
+    # too big for the cookie still saves correctly; don't block them on it.
+    if _authenticated_user(request) is None and not _extra_system_prompt_cookie_fits(
+        extra_system_prompt
+    ):
         return HttpResponseBadRequest("extra system prompt is too long")
     valid_efforts = {e.value for e in ReasoningEffort}
     if effort and effort not in valid_efforts:
