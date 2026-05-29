@@ -974,6 +974,31 @@ class LaunchWorkerProcessTests(TestCase):
         mock_which.assert_called_once_with("systemctl")
 
     @override_settings(
+        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
+        CODEX_WORKER_SLICE_MEMORY_HIGH="8G",
+        CODEX_WORKER_SLICE_MEMORY_MAX="",
+        CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="",
+    )
+    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.codex_pool.subprocess.run")
+    def test_slice_resets_cleared_caps_to_infinity(
+        self, mock_run: MagicMock, _mock_which: MagicMock
+    ) -> None:
+        # `set-property --runtime` only changes the properties it is handed, so
+        # a cleared cap must be reset to `infinity` rather than omitted —
+        # otherwise a previously-applied MemoryMax/MemorySwapMax would linger on
+        # the runtime slice and keep clipping workers after the operator cleared
+        # it (and the hierarchy warning would wrongly treat it as unlimited).
+        mock_run.return_value = SimpleNamespace(returncode=0, stderr=b"")
+
+        codex_pool._ensure_systemd_worker_slice()
+
+        argv = mock_run.call_args.args[0]
+        self.assertIn("MemoryHigh=8G", argv)
+        self.assertIn("MemoryMax=infinity", argv)
+        self.assertIn("MemorySwapMax=infinity", argv)
+
+    @override_settings(
         CODEX_WORKER_MEMORY_HIGH="2G",
         CODEX_WORKER_MEMORY_MAX="4G",
         CODEX_WORKER_MEMORY_SWAP_MAX="0",
@@ -1075,6 +1100,28 @@ class LaunchWorkerProcessTests(TestCase):
         self.assertIn("--property=MemoryAccounting=yes", argv)
         self.assertIn("--property=MemoryHigh=2G", argv)
         self.assertNotIn("--property=MemoryMax=", argv)
+        self.assertFalse(
+            [arg for arg in argv if arg.startswith("--property=MemorySwapMax")]
+        )
+
+    @override_settings(
+        CODEX_WORKER_MEMORY_HIGH="2G",
+        CODEX_WORKER_MEMORY_MAX="infinity",
+        CODEX_WORKER_MEMORY_SWAP_MAX="0",
+        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
+    )
+    def test_per_worker_scope_keeps_swap_when_hard_cap_is_infinity(self) -> None:
+        # systemd treats MemoryMax=infinity as no limit, so it is not a real
+        # ceiling for the swap cap to make "true"; capping swap here would
+        # reintroduce the soft-only/unbounded regression. The explicit
+        # MemoryMax=infinity is still passed through.
+        argv = codex_pool._systemd_scope_argv(
+            systemd_run="/usr/bin/systemd-run",
+            scope_unit="hitch-codex-worker-7.scope",
+            worker_argv=["python", "manage.py", "codex_worker"],
+        )
+
+        self.assertIn("--property=MemoryMax=infinity", argv)
         self.assertFalse(
             [arg for arg in argv if arg.startswith("--property=MemorySwapMax")]
         )
@@ -1286,6 +1333,24 @@ class SwapCapHierarchyWarningTests(TestCase):
             codex_pool._warn_on_swap_cap_hierarchy()
         self.assertTrue(
             any("hierarchical" in line and "1G" in line for line in logs.output),
+            logs.output,
+        )
+
+    @override_settings(
+        CODEX_WORKER_MEMORY_SWAP_MAX="", CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0"
+    )
+    def test_warns_when_worker_opts_out_but_slice_still_caps(self) -> None:
+        # Clearing the worker swap cap (with a hard MemoryMax still set) reads
+        # as opting the worker out of a per-scope cap, but the slice still
+        # enforces MemorySwapMax=0, so the worker gets no swap regardless. Warn
+        # rather than letting the cleared setting silently do nothing.
+        with (
+            override_settings(**self.BASE),
+            self.assertLogs("hitch.main.codex_pool", level="WARNING") as logs,
+        ):
+            codex_pool._warn_on_swap_cap_hierarchy()
+        self.assertTrue(
+            any("uncapped" in line and "hierarchical" in line for line in logs.output),
             logs.output,
         )
 
