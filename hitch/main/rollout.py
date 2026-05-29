@@ -1239,7 +1239,9 @@ def proposed_plan_text(text: str) -> str | None:
     open_tag = "<proposed_plan>"
     close_tag = "</proposed_plan>"
     if text.startswith(open_tag) and text.endswith(close_tag):
-        return text[len(open_tag) : -len(close_tag)].strip()
+        # An empty tag body is "no plan", not a plan whose text is empty:
+        # callers only guard with ``plan_text is not None``.
+        return text[len(open_tag) : -len(close_tag)].strip() or None
     return None
 
 
