@@ -1516,8 +1516,34 @@ def _worker_slice() -> str:
     return str(getattr(settings, "CODEX_WORKER_SLICE", "") or "").strip()
 
 
+def _is_finite_limit(value: str) -> bool:
+    """Whether a cgroup limit value actually bounds the unit.
+
+    systemd treats an empty value as "unset" and ``infinity`` as "no limit", so
+    neither is a real ceiling the swap cap can make "true".
+    """
+    return bool(value) and value.strip().lower() != "infinity"
+
+
+def _limit_property(name: str, value: str, *, declarative: bool) -> str | None:
+    """Render a single cgroup limit property, or ``None`` to omit it.
+
+    A configured value is rendered as-is. A cleared value is omitted by default
+    — fine for a fresh transient scope — but in ``declarative`` mode it renders
+    as ``infinity`` instead. The slice is configured with the *stateful*
+    ``systemctl set-property --runtime``, which only changes the properties it
+    is handed, so omitting a cleared cap would leave a previously-applied value
+    lingering on the runtime unit; emitting ``infinity`` resets it to unlimited.
+    """
+    if value:
+        return f"{name}={value}"
+    if declarative:
+        return f"{name}=infinity"
+    return None
+
+
 def _memory_cgroup_properties(
-    high_setting: str, max_setting: str, swap_setting: str
+    high_setting: str, max_setting: str, swap_setting: str, *, declarative: bool = False
 ) -> list[str]:
     """Build systemd memory-cgroup properties for the named settings.
 
@@ -1530,34 +1556,47 @@ def _memory_cgroup_properties(
     v2 counts only RAM toward ``MemoryMax``: without a swap cap a runaway worker
     is reclaimed to swap instead of OOM-killed, so the hard cap never fires and
     the turn thrashes the host indefinitely rather than failing. It is gated on
-    ``MemoryMax`` rather than any limit: ``MemoryHigh`` is a soft throttle that
-    usage may exceed (graceful degradation, no OOM), so a high-only config has
-    no hard ceiling for the swap cap to make "true" and must keep its swap to
-    degrade as intended rather than be silently denied it.
+    a *finite* ``MemoryMax`` rather than any limit: ``MemoryHigh`` is a soft
+    throttle that usage may exceed (graceful degradation, no OOM) and
+    ``MemoryMax=infinity`` is no limit at all, so neither gives the swap cap a
+    hard ceiling to make "true" — capping swap there would silently deny swap
+    to a config that deliberately has no OOM ceiling.
 
-    The per-worker scope and the aggregate slice share this builder so their
+    ``declarative`` makes cleared caps render as ``infinity`` rather than being
+    omitted, so a stateful ``set-property`` target (the slice) fully resets to
+    the configured state instead of inheriting stale runtime values. The
+    per-worker scope and the aggregate slice share this builder so their
     accounting/limit/swap handling cannot drift apart.
     """
     high = str(getattr(settings, high_setting, "") or "").strip()
     hard = str(getattr(settings, max_setting, "") or "").strip()
     swap = str(getattr(settings, swap_setting, "") or "").strip()
+    # Swap is only a real cap below a finite hard ceiling; otherwise it is
+    # unset (and, in declarative mode, reset to unlimited rather than left at a
+    # stale value).
+    swap_value = swap if _is_finite_limit(hard) else ""
     properties: list[str] = []
-    if high or hard:
+    if _is_finite_limit(high) or _is_finite_limit(hard):
         properties.append("MemoryAccounting=yes")
-    if high:
-        properties.append(f"MemoryHigh={high}")
-    if hard:
-        properties.append(f"MemoryMax={hard}")
-    if swap and hard:
-        properties.append(f"MemorySwapMax={swap}")
+    for prop in (
+        _limit_property("MemoryHigh", high, declarative=declarative),
+        _limit_property("MemoryMax", hard, declarative=declarative),
+        _limit_property("MemorySwapMax", swap_value, declarative=declarative),
+    ):
+        if prop is not None:
+            properties.append(prop)
     return properties
 
 
 def _systemd_worker_slice_properties() -> list[str]:
+    # The slice is configured with the stateful ``set-property --runtime``, so
+    # build it declaratively: a cleared cap resets to ``infinity`` rather than
+    # leaving a stale runtime value (and misleading the hierarchy warning).
     return _memory_cgroup_properties(
         "CODEX_WORKER_SLICE_MEMORY_HIGH",
         "CODEX_WORKER_SLICE_MEMORY_MAX",
         "CODEX_WORKER_SLICE_MEMORY_SWAP_MAX",
+        declarative=True,
     )
 
 
@@ -1602,57 +1641,83 @@ def _effective_swap_cap(max_setting: str, swap_setting: str) -> str | None:
     """Return the ``MemorySwapMax`` value a unit will actually enforce, if any.
 
     Mirrors :func:`_memory_cgroup_properties`: the swap cap is only emitted
-    (hence enforced) alongside a hard ``MemoryMax``, so a unit with no hard cap
-    reports ``None`` — it leaves swap unlimited regardless of the setting.
+    (hence enforced) alongside a finite hard ``MemoryMax``, so a unit with no
+    real hard cap reports ``None`` — it leaves swap unlimited regardless of the
+    setting.
     """
     hard = str(getattr(settings, max_setting, "") or "").strip()
     swap = str(getattr(settings, swap_setting, "") or "").strip()
-    if swap and hard:
+    if swap and _is_finite_limit(hard):
         return swap
     return None
 
 
 def _warn_on_swap_cap_hierarchy() -> None:
-    """Warn when the slice's parent swap cap nullifies the per-worker cushion.
+    """Warn when the parent slice's swap cap overrides the per-worker setting.
 
-    cgroup v2 swap limits are hierarchical, so a worker cannot use more swap
-    than its enclosing slice allows. An operator who raises only
-    ``CODEX_WORKER_MEMORY_SWAP_MAX`` to grant a cushion — leaving the slice at
-    the fail-fast ``0`` default — gets no cushion at all, silently. Surface
-    that mismatch so the slice cap gets raised to match.
+    cgroup v2 swap limits are hierarchical, so a worker can never use more swap
+    than its enclosing slice allows. Two silent surprises follow, both fixed by
+    raising (or clearing) ``CODEX_WORKER_SLICE_MEMORY_SWAP_MAX``:
+
+    * An operator raises only ``CODEX_WORKER_MEMORY_SWAP_MAX`` to grant a
+      cushion, leaving the slice at the fail-fast ``0`` default — the stricter
+      slice cap nullifies the cushion.
+    * An operator clears ``CODEX_WORKER_MEMORY_SWAP_MAX`` to opt a worker out of
+      the per-scope cap — the slice still enforces its own cap, so the worker
+      gets no swap despite the cleared setting.
     """
-    worker_swap = _effective_swap_cap(
-        "CODEX_WORKER_MEMORY_MAX",
-        "CODEX_WORKER_MEMORY_SWAP_MAX",
-    )
-    # No effective cap, or a hard-zero cap, means there is no cushion to defend.
-    if worker_swap is None or worker_swap == "0":
-        return
     slice_swap = _effective_swap_cap(
         "CODEX_WORKER_SLICE_MEMORY_MAX",
         "CODEX_WORKER_SLICE_MEMORY_SWAP_MAX",
     )
-    # No enforced parent cap leaves slice swap unlimited; the cushion stands.
-    if slice_swap is None:
+    # No enforced, finite slice cap means the slice imposes no swap restriction
+    # the worker could be surprised by.
+    if slice_swap is None or not _is_finite_limit(slice_swap):
         return
-    worker_bytes = _parse_memory_bytes(worker_swap)
-    slice_bytes = _parse_memory_bytes(slice_swap)
-    if worker_bytes is not None and slice_bytes is not None:
-        parent_is_stricter = slice_bytes < worker_bytes
-    else:
-        # Can't compare magnitudes (percentages, decimals, infinity); only the
-        # hard-zero parent is unambiguously stricter than a non-zero cushion.
-        parent_is_stricter = slice_swap == "0"
-    if not parent_is_stricter:
-        return
-    logger.warning(
-        "CODEX_WORKER_MEMORY_SWAP_MAX=%r is nullified by the stricter parent "
-        "slice CODEX_WORKER_SLICE_MEMORY_SWAP_MAX=%r: cgroup swap limits are "
-        "hierarchical, so the per-worker swap cushion is ineffective until the "
-        "slice cap is raised to at least match it.",
-        worker_swap,
-        slice_swap,
+
+    worker_swap = _effective_swap_cap(
+        "CODEX_WORKER_MEMORY_MAX",
+        "CODEX_WORKER_MEMORY_SWAP_MAX",
     )
+    if worker_swap is not None and _is_finite_limit(worker_swap):
+        # The worker imposes its own finite swap cap.
+        if worker_swap == "0":
+            return  # Worker denies swap too; consistent with the slice cap.
+        worker_bytes = _parse_memory_bytes(worker_swap)
+        slice_bytes = _parse_memory_bytes(slice_swap)
+        if worker_bytes is not None and slice_bytes is not None:
+            clipped = slice_bytes < worker_bytes
+        else:
+            # Can't compare magnitudes (percentages, decimals); only a hard-zero
+            # slice is unambiguously stricter than a non-zero cushion.
+            clipped = slice_swap == "0"
+        if clipped:
+            logger.warning(
+                "CODEX_WORKER_MEMORY_SWAP_MAX=%r is nullified by the stricter "
+                "parent slice CODEX_WORKER_SLICE_MEMORY_SWAP_MAX=%r: cgroup swap "
+                "limits are hierarchical, so the per-worker swap cushion is "
+                "ineffective until the slice cap is raised to at least match it.",
+                worker_swap,
+                slice_swap,
+            )
+        return
+
+    # The worker has a finite hard cap but leaves swap unlimited (the setting is
+    # cleared or ``infinity``) — an opt-out the slice silently overrides.
+    worker_hard = str(getattr(settings, "CODEX_WORKER_MEMORY_MAX", "") or "").strip()
+    worker_swap_raw = str(
+        getattr(settings, "CODEX_WORKER_MEMORY_SWAP_MAX", "") or ""
+    ).strip()
+    if _is_finite_limit(worker_hard) and not _is_finite_limit(worker_swap_raw):
+        logger.warning(
+            "CODEX_WORKER_MEMORY_SWAP_MAX=%r leaves the worker's swap uncapped, "
+            "but the enclosing slice still enforces "
+            "CODEX_WORKER_SLICE_MEMORY_SWAP_MAX=%r: cgroup swap limits are "
+            "hierarchical, so the worker is still limited to the slice's swap "
+            "budget until that cap is cleared or raised.",
+            worker_swap_raw,
+            slice_swap,
+        )
 
 
 def _ensure_systemd_worker_slice() -> None:
