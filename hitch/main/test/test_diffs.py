@@ -456,6 +456,64 @@ class WorktreeDiffTests(SimpleTestCase):
         ]
         self.assertEqual(context_line_numbers, [])
 
+    def test_form_feed_in_content_does_not_split_diff_lines(self) -> None:
+        # git frames diff output on ``\n`` only, treating form feeds (common in
+        # Python/Emacs/C source as page-break markers), vertical tabs, and the
+        # Unicode line/paragraph separators as ordinary line content.
+        # ``str.splitlines`` instead breaks on all of them, which used to tear a
+        # single diff line in two: the model added exactly one line, but the
+        # tail after the form feed -- here beginning with ``-`` -- was reparsed
+        # as a phantom deletion, inventing a bogus ``deletions`` total and
+        # shifting the old-side line numbers of every following context line.
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            tracked = repo / "page.txt"
+            tracked.write_text("one\ntwo\nthree\n")
+            _git(repo, "add", "page.txt")
+            _git(repo, "commit", "-m", "initial")
+
+            tracked.write_text("one\ninserted\x0c-dashed\ntwo\nthree\n")
+
+            diff = build_worktree_diff(str(repo))
+
+        self.assertEqual(diff.additions, 1)
+        self.assertEqual(diff.deletions, 0)
+        page = next(file for file in diff.files if file.path == "page.txt")
+        added = [line for line in page.lines if line.kind == "add"]
+        self.assertEqual(len(added), 1)
+        self.assertIn("inserted", added[0].html)
+        self.assertIn("dashed", added[0].html)
+        self.assertEqual([line for line in page.lines if line.kind == "remove"], [])
+        # The unchanged trailing lines keep their true old-side line numbers
+        # rather than being pushed down by the phantom deletion.
+        context = [
+            (line.old_lineno, line.new_lineno)
+            for line in page.lines
+            if line.kind == "context"
+        ]
+        self.assertEqual(context, [(1, 1), (2, 3), (3, 4)])
+
+    def test_form_feed_in_untracked_file_keeps_one_line_per_newline(self) -> None:
+        # The same ``splitlines`` over-split inflated the synthetic untracked
+        # file diff: a file with N ``\n``-delimited lines but an embedded form
+        # feed rendered N+1 ``+`` rows and a wrong ``@@ -0,0 +1,N @@`` count.
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw)
+            subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+            (repo / "new.txt").write_text("header\x0cbody\ntail\n")
+
+            diff_text = build_worktree_diff_text(str(repo))
+            diff = build_worktree_diff(str(repo))
+
+        self.assertIn("@@ -0,0 +1,2 @@", diff_text)
+        new_file = next(file for file in diff.files if file.path == "new.txt")
+        added = [line for line in new_file.lines if line.kind == "add"]
+        self.assertEqual(len(added), 2)
+        self.assertIn("header", added[0].html)
+        self.assertIn("body", added[0].html)
+        self.assertIn("tail", added[1].html)
+
     def test_untracked_file_without_trailing_newline_marks_eof(self) -> None:
         # The synthetic untracked-file diff is rendered into the session view
         # and -- when auto-merge is disabled -- forwarded verbatim to the QA
