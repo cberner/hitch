@@ -1035,6 +1035,7 @@ def _finalize_pr_snapshot(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     if not url and not (
         isinstance(snapshot.get("repository_full_name"), str)
         and isinstance(snapshot.get("pr_number"), int)
+        and not isinstance(snapshot.get("pr_number"), bool)
     ):
         return None
     return snapshot
