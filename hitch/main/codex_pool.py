@@ -1526,12 +1526,14 @@ def _memory_cgroup_properties(
     silently ignore the limits unless accounting is explicitly enabled on the
     unit, so the cap would not actually bound the worker.
 
-    ``MemorySwapMax`` rides along with the limits because cgroup v2 counts only
-    RAM toward ``MemoryMax``: without a swap cap a runaway worker is reclaimed
-    to swap instead of OOM-killed, so the hard cap never fires and the turn
-    thrashes the host indefinitely rather than failing. It is only emitted when
-    a memory limit is also set (i.e. accounting is on), so it never disables
-    swap on an otherwise-unbounded unit.
+    ``MemorySwapMax`` rides along with the *hard* ``MemoryMax`` because cgroup
+    v2 counts only RAM toward ``MemoryMax``: without a swap cap a runaway worker
+    is reclaimed to swap instead of OOM-killed, so the hard cap never fires and
+    the turn thrashes the host indefinitely rather than failing. It is gated on
+    ``MemoryMax`` rather than any limit: ``MemoryHigh`` is a soft throttle that
+    usage may exceed (graceful degradation, no OOM), so a high-only config has
+    no hard ceiling for the swap cap to make "true" and must keep its swap to
+    degrade as intended rather than be silently denied it.
 
     The per-worker scope and the aggregate slice share this builder so their
     accounting/limit/swap handling cannot drift apart.
@@ -1546,7 +1548,7 @@ def _memory_cgroup_properties(
         properties.append(f"MemoryHigh={high}")
     if hard:
         properties.append(f"MemoryMax={hard}")
-    if swap and (high or hard):
+    if swap and hard:
         properties.append(f"MemorySwapMax={swap}")
     return properties
 
@@ -1596,19 +1598,16 @@ def _parse_memory_bytes(value: str) -> int | None:
         return None
 
 
-def _effective_swap_cap(
-    high_setting: str, max_setting: str, swap_setting: str
-) -> str | None:
+def _effective_swap_cap(max_setting: str, swap_setting: str) -> str | None:
     """Return the ``MemorySwapMax`` value a unit will actually enforce, if any.
 
     Mirrors :func:`_memory_cgroup_properties`: the swap cap is only emitted
-    (hence enforced) when a memory limit rides along, so an otherwise-unbounded
-    unit reports ``None`` — it leaves swap unlimited regardless of the setting.
+    (hence enforced) alongside a hard ``MemoryMax``, so a unit with no hard cap
+    reports ``None`` — it leaves swap unlimited regardless of the setting.
     """
-    high = str(getattr(settings, high_setting, "") or "").strip()
     hard = str(getattr(settings, max_setting, "") or "").strip()
     swap = str(getattr(settings, swap_setting, "") or "").strip()
-    if swap and (high or hard):
+    if swap and hard:
         return swap
     return None
 
@@ -1623,7 +1622,6 @@ def _warn_on_swap_cap_hierarchy() -> None:
     that mismatch so the slice cap gets raised to match.
     """
     worker_swap = _effective_swap_cap(
-        "CODEX_WORKER_MEMORY_HIGH",
         "CODEX_WORKER_MEMORY_MAX",
         "CODEX_WORKER_MEMORY_SWAP_MAX",
     )
@@ -1631,7 +1629,6 @@ def _warn_on_swap_cap_hierarchy() -> None:
     if worker_swap is None or worker_swap == "0":
         return
     slice_swap = _effective_swap_cap(
-        "CODEX_WORKER_SLICE_MEMORY_HIGH",
         "CODEX_WORKER_SLICE_MEMORY_MAX",
         "CODEX_WORKER_SLICE_MEMORY_SWAP_MAX",
     )
