@@ -2730,12 +2730,32 @@ def _cleanup_new_autonomous_goal_worktree(worktree: ManagedWorktree | None) -> N
         )
 
 
+def _interrupt_candidate_instance(instance: CodexInstance) -> None:
+    """Best-effort stop of a spawned candidate worker during startup cleanup."""
+    try:
+        codex_pool.interrupt_instance(
+            instance.pk, expected_thread_id=instance.thread_id
+        )
+    except Exception:
+        logger.exception(
+            "failed to interrupt autonomous goal candidate worker %s", instance.pk
+        )
+
+
 def _spawn_autonomous_goal_candidate_run(
     workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
 ) -> SystemAgentRun:
     session_cwd, managed_worktree = _prepare_autonomous_goal_candidate_cwd(
         workflow, autonomous_goal
     )
+    # Reclaim a freshly created worktree only while it is still unlinked, i.e.
+    # before the candidate session exists. Up to that point a failure leaves
+    # nothing able to reclaim it later: the failure notice would carry
+    # candidate_session=None, so the dismiss/reject cleanup skips it and the
+    # worktree (and spawned worker) would orphan on disk. Once the candidate
+    # session id is recorded below, the notice links to that session and the
+    # normal dismiss/reject path removes the worktree, so a later failure must
+    # not delete it out from under that still-referenced link.
     try:
         prompt, memory_context = _autonomous_goal_candidate_prompt(
             workflow, autonomous_goal
@@ -2760,17 +2780,26 @@ def _spawn_autonomous_goal_candidate_run(
     except Exception:
         _cleanup_new_autonomous_goal_worktree(managed_worktree)
         raise
-    metadata = session_index.upsert_local_session(
-        thread_id=instance.thread_id,
-        cwd=session_cwd,
-        project=autonomous_goal.project,
-        preview=prompt,
-        auto_pr_enabled=False,
-        auto_qa_enabled=False,
-        auto_merge_to_local_branch=False,
-        auto_merge_branch="",
-        is_hidden_system_session=True,
-    )
+    try:
+        metadata = session_index.upsert_local_session(
+            thread_id=instance.thread_id,
+            cwd=session_cwd,
+            project=autonomous_goal.project,
+            preview=prompt,
+            auto_pr_enabled=False,
+            auto_qa_enabled=False,
+            auto_merge_to_local_branch=False,
+            auto_merge_branch="",
+            is_hidden_system_session=True,
+        )
+    except Exception:
+        # The worker is already launched in this checkout. Stop it before
+        # reclaiming the worktree so it is not left running against a removed
+        # cwd (best-effort: a no-op while it is still launching with no pid,
+        # in which case reconcile_dead reaps it once the workflow is blocked).
+        _interrupt_candidate_instance(instance)
+        _cleanup_new_autonomous_goal_worktree(managed_worktree)
+        raise
     workflow.state = {**workflow.state, "candidate_session_id": metadata.pk}
     workflow.save(update_fields=["state", "updated_at"])
     run, _created = SystemAgentRun.objects.get_or_create(

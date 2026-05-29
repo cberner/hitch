@@ -7,7 +7,7 @@ from typing import Any, NamedTuple, override
 from unittest.mock import MagicMock, patch
 
 from django.core.management import call_command
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, OperationalError, transaction
 from django.test import TestCase
 from openai_codex.generated.v2_all import GetAccountRateLimitsResponse, ThreadSource
 
@@ -4855,6 +4855,99 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_cleanup.assert_called_once_with(managed_worktree)
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+
+    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
+    @patch("hitch.main.system_agents.cleanup_worktree")
+    @patch("hitch.main.system_agents.session_index.upsert_local_session")
+    @patch("hitch.main.system_agents.create_worktree_for_session")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_workflow_cleans_up_candidate_worktree_when_session_persist_fails(
+        self,
+        mock_spawn: MagicMock,
+        mock_worktree: MagicMock,
+        mock_upsert: MagicMock,
+        mock_cleanup: MagicMock,
+        mock_interrupt: MagicMock,
+    ) -> None:
+        # A transient DB failure after the candidate worker is spawned but
+        # before its session id is stored must reclaim the worktree (otherwise
+        # the failure notice has no candidate_session to clean up and the
+        # worktree leaks) and stop the already-launched worker so it does not
+        # keep running against the removed checkout.
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+        )
+        managed_worktree = MagicMock(path=Path("/repo-worktree"))
+        mock_worktree.return_value = managed_worktree
+        instance = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        mock_spawn.return_value = instance
+        mock_upsert.side_effect = OperationalError("database is locked")
+
+        workflow = system_agents.start_autonomous_goal_workflow(
+            autonomous_goal=autonomous_goal,
+            use_worktrees=True,
+        )
+
+        mock_interrupt.assert_called_once_with(
+            instance.pk, expected_thread_id="candidate-thread"
+        )
+        mock_cleanup.assert_called_once_with(managed_worktree)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+
+    @patch("hitch.main.system_agents.cleanup_worktree")
+    @patch("hitch.main.system_agents.create_worktree_for_session")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_candidate_worktree_kept_when_linked_run_persist_fails(
+        self,
+        mock_spawn: MagicMock,
+        mock_worktree: MagicMock,
+        mock_cleanup: MagicMock,
+    ) -> None:
+        # Once the candidate session is linked (session row created and
+        # candidate_session_id stored), a later failure must NOT delete the
+        # worktree: the blocked workflow's failure notice points at that
+        # candidate session, and the normal dismiss/reject path reclaims the
+        # worktree. Deleting it here would strand the spawned worker and leave
+        # the inbox notice pointing at a removed checkout.
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+        )
+        mock_worktree.return_value = MagicMock(path=Path("/repo-worktree"))
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        with patch.object(
+            SystemAgentRun.objects,
+            "get_or_create",
+            side_effect=OperationalError("database is locked"),
+        ):
+            workflow = system_agents.start_autonomous_goal_workflow(
+                autonomous_goal=autonomous_goal,
+                use_worktrees=True,
+            )
+
+        mock_cleanup.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        candidate = SessionMetadata.objects.get(thread_id="candidate-thread")
+        self.assertEqual(workflow.state["candidate_session_id"], candidate.pk)
+        notice = ProposedSession.objects.get(
+            inbox_kind=ProposedSession.INBOX_KIND_NOTICE
+        )
+        self.assertEqual(notice.candidate_session, candidate)
 
     @patch(
         "hitch.main.system_agents.default_branch_checkout_commit_hash",
