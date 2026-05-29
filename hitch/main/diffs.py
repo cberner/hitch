@@ -256,14 +256,19 @@ def _synthetic_new_file_diff(repo: Path, relpath: str) -> str:
         )
     clipped = len(data) > _MAX_UNTRACKED_FILE_BYTES
     text = data[:_MAX_UNTRACKED_FILE_BYTES].decode("utf-8", errors="replace")
-    lines = text.splitlines()
-    # ``splitlines`` strips line terminators, so the trailing-newline status
-    # of the file would otherwise be lost. Capture it here so we can emit the
-    # git-style ``\ No newline at end of file`` marker that ``_parse_unified_diff``
-    # surfaces as a meta row and that reviewer agents look for. When the file
-    # is clipped the marker would describe the synthetic ``File preview
-    # truncated`` line rather than the real file, so suppress it.
-    file_ends_with_newline = text.endswith(("\n", "\r"))
+    # Split on ``\n`` only (see ``_split_diff_lines``): ``str.splitlines`` would
+    # break on embedded form feeds / Unicode separators and synthesise extra
+    # ``+`` rows plus a wrong ``@@ -0,0 +1,N @@`` line count for files that
+    # contain them.
+    lines = _split_diff_lines(text)
+    # The split drops line terminators, so capture the trailing-newline status
+    # here to emit the git-style ``\ No newline at end of file`` marker that
+    # ``_parse_unified_diff`` surfaces as a meta row and that reviewer agents
+    # look for. Only ``\n`` counts as a git line terminator, so a file ending in
+    # a bare ``\r`` (classic-Mac) correctly reads as having no trailing newline.
+    # When the file is clipped the marker would describe the synthetic ``File
+    # preview truncated`` line rather than the real file, so suppress it.
+    file_ends_with_newline = text.endswith("\n")
     if clipped:
         lines.append("File preview truncated")
     body = list(
@@ -291,13 +296,36 @@ def _synthetic_notice_diff(relpath: str, message: str) -> str:
     )
 
 
+def _split_diff_lines(text: str) -> list[str]:
+    """Split git diff / file text into lines on ``\\n`` only.
+
+    git frames both its diff output and file content on ``\\n``; every other
+    byte -- including form feed (``\\f``), vertical tab (``\\v``), the ASCII
+    file/group/record separators (``\\x1c``-``\\x1e``), and the Unicode line
+    (``\\u2028``)/paragraph (``\\u2029``)/NEL (``\\x85``) separators -- is
+    ordinary line *content*. ``str.splitlines`` breaks on all of those, which
+    would tear a single diff line in two: the tail is reparsed as its own row
+    (silently truncating the real content, emitting a phantom meta line, and --
+    when the tail happens to start with ``+``/``-``/`` `` -- inventing a
+    phantom add/remove that drifts every following line number and the
+    add/delete totals). A trailing ``\\r`` is dropped so a CRLF diff renders
+    identically to an LF one.
+    """
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        # ``text`` is newline-terminated; the split's trailing empty element is
+        # not a real line.
+        lines.pop()
+    return [line[:-1] if line.endswith("\r") else line for line in lines]
+
+
 def _parse_unified_diff(text: str, *, truncated: bool = False) -> DiffView:
     files: list[DiffFile] = []
     current: _MutableDiffFile | None = None
     old_lineno: int | None = None
     new_lineno: int | None = None
 
-    for raw_line in text.splitlines():
+    for raw_line in _split_diff_lines(text):
         if raw_line.startswith("diff --git "):
             if current is not None:
                 files.append(current.freeze())
