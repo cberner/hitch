@@ -99,6 +99,18 @@ def pending_plan_entry(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
         if kind == "plan":
             return entry
         if kind == "agent":
+            # Commentary narration is intermediate, not the turn's final reply.
+            # Callers also pass raw, un-collapsed rollout entries (the
+            # session-list stage and the auto-review gate), where that
+            # narration keeps ``kind="agent"`` with a ``commentary`` phase
+            # instead of being folded into a skipped ``thinking`` entry as it
+            # is for the collapsed session view. Skip it so both inputs agree
+            # that only a real (final/unset-phase) agent reply resolves a
+            # pending plan -- otherwise auto-PR/auto-QA can fire on a plan the
+            # user has not approved yet. Collapsed entries carry no phase, so
+            # they always fall through to the terminator below.
+            if entry.get("phase") == "commentary":
+                continue
             return None
     return None
 
