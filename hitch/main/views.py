@@ -2805,7 +2805,11 @@ def update_proposed_session_outcome(
     if proposed_session is None:
         return HttpResponseBadRequest("proposed session is required")
     outcome_status = request.POST.get("outcome_status", "")
-    valid_statuses = {choice[0] for choice in ProposedSession.OUTCOME_CHOICES}
+    # OUTCOME_UNSET is the inbox's pending state, not a decision the endpoint can
+    # apply; accepting it as a target would let a request re-open a resolved item.
+    valid_statuses = {
+        choice[0] for choice in ProposedSession.OUTCOME_CHOICES
+    } - {ProposedSession.OUTCOME_UNSET}
     if outcome_status not in valid_statuses:
         return HttpResponseBadRequest("outcome status is invalid")
     outcome_notes = request.POST.get(
@@ -2822,12 +2826,15 @@ def update_proposed_session_outcome(
         and outcome_status != ProposedSession.OUTCOME_DISMISSED
     ):
         return HttpResponseBadRequest("outcome status is invalid")
-    proposed_session.outcome_status = outcome_status
-    proposed_session.outcome_notes = outcome_notes
-    update_fields = ["outcome_status", "outcome_notes", "updated_at"]
+    update_values: dict[str, Any] = {
+        "outcome_status": outcome_status,
+        "outcome_notes": outcome_notes,
+        # update() bypasses save(), so the auto_now updated_at must be set here.
+        "updated_at": timezone.now(),
+    }
     if outcome_status == ProposedSession.OUTCOME_ACCEPTED:
-        proposed_session.accepted_session = proposed_session.candidate_session
-        proposed_session.outcome_metadata = _proposal_outcome_metadata(
+        update_values["accepted_session"] = proposed_session.candidate_session
+        update_values["outcome_metadata"] = _proposal_outcome_metadata(
             proposed_session,
             {
                 "accepted_by": "user",
@@ -2843,8 +2850,26 @@ def update_proposed_session_outcome(
                 ),
             },
         )
-        update_fields.extend(["accepted_session", "outcome_metadata"])
-    proposed_session.save(update_fields=update_fields)
+    # Inbox decisions are one-way: only an undecided item may be resolved
+    # (UNSET -> accepted/rejected/dismissed), matching the OUTCOME_UNSET filter
+    # the new-session entry points already apply. Enforce it with a single
+    # conditional UPDATE gated on the row still being OUTCOME_UNSET rather than a
+    # read-then-write: two near-simultaneous requests (e.g. a stale-tab reject
+    # racing an accept) could both read OUTCOME_UNSET before either commits, and
+    # the loser would clobber the accepted outcome and re-hide the live session.
+    # The atomic WHERE clause serializes the decision -- exactly one request
+    # matches a row; the loser updates nothing and bails before any side effects.
+    # (A row lock would also work, but only on backends that honor
+    # select_for_update; a conditional UPDATE is correct on every backend.)
+    applied = ProposedSession.objects.filter(
+        pk=proposed_session.pk,
+        outcome_status=ProposedSession.OUTCOME_UNSET,
+    ).update(**update_values)
+    if not applied:
+        return HttpResponseBadRequest("proposed session has already been resolved")
+    # Mirror the committed values onto the instance for the cleanup side effect.
+    for field, value in update_values.items():
+        setattr(proposed_session, field, value)
     if outcome_status in {
         ProposedSession.OUTCOME_DISMISSED,
         ProposedSession.OUTCOME_REJECTED,
@@ -6495,12 +6520,16 @@ def _candidate_session_to_continue_from_proposal(
 
 def _accept_proposed_session_for_session(
     proposed_session: ProposedSession | None, session_metadata: SessionMetadata
-) -> None:
+) -> bool:
+    """Record acceptance of ``proposed_session`` into ``session_metadata``.
+
+    Returns whether this call won the one-way transition. ``False`` means the
+    proposal was already resolved (e.g. a concurrent inbox reject/dismiss), so
+    callers that adopt the candidate worktree must abort rather than present it.
+    """
     if proposed_session is None:
-        return
-    proposed_session.outcome_status = ProposedSession.OUTCOME_ACCEPTED
-    proposed_session.accepted_session = session_metadata
-    proposed_session.outcome_metadata = _proposal_outcome_metadata(
+        return False
+    outcome_metadata = _proposal_outcome_metadata(
         proposed_session,
         {
             "accepted_by": "user",
@@ -6508,14 +6537,28 @@ def _accept_proposed_session_for_session(
             "accepted_thread_id": session_metadata.thread_id,
         },
     )
-    proposed_session.save(
-        update_fields=[
-            "outcome_status",
-            "accepted_session",
-            "outcome_metadata",
-            "updated_at",
-        ]
+    # Gate the accept on the proposal still being undecided, mirroring the
+    # conditional UPDATE in update_proposed_session_outcome, so exactly one
+    # transition wins across both endpoints. In a stale-tab race where the inbox
+    # endpoint rejects/dismisses this proposal (cleaning up the candidate
+    # worktree) while new_session is accepting it, an unconditional save here
+    # would overwrite the resolved status and leave accepted_session pointing at
+    # a removed worktree. The loser of the race updates nothing.
+    applied = ProposedSession.objects.filter(
+        pk=proposed_session.pk,
+        outcome_status=ProposedSession.OUTCOME_UNSET,
+    ).update(
+        outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        accepted_session=session_metadata,
+        outcome_metadata=outcome_metadata,
+        updated_at=timezone.now(),
     )
+    if not applied:
+        return False
+    proposed_session.outcome_status = ProposedSession.OUTCOME_ACCEPTED
+    proposed_session.accepted_session = session_metadata
+    proposed_session.outcome_metadata = outcome_metadata
+    return True
 
 
 def _proposal_outcome_metadata(
@@ -7692,6 +7735,14 @@ def _finish_candidate_proposal_start(
         if target.project_cleared
         else candidate_session.project or target.project
     )
+    # Win the accept transition before adopting the candidate. If a concurrent
+    # inbox reject/dismiss resolved the proposal first, it may have already
+    # cleaned up this candidate's worktree, so we must not unhide it as a visible
+    # working session -- bail back to the inbox and leave the candidate hidden.
+    if not _accept_proposed_session_for_session(proposed_session, candidate_session):
+        response = redirect("inbox")
+        _apply_cookie_updates(response, cookie_updates)
+        return response
     SessionMetadata.objects.filter(pk=candidate_session.pk).update(
         cwd=candidate_cwd,
         project=session_project,
@@ -7703,7 +7754,6 @@ def _finish_candidate_proposal_start(
         is_hidden_system_session=False,
     )
     candidate_session.refresh_from_db()
-    _accept_proposed_session_for_session(proposed_session, candidate_session)
     remembered_values = settings._replace(last_selected_repo=cwd)
     user = _authenticated_user(request)
     if user is not None:

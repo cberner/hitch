@@ -6644,6 +6644,72 @@ class NewSessionViewTests(TestCase):
         self.assertEqual(candidate.auto_merge_branch, "release")
         mock_new_session.assert_not_called()
 
+    @patch("hitch.main.views._auto_merge_to_local_branch_for_proposal")
+    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    def test_candidate_accept_losing_race_aborts_to_inbox(
+        self,
+        mock_turn: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_managed_worktrees: MagicMock,
+        mock_auto_merge: MagicMock,
+    ) -> None:
+        # Stale-tab race: new_session fetched the still-unset proposal and began
+        # continuing its candidate worktree, but an inbox reject commits before
+        # the accept transition runs. The accept must lose, and the caller must
+        # abort to the inbox rather than unhide the candidate (whose worktree the
+        # reject path may have cleaned up) and redirect to it as a live session.
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
+        _setup_codex(mock_codex, models=[])
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+            is_hidden_system_session=True,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            title="Add parser coverage",
+        )
+
+        def reject_concurrently(*_args: Any, **_kwargs: Any) -> tuple[bool, str]:
+            ProposedSession.objects.filter(pk=proposal.pk).update(
+                outcome_status=ProposedSession.OUTCOME_REJECTED,
+                outcome_notes="Resolved from another tab.",
+            )
+            return False, ""
+
+        mock_auto_merge.side_effect = reject_concurrently
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Go ahead and implement this proposed session.",
+                "cwd": self.REPO,
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], reverse("inbox"))
+        proposal.refresh_from_db()
+        candidate.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_REJECTED)
+        self.assertIsNone(proposal.accepted_session)
+        # The losing accept must not have adopted the candidate as a live session.
+        self.assertTrue(candidate.is_hidden_system_session)
+
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.discover_managed_worktrees")
     @patch("hitch.main.views.discover_repos")
@@ -13172,6 +13238,119 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_REJECTED)
         self.assertEqual(proposal.outcome_notes, "Not useful enough.")
         mock_cleanup.assert_called_once_with("/repo-worktree")
+
+    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    def test_update_outcome_rejects_already_resolved_proposal(
+        self, mock_cleanup: MagicMock
+    ) -> None:
+        # A proposal accepted into its candidate session (accepted_session ==
+        # candidate_session) un-hides that otherwise-hidden system thread, so the
+        # user can see and work in it. A stale inbox tab can still post a
+        # dismiss/reject for the same proposal; re-deciding it must be refused so
+        # the recorded outcome is not corrupted and the live session stays
+        # visible.
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+            is_hidden_system_session=True,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            title="Add parser coverage",
+            candidate_session=candidate,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            accepted_session=candidate,
+        )
+        self.assertIn(
+            "candidate-thread",
+            system_agents.accepted_visible_system_thread_ids(),
+        )
+
+        for outcome in (
+            ProposedSession.OUTCOME_DISMISSED,
+            ProposedSession.OUTCOME_REJECTED,
+        ):
+            with self.subTest(outcome=outcome):
+                response = self.client.post(
+                    reverse("update_proposed_session_outcome", args=[proposal.pk]),
+                    {"outcome_status": outcome, "reason": "Changed my mind."},
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(
+                    response.content, b"proposed session has already been resolved"
+                )
+                proposal.refresh_from_db()
+                self.assertEqual(
+                    proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED
+                )
+                self.assertEqual(proposal.accepted_session, candidate)
+        # The accepted session stayed visible and its worktree was never removed.
+        self.assertIn(
+            "candidate-thread",
+            system_agents.accepted_visible_system_thread_ids(),
+        )
+        mock_cleanup.assert_not_called()
+
+    def test_update_outcome_rejects_unset_target_status(self) -> None:
+        # OUTCOME_UNSET is the pending inbox state, not a decision; the endpoint
+        # must not let a request re-open a proposal by posting it.
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            title="Add parser coverage",
+        )
+
+        response = self.client.post(
+            reverse("update_proposed_session_outcome", args=[proposal.pk]),
+            {"outcome_status": ProposedSession.OUTCOME_UNSET},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"outcome status is invalid")
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+
+    def test_accept_helper_does_not_overwrite_resolved_proposal(self) -> None:
+        # The accept path (new-session "Do it") and the inbox outcome endpoint
+        # race on the same proposal. If the inbox endpoint already rejected it
+        # -- which also cleans up the candidate worktree -- the accept helper
+        # must leave that decision intact rather than flip it to accepted, which
+        # would leave accepted_session pointing at a removed worktree. Exactly
+        # one transition wins across both endpoints.
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Add parser coverage",
+            outcome_status=ProposedSession.OUTCOME_REJECTED,
+            outcome_notes="Not useful enough.",
+        )
+        started = SessionMetadata.objects.create(
+            thread_id="started-thread",
+            cwd="/repo",
+            project=project,
+        )
+
+        views._accept_proposed_session_for_session(proposal, started)
+
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_REJECTED)
+        self.assertIsNone(proposal.accepted_session)
+        self.assertEqual(proposal.outcome_notes, "Not useful enough.")
 
 
 class ResetStaleStageCacheMigrationTests(TransactionTestCase):
