@@ -319,11 +319,17 @@ def pr_observation_result_from_turns(
         if not turn.is_pr_prompt:
             if not _pr_snapshot_has_identity(current_snapshot):
                 continue
-            accepted_updates = [
-                update
-                for update in turn_updates
-                if _pr_update_belongs_to_current_pr(current_snapshot, update)
-            ]
+            # Accept updates sequentially against a working copy so an earlier
+            # update in the turn that records the PR's run ids (a commit-
+            # correlated ``fetch_commit_workflow_runs``) lets a later
+            # ``fetch_workflow_run_jobs`` update in the same turn correlate by
+            # run id.
+            working = dict(current_snapshot) if current_snapshot else {}
+            accepted_updates = []
+            for update in turn_updates:
+                if _pr_update_belongs_to_current_pr(working, update):
+                    accepted_updates.append(update)
+                    _merge_pr_snapshot_update(working, update)
             if (
                 not accepted_updates
                 and turn.is_completed
@@ -765,6 +771,18 @@ def _copy_ci_fields(
     result_values: list[dict[str, Any]],
 ) -> None:
     _copy_pr_identity_from_args(target, raw_args)
+    if tool == "fetch_workflow_run_jobs" and isinstance(raw_args, dict):
+        # ``fetch_workflow_run_jobs`` names only a ``run_id``; record it as the
+        # correlation key so a later turn that drills into a run already seen
+        # for the current PR (its id captured from ``fetch_commit_workflow_runs``
+        # below) is attributed to that PR instead of being treated as either an
+        # unrelated run or unrelated work that supersedes the PR epoch.
+        observed_run_id = _positive_int(raw_args.get("run_id"))
+        if observed_run_id is not None:
+            target["observed_run_id"] = observed_run_id
+            target["workflow_run_ids"] = _merge_run_ids(
+                target.get("workflow_run_ids"), [observed_run_id]
+            )
     for source in result_values:
         if tool == "get_commit_combined_status":
             status = _ci_status_from_statuses(source.get("statuses"))
@@ -781,6 +799,15 @@ def _copy_ci_fields(
                 # the follow-up agent needs.
                 target["ci_status"] = status
         elif tool == "fetch_commit_workflow_runs":
+            # Workflow-runs observations carry ``commit_sha`` (so they correlate
+            # to the current PR by commit) and enumerate the run ids that
+            # ``fetch_workflow_run_jobs`` later drills into; record them so those
+            # follow-up job observations correlate by run id.
+            run_ids = _workflow_run_ids_from_runs(source.get("workflow_runs"))
+            if run_ids:
+                target["workflow_run_ids"] = _merge_run_ids(
+                    target.get("workflow_run_ids"), run_ids
+                )
             status = _ci_status_from_runs(source.get("workflow_runs"))
             if status:
                 # Workflow-runs observations DO speak for the same check-run
@@ -917,6 +944,13 @@ def _merge_pr_snapshot_update(
     values = dict(update.values)
     if _pr_snapshot_identity_changed(snapshot, values):
         snapshot.clear()
+    elif _pr_snapshot_head_changed(snapshot, values):
+        # A new push advances the head: workflow run ids captured for the old
+        # head identify a superseded commit's runs, so drop them. Otherwise a
+        # later job drill into one of those stale run ids would still correlate
+        # and overwrite the new head's CI status with results from the old
+        # commit, leaving the PR follow-up blocked on superseded CI.
+        snapshot.pop("workflow_run_ids", None)
     for key, value in values.items():
         # ``None`` is an "absent" sentinel; empty list/dict is an explicit
         # "observed and found none" clear. ``""`` is "absent" for every
@@ -938,6 +972,12 @@ def _merge_pr_snapshot_update(
             and value == "thumbs_up"
             and snapshot.get("review_signal") == "changes_requested"
         ):
+            continue
+        if key == "workflow_run_ids" and isinstance(value, list):
+            # Run ids accumulate across observations (an empty list never
+            # clears them) so a run seen once for this PR keeps correlating
+            # later job observations.
+            snapshot[key] = _merge_run_ids(snapshot.get(key), value)
             continue
         snapshot[key] = value
 
@@ -967,6 +1007,23 @@ def _pr_snapshot_identity_changed(
         and not isinstance(update_number, bool)
         and current_number != update_number
     )
+
+
+def _pr_head_commit_values(snapshot: dict[str, Any]) -> set[str]:
+    values: set[str] = set()
+    for key in ("head_sha", "latest_commit_sha"):
+        value = snapshot.get(key)
+        if isinstance(value, str) and value:
+            values.add(value)
+    return values
+
+
+def _pr_snapshot_head_changed(current: dict[str, Any], update: dict[str, Any]) -> bool:
+    if not current:
+        return False
+    current_values = _pr_head_commit_values(current)
+    update_values = _pr_head_commit_values(update)
+    return bool(current_values and update_values and current_values != update_values)
 
 
 def _finalize_pr_snapshot(snapshot: dict[str, Any]) -> dict[str, Any] | None:
@@ -1021,7 +1078,63 @@ def _pr_update_belongs_to_current_pr(
     if update_repo and current_repo and update_repo != current_repo:
         return False
     update_commit = _string_from_any(update.values.get("latest_commit_sha"))
-    return bool(update_commit and update_commit in _pr_commit_shas(current))
+    if update_commit:
+        return update_commit in _pr_commit_shas(current)
+    # No PR identity and no commit SHA. A ``fetch_workflow_run_jobs`` observation
+    # is in this shape -- it names only a ``run_id``. Correlate it to the current
+    # PR by that run id: accept it only when the run was already seen among the
+    # PR's own workflow runs (recorded from a commit-correlated
+    # ``fetch_commit_workflow_runs``). This keeps a routine "drill into the
+    # failing run's jobs" follow-up from superseding the PR epoch, without
+    # attributing a job check for an unrelated repo/PR's ``run_id`` to it.
+    update_run_id = update.values.get("observed_run_id")
+    if isinstance(update_run_id, int) and not isinstance(update_run_id, bool):
+        return update_run_id in _pr_workflow_run_ids(current)
+    return False
+
+
+def _pr_workflow_run_ids(snapshot: dict[str, Any] | None) -> set[int]:
+    if not snapshot:
+        return set()
+    raw = snapshot.get("workflow_run_ids")
+    if not isinstance(raw, list):
+        return set()
+    return {
+        value
+        for value in raw
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+    }
+
+
+def _workflow_run_ids_from_runs(raw_runs: Any) -> list[int]:
+    if not isinstance(raw_runs, list):
+        return []
+    ids: list[int] = []
+    for run in raw_runs:
+        if not isinstance(run, dict):
+            continue
+        run_id = _positive_int(
+            run.get("id") or run.get("run_id") or run.get("databaseId")
+        )
+        if run_id is not None and run_id not in ids:
+            ids.append(run_id)
+    return ids
+
+
+def _merge_run_ids(existing: Any, new: list[int]) -> list[int]:
+    merged: list[int] = []
+    for source in (existing, new):
+        if not isinstance(source, list):
+            continue
+        for value in source:
+            if (
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and value > 0
+                and value not in merged
+            ):
+                merged.append(value)
+    return merged
 
 
 def _pr_commit_shas(snapshot: dict[str, Any] | None) -> set[str]:
