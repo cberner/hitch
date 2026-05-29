@@ -4267,6 +4267,72 @@ class IndexViewTests(TestCase):
 
         self.assertIsNone(views._token_usage_snapshot_for(thread))
 
+    def test_token_usage_snapshot_survives_compaction_reset(self) -> None:
+        # A session that exhausts its context window records a token_count
+        # whose total_token_usage is reset to zero (plus the window size). The
+        # headline cumulative figure and the per-day chart are derived from two
+        # different rollout reads (latest_token_usage vs token_usage_history),
+        # so both must account for the pre-reset spend or the usage page shows
+        # a session that suddenly "lost" most of its tokens and a chart that
+        # disagrees with its own total.
+        rollout_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=100_000,
+                    cached_input_tokens=80_000,
+                    output_tokens=20_000,
+                    total_tokens=120_000,
+                    context_tokens=120_000,
+                    model_context_window=200_000,
+                    timestamp="2025-01-05T12:00:00Z",
+                ),
+                _token_count_line(
+                    input_tokens=0,
+                    cached_input_tokens=0,
+                    output_tokens=0,
+                    total_tokens=200_000,
+                    context_tokens=200_000,
+                    model_context_window=200_000,
+                    timestamp="2025-01-05T13:00:00Z",
+                ),
+                _token_count_line(
+                    input_tokens=50_000,
+                    cached_input_tokens=10_000,
+                    output_tokens=5_000,
+                    total_tokens=55_000,
+                    context_tokens=55_000,
+                    model_context_window=200_000,
+                    timestamp="2025-01-06T12:00:00Z",
+                ),
+            ],
+            archived=True,
+        )
+        thread = _session("archived", path=str(rollout_path))
+
+        snapshot = views._token_usage_snapshot_for(thread)
+        assert snapshot is not None
+        usage = snapshot["usage"]
+        self.assertEqual(usage["input_tokens"], 150_000)
+        self.assertEqual(usage["cached_input_tokens"], 90_000)
+        self.assertEqual(usage["output_tokens"], 25_000)
+
+        # Headline non-cached/cached/output must equal the sum of the per-day
+        # buckets shown in the chart.
+        daily = snapshot["daily_usage"]
+        self.assertEqual(
+            sum(bucket["input"] for bucket in daily.values()),
+            views._non_cached_input_tokens(usage),
+        )
+        self.assertEqual(
+            sum(bucket["cached"] for bucket in daily.values()),
+            usage["cached_input_tokens"],
+        )
+        self.assertEqual(
+            sum(bucket["output"] for bucket in daily.values()),
+            usage["output_tokens"],
+        )
+
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_hides_archived_sessions_by_default(

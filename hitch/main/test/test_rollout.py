@@ -2588,6 +2588,97 @@ class IterEntriesTests(TestCase):
     def test_token_usage_history_returns_empty_when_unreadable(self) -> None:
         self.assertEqual(rollout.token_usage_history(Path("/nonexistent/rollout.jsonl")), [])
 
+    def test_latest_token_usage_accumulates_across_compaction_reset(self) -> None:
+        # When a turn exhausts the context window, Codex emits a token_count
+        # whose info.total_token_usage is *reset* (fill_to_context_window sets
+        # input/cached/output to 0 and total_tokens to the window size); later
+        # turns then accumulate from zero again. Taking only the last event's
+        # totals therefore drops every token spent before the reset, so the
+        # session and lifetime usage silently collapse to the post-reset turn.
+        # latest_token_usage must instead sum the positive per-event deltas so
+        # the running session total survives the reset, staying consistent with
+        # token_usage_history (which is summed the same way for the daily view).
+        path = self._make(
+            [
+                _line(
+                    "event_msg",
+                    {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 100_000,
+                                "cached_input_tokens": 80_000,
+                                "output_tokens": 20_000,
+                                "total_tokens": 120_000,
+                            },
+                            "last_token_usage": {"total_tokens": 120_000},
+                            "model_context_window": 200_000,
+                        },
+                    },
+                ),
+                # Context window exceeded: total_token_usage is reset to the
+                # window size with the per-kind counters zeroed.
+                _line(
+                    "event_msg",
+                    {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 0,
+                                "cached_input_tokens": 0,
+                                "output_tokens": 0,
+                                "total_tokens": 200_000,
+                            },
+                            "last_token_usage": {"total_tokens": 200_000},
+                            "model_context_window": 200_000,
+                        },
+                    },
+                ),
+                # A later turn accumulates from zero again.
+                _line(
+                    "event_msg",
+                    {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {
+                                "input_tokens": 50_000,
+                                "cached_input_tokens": 10_000,
+                                "output_tokens": 5_000,
+                                "total_tokens": 55_000,
+                            },
+                            "last_token_usage": {"total_tokens": 55_000},
+                            "model_context_window": 200_000,
+                        },
+                    },
+                ),
+            ]
+        )
+        usage = rollout.latest_token_usage(path)
+        assert usage is not None
+        # Pre-reset spend (100k/80k/20k) plus post-reset spend (50k/10k/5k).
+        self.assertEqual(usage["input_tokens"], 150_000)
+        self.assertEqual(usage["cached_input_tokens"], 90_000)
+        self.assertEqual(usage["output_tokens"], 25_000)
+        # total_tokens must be the real lifetime total (120k + 55k), not the
+        # synthetic window size (200k) the reset event carries.
+        self.assertEqual(usage["total_tokens"], 175_000)
+        # Active-context fields still reflect the most recent event.
+        self.assertEqual(usage["context_tokens"], 55_000)
+        self.assertEqual(usage["model_context_window"], 200_000)
+        # The cumulative totals must match the sum of the per-event deltas that
+        # token_usage_history feeds into the daily breakdown, or the headline
+        # number and the per-day chart disagree.
+        history = rollout.token_usage_history(path)
+        previous = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+        summed = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
+        for event in history:
+            for key in summed:
+                summed[key] += max(event[key] - previous[key], 0)
+                previous[key] = event[key]
+        self.assertEqual(usage["input_tokens"], summed["input_tokens"])
+        self.assertEqual(usage["cached_input_tokens"], summed["cached_input_tokens"])
+        self.assertEqual(usage["output_tokens"], summed["output_tokens"])
+
     def test_function_call_arguments_edge_cases(self) -> None:
         # Non-string arguments fall through as empty; malformed JSON falls
         # back to the raw string; a JSON literal that isn't a dict also falls
