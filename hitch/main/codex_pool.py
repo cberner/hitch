@@ -940,11 +940,39 @@ def _mark_dead_instances_failed(pending: Iterable[CodexInstance]) -> int:
     for instance in pending:
         if worker_is_alive(instance):
             continue
-        instance.status = CodexInstance.STATUS_FAILED
-        if not instance.error:
-            instance.error = "worker process exited before reporting completion"
-        instance.ended_at = now
-        instance.save(update_fields=["status", "error", "ended_at"])
+        error = instance.error or "worker process exited before reporting completion"
+        # Conditional UPDATE keyed on the active statuses so a worker that
+        # reached a terminal state in the gap between the queryset read and this
+        # write is preserved rather than retroactively rewritten as failed (and
+        # falsely routed to the system agents). Mirrors ``_mark_failed``.
+        rows = CodexInstance.objects.filter(
+            pk=instance.pk,
+            status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+        ).update(
+            status=CodexInstance.STATUS_FAILED,
+            error=error,
+            ended_at=now,
+        )
+        if rows == 0:
+            # The worker reached a terminal state in the gap. Preserve its
+            # status (don't count it as a kill), but still run finish routing:
+            # demo system-agent rows are excluded from
+            # reconcile_terminal_workflow_instances() and rely on this callback,
+            # so a worker that died after saving its status but before notifying
+            # would otherwise strand the SessionDemo/SystemAgentRun. Routing is
+            # idempotent, so a worker that already notified is a no-op.
+            try:
+                instance.refresh_from_db()
+            except CodexInstance.DoesNotExist:
+                continue
+            if instance.status in (
+                CodexInstance.STATUS_COMPLETED,
+                CodexInstance.STATUS_FAILED,
+            ):
+                _notify_system_agents_if_needed(instance)
+                cleanup_requested_input_images_for(instance)
+            continue
+        instance.refresh_from_db()
         _notify_system_agents_if_needed(instance)
         cleanup_requested_input_images_for(instance)
         updated += 1
@@ -1046,7 +1074,8 @@ def cleanup_input_images_for(instance: CodexInstance) -> None:
     if not image_paths:
         return
     root = input_attachments_dir().resolve(strict=False)
-    remaining_paths: list[str] = []
+    candidate_paths = set(image_paths)
+    retained_paths: list[str] = []
     for raw_path in image_paths:
         path = Path(raw_path).resolve(strict=False)
         if not _path_within(path, root):
@@ -1054,23 +1083,46 @@ def cleanup_input_images_for(instance: CodexInstance) -> None:
                 "refusing to clean up input image outside attachment dir: %s",
                 raw_path,
             )
-            remaining_paths.append(raw_path)
+            retained_paths.append(raw_path)
             continue
         try:
             path.unlink(missing_ok=True)
         except OSError:
             logger.warning("failed to clean up input image attachment %s", path)
-            remaining_paths.append(raw_path)
+            retained_paths.append(raw_path)
         else:
             _prune_empty_attachment_dirs(path.parent, root)
-    CodexInstance.objects.filter(pk=instance.pk).update(
-        input_image_paths=[],
-        input_attachment_paths=remaining_paths,
-        input_attachment_cleanup_requested=bool(remaining_paths),
-    )
-    instance.input_image_paths = []
-    instance.input_attachment_paths = remaining_paths
-    instance.input_attachment_cleanup_requested = bool(remaining_paths)
+    # Recompute the ledger from the locked row (unlinks happen above, outside the
+    # lock) so a steer image added concurrently isn't clobbered. Mirrors the
+    # locked read-modify-write in ``_remove_input_attachment_paths``.
+    with transaction.atomic():
+        current = CodexInstance.objects.select_for_update().get(pk=instance.pk)
+        new_attachment = [
+            stored
+            for stored in _normalized_input_image_paths(current.input_attachment_paths)
+            if stored not in candidate_paths
+        ]
+        for retained in retained_paths:
+            if retained not in new_attachment:
+                new_attachment.append(retained)
+        new_image = [
+            stored
+            for stored in _normalized_input_image_paths(current.input_image_paths)
+            if stored not in candidate_paths
+        ]
+        current.input_image_paths = new_image
+        current.input_attachment_paths = new_attachment
+        current.input_attachment_cleanup_requested = bool(new_attachment)
+        current.save(
+            update_fields=[
+                "input_image_paths",
+                "input_attachment_paths",
+                "input_attachment_cleanup_requested",
+            ]
+        )
+    instance.input_image_paths = new_image
+    instance.input_attachment_paths = new_attachment
+    instance.input_attachment_cleanup_requested = bool(new_attachment)
 
 
 def cleanup_input_images_for_thread(thread_id: str) -> None:
