@@ -22,8 +22,15 @@ from django.core import signing
 from django.core.exceptions import SuspiciousOperation
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, connection
+from django.db.migrations.executor import MigrationExecutor
 from django.http import HttpResponse
-from django.test import Client, RequestFactory, TestCase, override_settings
+from django.test import (
+    Client,
+    RequestFactory,
+    TestCase,
+    TransactionTestCase,
+    override_settings,
+)
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from openai_codex.errors import AppServerError, InvalidRequestError, MethodNotFoundError
@@ -462,6 +469,91 @@ class SessionDetailFastPathTests(TestCase):
         metadata.refresh_from_db()
         self.assertEqual(metadata.derived_stage, "done_merged")
         mock_codex.assert_not_called()
+
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_active_session_detail_does_not_cache_forced_stage(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        # Viewing a session while a worker runs shows the active Implementation
+        # stage, but that stage is forced by the running worker rather than the
+        # rollout. Writing it to the mtime-keyed cache would let the index serve
+        # a stale active badge once the worker stops without rewriting the
+        # rollout, so the detail view must not persist it.
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_create_pull_request",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps(
+                            {"url": "https://github.com/cberner/hitch/pull/94",
+                             "state": "closed", "merged": False}
+                        ),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Closed."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        metadata = SessionMetadata.objects.create(
+            thread_id="active-detail",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Active detail",
+            codex_preview="Follow up",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+        CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="active-detail",
+            cwd="/repo",
+            prompt="Follow up",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=_session("active-detail", name="Active detail", path=str(rollout_path))
+        )
+
+        with patch("hitch.main.codex_pool.worker_is_alive", return_value=True):
+            response = self.client.get(
+                reverse("session", kwargs={"session_id": "active-detail"})
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">Implementation</span>',
+        )
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.derived_stage, "")
+        self.assertEqual(metadata.derived_stage_source_mtime_ns, 0)
 
     @patch("hitch.main.views._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
@@ -1233,6 +1325,119 @@ class IndexViewTests(TestCase):
             '<span class="stage-badge" data-tone="active">Implementation</span>',
         )
         self.assertNotContains(response, "Done: Closed")
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_active_instance_stage_not_cached_after_worker_stops(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        _worker_is_alive: MagicMock,
+    ) -> None:
+        # An active worker forces the Implementation stage. That stage is not a
+        # function of the rollout file, so it must not be written to the
+        # mtime-keyed stage cache: once the worker stops without rewriting the
+        # rollout (interrupted/aborted/no-op turn), the index must recompute the
+        # real terminal stage rather than resurrect the stale active badge.
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_create_pull_request",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps(
+                            {
+                                "url": "https://github.com/cberner/hitch/pull/94",
+                                "state": "closed",
+                                "merged": False,
+                            }
+                        ),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Closed."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        metadata = SessionMetadata.objects.create(
+            thread_id="active-then-idle",
+            cwd="/repo",
+            codex_display_title="Active then idle",
+            codex_preview="Follow up",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+        )
+        instance = CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="active-then-idle",
+            cwd="/repo",
+            prompt="Follow up",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        mtime_before = rollout_path.stat().st_mtime_ns
+
+        active_response = self.client.get(reverse("index"))
+
+        self.assertEqual(active_response.status_code, 200)
+        self.assertContains(
+            active_response,
+            '<span class="stage-badge" data-tone="active">Implementation</span>',
+        )
+
+        # Worker finishes without touching the rollout, so its mtime is
+        # unchanged and the terminal "Done: Closed" stage is the truth.
+        instance.delete()
+        self.assertEqual(rollout_path.stat().st_mtime_ns, mtime_before)
+
+        idle_response = self.client.get(reverse("index"))
+
+        self.assertEqual(idle_response.status_code, 200)
+        self.assertContains(
+            idle_response,
+            '<span class="stage-badge" data-tone="done">Done: Closed</span>',
+        )
+        self.assertNotContains(
+            idle_response,
+            '<span class="stage-badge" data-tone="active">Implementation</span>',
+        )
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.derived_stage, "done_closed")
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
@@ -12901,3 +13106,48 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_REJECTED)
         self.assertEqual(proposal.outcome_notes, "Not useful enough.")
         mock_cleanup.assert_called_once_with("/repo-worktree")
+
+
+class ResetStaleStageCacheMigrationTests(TransactionTestCase):
+    """The 0048 data migration heals transient stage rows persisted by the
+    pre-fix write path, which the mtime-keyed read guard would otherwise serve
+    indefinitely after the active owner exits without rewriting the rollout."""
+
+    migrate_from = [("main", "0047_sessionmetadata_derived_stage")]
+    migrate_to = [("main", "0048_reset_stale_stage_cache")]
+
+    def _migrate(self, targets: list[tuple[str, str]]) -> MigrationExecutor:
+        executor = MigrationExecutor(connection)
+        executor.loader.build_graph()
+        executor.migrate(targets)
+        return executor
+
+    def test_reset_clears_persisted_stage_cache(self) -> None:
+        leaf = MigrationExecutor(connection).loader.graph.leaf_nodes("main")
+        self.addCleanup(self._migrate, leaf)
+
+        old_apps = self._migrate(self.migrate_from).loader.project_state(
+            self.migrate_from
+        ).apps
+        SessionMetadata = old_apps.get_model("main", "SessionMetadata")
+        SessionMetadata.objects.create(
+            thread_id="stale-transient",
+            derived_stage="implementation",
+            derived_stage_source_mtime_ns=123,
+        )
+        SessionMetadata.objects.create(
+            thread_id="already-empty",
+            derived_stage="",
+            derived_stage_source_mtime_ns=0,
+        )
+
+        new_apps = self._migrate(self.migrate_to).loader.project_state(
+            self.migrate_to
+        ).apps
+        SessionMetadata = new_apps.get_model("main", "SessionMetadata")
+        stale = SessionMetadata.objects.get(thread_id="stale-transient")
+        self.assertEqual(stale.derived_stage, "")
+        self.assertEqual(stale.derived_stage_source_mtime_ns, 0)
+        empty = SessionMetadata.objects.get(thread_id="already-empty")
+        self.assertEqual(empty.derived_stage, "")
+        self.assertEqual(empty.derived_stage_source_mtime_ns, 0)

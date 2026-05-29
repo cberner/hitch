@@ -2123,11 +2123,19 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             workflow_pr_snapshot=system_agents.pr_handoff_for_workflow(stage_workflow),
         )
         session["stage"] = stage.as_context()
-        _update_cached_stage(
-            session_id,
-            stage,
-            rollout_state.mtime_ns if rollout_state is not None else 0,
-        )
+        # The stage cache is keyed only on the rollout file's mtime, so it may
+        # only hold stages that are a pure function of the rollout. A stage that
+        # an active worker or a PR/QA workflow forced (e.g. Implementation while
+        # a turn runs) is transient state the mtime key cannot track: once the
+        # worker/workflow goes away without rewriting the rollout, the cached
+        # row would still satisfy the read guard and resurrect the stale active
+        # badge. Persist only when no such owner contributed to the stage.
+        if active_instance is None and workflow is None:
+            _update_cached_stage(
+                session_id,
+                stage,
+                rollout_state.mtime_ns if rollout_state is not None else 0,
+            )
 
 
 def _latest_pr_workflows_by_thread_id(
@@ -3215,9 +3223,20 @@ def _render_session_detail(
             pr_snapshot=pr_observation.snapshot,
             workflow_pr_snapshot=system_agents.pr_handoff_for_workflow(stage_pr_workflow),
         )
-        _update_cached_stage(
-            session_id, stage, _rollout_mtime_ns(_rollout_path_for(thread))
-        )
+        # Only persist a rollout-derived stage; see _attach_session_stage_context
+        # for why active-instance/workflow-forced stages must not enter the
+        # mtime-keyed cache. The post-lifecycle ``stage_workflow``/
+        # ``stage_pr_workflow`` being ``None`` means no live owner influenced the
+        # result (a stale workflow stripped by ``_workflow_after_main_lifecycle``
+        # leaves the stage purely rollout-derived and therefore cacheable).
+        if (
+            active_instance is None
+            and stage_workflow is None
+            and stage_pr_workflow is None
+        ):
+            _update_cached_stage(
+                session_id, stage, _rollout_mtime_ns(_rollout_path_for(thread))
+            )
         stage_context = stage.as_context()
     show_active_worker_transcript = _show_active_worker_transcript(active_instance)
     active_demo_worker = (
