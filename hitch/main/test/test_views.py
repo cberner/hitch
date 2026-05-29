@@ -6730,6 +6730,97 @@ class NewSessionViewTests(TestCase):
                 self.assertFalse(candidate.auto_pr_enabled)
                 self.assertFalse(candidate.auto_qa_enabled)
 
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    def test_candidate_worktree_slash_command_preserves_goal_auto_review(
+        self,
+        mock_turn: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_managed_worktrees: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        # Accepting an autonomous-goal proposal with a /qa (or /pr) prompt must
+        # persist the goal-derived auto-review and auto-merge configuration onto
+        # the session, so subsequent turns keep honoring it rather than silently
+        # reverting to manual review.
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
+        codex = _setup_codex(mock_codex, models=[])
+        codex._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(turns=[])
+        )
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            auto_qa_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="release",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+            is_hidden_system_session=True,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            title="Add parser coverage",
+            outcome_metadata={
+                "auto_pr_enabled": False,
+                "auto_qa_enabled": True,
+                "auto_merge_to_local_branch": True,
+                "auto_merge_branch": "release",
+            },
+        )
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "/qa",
+                "cwd": self.REPO,
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.headers["Location"],
+            reverse("session", kwargs={"session_id": "candidate-thread"}),
+        )
+        mock_start_workflow.assert_called_once_with(
+            main_thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model=None,
+            reasoning_effort=None,
+            developer_instructions=None,
+            enable_memories=False,
+            initial_user_message_index=0,
+            open_pr_on_lgtm=False,
+            auto_merge_branch="release",
+        )
+        mock_turn.assert_not_called()
+        proposal.refresh_from_db()
+        candidate.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
+        self.assertEqual(proposal.accepted_session, candidate)
+        self.assertFalse(candidate.is_hidden_system_session)
+        # The goal enabled auto-QA and auto-merge; the accepted session must
+        # retain those so future turns continue to review and merge.
+        self.assertFalse(candidate.auto_pr_enabled)
+        self.assertTrue(candidate.auto_qa_enabled)
+        self.assertTrue(candidate.auto_merge_to_local_branch)
+        self.assertEqual(candidate.auto_merge_branch, "release")
+
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
     @patch("hitch.main.views.discover_managed_worktrees")
     @patch("hitch.main.views.discover_repos")
@@ -7703,6 +7794,86 @@ class NewSessionViewTests(TestCase):
                     initial_user_message_index=0,
                     **workflow_kwargs,
                 )
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.create_session_thread")
+    @patch("hitch.main.views.discover_repos")
+    def test_oneoff_qa_slash_does_not_persist_global_auto_review(
+        self,
+        mock_discover: MagicMock,
+        mock_create_thread: MagicMock,
+        mock_codex: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        # A bare /qa is a one-off review, not a proposal acceptance. Even with
+        # global auto-QA enabled, the resulting session must NOT carry auto-QA
+        # forward, or every later follow-up in the review thread would be
+        # auto-reviewed unexpectedly.
+        mock_discover.return_value = [Path(self.REPO)]
+        _setup_codex(mock_codex, models=[_make_model("gpt-5.4", is_default=True)])
+        mock_create_thread.return_value = "oneoff-qa-thread"
+        client = Client()
+        _seed_cookies(client, **{_AUTO_QA_COOKIE: "true"})
+
+        response = client.post(
+            reverse("new_session"),
+            data={"prompt": "/qa", "cwd": self.REPO},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_start_workflow.assert_called_once()
+        metadata = SessionMetadata.objects.get(thread_id="oneoff-qa-thread")
+        self.assertFalse(metadata.auto_qa_enabled)
+        self.assertFalse(metadata.auto_pr_enabled)
+        self.assertFalse(metadata.auto_merge_to_local_branch)
+        self.assertEqual(metadata.auto_merge_branch, "")
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.create_session_thread")
+    @patch("hitch.main.views.discover_repos")
+    def test_coding_agent_proposal_qa_slash_does_not_persist_global_auto_review(
+        self,
+        mock_discover: MagicMock,
+        mock_create_thread: MagicMock,
+        mock_codex: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        # A coding-agent proposal (no autonomous goal) leaves the inbox's
+        # auto-review inputs empty, so the proposal did not request auto-review.
+        # Accepting it via /qa with global auto-QA enabled must not persist
+        # auto-QA on the session: only proposal-requested settings carry forward.
+        mock_discover.return_value = [Path(self.REPO)]
+        _setup_codex(mock_codex, models=[_make_model("gpt-5.4", is_default=True)])
+        mock_create_thread.return_value = "coding-proposal-thread"
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Tidy up logging",
+        )
+        self.assertIsNone(proposal.autonomous_goal)
+        client = Client()
+        _seed_cookies(client, **{_AUTO_QA_COOKIE: "true"})
+
+        response = client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "/qa",
+                "cwd": self.REPO,
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_start_workflow.assert_called_once()
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
+        metadata = SessionMetadata.objects.get(thread_id="coding-proposal-thread")
+        self.assertFalse(metadata.auto_qa_enabled)
+        self.assertFalse(metadata.auto_pr_enabled)
+        self.assertFalse(metadata.auto_merge_to_local_branch)
+        self.assertEqual(metadata.auto_merge_branch, "")
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.Codex")
