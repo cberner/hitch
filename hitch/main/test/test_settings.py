@@ -1385,6 +1385,58 @@ class UpdateSettingsViewTests(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertNotIn(_EXTRA_SYSTEM_PROMPT_COOKIE, response.cookies)
 
+    def test_rejects_multibyte_prompt_that_would_overflow_the_cookie(self) -> None:
+        """A prompt is stored as base64-of-UTF-8 inside a signed cookie. The
+        2500-*character* cap doesn't bound that byte size, so a multibyte
+        prompt well under the character limit can still produce a cookie past
+        the browser's ~4KB per-cookie ceiling. The browser then silently drops
+        the cookie, losing the setting even though the POST "succeeded" with a
+        302. Such a prompt must be rejected up front rather than written out."""
+        _seed_cookies(
+            self.client, **{_EXTRA_SYSTEM_PROMPT_COOKIE: "previous value"}
+        )
+        # Hiragana costs 3 UTF-8 bytes/char: 2400 chars is under the 2500
+        # character cap but base64-encodes to a ~9.6KB cookie.
+        prompt = "あ" * 2400
+        self.assertLessEqual(len(prompt), views._EXTRA_SYSTEM_PROMPT_MAX_LEN)
+
+        response = self.client.post(
+            reverse("update_settings"),
+            data={"model": "", "reasoning_effort": "", "extra_system_prompt": prompt},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        # No oversized cookie is written, so the prior value survives instead
+        # of being clobbered by a value the browser would have discarded.
+        self.assertNotIn(_EXTRA_SYSTEM_PROMPT_COOKIE, response.cookies)
+
+    def test_accepted_prompt_cookie_stays_within_browser_limit(self) -> None:
+        """Every prompt the server accepts must fit in the cookie it then
+        writes — ASCII at the character cap and a sizable multibyte prompt
+        both round-trip without crossing the byte budget."""
+        for label, prompt in (
+            ("ascii at cap", "a" * views._EXTRA_SYSTEM_PROMPT_MAX_LEN),
+            ("multibyte", "あ" * 800),
+        ):
+            with self.subTest(label=label):
+                response = Client().post(
+                    reverse("update_settings"),
+                    data={
+                        "model": "",
+                        "reasoning_effort": "",
+                        "extra_system_prompt": prompt,
+                    },
+                )
+
+                self.assertEqual(response.status_code, 302)
+                morsel = response.cookies[_EXTRA_SYSTEM_PROMPT_COOKIE]
+                name_value = morsel.output(header="").split(";")[0].strip()
+                self.assertLessEqual(
+                    len(name_value.encode()), views._COOKIE_MAX_VALUE_BYTES
+                )
+                # The value still round-trips intact under the byte budget.
+                self.assertEqual(_extra_system_prompt_value(response), prompt)
+
     @patch("hitch.main.views.Codex")
     def test_get_renders_settings_page(self, mock_codex: MagicMock) -> None:
         _configure_codex(mock_codex, models=[_model("gpt-5", is_default=True)])

@@ -21,6 +21,7 @@ from urllib.parse import urlencode
 from django.contrib.auth import login as auth_login
 from django.contrib.auth import logout as auth_logout
 from django.contrib.auth.forms import AuthenticationForm, UserCreationForm
+from django.core import signing
 from django.core.exceptions import SuspiciousOperation
 from django.core.files.uploadedfile import UploadedFile
 from django.core.files.uploadhandler import FileUploadHandler
@@ -366,9 +367,22 @@ _COOKIE_MAX_AGE = 60 * 60 * 24 * 365
 # is comfortably more than that without leaving room for abuse.
 _MODEL_MAX_LEN = 256
 
-# The prompt is base64-encoded inside a signed cookie, so keep enough room for
-# encoding/signing overhead and browser cookie limits.
+# UX-facing character cap on the developer prompt; mirrored by the textarea's
+# ``maxlength``. This bounds the input length but is NOT the real guard against
+# overflowing a cookie: the prompt is base64-encoded (and the whole cookie then
+# signed), and a single multibyte character costs several UTF-8 bytes, so a
+# prompt comfortably under this character count can still produce a cookie far
+# past the browser limit. ``_extra_system_prompt_cookie_fits`` enforces the byte
+# budget below; both checks run on save.
 _EXTRA_SYSTEM_PROMPT_MAX_LEN = 2500
+
+# RFC 6265 only guarantees ~4096 bytes per cookie (name + value + attributes).
+# When a signed cookie crosses that line the browser silently drops it, so a
+# setting we persist solely in a cookie (anonymous users) would vanish on the
+# next request even though the save "succeeded". Budget conservatively under
+# 4096 to leave room for the Max-Age/Path/SameSite attributes attached in
+# ``_apply_cookie_updates``.
+_COOKIE_MAX_VALUE_BYTES = 4000
 
 # Upper bound on what we render inline as a session's title. Codex does not
 # generate its own thread summaries, so for unnamed threads `Thread.preview`
@@ -5840,6 +5854,24 @@ def _encode_extra_system_prompt_cookie(value: str) -> str:
     return base64.urlsafe_b64encode(value.encode()).decode("ascii")
 
 
+def _signed_cookie_fits(name: str, value: str) -> bool:
+    """Return whether the signed ``name=value`` cookie stays within the limit.
+
+    Mirrors how ``_apply_cookie_updates`` writes the cookie (Django signs with
+    a per-name salt) so the size we check is the size the browser would see.
+    A cookie over the limit is silently dropped client-side, taking the value
+    with it, so callers reject the input before it reaches that state.
+    """
+    signed = signing.get_cookie_signer(salt=name).sign(value)
+    return len(f"{name}={signed}".encode()) <= _COOKIE_MAX_VALUE_BYTES
+
+
+def _extra_system_prompt_cookie_fits(value: str) -> bool:
+    return _signed_cookie_fits(
+        _EXTRA_SYSTEM_PROMPT_COOKIE, _encode_extra_system_prompt_cookie(value)
+    )
+
+
 def _apply_cookie_updates(response: HttpResponse, updates: dict[str, str]) -> None:
     for name, value in updates.items():
         response.set_signed_cookie(
@@ -6134,6 +6166,11 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     if len(model) > _MODEL_MAX_LEN:
         return HttpResponseBadRequest("model id is too long")
     if len(extra_system_prompt) > _EXTRA_SYSTEM_PROMPT_MAX_LEN:
+        return HttpResponseBadRequest("extra system prompt is too long")
+    # The character cap above does not bound the encoded cookie size, so a
+    # multibyte prompt can still overflow the browser cookie limit and be
+    # dropped, silently losing the setting. Reject it up front instead.
+    if not _extra_system_prompt_cookie_fits(extra_system_prompt):
         return HttpResponseBadRequest("extra system prompt is too long")
     valid_efforts = {e.value for e in ReasoningEffort}
     if effort and effort not in valid_efforts:
