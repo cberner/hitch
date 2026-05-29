@@ -291,6 +291,8 @@ def _pr_snapshot_from_updates(
 ) -> dict[str, Any] | None:
     snapshot: dict[str, Any] = {}
     for update in updates:
+        if _pr_update_observes_foreign_commit(snapshot, update):
+            continue
         _merge_pr_snapshot_update(snapshot, update)
     return _finalize_pr_snapshot(snapshot)
 
@@ -1022,6 +1024,31 @@ def _pr_update_belongs_to_current_pr(
         return False
     update_commit = _string_from_any(update.values.get("latest_commit_sha"))
     return bool(update_commit and update_commit in _pr_commit_shas(current))
+
+
+def _pr_update_observes_foreign_commit(
+    snapshot: dict[str, Any], update: _PrSnapshotUpdate
+) -> bool:
+    """True when a bare CI/state observation speaks for a non-PR commit.
+
+    A workflow-run/CI observation carries a commit SHA but no PR identity of its
+    own. Once we are tracking a PR with known commit SHAs, merging an
+    observation for a *different* commit (e.g. the agent peeking at the base
+    branch or a sibling) would wipe the head's real ``failing_jobs`` and rewrite
+    ``latest_commit_sha`` to the foreign SHA. The multi-turn path rejects these
+    via ``_pr_update_belongs_to_current_pr``; the single-turn merge applies the
+    same commit-identity guard here. Updates that carry their own PR identity,
+    or arrive before any commit is known, are left for the merge to handle.
+    """
+    if not _pr_snapshot_has_identity(snapshot):
+        return False
+    if _pr_snapshot_has_identity(_finalize_pr_snapshot(dict(update.values))):
+        return False
+    update_commit = _string_from_any(update.values.get("latest_commit_sha"))
+    if not update_commit:
+        return False
+    known = _pr_commit_shas(snapshot)
+    return bool(known) and update_commit not in known
 
 
 def _pr_commit_shas(snapshot: dict[str, Any] | None) -> set[str]:

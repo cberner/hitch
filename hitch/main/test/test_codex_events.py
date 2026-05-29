@@ -1598,6 +1598,113 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
         self.assertEqual(snapshot.get("failing_jobs", []), [])
         self.assertEqual(snapshot.get("pending_jobs", []), [])
 
+    def test_pr_snapshot_ignores_ci_observation_for_a_foreign_commit(
+        self,
+    ) -> None:
+        # A PR turn observes the head commit's real CI failure via
+        # ``fetch_workflow_run_jobs``, then peeks at a DIFFERENT commit (e.g. the
+        # base branch or a sibling) via ``fetch_commit_workflow_runs`` that is
+        # still pending. That observation speaks for a foreign commit, so it must
+        # not clear the head's ``failing_jobs`` or rewrite ``latest_commit_sha``
+        # to the foreign SHA. The multi-turn path already guards this via
+        # ``_pr_update_belongs_to_current_pr``; the single-turn event-path merge
+        # must apply the same commit-identity guard, otherwise the CI gate stops
+        # blocking on a real red build and the next agent is pointed at the wrong
+        # commit.
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_create_pull_request",
+                                    "result": {
+                                        "structuredContent": {
+                                            "url": (
+                                                "https://github.com/cberner/hitch/pull/200"
+                                            ),
+                                            "number": 200,
+                                            "head_sha": "abc123",
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=5,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_fetch_workflow_run_jobs",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "run_id": 42,
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "jobs": [
+                                                {
+                                                    "name": "test-suite",
+                                                    "status": "completed",
+                                                    "conclusion": "failure",
+                                                },
+                                            ]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_fetch_commit_workflow_runs",
+                                    "arguments": {
+                                        "repo_full_name": "cberner/hitch",
+                                        "commit_sha": "def456",
+                                    },
+                                    "result": {
+                                        "structuredContent": {
+                                            "workflow_runs": [
+                                                {"status": "in_progress"},
+                                            ]
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["ci_status"], "failure")
+        self.assertEqual(snapshot.get("failing_jobs", []), ["test-suite"])
+        self.assertEqual(snapshot["head_sha"], "abc123")
+        self.assertNotEqual(snapshot.get("latest_commit_sha"), "def456")
+
     def test_pr_snapshot_preserves_workflow_run_failing_jobs_across_combined_status(
         self,
     ) -> None:
