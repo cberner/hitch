@@ -586,14 +586,35 @@ def _settings_context(
 ) -> dict[str, Any]:
     projects = list(Project.objects.all())
     current_project = _selected_project_for_settings(current_settings, projects)
+    # Each model advertises which reasoning efforts it accepts. The dialog
+    # must only offer the efforts the *selected* model supports — otherwise a
+    # user can pick an effort the model rejects and ``update_settings`` bounces
+    # the save with a raw 400. An empty supported set means the model didn't
+    # advertise any constraint, so every effort is allowed (matching
+    # ``_validate_settings_against_models``).
+    supported_by_model = {m.id: _supported_effort_values(m) for m in models_data}
+    current_supported = supported_by_model.get(current_settings.model, set())
     return {
         "settings_url": reverse("update_settings"),
         "new_project_url": reverse("new_project"),
         "edit_project_url": reverse("edit_project"),
         "model_options": [
-            {"id": m.id, "display_name": m.display_name} for m in models_data
+            {
+                "id": m.id,
+                "display_name": m.display_name,
+                # Space-separated so the template can drop it into a single
+                # data attribute the effort-filter script splits on whitespace.
+                "supported_efforts": " ".join(sorted(supported_by_model[m.id])),
+            }
+            for m in models_data
         ],
-        "effort_options": [effort.value for effort in ReasoningEffort],
+        "effort_options": [
+            {
+                "value": effort.value,
+                "supported": not current_supported or effort.value in current_supported,
+            }
+            for effort in ReasoningEffort
+        ],
         "sandbox_options": [
             {"id": value, "display_name": label}
             for value, label in _SANDBOX_POLICY_OPTIONS

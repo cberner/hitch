@@ -4,9 +4,9 @@
     <label>
         Model
         {% if model_options %}
-        <select name="model">
+        <select name="model" data-settings-model-select>
             {% for option in model_options %}
-            <option value="{{ option.id }}" {% if option.id == current_model %}selected{% endif %}>{{ option.display_name }}</option>
+            <option value="{{ option.id }}" {% if option.id == current_model %}selected{% endif %} data-supported-efforts="{{ option.supported_efforts }}">{{ option.display_name }}</option>
             {% endfor %}
         </select>
         {% else %}
@@ -15,10 +15,10 @@
     </label>
     <label>
         Reasoning effort
-        <select name="reasoning_effort">
+        <select name="reasoning_effort" data-settings-effort-select>
             <option value="" {% if not current_effort %}selected{% endif %}>Model default</option>
             {% for option in effort_options %}
-            <option value="{{ option }}" {% if option == current_effort %}selected{% endif %}>{{ option }}</option>
+            <option value="{{ option.value }}" {% if option.value == current_effort %}selected{% endif %} data-effort-option {% if not option.supported %}hidden disabled{% endif %}>{{ option.value }}</option>
             {% endfor %}
         </select>
     </label>

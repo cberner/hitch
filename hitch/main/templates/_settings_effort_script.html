@@ -1,0 +1,29 @@
+            // Keep the reasoning-effort dropdown in sync with the model the
+            // user has selected: each model advertises the efforts it accepts
+            // via `data-supported-efforts`, and the server rejects unsupported
+            // (model, effort) pairs with a 400. Hiding the efforts the chosen
+            // model can't use stops the user from saving a combination that
+            // would bounce. An empty advertised set means "no constraint", so
+            // every effort stays available.
+            const settingsModelSelect = document.querySelector("[data-settings-model-select]");
+            const settingsEffortSelect = document.querySelector("[data-settings-effort-select]");
+            function applySupportedEffortFilter() {
+                if (!settingsModelSelect || !settingsEffortSelect) return;
+                const option = settingsModelSelect.selectedOptions && settingsModelSelect.selectedOptions[0];
+                const raw = option ? (option.dataset.supportedEfforts || "") : "";
+                const supported = raw.split(/\s+/).filter(Boolean);
+                const constrained = supported.length > 0;
+                let selectedHidden = false;
+                settingsEffortSelect.querySelectorAll("option[data-effort-option]").forEach((effortOption) => {
+                    const allowed = !constrained || supported.includes(effortOption.value);
+                    effortOption.hidden = !allowed;
+                    effortOption.disabled = !allowed;
+                    if (!allowed && effortOption.selected) selectedHidden = true;
+                });
+                // The empty "Model default" option is always valid, so falling
+                // back to it keeps the form submittable when the previously
+                // selected effort is no longer offered by the new model.
+                if (selectedHidden) settingsEffortSelect.value = "";
+            }
+            if (settingsModelSelect) settingsModelSelect.addEventListener("change", applySupportedEffortFilter);
+            applySupportedEffortFilter();

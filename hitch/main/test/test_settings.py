@@ -1,4 +1,5 @@
 import base64
+import re
 import subprocess
 from types import SimpleNamespace
 from typing import override
@@ -454,6 +455,89 @@ class SettingsPageRenderTests(TestCase):
         self.assertContains(response, 'name="auto_pr_mode"')
         self.assertContains(response, "Follow global")
 
+    @staticmethod
+    def _effort_option(body: str, value: str) -> str:
+        match = re.search(rf'<option value="{re.escape(value)}"[^>]*>', body)
+        assert match is not None, f"effort option {value!r} missing from settings page"
+        return match.group(0)
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_effort_dropdown_only_offers_efforts_the_model_supports(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        """The selected model advertises which reasoning efforts it accepts,
+        and ``update_settings`` returns a hard 400 for an unsupported (model,
+        effort) pair. The dialog must therefore not present the efforts the
+        current model rejects as plain, selectable options — otherwise a user
+        picks one, hits Save, and the page bounces with a raw 400 instead of
+        saving. Unsupported efforts are rendered ``hidden disabled`` so they
+        can't be chosen, while every model option carries its supported set so
+        the client can re-filter when the model selection changes."""
+        _seed_cookies(
+            self.client, **{_MODEL_COOKIE: "gpt-5-codex", _EFFORT_COOKIE: "low"}
+        )
+        _seed_models_cache(
+            [
+                _model(
+                    "gpt-5-codex",
+                    is_default=True,
+                    default_effort="medium",
+                    supported_efforts=["low", "medium"],
+                ),
+                _model(
+                    "gpt-5",
+                    default_effort="high",
+                    supported_efforts=["low", "medium", "high", "xhigh"],
+                ),
+            ]
+        )
+        self.addCleanup(_clear_models_cache)
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("update_settings"))
+
+        self.assertEqual(response.status_code, 200)
+        mock_codex.assert_not_called()
+        body = response.content.decode()
+        # Efforts the selected model accepts stay selectable...
+        for supported in ("low", "medium"):
+            option = self._effort_option(body, supported)
+            self.assertNotIn("hidden", option)
+            self.assertNotIn("disabled", option)
+        # ...and the ones it rejects are locked out so Save can't 400.
+        for unsupported in ("high", "xhigh", "minimal"):
+            option = self._effort_option(body, unsupported)
+            self.assertIn("hidden", option)
+            self.assertIn("disabled", option)
+        # Each model exposes its supported efforts so the client can refilter
+        # the dropdown the moment the user switches models.
+        self.assertContains(response, 'data-supported-efforts="low medium"')
+        self.assertContains(response, 'data-supported-efforts="high low medium xhigh"')
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_effort_dropdown_offers_all_efforts_when_model_unconstrained(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        """A model that advertises no supported-effort constraint accepts any
+        effort (matching ``_validate_settings_against_models``), so the dialog
+        must keep every effort selectable rather than hiding them all."""
+        _seed_models_cache(
+            [_model("gpt-5", is_default=True, supported_efforts=[])]
+        )
+        self.addCleanup(_clear_models_cache)
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("update_settings"))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode()
+        for effort in (e.value for e in ReasoningEffort):
+            option = self._effort_option(body, effort)
+            self.assertNotIn("hidden", option)
+            self.assertNotIn("disabled", option)
+
     @patch("hitch.main.views.Codex")
     def test_usage_page_renders_primary_nav_menu_instead_of_back_link(
         self, mock_codex: MagicMock
@@ -821,7 +905,15 @@ class SettingsPageRenderTests(TestCase):
         self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "medium")
         self.assertEqual(
             response.context["model_options"],
-            [{"id": "gpt-5", "display_name": "gpt-5"}],
+            [
+                {
+                    "id": "gpt-5",
+                    "display_name": "gpt-5",
+                    "supported_efforts": " ".join(
+                        sorted(e.value for e in ReasoningEffort)
+                    ),
+                }
+            ],
         )
 
     @patch("hitch.main.views.Codex")
