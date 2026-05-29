@@ -103,24 +103,44 @@ def pending_plan_entry(entries: list[dict[str, Any]]) -> dict[str, Any] | None:
     return None
 
 
-def latest_token_usage(rollout_path: Path) -> dict[str, int] | None:
-    """Return latest token counts and context window for a thread.
+_CUMULATIVE_TOKEN_KEYS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "output_tokens",
+    "total_tokens",
+)
+# Spend counters that are all zero in a context-window reset event but never
+# zero in a real turn (every turn sends a non-empty prompt).
+_SPEND_TOKEN_KEYS = ("input_tokens", "cached_input_tokens", "output_tokens")
 
-    Codex emits a `TokenCount` event_msg after each turn whose
-    `info.total_token_usage` is the running session total and whose
-    `info.last_token_usage` is the latest active context size. Only the
-    most recent such event is kept; earlier ones are obsoleted by it.
-    Returns None when the rollout is unreadable or contains no parseable
-    token_count event (e.g. a session that has yet to receive a response).
+
+def _is_token_usage_reset(totals: dict[str, int]) -> bool:
+    """Return True for a `fill_to_context_window` reset / pre-response event.
+
+    Codex zeroes every spend counter on such events (and, for a reset, sets
+    `total_tokens` to the window size). They are discontinuities, not real
+    usage, so callers must skip them rather than count the synthetic
+    `total_tokens` jump.
     """
-    lines = _load_rollout_lines(rollout_path)
-    if lines is None:
-        return None
-    latest: dict[str, Any] | None = None
-    latest_context: dict[str, Any] = {}
-    latest_context_window: int = 0
+    return all(totals[key] == 0 for key in _SPEND_TOKEN_KEYS)
+
+
+def _iter_token_count_events(
+    lines: list[dict[str, Any]],
+) -> Iterator[tuple[int, dict[str, Any], dict[str, Any]]]:
+    """Yield ``(timestamp, total_token_usage, info)`` per token_count event.
+
+    Both the cumulative total (``latest_token_usage``) and the daily breakdown
+    (``token_usage_history``) iterate this single source so they can never
+    disagree about which events are counted: an event missing a parseable
+    timestamp or a ``total_token_usage`` dict is dropped from *both*, keeping
+    the headline figure and the per-day chart consistent by construction.
+    """
     for entry in lines:
         if entry.get("type") != "event_msg":
+            continue
+        timestamp = _iso_to_unix_seconds(entry.get("timestamp"))
+        if timestamp is None:
             continue
         payload = entry.get("payload") or {}
         if payload.get("type") != "token_count":
@@ -129,18 +149,62 @@ def latest_token_usage(rollout_path: Path) -> dict[str, int] | None:
         if not isinstance(info, dict):
             continue
         total = info.get("total_token_usage")
-        if isinstance(total, dict):
-            latest = total
-            last = info.get("last_token_usage")
-            latest_context = last if isinstance(last, dict) else {}
-            latest_context_window = _coerce_int(info.get("model_context_window"))
-    if latest is None:
+        if not isinstance(total, dict):
+            continue
+        yield timestamp, total, info
+
+
+def latest_token_usage(rollout_path: Path) -> dict[str, int] | None:
+    """Return cumulative token counts and the active context window.
+
+    Codex emits a `TokenCount` event_msg after each turn whose
+    `info.total_token_usage` is the running session total and whose
+    `info.last_token_usage` is the latest active context size.
+
+    The running total is *not* strictly monotonic: when a turn exhausts the
+    context window Codex resets `total_token_usage` (zeroing the per-kind
+    counters and setting `total_tokens` to the window size) and subsequent
+    turns accumulate from zero again. Reading only the last event would
+    therefore discard every token spent before the reset. We instead sum the
+    positive per-event deltas of each counter, which equals the final total
+    for an unbroken session and survives any reset. The events are drawn from
+    the same `_iter_token_count_events` source as `token_usage_history`, so the
+    headline figure and the per-day chart always count the same events.
+
+    The reset event itself is skipped entirely: its `total_tokens` is the
+    window size (not real spend), so counting its delta would inflate the
+    cached `total_tokens`. Skipping it and rebasing means later turns are
+    added on top of the genuine pre-reset total.
+
+    Returns None when the rollout is unreadable or contains no parseable
+    token_count event (e.g. a session that has yet to receive a response).
+    """
+    lines = _load_rollout_lines(rollout_path)
+    if lines is None:
+        return None
+    cumulative = {key: 0 for key in _CUMULATIVE_TOKEN_KEYS}
+    previous = {key: 0 for key in _CUMULATIVE_TOKEN_KEYS}
+    latest_context: dict[str, Any] = {}
+    latest_context_window: int = 0
+    seen = False
+    for _timestamp, total, info in _iter_token_count_events(lines):
+        seen = True
+        current = {key: _coerce_int(total.get(key)) for key in _CUMULATIVE_TOKEN_KEYS}
+        if _is_token_usage_reset(current):
+            # Discontinuity: drop it and rebase so the next turn's counts add
+            # onto the pre-reset total instead of the synthetic window value.
+            previous = {key: 0 for key in _CUMULATIVE_TOKEN_KEYS}
+        else:
+            for key in _CUMULATIVE_TOKEN_KEYS:
+                cumulative[key] += max(current[key] - previous[key], 0)
+            previous = current
+        last = info.get("last_token_usage")
+        latest_context = last if isinstance(last, dict) else {}
+        latest_context_window = _coerce_int(info.get("model_context_window"))
+    if not seen:
         return None
     return {
-        "input_tokens": _coerce_int(latest.get("input_tokens")),
-        "cached_input_tokens": _coerce_int(latest.get("cached_input_tokens")),
-        "output_tokens": _coerce_int(latest.get("output_tokens")),
-        "total_tokens": _coerce_int(latest.get("total_tokens")),
+        **cumulative,
         "context_tokens": _coerce_int(latest_context.get("total_tokens")),
         "model_context_window": latest_context_window,
     }
@@ -163,19 +227,7 @@ def token_usage_history(rollout_path: Path) -> list[dict[str, int]]:
     if lines is None:
         return []
     history: list[dict[str, int]] = []
-    for entry in lines:
-        timestamp = _iso_to_unix_seconds(entry.get("timestamp"))
-        if timestamp is None or entry.get("type") != "event_msg":
-            continue
-        payload = entry.get("payload") or {}
-        if payload.get("type") != "token_count":
-            continue
-        info = payload.get("info")
-        if not isinstance(info, dict):
-            continue
-        total = info.get("total_token_usage")
-        if not isinstance(total, dict):
-            continue
+    for timestamp, total, _info in _iter_token_count_events(lines):
         history.append(
             {
                 "timestamp": timestamp,
