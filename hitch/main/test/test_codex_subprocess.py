@@ -915,6 +915,10 @@ class LaunchWorkerProcessTests(TestCase):
         )
         self.assertIn("--unit=hitch-codex-worker-7", argv)
         self.assertIn("--slice=hitch-codex-workers.slice", argv)
+        # MemoryHigh/MemoryMax are silently ignored on hosts that do not
+        # default to memory accounting, so the scope must opt in explicitly —
+        # otherwise the per-worker cap would not actually bound the worker.
+        self.assertIn("--property=MemoryAccounting=yes", argv)
         self.assertIn("--property=MemoryHigh=4G", argv)
         self.assertIn("--property=MemoryMax=12G", argv)
         separator = argv.index("--")
@@ -960,6 +964,46 @@ class LaunchWorkerProcessTests(TestCase):
         self.assertIn("MemoryHigh=8G", argv)
         self.assertIn("MemoryMax=10G", argv)
         mock_which.assert_called_once_with("systemctl")
+
+    @override_settings(
+        CODEX_WORKER_MEMORY_HIGH="2G",
+        CODEX_WORKER_MEMORY_MAX="4G",
+        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
+    )
+    def test_per_worker_scope_enables_memory_accounting(self) -> None:
+        # Regression: a scope launched with MemoryHigh/MemoryMax but no
+        # MemoryAccounting=yes has its limits silently dropped on any host that
+        # does not default to memory accounting (DefaultMemoryAccounting=no or
+        # legacy cgroup v1). The aggregate slice opts in, so without this the
+        # per-worker cap is the only one that fails to bind and a single
+        # runaway worker can consume the whole slice budget and OOM-kill its
+        # sibling QA-panel lanes.
+        argv = codex_pool._systemd_scope_argv(
+            systemd_run="/usr/bin/systemd-run",
+            scope_unit="hitch-codex-worker-7.scope",
+            worker_argv=["python", "manage.py", "codex_worker"],
+        )
+
+        self.assertIn("--property=MemoryAccounting=yes", argv)
+        self.assertIn("--property=MemoryHigh=2G", argv)
+        self.assertIn("--property=MemoryMax=4G", argv)
+
+    @override_settings(
+        CODEX_WORKER_MEMORY_HIGH="",
+        CODEX_WORKER_MEMORY_MAX="",
+        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
+    )
+    def test_per_worker_scope_skips_accounting_without_limits(self) -> None:
+        # Accounting is only worth enabling when a limit rides along with it;
+        # an unconfigured cap must not emit a bare MemoryAccounting property.
+        argv = codex_pool._systemd_scope_argv(
+            systemd_run="/usr/bin/systemd-run",
+            scope_unit="hitch-codex-worker-7.scope",
+            worker_argv=["python", "manage.py", "codex_worker"],
+        )
+
+        self.assertNotIn("--property=MemoryAccounting=yes", argv)
+        self.assertFalse([arg for arg in argv if arg.startswith("--property=Memory")])
 
     @override_settings(CODEX_WORKER_SLICE="")
     @patch("hitch.main.codex_pool.shutil.which")

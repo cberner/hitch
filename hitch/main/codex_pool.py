@@ -1513,21 +1513,32 @@ def _worker_slice() -> str:
     return str(getattr(settings, "CODEX_WORKER_SLICE", "") or "").strip()
 
 
-def _systemd_worker_slice_properties() -> list[str]:
+def _memory_cgroup_properties(high_setting: str, max_setting: str) -> list[str]:
+    """Build systemd memory-cgroup properties for the named settings.
+
+    ``MemoryAccounting=yes`` must accompany any ``MemoryHigh``/``MemoryMax``:
+    hosts with ``DefaultMemoryAccounting=no`` (or a legacy cgroup v1 hierarchy)
+    silently ignore the limits unless accounting is explicitly enabled on the
+    unit, so the cap would not actually bound the worker. The per-worker scope
+    and the aggregate slice share this builder so their accounting/limit
+    handling cannot drift apart.
+    """
+    high = str(getattr(settings, high_setting, "") or "").strip()
+    hard = str(getattr(settings, max_setting, "") or "").strip()
     properties: list[str] = []
-    memory_high = str(
-        getattr(settings, "CODEX_WORKER_SLICE_MEMORY_HIGH", "") or ""
-    ).strip()
-    memory_max = str(
-        getattr(settings, "CODEX_WORKER_SLICE_MEMORY_MAX", "") or ""
-    ).strip()
-    if memory_high or memory_max:
+    if high or hard:
         properties.append("MemoryAccounting=yes")
-    if memory_high:
-        properties.append(f"MemoryHigh={memory_high}")
-    if memory_max:
-        properties.append(f"MemoryMax={memory_max}")
+    if high:
+        properties.append(f"MemoryHigh={high}")
+    if hard:
+        properties.append(f"MemoryMax={hard}")
     return properties
+
+
+def _systemd_worker_slice_properties() -> list[str]:
+    return _memory_cgroup_properties(
+        "CODEX_WORKER_SLICE_MEMORY_HIGH", "CODEX_WORKER_SLICE_MEMORY_MAX"
+    )
 
 
 def _ensure_systemd_worker_slice() -> None:
@@ -1640,12 +1651,10 @@ def _systemd_scope_argv(
     worker_slice = _worker_slice()
     if worker_slice:
         argv.append(f"--slice={worker_slice}")
-    memory_high = str(getattr(settings, "CODEX_WORKER_MEMORY_HIGH", "") or "").strip()
-    if memory_high:
-        argv.append(f"--property=MemoryHigh={memory_high}")
-    memory_max = str(getattr(settings, "CODEX_WORKER_MEMORY_MAX", "") or "").strip()
-    if memory_max:
-        argv.append(f"--property=MemoryMax={memory_max}")
+    for property_value in _memory_cgroup_properties(
+        "CODEX_WORKER_MEMORY_HIGH", "CODEX_WORKER_MEMORY_MAX"
+    ):
+        argv.append(f"--property={property_value}")
     argv.append("--")
     argv.extend(worker_argv)
     return argv
