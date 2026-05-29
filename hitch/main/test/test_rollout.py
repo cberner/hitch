@@ -2693,3 +2693,22 @@ class IterEntriesTests(TestCase):
         )
         details = [e["detail"] for e in rollout.iter_entries(path)]
         self.assertEqual(details, ["", "{not json", '"literal"', ""])
+
+
+class ProposedPlanTextTests(TestCase):
+    def test_extracts_plan_body(self) -> None:
+        self.assertEqual(
+            rollout.proposed_plan_text("<proposed_plan>\nDo the thing\n</proposed_plan>"),
+            "Do the thing",
+        )
+
+    def test_missing_tags_return_none(self) -> None:
+        self.assertIsNone(rollout.proposed_plan_text("just some agent reply"))
+
+    def test_empty_plan_body_is_treated_as_no_plan(self) -> None:
+        # An empty tag body must be None, not "" — callers only guard with
+        # ``plan_text is not None`` and would otherwise render an empty plan.
+        self.assertIsNone(rollout.proposed_plan_text("<proposed_plan></proposed_plan>"))
+        self.assertIsNone(
+            rollout.proposed_plan_text("<proposed_plan>\n  \n</proposed_plan>")
+        )
