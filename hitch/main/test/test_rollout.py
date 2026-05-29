@@ -1634,6 +1634,111 @@ class IterEntriesTests(TestCase):
         self.assertEqual(entries[-1]["text"], plan)
         self.assertTrue(rollout.entries_await_plan_approval(entries))
 
+    def test_pending_plan_survives_trailing_commentary_in_flat_entries(self) -> None:
+        # ``entries_await_plan_approval`` runs against BOTH the collapsed
+        # session-view entries and the raw, un-collapsed rollout entries
+        # (session-list stage in ``views`` and the auto-review gate
+        # ``_completed_turn_has_pending_proposed_plan`` in ``system_agents``).
+        # Codex commonly narrates after emitting the plan with a
+        # ``commentary``-phase ``agent_message``. The collapse step folds that
+        # narration into a skipped ``thinking`` entry, but the raw stream keeps
+        # it as ``kind="agent"``. If that intermediate commentary were treated
+        # as the turn's final reply, the gate would conclude the plan is no
+        # longer pending and auto-PR/auto-QA would fire on a plan the user has
+        # not approved yet.
+        plan = "# Plan\n\n1. Do step one\n2. Do step two"
+        path = self._make(
+            [
+                _line("turn_context", {"collaboration_mode": {"mode": "plan"}}),
+                _line("event_msg", {"type": "user_message", "message": "Plan it"}),
+                _line(
+                    "event_msg",
+                    {"type": "item_completed", "item": {"type": "plan", "text": plan}},
+                ),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "message": f"<proposed_plan>\n{plan}\n</proposed_plan>",
+                        "phase": "final_answer",
+                    },
+                ),
+                # Reading-tool narration plus a closing commentary remark, both
+                # of which are intermediate and must not resolve the plan.
+                _line(
+                    "event_msg",
+                    {
+                        "type": "mcp_tool_call_end",
+                        "invocation": {"server": "fs", "tool": "read"},
+                        "result": {},
+                    },
+                ),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "message": "Let me know if you'd like any changes.",
+                        "phase": "commentary",
+                    },
+                ),
+            ]
+        )
+
+        flat_entries = list(rollout.iter_entries(path))
+
+        # Sanity-check the shape this regression targets: a commentary agent
+        # entry trails the plan in the raw stream.
+        self.assertEqual(flat_entries[-1]["kind"], "agent")
+        self.assertEqual(flat_entries[-1]["phase"], "commentary")
+        self.assertTrue(any(entry["kind"] == "plan" for entry in flat_entries))
+
+        pending = rollout.pending_plan_entry(flat_entries)
+        self.assertIsNotNone(pending)
+        assert pending is not None
+        self.assertEqual(pending["text"], plan)
+        self.assertTrue(rollout.entries_await_plan_approval(flat_entries))
+
+    def test_final_agent_reply_after_plan_resolves_pending_plan(self) -> None:
+        # The mirror of the commentary case: a genuine final-answer agent reply
+        # after the plan means the agent moved on, so the plan is no longer
+        # pending. Guards against the commentary skip over-reaching.
+        plan = "# Plan\n\n1. Do step one\n2. Do step two"
+        path = self._make(
+            [
+                _line("turn_context", {"collaboration_mode": {"mode": "plan"}}),
+                _line("event_msg", {"type": "user_message", "message": "Plan it"}),
+                _line(
+                    "event_msg",
+                    {"type": "item_completed", "item": {"type": "plan", "text": plan}},
+                ),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "message": f"<proposed_plan>\n{plan}\n</proposed_plan>",
+                        "phase": "final_answer",
+                    },
+                ),
+                _line("turn_context", {"collaboration_mode": {"mode": "default"}}),
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Implement the plan."},
+                ),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "message": "Implemented and tests pass.",
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+
+        flat_entries = list(rollout.iter_entries(path))
+
+        self.assertFalse(rollout.entries_await_plan_approval(flat_entries))
+
     def test_final_proposed_plan_replaces_streamed_draft_plan(self) -> None:
         draft_plan = "# Draft Plan\n\nStill streaming."
         final_plan = "# Final Plan\n\nUse the canonical response item."
