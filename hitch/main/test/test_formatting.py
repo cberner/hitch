@@ -15,12 +15,48 @@ class LooksLikeMarkdownTests(SimpleTestCase):
             ("stray inline backticks", "Use `print` to send output.", False),
             ("single bullet", "- only one thing", False),
             ("single numbered item", "1. only one", False),
+            ("single paren-numbered item", "1) only one", False),
             ("hash without space", "Filed as #123.", False),
             ("fenced code block", "Here:\n```python\nprint('hi')\n```", True),
             ("ATX heading", "# Overview\n\nSome text.", True),
             ("ATX subheading", "Intro.\n\n### Details\n\nMore.", True),
             ("two bullet items", "- first\n- second", True),
             ("two numbered items", "1. first\n2. second", True),
+            ("two paren-numbered items", "1) first\n2) second", True),
+            (
+                "paren-numbered items under intro line",
+                "Steps:\n1) Set up the repo\n2) Run the tests",
+                True,
+            ),
+            # An ordered list can only interrupt a paragraph when it starts at 1,
+            # so a run beginning above 1 glued onto a prose line stays inside the
+            # paragraph -- the renderer emits no <ol>, so the detector must not
+            # flag it (true for both "." and ")" markers).
+            (
+                "numbered run starting above 1 after prose is not a list",
+                "Steps:\n2. do the second thing\n3. do the third thing",
+                False,
+            ),
+            (
+                "paren run starting above 1 after prose is not a list",
+                "Steps:\n2) do the second thing\n3) do the third thing",
+                False,
+            ),
+            (
+                "numbered run starting above 1 after a blank line is a list",
+                "Steps:\n\n2) do the second thing\n3) do the third thing",
+                True,
+            ),
+            (
+                "numbered run starting above 1 at the top is a list",
+                "2) do the second thing\n3) do the third thing",
+                True,
+            ),
+            (
+                "multi-line list items still count as a list",
+                "1. first item\n   continued on the next line\n2. second item",
+                True,
+            ),
             ("asterisk bullet list", "* a\n* b", True),
             (
                 "indented bullets under intro line",
@@ -43,7 +79,69 @@ class LooksLikeMarkdownTests(SimpleTestCase):
             ("markdown HTTP link", "See [docs](http://example.com).", True),
             ("array indexing is not a link", "Call Array[0](foo) to fetch.", False),
             ("table with separator", "| a | b |\n|---|---|\n| 1 | 2 |", True),
+            (
+                "table with single-dash delimiter cells",
+                "| a | b |\n| - | - |\n| 1 | 2 |",
+                True,
+            ),
+            # Table detection defers to the renderer, so it tracks markdown-it
+            # exactly: a pipeless delimiter behind a matching header renders as a
+            # table and is flagged, while ``- | -`` renders as a list and is not.
+            (
+                "pipeless delimiter row behind a header is a table",
+                "a | b\n--- | ---\n1 | 2",
+                True,
+            ),
+            (
+                "pipeless single-dash row renders as a list, not a table",
+                "a | b\n- | -\n1 | 2",
+                False,
+            ),
             ("single pipe line is not a table", "| just text |", False),
+            ("horizontal rule is not a table", "---", False),
+            ("rule then pipe line is not a table", "---\n| ---", False),
+            ("prose with a pipe is not a table", "Choose cats | dogs.", False),
+            # A delimiter row only renders as a table behind a header row, so a
+            # standalone one (any dash count) must not switch text to markdown.
+            (
+                "standalone single-dash delimiter row is not a table",
+                "| - | - |",
+                False,
+            ),
+            (
+                "standalone multi-dash delimiter row is not a table",
+                "| --- | --- |",
+                False,
+            ),
+            (
+                "delimiter row after a pipeless prose line is not a table",
+                "See below.\n| - | - |",
+                False,
+            ),
+            # The renderer rejects these, so the detector must too: a header with
+            # a different column count, and a header indented as a code block.
+            (
+                "header/delimiter column-count mismatch is not a table",
+                "a | b | c\n| - | - |",
+                False,
+            ),
+            (
+                "code-block-indented header is not a table",
+                "    a | b\n| - | - |",
+                False,
+            ),
+            # The candidate gate is line-ending agnostic and column-count
+            # agnostic, so renderer-supported CRLF and one-column tables detect.
+            (
+                "CRLF table is detected",
+                "| a | b |\r\n| - | - |\r\n| 1 | 2 |",
+                True,
+            ),
+            (
+                "one-column table is detected",
+                "| value |\n| - |\n| 1 |",
+                True,
+            ),
         ]
         for label, text, expected in cases:
             with self.subTest(label=label):
@@ -95,6 +193,18 @@ class RenderMarkdownTests(SimpleTestCase):
             (
                 "table is rendered",
                 "| a | b |\n|---|---|\n| 1 | 2 |",
+                ("<table>", "<th>a</th>", "<td>1</td>"),
+                (),
+            ),
+            (
+                "paren-numbered list renders as ol",
+                "1) one\n2) two",
+                ("<ol>", "<li>one</li>", "<li>two</li>"),
+                (),
+            ),
+            (
+                "single-dash delimiter table is rendered",
+                "| a | b |\n| - | - |\n| 1 | 2 |",
                 ("<table>", "<th>a</th>", "<td>1</td>"),
                 (),
             ),
