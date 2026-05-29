@@ -193,6 +193,7 @@ def _cache_token_usage(
     total_tokens: int,
     path: str | Path = "",
     daily_usage: dict[str, dict[str, int]] | None = None,
+    usage_logic_version: int = views._TOKEN_USAGE_LOGIC_VERSION,
 ) -> ArchivedSessionTokenUsage:
     rollout_path = str(path) if path else ""
     rollout_mtime_ns = Path(path).stat().st_mtime_ns if path else 0
@@ -208,6 +209,7 @@ def _cache_token_usage(
         thread_id=thread_id,
         rollout_path=rollout_path,
         rollout_mtime_ns=rollout_mtime_ns,
+        usage_logic_version=usage_logic_version,
         input_tokens=input_tokens,
         cached_input_tokens=cached_input_tokens,
         output_tokens=output_tokens,
@@ -4471,6 +4473,131 @@ class IndexViewTests(TestCase):
         thread = _session("active", name="Active session", path=str(rollout_path))
 
         self.assertIsNone(views._token_usage_snapshot_for(thread))
+
+    def test_token_usage_snapshot_recomputes_stale_logic_version_cache(self) -> None:
+        # A cache row written by an older counting-logic version must be
+        # recomputed even when its (rollout_path, mtime) still match the file.
+        # Archived rollouts are immutable, so without a logic-version stamp a
+        # row written before a counting fix (e.g. the compaction-reset fix)
+        # would be served verbatim forever and the corrected numbers would
+        # never reach historical sessions.
+        rollout_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=100_000,
+                    cached_input_tokens=80_000,
+                    output_tokens=20_000,
+                    total_tokens=120_000,
+                    context_tokens=120_000,
+                    model_context_window=200_000,
+                ),
+            ],
+            archived=True,
+        )
+        mtime_ns = rollout_path.stat().st_mtime_ns
+        # Stale row: matches path+mtime and has daily usage, but carries the
+        # wrong (pre-fix) numbers and the legacy logic version 0.
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="archived",
+            rollout_path=str(rollout_path),
+            rollout_mtime_ns=mtime_ns,
+            input_tokens=1,
+            cached_input_tokens=0,
+            output_tokens=1,
+            total_tokens=2,
+            context_tokens=1,
+            model_context_window=200_000,
+            daily_usage={"2025-01-05": {"input": 1, "output": 1, "cached": 0}},
+            usage_logic_version=0,
+        )
+        thread = _session("archived", path=str(rollout_path))
+
+        snapshot = views._token_usage_snapshot_for(thread)
+        assert snapshot is not None
+        usage = snapshot["usage"]
+        # Recomputed from the rollout, not served from the stale row.
+        self.assertEqual(usage["input_tokens"], 100_000)
+        self.assertEqual(usage["cached_input_tokens"], 80_000)
+        self.assertEqual(usage["output_tokens"], 20_000)
+        self.assertEqual(usage["total_tokens"], 120_000)
+        cache = ArchivedSessionTokenUsage.objects.get(thread_id="archived")
+        self.assertEqual(cache.total_tokens, 120_000)
+        self.assertEqual(cache.usage_logic_version, views._TOKEN_USAGE_LOGIC_VERSION)
+
+    def test_cached_token_usage_matches_rollout_state_requires_current_version(
+        self,
+    ) -> None:
+        # The match check gates on path, mtime, AND logic version. A row with a
+        # matching path+mtime but a stale logic version must not be treated as a
+        # match, so a counting-logic bump forces a recompute even when the
+        # rollout file is byte-for-byte unchanged.
+        rollout_state = views._RolloutFileState(
+            path=Path("/codex/archived/rollout.jsonl"), mtime_ns=1_234
+        )
+        current = ArchivedSessionTokenUsage(
+            thread_id="t",
+            rollout_path=str(rollout_state.path),
+            rollout_mtime_ns=rollout_state.mtime_ns,
+            usage_logic_version=views._TOKEN_USAGE_LOGIC_VERSION,
+        )
+        self.assertTrue(
+            views._cached_token_usage_matches_rollout_state(current, rollout_state)
+        )
+        legacy = ArchivedSessionTokenUsage(
+            thread_id="t",
+            rollout_path=str(rollout_state.path),
+            rollout_mtime_ns=rollout_state.mtime_ns,
+            usage_logic_version=views._TOKEN_USAGE_LOGIC_VERSION - 1,
+        )
+        self.assertFalse(
+            views._cached_token_usage_matches_rollout_state(legacy, rollout_state)
+        )
+
+    def test_stale_logic_version_cache_is_not_current_without_rollout_path(
+        self,
+    ) -> None:
+        # When the rollout file can't be located, a current-version row is still
+        # trusted (we can't re-derive it), but a stale-version row must not be:
+        # otherwise pathless cached-only sessions keep serving pre-fix counts
+        # forever, since archived rollouts never change to trigger a refresh.
+        current = ArchivedSessionTokenUsage(
+            thread_id="t",
+            rollout_path="",
+            usage_logic_version=views._TOKEN_USAGE_LOGIC_VERSION,
+        )
+        self.assertTrue(
+            views._cached_token_usage_is_current_for_state(current, None)
+        )
+        legacy = ArchivedSessionTokenUsage(
+            thread_id="t",
+            rollout_path="",
+            usage_logic_version=views._TOKEN_USAGE_LOGIC_VERSION - 1,
+        )
+        self.assertFalse(
+            views._cached_token_usage_is_current_for_state(legacy, None)
+        )
+
+    def test_usage_token_cache_state_rejects_stale_version_pathless_rows(self) -> None:
+        # The lifetime-aggregation usability check must also reject stale-version
+        # rows on its no-path branches, so a legacy version-0 row does not keep
+        # contributing pre-fix counts to the summed totals while a refresh is
+        # pending.
+        metadata = views._UsageTokenRefreshCandidate(
+            thread_id="t", codex_path="", usage_last_checked_at=None
+        )
+        current = ArchivedSessionTokenUsage(
+            thread_id="t",
+            rollout_path="",
+            usage_logic_version=views._TOKEN_USAGE_LOGIC_VERSION,
+        )
+        self.assertTrue(views._usage_token_cache_state(metadata, current).cache_usable)
+        legacy = ArchivedSessionTokenUsage(
+            thread_id="t",
+            rollout_path="",
+            usage_logic_version=views._TOKEN_USAGE_LOGIC_VERSION - 1,
+        )
+        self.assertFalse(views._usage_token_cache_state(metadata, legacy).cache_usable)
 
     def test_token_usage_snapshot_survives_compaction_reset(self) -> None:
         # A session that exhausts its context window records a token_count

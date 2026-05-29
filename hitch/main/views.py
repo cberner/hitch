@@ -587,6 +587,13 @@ _TOKEN_USAGE_KEYS = (
     "context_tokens",
     "model_context_window",
 )
+# Bump whenever rollout->counts parsing changes meaning. A cached
+# ArchivedSessionTokenUsage row stamped below this is treated as stale and
+# recomputed even when the (immutable) rollout file is byte-for-byte
+# unchanged, so counting-logic fixes reach already-cached archived sessions.
+# v1: sum positive per-event deltas and skip context-window reset events
+# (commit 20ea557), correcting sessions that hit their context window.
+_TOKEN_USAGE_LOGIC_VERSION = 1
 _HUMAN_TOKEN_UNITS = (
     (1_000_000_000, "B"),
     (1_000_000, "M"),
@@ -3794,6 +3801,12 @@ def _rollout_mtime_ns(rollout_path: Path | None) -> int:
 def _cached_token_usage_is_current_for_state(
     cache: ArchivedSessionTokenUsage, rollout_state: _RolloutFileState | None
 ) -> bool:
+    # A row produced by superseded counting logic is never current, even when
+    # the path is missing/unreadable: returning True there for a stale-version
+    # row would keep serving its pre-fix counts indefinitely, since archived
+    # rollouts are immutable and the read path short-circuits before re-parsing.
+    if not _cached_token_usage_logic_is_current(cache):
+        return False
     # ``rollout_state is None`` means the path is missing/unreadable; there is
     # nothing to compare against, so treat the cache as current rather than
     # discarding the only numbers we have.
@@ -3802,12 +3815,17 @@ def _cached_token_usage_is_current_for_state(
     return _cached_token_usage_matches_rollout_state(cache, rollout_state)
 
 
+def _cached_token_usage_logic_is_current(cache: ArchivedSessionTokenUsage) -> bool:
+    return cache.usage_logic_version >= _TOKEN_USAGE_LOGIC_VERSION
+
+
 def _cached_token_usage_matches_rollout_state(
     cache: ArchivedSessionTokenUsage, rollout_state: _RolloutFileState
 ) -> bool:
     return (
         cache.rollout_path == str(rollout_state.path)
         and cache.rollout_mtime_ns == rollout_state.mtime_ns
+        and _cached_token_usage_logic_is_current(cache)
     )
 
 
@@ -3839,6 +3857,7 @@ def _token_usage_cache_defaults(
     return {
         "rollout_path": str(rollout_path) if rollout_path is not None else "",
         "rollout_mtime_ns": rollout_mtime_ns,
+        "usage_logic_version": _TOKEN_USAGE_LOGIC_VERSION,
         "input_tokens": usage["input_tokens"],
         "cached_input_tokens": usage["cached_input_tokens"],
         "output_tokens": usage["output_tokens"],
@@ -4382,7 +4401,11 @@ def _usage_token_cache_state(
     if not metadata.codex_path:
         return _UsageTokenCacheState(
             refresh_pending=True,
-            cache_usable=cache is not None and cache.rollout_path == "",
+            cache_usable=(
+                cache is not None
+                and cache.rollout_path == ""
+                and _cached_token_usage_logic_is_current(cache)
+            ),
         )
     if cache is None:
         return _UsageTokenCacheState(refresh_pending=True, cache_usable=False)
@@ -4390,7 +4413,10 @@ def _usage_token_cache_state(
     if rollout_state is None:
         return _UsageTokenCacheState(
             refresh_pending=True,
-            cache_usable=cache.rollout_path == metadata.codex_path,
+            cache_usable=(
+                cache.rollout_path == metadata.codex_path
+                and _cached_token_usage_logic_is_current(cache)
+            ),
         )
     cache_is_current = _cached_token_usage_matches_rollout_state(cache, rollout_state)
     if _cached_token_usage_has_counts(cache) and not _daily_token_usage_from_cache(cache):
