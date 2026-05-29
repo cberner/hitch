@@ -552,7 +552,26 @@ class CodexInstance(models.Model):
         {APPROVAL_MODE_PROMPT_USER, APPROVAL_MODE_APPROVE_ALL}
     )
 
+    # Which coding-agent backend drives this worker. ``codex`` rows run the
+    # openai-codex app-server via ``codex_worker``; ``claude`` rows run the
+    # local Claude CLI via ``claude_worker`` and translate its message stream
+    # into the same on-disk event schema. Defaulting to ``codex`` keeps every
+    # existing row and migration backfill on the original path.
+    BACKEND_CODEX = "codex"
+    BACKEND_CLAUDE = "claude"
+    BACKEND_CHOICES = (
+        (BACKEND_CODEX, "Codex"),
+        (BACKEND_CLAUDE, "Claude Code"),
+    )
+
     pid = models.IntegerField()
+    backend = models.CharField(
+        max_length=16, choices=BACKEND_CHOICES, default=BACKEND_CODEX
+    )
+    # Real Claude CLI session id for ``claude`` rows, used to resume the
+    # transcript on follow-up turns. Empty for ``codex`` rows (which resume by
+    # ``thread_id`` against the app-server instead).
+    claude_session_id = models.CharField(max_length=128, blank=True, default="")
     systemd_scope_unit = models.CharField(max_length=128, blank=True, default="")
     thread_id = models.CharField(max_length=128, db_index=True)
     cwd = models.CharField(max_length=4096)
@@ -866,6 +885,7 @@ class UserSettings(models.Model):
     reasoning_effort = models.CharField(max_length=32, blank=True, default="")
     sandbox_policy = models.CharField(max_length=32, blank=True, default="")
     approval_mode = models.CharField(max_length=32, blank=True, default="auto_review")
+    provider = models.CharField(max_length=16, blank=True, default="codex")
     coding_agent = models.CharField(max_length=32, blank=True, default="")
     extra_system_prompt = models.TextField(blank=True, default="")
     use_worktrees = models.BooleanField(default=False)

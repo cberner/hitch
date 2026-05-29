@@ -157,3 +157,68 @@ class CodexIntegrationTests(TestCase):
             plan_mode=False,
             collaboration_mode="default",
         )
+
+
+@tag("integration")
+class ClaudeOllamaIntegrationTests(TestCase):
+    """Run a real Claude Code turn against a local qwen model.
+
+    The ``claude`` CLI speaks the Anthropic Messages API, so a small in-process
+    proxy translates to ollama's OpenAI API (see ``anthropic_ollama_proxy``).
+    This is the Claude-backend analog of ``test_sdk_runs_turn_via_ollama``.
+    Requires the ``claude`` binary on PATH plus a local ollama with the model
+    pulled; CI installs both.
+    """
+
+    def test_claude_turn_via_anthropic_proxy(self) -> None:
+        import asyncio
+
+        from claude_agent_sdk import (
+            AssistantMessage,
+            ClaudeAgentOptions,
+            ResultMessage,
+            TextBlock,
+            query,
+        )
+
+        from hitch.main import claude_options
+        from hitch.main.test.anthropic_ollama_proxy import AnthropicOllamaProxy
+
+        async def _run() -> tuple[list[str], bool]:
+            texts: list[str] = []
+            completed = False
+            with (
+                AnthropicOllamaProxy() as proxy,
+                tempfile.TemporaryDirectory(prefix="hitch-claude-") as cwd,
+            ):
+                options = ClaudeAgentOptions(
+                    cwd=cwd,
+                    permission_mode="bypassPermissions",
+                    # Isolate from any host CLAUDE.md / credentials so the turn
+                    # is driven entirely through the proxy.
+                    setting_sources=None,
+                    cli_path=claude_options.claude_bin(),
+                    env={
+                        "ANTHROPIC_BASE_URL": proxy.base_url,
+                        "ANTHROPIC_API_KEY": "test-key",
+                        "ANTHROPIC_AUTH_TOKEN": "test-key",
+                    },
+                )
+                async for message in query(
+                    prompt="Reply with the single word HELLO.", options=options
+                ):
+                    if isinstance(message, AssistantMessage):
+                        texts.extend(
+                            block.text
+                            for block in message.content
+                            if isinstance(block, TextBlock)
+                        )
+                    elif isinstance(message, ResultMessage):
+                        completed = not message.is_error
+            return texts, completed
+
+        texts, completed = asyncio.run(_run())
+        # qwen2.5-coder:0.5b output is unpredictable, so assert only that the
+        # turn completed end to end and produced assistant text via the proxy.
+        self.assertTrue(completed)
+        self.assertTrue(any(text.strip() for text in texts))

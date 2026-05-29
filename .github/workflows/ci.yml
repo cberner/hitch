@@ -80,6 +80,13 @@ jobs:
         # this can lag the Rust crate tag name the SDK pin is taken from.
         run: npm install -g @openai/codex@0.131.0-alpha.4
 
+      - name: Install claude
+        # The Claude Code backend's worker drives the local `claude` CLI through
+        # the `claude-agent-sdk` Python package. Unlike the Codex app-server
+        # protocol the CLI and SDK are loosely coupled, so a recent CLI is
+        # sufficient; the SDK spawns whatever `claude` is on PATH.
+        run: npm install -g @anthropic-ai/claude-code
+
       - name: Cache ollama models
         uses: actions/cache@v4
         with:

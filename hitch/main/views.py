@@ -56,6 +56,8 @@ from openai_codex.generated.v2_all import (
 )
 
 from hitch.main import (
+    claude_options,
+    claude_session_entries,
     codex_events,
     codex_pool,
     coding_agents,
@@ -148,6 +150,7 @@ class SettingsValues(NamedTuple):
     visible_session_project_ids: tuple[int, ...] | None
     show_no_project_sessions: bool
     enable_memories: bool
+    provider: str = coding_agents.PROVIDER_CODEX
 
 
 class SessionProjectVisibility(NamedTuple):
@@ -396,6 +399,7 @@ _MODEL_COOKIE = "hitch_model"
 _EFFORT_COOKIE = "hitch_reasoning_effort"
 _SANDBOX_COOKIE = "hitch_sandbox_policy"
 _APPROVAL_COOKIE = "hitch_approval_mode"
+_PROVIDER_COOKIE = "hitch_provider"
 _CODING_AGENT_COOKIE = "hitch_coding_agent"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
@@ -741,20 +745,38 @@ def _settings_context(
     # ``_validate_settings_against_models``).
     supported_by_model = {m.id: _supported_effort_values(m) for m in models_data}
     current_supported = supported_by_model.get(current_settings.model, set())
+    codex_model_options = [
+        {
+            "id": m.id,
+            "display_name": m.display_name,
+            "supported_efforts": " ".join(sorted(supported_by_model[m.id])),
+        }
+        for m in models_data
+    ]
+    claude_model_options = [
+        {"id": value, "display_name": label, "supported_efforts": ""}
+        for value, label in claude_options.CLAUDE_MODELS
+    ]
+    current_provider = _effective_provider(current_settings)
+    # Render the model dropdown for the saved provider so opening the dialog
+    # with Claude selected does not show (and post) a Codex model id that
+    # ``update_settings`` would reject. The JS swaps lists on provider change.
+    initial_model_options = (
+        claude_model_options
+        if current_provider == coding_agents.PROVIDER_CLAUDE
+        else codex_model_options
+    )
     return {
         "settings_url": reverse("update_settings"),
         "new_project_url": reverse("new_project"),
         "edit_project_url": reverse("edit_project"),
-        "model_options": [
-            {
-                "id": m.id,
-                "display_name": m.display_name,
-                # Space-separated so the template can drop it into a single
-                # data attribute the effort-filter script splits on whitespace.
-                "supported_efforts": " ".join(sorted(supported_by_model[m.id])),
-            }
-            for m in models_data
-        ],
+        # Space-separated efforts so the template can drop it into a single
+        # data attribute the effort-filter script splits on whitespace.
+        "model_options": initial_model_options,
+        "model_options_by_provider": {
+            coding_agents.PROVIDER_CODEX: codex_model_options,
+            coding_agents.PROVIDER_CLAUDE: claude_model_options,
+        },
         "effort_options": [
             {
                 "value": effort.value,
@@ -774,6 +796,11 @@ def _settings_context(
             {"id": value, "display_name": label}
             for value, label in coding_agents.CODING_AGENT_OPTIONS
         ],
+        "provider_options": [
+            {"id": value, "display_name": label}
+            for value, label in coding_agents.PROVIDER_OPTIONS
+        ],
+        "current_provider": _effective_provider(current_settings),
         "web_search_options": [
             {"id": value, "display_name": label}
             for value, label in _WEB_SEARCH_MODE_OPTIONS
@@ -4702,7 +4729,12 @@ def _render_session_detail(
         if metadata is not None
         else 0
     )
-    metadata_resume = _metadata_resume_for_inactive_session(
+    metadata_resume = _claude_resume_for_session(
+        session_id,
+        metadata,
+        active_instance=active_instance,
+        require_system_agent_thread=require_system_agent_thread,
+    ) or _metadata_resume_for_inactive_session(
         session_id,
         metadata,
         active_instance=active_instance,
@@ -5386,6 +5418,65 @@ def _rollout_filename_matches_thread_id(path: Path, session_id: str) -> bool:
     return match is not None and match.group("thread_id") == session_id
 
 
+def _claude_resume_for_session(
+    session_id: str,
+    metadata: SessionMetadata | None,
+    *,
+    active_instance: CodexInstance | None,
+    require_system_agent_thread: bool,
+) -> _MetadataResume | None:
+    """Build a session resume for a Claude-backed thread from worker events.
+
+    Claude sessions have no Codex rollout/thread, so the normal
+    ``thread_resume`` path would fail on the synthetic UUID. We reconstruct a
+    synthetic thread from local metadata and derive the transcript from the
+    latest worker's events file. While a turn is active the transcript is left
+    empty here so the SSE replay (which streams the events file from the start)
+    is the single source on the live page; completed sessions render their full
+    transcript statically.
+    """
+    if require_system_agent_thread:
+        return None
+    latest = _latest_instance_for_next_message(session_id)
+    if latest is None or latest.backend != CodexInstance.BACKEND_CLAUDE:
+        return None
+    if metadata is not None:
+        thread = _metadata_thread(metadata)
+    else:
+        thread = _MetadataThread(
+            id=session_id,
+            cwd=latest.cwd,
+            path="",
+            name="",
+            preview=latest.prompt,
+            created_at=None,
+            updated_at=None,
+            archived=False,
+            thread_source="",
+        )
+    # Each Claude turn is a separate CodexInstance with its own events file, so
+    # a multi-turn transcript spans all of them in order. While a turn is
+    # active its file is omitted here and streamed live by the SSE EventSource
+    # instead (avoids duplicating the in-flight turn); earlier completed turns
+    # still render so they don't vanish until the page reloads.
+    instances = CodexInstance.objects.filter(
+        thread_id=session_id, backend=CodexInstance.BACKEND_CLAUDE
+    ).order_by("started_at", "pk")
+    if active_instance is not None:
+        instances = instances.exclude(pk=active_instance.pk)
+    collected: list[dict[str, Any]] = []
+    for path in instances.values_list("events_path", flat=True):
+        if path:
+            collected.extend(claude_session_entries.session_entries(path))
+    entries = tuple(collected)
+    return _MetadataResume(
+        thread=thread,
+        entries=entries,
+        model=latest.model,
+        reasoning_effort=latest.reasoning_effort,
+    )
+
+
 def _metadata_resume_for_inactive_session(
     session_id: str,
     metadata: SessionMetadata | None,
@@ -5464,6 +5555,84 @@ def _latest_instance_for_next_message(session_id: str) -> CodexInstance | None:
         .order_by("-started_at", "-pk")
         .first()
     )
+
+
+def _session_is_claude(session_id: str) -> bool:
+    backend = (
+        CodexInstance.objects.filter(thread_id=session_id)
+        .order_by("-started_at", "-pk")
+        .values_list("backend", flat=True)
+        .first()
+    )
+    return backend == CodexInstance.BACKEND_CLAUDE
+
+
+def _send_claude_follow_up(
+    *,
+    session_id: str,
+    prompt: str,
+    plan_mode: bool,
+    settings: SettingsValues,
+    input_image_paths: list[str],
+) -> HttpResponse:
+    """Run a follow-up turn on a Claude session without a Codex resume.
+
+    Claude threads are not known to the Codex app-server, so the normal
+    follow-up path's ``thread_resume`` would fail. cwd and per-turn settings are
+    taken from local rows instead; ``spawn_turn`` inherits the backend and the
+    stored Claude session id from the thread's history.
+    """
+    previous_instance = codex_pool.latest_for_thread(session_id)
+    cwd = previous_instance.cwd if previous_instance is not None else ""
+    if not cwd:
+        metadata = SessionMetadata.objects.filter(thread_id=session_id).first()
+        cwd = metadata.cwd if metadata is not None else ""
+    if not cwd:
+        _cleanup_saved_input_images(input_image_paths)
+        return HttpResponseBadRequest("session has no cwd")
+    if cwd not in _allowed_session_cwds():
+        _cleanup_saved_input_images(input_image_paths)
+        return HttpResponseBadRequest("session cwd is not an allowed repository")
+    model = settings.model
+    if model not in claude_options.VALID_CLAUDE_MODELS:
+        model = claude_options.DEFAULT_CLAUDE_MODEL
+    web_search_mode = _valid_web_search_mode_or_default(settings.web_search_mode)
+    developer_instructions = (
+        previous_instance.developer_instructions
+        if previous_instance is not None
+        else _developer_instructions_for_project(
+            settings, _project_for_cwd(cwd, list(Project.objects.all()))
+        )
+    )
+    spawn_kwargs: dict[str, Any] = {
+        "thread_id": session_id,
+        "cwd": cwd,
+        "prompt": prompt,
+        "model": model,
+        "stored_model": model,
+        "reasoning_effort": settings.reasoning_effort or None,
+        "sandbox_policy": _effective_sandbox_policy(settings) or None,
+        "approval_mode": _effective_approval_mode(settings),
+        "plan_mode": plan_mode,
+    }
+    if input_image_paths:
+        spawn_kwargs["input_image_paths"] = input_image_paths
+    if web_search_mode:
+        spawn_kwargs["web_search_mode"] = web_search_mode
+    if previous_instance is None and developer_instructions:
+        spawn_kwargs["developer_instructions"] = developer_instructions
+    try:
+        codex_pool.spawn_turn(**spawn_kwargs)
+    except Exception:
+        _cleanup_saved_input_images(input_image_paths)
+        raise
+    # Claude sessions have no app-server sync to refresh the index timestamp,
+    # so bump it here or a multi-turn session stays sorted at its creation time.
+    now = timezone.now()
+    SessionMetadata.objects.filter(thread_id=session_id).update(
+        codex_updated_at=now, codex_last_synced_at=now
+    )
+    return redirect("session", session_id=session_id)
 
 
 def _token_usage_for(thread: Any) -> dict[str, str] | None:
@@ -7188,9 +7357,19 @@ def _effective_coding_agent(settings: SettingsValues) -> str:
     return coding_agents.DEFAULT_CODING_AGENT
 
 
+def _effective_provider(settings: SettingsValues) -> str:
+    if settings.provider in coding_agents.VALID_PROVIDERS:
+        return settings.provider
+    return coding_agents.DEFAULT_PROVIDER
+
+
 def _base_instructions_for_settings(
     settings: SettingsValues, *, explicit_default: bool = False
 ) -> str | None:
+    # Claude ships its own system prompt; Hitch's Codex base-instruction
+    # variants do not apply to the Claude backend.
+    if _effective_provider(settings) == coding_agents.PROVIDER_CLAUDE:
+        return None
     agent = _effective_coding_agent(settings)
     if agent == coding_agents.CODING_AGENT_CODEX:
         if explicit_default and settings.coding_agent == coding_agents.CODING_AGENT_CODEX:
@@ -8113,6 +8292,18 @@ def _resolved_settings(request: HttpRequest, models_data: list[Any]) -> Resolved
         approval_mode=saved_approval,
         web_search_mode=saved_web_search,
     )
+    # Claude models are not in the Codex catalog, so reconciling them against
+    # ``models_data`` would always snap a valid Claude id to a Codex default
+    # (and persist that for authenticated users). Validate against the static
+    # Claude set instead and skip the Codex model/effort reconciliation.
+    if _effective_provider(saved) == coding_agents.PROVIDER_CLAUDE:
+        if saved.model and saved.model not in claude_options.VALID_CLAUDE_MODELS:
+            return _resolved_settings_result(
+                request,
+                saved._replace(model=claude_options.DEFAULT_CLAUDE_MODEL),
+                {_MODEL_COOKIE: claude_options.DEFAULT_CLAUDE_MODEL},
+            )
+        return _resolved_settings_result(request, saved, {})
     if not models_data:
         return _resolved_settings_result(request, saved, {})
 
@@ -8163,6 +8354,7 @@ def _stored_settings(request: HttpRequest) -> SettingsValues:
         reasoning_effort=_read_cookie(request, _EFFORT_COOKIE),
         sandbox_policy=_read_cookie(request, _SANDBOX_COOKIE),
         approval_mode=_read_cookie(request, _APPROVAL_COOKIE),
+        provider=_read_cookie(request, _PROVIDER_COOKIE),
         coding_agent=_read_cookie(request, _CODING_AGENT_COOKIE),
         extra_system_prompt=_read_extra_system_prompt_cookie(request),
         use_worktrees=_read_cookie(request, _USE_WORKTREES_COOKIE) == "true",
@@ -8192,6 +8384,7 @@ def _settings_values_for_user(settings: UserSettings) -> SettingsValues:
         reasoning_effort=settings.reasoning_effort,
         sandbox_policy=settings.sandbox_policy,
         approval_mode=settings.approval_mode,
+        provider=settings.provider,
         coding_agent=settings.coding_agent,
         extra_system_prompt=settings.extra_system_prompt,
         use_worktrees=settings.use_worktrees,
@@ -8223,6 +8416,7 @@ def _save_user_settings(user: Any, values: SettingsValues) -> UserSettings:
         ("reasoning_effort", values.reasoning_effort),
         ("sandbox_policy", values.sandbox_policy),
         ("approval_mode", values.approval_mode),
+        ("provider", values.provider),
         ("coding_agent", values.coding_agent),
         ("extra_system_prompt", values.extra_system_prompt),
         ("use_worktrees", values.use_worktrees),
@@ -8251,6 +8445,7 @@ def _settings_cookie_updates(values: SettingsValues) -> dict[str, str]:
         _EFFORT_COOKIE: values.reasoning_effort,
         _SANDBOX_COOKIE: values.sandbox_policy,
         _APPROVAL_COOKIE: values.approval_mode,
+        _PROVIDER_COOKIE: _effective_provider(values),
         _CODING_AGENT_COOKIE: _effective_coding_agent(values),
         _EXTRA_SYSTEM_PROMPT_COOKIE: _encode_extra_system_prompt_cookie(
             values.extra_system_prompt
@@ -8304,6 +8499,13 @@ def _valid_cookie_setting_updates(
     if approval is not None:
         updates["approval_mode"] = (
             approval if approval in _VALID_APPROVAL_MODES else _DEFAULT_APPROVAL_MODE
+        )
+    provider = _read_signed_cookie_if_present(request, _PROVIDER_COOKIE)
+    if provider is not None:
+        updates["provider"] = (
+            provider
+            if provider in coding_agents.VALID_PROVIDERS
+            else coding_agents.DEFAULT_PROVIDER
         )
     coding_agent = _read_signed_cookie_if_present(request, _CODING_AGENT_COOKIE)
     if coding_agent is not None:
@@ -8829,6 +9031,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     effort = request.POST.get("reasoning_effort", "").strip()
     sandbox = request.POST.get("sandbox_policy", "").strip()
     approval = request.POST.get("approval_mode", "").strip()
+    provider = request.POST.get("provider", "").strip()
     coding_agent = request.POST.get("coding_agent", "").strip()
     extra_system_prompt = request.POST.get("extra_system_prompt", "").strip()
     use_worktrees = request.POST.get("use_worktrees", "").strip()
@@ -8879,6 +9082,10 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest("invalid coding agent")
     if not coding_agent:
         coding_agent = coding_agents.DEFAULT_CODING_AGENT
+    if provider and provider not in coding_agents.VALID_PROVIDERS:
+        return HttpResponseBadRequest("invalid provider")
+    if not provider:
+        provider = coding_agents.DEFAULT_PROVIDER
     if use_worktrees not in {"", "true"}:
         return HttpResponseBadRequest("invalid worktree setting")
     use_worktrees = "true" if use_worktrees == "true" else "false"
@@ -8913,7 +9120,12 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     if enable_memories not in {"", "true"}:
         return HttpResponseBadRequest("invalid memories setting")
     enable_memories = "true" if enable_memories == "true" else "false"
-    if model or effort:
+    if provider == coding_agents.PROVIDER_CLAUDE:
+        # Claude has no app-server model listing; validate against the static
+        # Claude model set instead of cross-checking the Codex catalog.
+        if model and model not in claude_options.VALID_CLAUDE_MODELS:
+            return HttpResponseBadRequest("invalid model")
+    elif model or effort:
         # Cross-check the posted (model, effort) pair against what Codex
         # actually offers so a malformed POST (typo, stale model id, effort
         # the chosen model doesn't support) gets a clean 400 instead of
@@ -8937,6 +9149,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         reasoning_effort=effort,
         sandbox_policy=sandbox,
         approval_mode=approval,
+        provider=provider,
         coding_agent=coding_agent,
         extra_system_prompt=extra_system_prompt,
         use_worktrees=use_worktrees == "true",
@@ -9664,11 +9877,13 @@ def set_session_name(request: HttpRequest, session_id: str) -> HttpResponse:
         return HttpResponseBadRequest("name is required")
     if len(name) > _NAME_MAX_LEN:
         return HttpResponseBadRequest("name is too long")
-    settings = _stored_settings(request)
-    with codex_pool.borrow_codex(
-        Codex, enable_memories=settings.enable_memories
-    ) as codex:
-        codex._client.thread_set_name(session_id, name)
+    # Claude threads have no app-server thread; update the local cache directly.
+    if not _session_is_claude(session_id):
+        settings = _stored_settings(request)
+        with codex_pool.borrow_codex(
+            Codex, enable_memories=settings.enable_memories
+        ) as codex:
+            codex._client.thread_set_name(session_id, name)
     session_index.update_cached_name(session_id, name)
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return HttpResponse(status=204)
@@ -9682,14 +9897,16 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
     archived = request.POST.get("archived", "").strip()
     if archived not in {"true", "false"}:
         return HttpResponseBadRequest("archived must be true or false")
-    settings = _stored_settings(request)
-    with codex_pool.borrow_codex(
-        Codex, enable_memories=settings.enable_memories
-    ) as codex:
-        if archived == "true":
-            codex.thread_archive(session_id)
-        else:
-            codex.thread_unarchive(session_id)
+    # Claude threads have no app-server thread; update the local cache directly.
+    if not _session_is_claude(session_id):
+        settings = _stored_settings(request)
+        with codex_pool.borrow_codex(
+            Codex, enable_memories=settings.enable_memories
+        ) as codex:
+            if archived == "true":
+                codex.thread_archive(session_id)
+            else:
+                codex.thread_unarchive(session_id)
     if archived == "true":
         demo.cleanup_demo_for_session(session_id)
     session_index.update_cached_archived(session_id, archived=archived == "true")
@@ -9717,6 +9934,10 @@ def _mark_workflow_failed(workflow: SystemWorkflow) -> None:
 
 @require_http_methods(["POST"])
 def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
+    # The demo flow resumes a Codex app-server thread; Claude sessions have no
+    # such thread, so reject rather than fail against Codex.
+    if _session_is_claude(session_id):
+        return HttpResponseBadRequest("demo is not supported for Claude sessions")
     if system_agents.active_workflow_for_thread(session_id) is not None:
         return HttpResponseBadRequest("PR workflow is running for this session")
     active_instance = codex_pool.latest_active_for_thread(session_id)
@@ -9977,6 +10198,21 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 return HttpResponseBadRequest("QA workflow could not be paused")
             _cleanup_saved_input_images(input_image_paths)
             return HttpResponseBadRequest("PR workflow is running for this session")
+        # Claude threads have no Codex rollout to resume, so route their
+        # follow-up turns around the app-server entirely.
+        if _session_is_claude(session_id):
+            if qa_workflow_activation:
+                _cleanup_saved_input_images(input_image_paths)
+                return HttpResponseBadRequest(
+                    "PR/QA workflow is not supported for Claude sessions"
+                )
+            return _send_claude_follow_up(
+                session_id=session_id,
+                prompt=prompt,
+                plan_mode=plan_mode,
+                settings=settings,
+                input_image_paths=input_image_paths,
+            )
         # If steering is unavailable or races a terminal worker, preserve the
         # submitted prompt by treating it as an ordinary follow-up turn.
         # ``raw_active`` posts still do not retarget a different active worker.
@@ -11529,7 +11765,21 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
     # render would have snapped away from; without this, a stale value
     # would ride straight into ``thread_start(model=...)`` and 500 the
     # new-session click.
-    resolved_settings = _new_session_post_settings(request)
+    claude_start = (
+        _effective_provider(_stored_settings(request)) == coding_agents.PROVIDER_CLAUDE
+    )
+    # The PR/QA workflow spawns Codex workers, so it cannot run a Claude session.
+    if claude_start and qa_workflow_activation:
+        return HttpResponseBadRequest(
+            "PR/QA workflow is not supported for Claude sessions"
+        )
+    if claude_start:
+        # The Claude spawn path needs no Codex model catalog, and the
+        # provider-aware resolver ignores ``models_data`` for Claude, so skip the
+        # app-server lookup entirely (it may be unavailable).
+        resolved_settings = _resolved_settings(request, [])
+    else:
+        resolved_settings = _new_session_post_settings(request)
     settings = resolved_settings.values
     spawn_settings = (
         settings._replace(coding_agent=coding_agent_override)
@@ -11753,6 +12003,23 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         "sandbox_policy": sandbox_policy or None,
         "approval_mode": settings.approval_mode,
     }
+    session_backend = coding_agents.backend_for_provider(
+        _effective_provider(spawn_settings)
+    )
+    # Only forward a non-default backend so the Codex spawn path (and its many
+    # tests) keep their exact call signature.
+    if session_backend == coding_agents.BACKEND_CLAUDE:
+        spawn_kwargs["backend"] = session_backend
+        # The model cookie may hold a Codex model id; fall back to a valid
+        # Claude model so the CLI does not reject the turn.
+        if spawn_kwargs.get("model") not in claude_options.VALID_CLAUDE_MODELS:
+            spawn_kwargs["model"] = claude_options.DEFAULT_CLAUDE_MODEL
+        # The PR/QA auto-review workflows spawn Codex workers using the
+        # instance model; a Claude session would hand them a Claude model id
+        # and fail. Disable them (and the Codex-only Spec Critic preflight) for
+        # Claude sessions rather than starting workers that cannot run.
+        auto_pr_enabled = False
+        auto_qa_enabled = False
     if input_image_paths:
         spawn_kwargs["input_image_paths"] = input_image_paths
     if web_search_mode:
@@ -11780,6 +12047,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
     if (
         proposed_session is None
         and settings.spec_critic_enabled
+        and session_backend != coding_agents.BACKEND_CLAUDE
         and not input_image_paths
         and not plan_mode
     ):

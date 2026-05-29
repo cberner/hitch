@@ -1,6 +1,15 @@
 <form class="settings-form" method="post" action="{{ settings_url }}">
     {% csrf_token %}
     <input type="hidden" name="next" value="{{ settings_next_url }}">
+    {{ model_options_by_provider|json_script:"provider-model-options" }}
+    <label>
+        Provider
+        <select name="provider" data-settings-provider-select>
+            {% for option in provider_options %}
+            <option value="{{ option.id }}" {% if option.id == current_provider %}selected{% endif %}>{{ option.display_name }}</option>
+            {% endfor %}
+        </select>
+    </label>
     <label>
         Model
         {% if model_options %}
@@ -75,7 +84,7 @@
         <span>Spec Critic preflight</span>
         <input type="checkbox" name="spec_critic" value="true" {% if current_spec_critic %}checked{% endif %}>
     </label>
-    <label class="checkbox-label">
+    <label class="checkbox-label" data-codex-only>
         <span>Enable Codex memories</span>
         <input type="checkbox" name="enable_memories" value="true" {% if current_enable_memories %}checked{% endif %}>
     </label>
@@ -108,3 +117,56 @@
         <a class="button secondary" href="{{ settings_cancel_url }}">Cancel</a>
     </div>
 </form>
+<script>
+(function () {
+    const providerSelect = document.querySelector("[data-settings-provider-select]");
+    const modelSelect = document.querySelector("[data-settings-model-select]");
+    const optionsNode = document.getElementById("provider-model-options");
+    if (!providerSelect || !modelSelect || !optionsNode) {
+        return;
+    }
+    let optionsByProvider = {};
+    try {
+        optionsByProvider = JSON.parse(optionsNode.textContent);
+    } catch (err) {
+        return;
+    }
+    const initialModel = modelSelect.value;
+
+    function repopulateModels() {
+        const provider = providerSelect.value;
+        const options = optionsByProvider[provider] || [];
+        const previous = modelSelect.value;
+        modelSelect.innerHTML = "";
+        options.forEach(function (option) {
+            const el = document.createElement("option");
+            el.value = option.id;
+            el.textContent = option.display_name;
+            el.dataset.supportedEfforts = option.supported_efforts || "";
+            modelSelect.appendChild(el);
+        });
+        // Keep the saved model selected when it still belongs to this provider.
+        const keep = options.some(function (o) { return o.id === previous; })
+            ? previous
+            : (options.some(function (o) { return o.id === initialModel; }) ? initialModel : "");
+        if (keep) {
+            modelSelect.value = keep;
+        }
+        // Let the reasoning-effort filter re-evaluate against the new model.
+        modelSelect.dispatchEvent(new Event("change"));
+    }
+
+    function toggleCodexOnly() {
+        const isCodex = providerSelect.value === "codex";
+        document.querySelectorAll("[data-codex-only]").forEach(function (node) {
+            node.hidden = !isCodex;
+        });
+    }
+
+    providerSelect.addEventListener("change", function () {
+        repopulateModels();
+        toggleCodexOnly();
+    });
+    toggleCodexOnly();
+})();
+</script>

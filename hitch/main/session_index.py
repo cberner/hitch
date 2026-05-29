@@ -13,7 +13,12 @@ from django.utils import timezone
 from openai_codex import AppServerError, Codex
 from openai_codex.generated.v2_all import SortDirection, ThreadSortKey
 
-from hitch.main.models import Project, SessionIndexSyncState, SessionMetadata
+from hitch.main.models import (
+    CodexInstance,
+    Project,
+    SessionIndexSyncState,
+    SessionMetadata,
+)
 from hitch.main.repos import same_repo_or_worktree
 
 logger = logging.getLogger(__name__)
@@ -481,7 +486,17 @@ def _refresh_source(
 
 
 def _invalidate_absent_source_rows(*, archived: bool, seen_thread_ids: set[str]) -> None:
-    SessionMetadata.objects.exclude(thread_id__in=seen_thread_ids).filter(
+    # Claude sessions live only as local rows and never appear in the Codex
+    # thread list, so a Codex index refresh must not treat them as "absent" and
+    # invalidate them out of the session list.
+    claude_thread_ids = set(
+        CodexInstance.objects.filter(
+            backend=CodexInstance.BACKEND_CLAUDE
+        ).values_list("thread_id", flat=True)
+    )
+    SessionMetadata.objects.exclude(
+        thread_id__in=seen_thread_ids | claude_thread_ids
+    ).filter(
         codex_updated_at__isnull=False,
         codex_archived=archived,
     ).update(codex_updated_at=None, codex_last_synced_at=timezone.now())
