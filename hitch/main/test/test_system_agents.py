@@ -4015,6 +4015,28 @@ class SpecCriticWorkflowTests(TestCase):
             '{"feedback": "Done", "lgtm": true}',
         )
 
+    def test_fenced_json_with_unicode_separators_still_parses(self) -> None:
+        # A fenced JSON verdict whose string content legitimately contains a
+        # Unicode line/paragraph/NEL separator must not be torn apart by the
+        # fence stripper: those characters are valid inside a JSON string, and
+        # rewriting them as literal newlines would block the workflow with a
+        # bogus "output was not valid JSON" failure.
+        for separator in ("\u2028", "\u2029", "\x85", "\x0c", "\x0b"):
+            with self.subTest(separator=repr(separator)):
+                verdict = {"feedback": f"left{separator}right", "lgtm": False}
+                fenced = "```json\n" + json.dumps(verdict, ensure_ascii=False) + "\n```"
+                parsed = system_agents._parse_qa_output(fenced)
+                self.assertIsNotNone(parsed)
+                assert parsed is not None
+                self.assertIs(parsed["lgtm"], False)
+                self.assertEqual(parsed["feedback"], f"left{separator}right")
+        # A CRLF-delimited fence parses identically to an LF one, and a plain
+        # fence is unaffected.
+        crlf = '```json\r\n{"feedback": "x", "lgtm": true}\r\n```'
+        self.assertEqual(
+            system_agents._parse_qa_output(crlf), {"feedback": "x", "lgtm": True}
+        )
+
     def test_pr_monitor_output_rejects_boolean_numeric_handoff_fields(self) -> None:
         parsed = system_agents._parse_pr_monitor_output(
             json.dumps(
