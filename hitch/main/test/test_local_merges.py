@@ -278,6 +278,24 @@ class LocalMergeTests(SimpleTestCase):
             )
             self.assertEqual(_git(repo, "show", "main:README.md"), "hello")
 
+    def test_unrelated_histories_raise_no_merge_base(self) -> None:
+        # ``git merge-base`` exits non-zero (not empty stdout) for unrelated
+        # histories, so the clear "no merge base" message must still surface.
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            session = root / "session"
+            _init_repo(repo)
+            _git(repo, "checkout", "--orphan", "release")
+            (repo / "OTHER.md").write_text("unrelated\n")
+            _git(repo, "add", "OTHER.md")
+            _git(repo, "commit", "-m", "orphan base")
+            _git(repo, "checkout", "main")
+            _git(repo, "worktree", "add", "-b", "session", str(session), "main")
+
+            with self.assertRaisesRegex(LocalBranchMergeError, "no merge base"):
+                build_auto_merge_review_patch(session, "release")
+
     def test_follow_up_review_does_not_replay_merged_patch(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
