@@ -614,7 +614,11 @@ def _drain_steer_requests(
     if newline < 0:
         return control_offset
     complete = chunk[: newline + 1]
-    for raw in complete.splitlines():
+    # Split only on "\n" to match the byte-offset accounting above; bytes.splitlines()
+    # would also break on \r, \v, \f, \x1c-\x1e, \x85, ... and could tear a record.
+    for raw in complete.split(b"\n"):
+        if not raw:
+            continue
         try:
             request = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError):

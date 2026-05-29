@@ -1688,6 +1688,54 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(completed.status, CodexInstance.STATUS_COMPLETED)
         self.assertIn("exited", dead_running.error)
 
+    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_preserves_row_that_completed_during_sweep(
+        self, _mock_alive: MagicMock
+    ) -> None:
+        # The worker can write its terminal status in the gap between the
+        # pending-row read and the failed-marking write; the conditional UPDATE
+        # must not retroactively rewrite that completed turn as failed.
+        instance = self._make(pid=20, status=CodexInstance.STATUS_RUNNING)
+        pending = list(CodexInstance.objects.filter(pk=instance.pk))
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            status=CodexInstance.STATUS_COMPLETED
+        )
+
+        n = codex_pool._mark_dead_instances_failed(pending)
+
+        instance.refresh_from_db()
+        self.assertEqual(n, 0)
+        self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
+        self.assertEqual(instance.error, "")
+        self.assertIsNone(instance.ended_at)
+
+    @patch("hitch.main.codex_pool.cleanup_requested_input_images_for")
+    @patch("hitch.main.codex_pool._notify_system_agents_if_needed")
+    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_still_routes_instance_that_completed_during_sweep(
+        self,
+        _mock_alive: MagicMock,
+        mock_notify: MagicMock,
+        _mock_cleanup: MagicMock,
+    ) -> None:
+        # A worker that saved its terminal status but died before its own notify
+        # must still be routed by the reclaim sweep — demo system-agent rows are
+        # excluded from reconcile_terminal_workflow_instances() and have no other
+        # backstop, so skipping routing here would strand them.
+        instance = self._make(pid=21, status=CodexInstance.STATUS_RUNNING)
+        pending = list(CodexInstance.objects.filter(pk=instance.pk))
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            status=CodexInstance.STATUS_COMPLETED
+        )
+
+        n = codex_pool._mark_dead_instances_failed(pending)
+
+        self.assertEqual(n, 0)
+        mock_notify.assert_called_once()
+        routed = mock_notify.call_args.args[0]
+        self.assertEqual(routed.pk, instance.pk)
+        self.assertEqual(routed.status, CodexInstance.STATUS_COMPLETED)
+
     def test_reconcile_spares_freshly_spawned_worker_with_unassigned_pid(self) -> None:
         # ``_spawn_worker`` commits the CodexInstance row with ``pid=0`` before
         # ``subprocess.Popen`` returns. Between those two writes, reconcile_dead
@@ -1865,6 +1913,41 @@ class ReconcileAndLookupTests(TestCase):
             self.assertEqual(instance.input_attachment_paths, [str(image_path)])
             self.assertTrue(instance.input_attachment_cleanup_requested)
             self.assertTrue(image_path.exists())
+
+    def test_cleanup_preserves_concurrently_added_attachment(self) -> None:
+        # A steer image can land between the candidate read and the ledger
+        # write; the locked read-modify-write must not clobber it.
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            attachments = codex_pool.input_attachments_dir()
+            path_a = attachments / "a" / "1.png"
+            path_b = attachments / "b" / "1.png"
+            for path in (path_a, path_b):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"image")
+            instance = self._make(status=CodexInstance.STATUS_FAILED)
+            CodexInstance.objects.filter(pk=instance.pk).update(
+                input_attachment_paths=[str(path_a)],
+            )
+
+            injected = {"done": False}
+
+            def _inject_concurrent_add(*args: Any, **kwargs: Any) -> None:
+                if not injected["done"]:
+                    injected["done"] = True
+                    CodexInstance.objects.filter(pk=instance.pk).update(
+                        input_attachment_paths=[str(path_a), str(path_b)],
+                    )
+                return None
+
+            with patch.object(Path, "unlink", side_effect=_inject_concurrent_add):
+                codex_pool.cleanup_input_images_for(instance)
+
+            instance.refresh_from_db()
+            self.assertEqual(instance.input_attachment_paths, [str(path_b)])
+            self.assertTrue(instance.input_attachment_cleanup_requested)
 
     def test_retry_failed_input_image_cleanups_retries_requested_rows(self) -> None:
         with (
@@ -4857,6 +4940,41 @@ class ApprovalHandlerTests(TestCase):
         self.assertEqual(handler("custom/requestUserInputExtra", {}), {})
         self.assertFalse(UserInputRequest.objects.exists())
         self.assertEqual(events, [])
+
+    def test_drain_steer_requests_splits_only_on_newline(self) -> None:
+        """The control file is newline-delimited JSONL; the drain must split on
+        ``\\n`` (matching its byte-offset accounting) and leave a trailing
+        partial line for the next drain."""
+        from hitch.main.management.commands import codex_worker
+
+        instance = self._make_instance()
+        with tempfile.TemporaryDirectory() as raw:
+            control_path = Path(raw) / "control.jsonl"
+            complete = (
+                json.dumps({"op": "steer", "input": "first"}).encode()
+                + b"\n"
+                + json.dumps({"op": "steer", "input": "second"}).encode()
+                + b"\n"
+            )
+            partial = json.dumps({"op": "steer", "input": "third"}).encode()
+            control_path.write_bytes(complete + partial)
+
+            steered: list[str] = []
+
+            def _record_steer(turn: Any, text: str, **kw: Any) -> bool:
+                steered.append(text)
+                return True
+
+            with patch.object(codex_worker, "_try_steer", side_effect=_record_steer):
+                new_offset = codex_worker._drain_steer_requests(
+                    MagicMock(),
+                    instance=instance,
+                    control_path=control_path,
+                    control_offset=0,
+                )
+
+        self.assertEqual(steered, ["first", "second"])
+        self.assertEqual(new_offset, len(complete))
 
     @patch(
         "hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001
