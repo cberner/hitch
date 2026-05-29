@@ -5219,8 +5219,35 @@ def _block_workflow(
     workflow.step = STEP_BLOCKED
     workflow.state = {**workflow.state, "error": error}
     workflow.save(update_fields=["status", "step", "state", "updated_at"])
+    _interrupt_orphaned_qa_review_runs(workflow, error)
     if surface_to_thread:
         _surface_workflow_failure(workflow, error)
+
+
+def _interrupt_orphaned_qa_review_runs(workflow: SystemWorkflow, error: str) -> None:
+    """Stop hidden QA review subagents left running when the workflow ends.
+
+    A QA verdict or panel-lane worker only matters while the PR-QA workflow is
+    still collecting its review. When the workflow blocks before every peer has
+    finished -- for example because one panel lane failed or returned invalid
+    JSON while its siblings are still reviewing -- the survivors would otherwise
+    keep running to completion, burning model quota and touching the session
+    worktree for a review that can no longer be used. Interrupt and fail them so
+    blocking the workflow tears down its whole in-flight QA fan-out.
+    """
+    if workflow.kind != SystemWorkflow.KIND_PR_QA:
+        return
+    runs = list(
+        workflow.agent_runs.filter(
+            agent_kind__in=_QA_INTERRUPTIBLE_AGENT_KINDS,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+        .select_related("instance")
+        .order_by("created_at", "id")
+    )
+    if not runs:
+        return
+    _mark_system_agent_runs_failed(_interrupt_system_agent_runs(runs), error)
 
 
 def _surface_workflow_failure(workflow: SystemWorkflow, error: str) -> None:

@@ -1292,6 +1292,74 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(run.output["lane"], lane.label)
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
 
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
+    def test_failed_panel_lane_interrupts_running_siblings(
+        self, mock_interrupt: MagicMock, _mock_spawn_turn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_QA_RUNNING,
+            state={"qa_panel_enabled": True, "next_user_message_index": 1},
+        )
+        lane_runs: list[SystemAgentRun] = []
+        failing_instance: CodexInstance | None = None
+        for index, lane in enumerate(system_agents._QA_PANEL_LANES):
+            if index == 0:
+                # First lane returns invalid JSON, which fails the lane and
+                # blocks the whole workflow.
+                events_path = _agent_message_events_file(self, "not valid json")
+                status = CodexInstance.STATUS_COMPLETED
+            else:
+                events_path = "/dev/null"
+                status = CodexInstance.STATUS_RUNNING
+            instance = _instance(
+                thread_id=f"qa-lane-{index}",
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                workflow_id=workflow.pk,
+                events_path=events_path,
+                status=status,
+                agent_kind=lane.agent_kind,
+            )
+            if index == 0:
+                failing_instance = instance
+            lane_runs.append(
+                SystemAgentRun.objects.create(
+                    workflow=workflow,
+                    agent_kind=lane.agent_kind,
+                    thread_id=instance.thread_id,
+                    instance=instance,
+                    status=SystemAgentRun.STATUS_RUNNING,
+                    input={"lane": lane.label},
+                )
+            )
+        assert failing_instance is not None
+        mock_interrupt.side_effect = lambda instance_id, *, expected_thread_id: (
+            CodexInstance.objects.get(pk=instance_id)
+        )
+
+        system_agents.on_codex_instance_finished(failing_instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        # The failing lane is marked failed; every still-running sibling lane is
+        # interrupted and failed too, instead of being orphaned to keep burning
+        # the user's Codex quota.
+        for run in lane_runs:
+            run.refresh_from_db()
+            self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        interrupted_threads = {
+            call.args[0] for call in mock_interrupt.call_args_list
+        }
+        sibling_instance_ids = {
+            run.instance_id for run in lane_runs[1:]
+        }
+        self.assertEqual(interrupted_threads, sibling_instance_ids)
+        self.assertNotIn(failing_instance.pk, interrupted_threads)
+
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_start_returns_existing_running_workflow(self, mock_spawn: MagicMock) -> None:
         existing = SystemWorkflow.objects.create(
