@@ -1513,18 +1513,29 @@ def _worker_slice() -> str:
     return str(getattr(settings, "CODEX_WORKER_SLICE", "") or "").strip()
 
 
-def _memory_cgroup_properties(high_setting: str, max_setting: str) -> list[str]:
+def _memory_cgroup_properties(
+    high_setting: str, max_setting: str, swap_setting: str
+) -> list[str]:
     """Build systemd memory-cgroup properties for the named settings.
 
     ``MemoryAccounting=yes`` must accompany any ``MemoryHigh``/``MemoryMax``:
     hosts with ``DefaultMemoryAccounting=no`` (or a legacy cgroup v1 hierarchy)
     silently ignore the limits unless accounting is explicitly enabled on the
-    unit, so the cap would not actually bound the worker. The per-worker scope
-    and the aggregate slice share this builder so their accounting/limit
-    handling cannot drift apart.
+    unit, so the cap would not actually bound the worker.
+
+    ``MemorySwapMax`` rides along with the limits because cgroup v2 counts only
+    RAM toward ``MemoryMax``: without a swap cap a runaway worker is reclaimed
+    to swap instead of OOM-killed, so the hard cap never fires and the turn
+    thrashes the host indefinitely rather than failing. It is only emitted when
+    a memory limit is also set (i.e. accounting is on), so it never disables
+    swap on an otherwise-unbounded unit.
+
+    The per-worker scope and the aggregate slice share this builder so their
+    accounting/limit/swap handling cannot drift apart.
     """
     high = str(getattr(settings, high_setting, "") or "").strip()
     hard = str(getattr(settings, max_setting, "") or "").strip()
+    swap = str(getattr(settings, swap_setting, "") or "").strip()
     properties: list[str] = []
     if high or hard:
         properties.append("MemoryAccounting=yes")
@@ -1532,12 +1543,16 @@ def _memory_cgroup_properties(high_setting: str, max_setting: str) -> list[str]:
         properties.append(f"MemoryHigh={high}")
     if hard:
         properties.append(f"MemoryMax={hard}")
+    if swap and (high or hard):
+        properties.append(f"MemorySwapMax={swap}")
     return properties
 
 
 def _systemd_worker_slice_properties() -> list[str]:
     return _memory_cgroup_properties(
-        "CODEX_WORKER_SLICE_MEMORY_HIGH", "CODEX_WORKER_SLICE_MEMORY_MAX"
+        "CODEX_WORKER_SLICE_MEMORY_HIGH",
+        "CODEX_WORKER_SLICE_MEMORY_MAX",
+        "CODEX_WORKER_SLICE_MEMORY_SWAP_MAX",
     )
 
 
@@ -1652,7 +1667,9 @@ def _systemd_scope_argv(
     if worker_slice:
         argv.append(f"--slice={worker_slice}")
     for property_value in _memory_cgroup_properties(
-        "CODEX_WORKER_MEMORY_HIGH", "CODEX_WORKER_MEMORY_MAX"
+        "CODEX_WORKER_MEMORY_HIGH",
+        "CODEX_WORKER_MEMORY_MAX",
+        "CODEX_WORKER_MEMORY_SWAP_MAX",
     ):
         argv.append(f"--property={property_value}")
     argv.append("--")

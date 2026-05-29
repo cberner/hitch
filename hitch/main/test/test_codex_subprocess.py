@@ -887,6 +887,7 @@ class LaunchWorkerProcessTests(TestCase):
         CODEX_WORKER_ISOLATION="systemd",
         CODEX_WORKER_MEMORY_HIGH="4G",
         CODEX_WORKER_MEMORY_MAX="12G",
+        CODEX_WORKER_MEMORY_SWAP_MAX="0",
         CODEX_WORKER_SLICE="hitch-codex-workers.slice",
     )
     @patch("hitch.main.codex_pool._ensure_systemd_worker_slice")
@@ -921,6 +922,9 @@ class LaunchWorkerProcessTests(TestCase):
         self.assertIn("--property=MemoryAccounting=yes", argv)
         self.assertIn("--property=MemoryHigh=4G", argv)
         self.assertIn("--property=MemoryMax=12G", argv)
+        # Cap swap so MemoryMax is a true ceiling that OOM-kills a runaway
+        # worker instead of letting it thrash swap forever.
+        self.assertIn("--property=MemorySwapMax=0", argv)
         separator = argv.index("--")
         worker_argv = argv[separator + 1 :]
         self.assertEqual(worker_argv[1].endswith("manage.py"), True)
@@ -939,6 +943,7 @@ class LaunchWorkerProcessTests(TestCase):
         CODEX_WORKER_SLICE="hitch-codex-workers.slice",
         CODEX_WORKER_SLICE_MEMORY_HIGH="8G",
         CODEX_WORKER_SLICE_MEMORY_MAX="10G",
+        CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0",
     )
     @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
     @patch("hitch.main.codex_pool.subprocess.run")
@@ -963,11 +968,15 @@ class LaunchWorkerProcessTests(TestCase):
         self.assertIn("MemoryAccounting=yes", argv)
         self.assertIn("MemoryHigh=8G", argv)
         self.assertIn("MemoryMax=10G", argv)
+        # The aggregate slice caps swap too, so workers collectively can't
+        # exceed their RAM budget by spilling to swap.
+        self.assertIn("MemorySwapMax=0", argv)
         mock_which.assert_called_once_with("systemctl")
 
     @override_settings(
         CODEX_WORKER_MEMORY_HIGH="2G",
         CODEX_WORKER_MEMORY_MAX="4G",
+        CODEX_WORKER_MEMORY_SWAP_MAX="0",
         CODEX_WORKER_SLICE="hitch-codex-workers.slice",
     )
     def test_per_worker_scope_enables_memory_accounting(self) -> None:
@@ -989,13 +998,53 @@ class LaunchWorkerProcessTests(TestCase):
         self.assertIn("--property=MemoryMax=4G", argv)
 
     @override_settings(
+        CODEX_WORKER_MEMORY_HIGH="2G",
+        CODEX_WORKER_MEMORY_MAX="4G",
+        CODEX_WORKER_MEMORY_SWAP_MAX="0",
+        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
+    )
+    def test_per_worker_scope_caps_swap(self) -> None:
+        # Regression: cgroup v2 counts only RAM toward MemoryMax, so without a
+        # swap cap a runaway worker is reclaimed to swap rather than OOM-killed.
+        # The hard cap then never fires and the turn thrashes the host
+        # indefinitely instead of failing, so MemoryMax must ride with a swap
+        # cap to be a true ceiling.
+        argv = codex_pool._systemd_scope_argv(
+            systemd_run="/usr/bin/systemd-run",
+            scope_unit="hitch-codex-worker-7.scope",
+            worker_argv=["python", "manage.py", "codex_worker"],
+        )
+
+        self.assertIn("--property=MemorySwapMax=0", argv)
+
+    @override_settings(
+        CODEX_WORKER_MEMORY_HIGH="2G",
+        CODEX_WORKER_MEMORY_MAX="4G",
+        CODEX_WORKER_MEMORY_SWAP_MAX="1G",
+        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
+    )
+    def test_per_worker_scope_honors_swap_override(self) -> None:
+        # A non-zero cap grants a bounded swap cushion rather than forbidding
+        # swap outright; the configured value must be passed through verbatim.
+        argv = codex_pool._systemd_scope_argv(
+            systemd_run="/usr/bin/systemd-run",
+            scope_unit="hitch-codex-worker-7.scope",
+            worker_argv=["python", "manage.py", "codex_worker"],
+        )
+
+        self.assertIn("--property=MemorySwapMax=1G", argv)
+
+    @override_settings(
         CODEX_WORKER_MEMORY_HIGH="",
         CODEX_WORKER_MEMORY_MAX="",
+        CODEX_WORKER_MEMORY_SWAP_MAX="0",
         CODEX_WORKER_SLICE="hitch-codex-workers.slice",
     )
     def test_per_worker_scope_skips_accounting_without_limits(self) -> None:
         # Accounting is only worth enabling when a limit rides along with it;
-        # an unconfigured cap must not emit a bare MemoryAccounting property.
+        # an unconfigured cap must not emit a bare MemoryAccounting property,
+        # and a stray swap cap must not disable swap on an otherwise-unbounded
+        # unit (it only completes a real MemoryMax ceiling).
         argv = codex_pool._systemd_scope_argv(
             systemd_run="/usr/bin/systemd-run",
             scope_unit="hitch-codex-worker-7.scope",
