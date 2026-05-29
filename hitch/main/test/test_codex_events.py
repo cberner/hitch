@@ -2484,3 +2484,18 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
             )
 
         self.assertIsNone(snapshot)
+
+
+class FinalizePrSnapshotTests(SimpleTestCase):
+    def test_accepts_repo_and_numeric_pr_number(self) -> None:
+        snapshot = codex_events._finalize_pr_snapshot(
+            {"repository_full_name": "cberner/hitch", "pr_number": 7}
+        )
+        self.assertIsNotNone(snapshot)
+
+    def test_rejects_bool_pr_number(self) -> None:
+        # bool is an int subclass; the identity guard must reject it so
+        # _finalize_pr_snapshot agrees with _pr_snapshot_has_identity.
+        snapshot = {"repository_full_name": "cberner/hitch", "pr_number": True}
+        self.assertIsNone(codex_events._finalize_pr_snapshot(snapshot))
+        self.assertFalse(codex_events._pr_snapshot_has_identity(snapshot))
