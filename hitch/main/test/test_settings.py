@@ -1696,6 +1696,34 @@ class AuthenticatedWebSearchSettingsTests(TestCase):
         self.assertEqual(settings.web_search_mode, "live")
         self.assertEqual(_cookie_value(response, _WEB_SEARCH_COOKIE), "live")
 
+    def test_account_prompt_too_big_for_cookie_still_saves_to_db(self) -> None:
+        """For a logged-in user the prompt's source of truth is the DB; the
+        cookie is only a mirror. A prompt under the character cap but over the
+        cookie byte budget must still save to the account instead of being
+        rejected — the cookie-overflow guard is for the anonymous, cookie-only
+        path, not the DB-backed one."""
+        user_model = get_user_model()
+        user = user_model.objects.create_user(
+            "dev@example.com", password="StrongPass123!"
+        )
+        UserSettings.objects.create(user=user)
+        self.client.force_login(user)
+        # Under the 2500-character cap, but its base64 cookie would blow past
+        # the browser limit (the value an anonymous POST would be rejected for).
+        prompt = "あ" * 2400
+        self.assertLessEqual(len(prompt), views._EXTRA_SYSTEM_PROMPT_MAX_LEN)
+        self.assertFalse(views._extra_system_prompt_cookie_fits(prompt))
+
+        response = self.client.post(
+            reverse("update_settings"),
+            data={"model": "", "reasoning_effort": "", "extra_system_prompt": prompt},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            UserSettings.objects.get(user=user).extra_system_prompt, prompt
+        )
+
     def test_login_imports_web_search_cookie_to_account(self) -> None:
         user_model = get_user_model()
         user = user_model.objects.create_user(
