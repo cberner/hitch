@@ -34,19 +34,25 @@ class AutoProposalSchedulerTests(SimpleTestCase):
     def test_scheduler_env_override_can_enable(self) -> None:
         self.assertTrue(auto_proposals._auto_proposal_scheduler_enabled())
 
+    @patch("hitch.main.auto_proposals.system_agents.maybe_advance_pr_monitors")
     @patch(
         "hitch.main.auto_proposals.system_agents.maybe_start_auto_proposal_workflows",
         return_value=2,
     )
     @patch("hitch.main.auto_proposals.codex_pool.reconcile_dead")
     def test_scheduler_tick_reconciles_and_starts_auto_proposals(
-        self, mock_reconcile_dead: MagicMock, mock_start: MagicMock
+        self,
+        mock_reconcile_dead: MagicMock,
+        mock_start: MagicMock,
+        mock_advance_monitors: MagicMock,
     ) -> None:
         auto_proposals._run_auto_proposal_scheduler_tick()
 
         mock_reconcile_dead.assert_called_once_with()
+        mock_advance_monitors.assert_called_once_with()
         mock_start.assert_called_once_with()
 
+    @patch("hitch.main.auto_proposals.system_agents.maybe_advance_pr_monitors")
     @patch("hitch.main.auto_proposals.logger.exception")
     @patch("hitch.main.auto_proposals.system_agents.maybe_start_auto_proposal_workflows")
     @patch("hitch.main.auto_proposals.codex_pool.reconcile_dead")
@@ -55,6 +61,7 @@ class AutoProposalSchedulerTests(SimpleTestCase):
         mock_reconcile_dead: MagicMock,
         mock_start: MagicMock,
         mock_log_exception: MagicMock,
+        mock_advance_monitors: MagicMock,
     ) -> None:
         mock_reconcile_dead.side_effect = RuntimeError("boom")
 

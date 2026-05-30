@@ -102,6 +102,11 @@ urlpatterns = [
         name="set_session_project",
     ),
     path(
+        "sessions/<str:session_id>/open-pr/",
+        hitch.main.views.open_session_pr,
+        name="open_session_pr",
+    ),
+    path(
         "sessions/<str:session_id>/message/",
         hitch.main.views.send_message,
         name="send_message",

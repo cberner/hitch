@@ -13,7 +13,7 @@ from django.test import Client, TestCase
 from django.urls import reverse
 from openai_codex.errors import AppServerError
 
-from hitch.main import codex_events, demo, system_agents
+from hitch.main import codex_events, demo, github_pr, system_agents
 from hitch.main.diffs import DiffFile, DiffLine, DiffView
 from hitch.main.models import (
     CodexInstance,
@@ -631,6 +631,90 @@ class SessionViewTests(TestCase):
         client = mock_codex.return_value.__enter__.return_value
         client._client.thread_resume.assert_called_once_with("thread-1")
 
+    @patch("hitch.main.views.github_pr.open_or_update_pr")
+    @patch("hitch.main.views.github_pr.current_branch", return_value="feature")
+    def test_open_session_pr_action_opens_and_persists_url(
+        self, mock_branch: MagicMock, mock_open_pr: MagicMock
+    ) -> None:
+        SessionMetadata.objects.create(thread_id="thread-1", cwd="/tmp/wt")
+        url = "https://github.com/cberner/hitch/pull/7"
+        mock_open_pr.return_value = {"url": url, "pr_number": 7}
+
+        response = self.client.post(
+            reverse("open_session_pr", kwargs={"session_id": "thread-1"})
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_open_pr.assert_called_once_with("/tmp/wt", branch="feature")
+        metadata = SessionMetadata.objects.get(thread_id="thread-1")
+        self.assertEqual(metadata.pr_url, url)
+
+    def test_open_session_pr_action_requires_cwd(self) -> None:
+        SessionMetadata.objects.create(thread_id="thread-1", cwd="")
+
+        response = self.client.post(
+            reverse("open_session_pr", kwargs={"session_id": "thread-1"})
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    @patch(
+        "hitch.main.views.github_pr.current_branch",
+        side_effect=github_pr.GithubCliError("no branch"),
+    )
+    def test_open_session_pr_action_redirects_on_gh_failure(
+        self, mock_branch: MagicMock
+    ) -> None:
+        SessionMetadata.objects.create(thread_id="thread-1", cwd="/tmp/wt")
+
+        response = self.client.post(
+            reverse("open_session_pr", kwargs={"session_id": "thread-1"})
+        )
+
+        self.assertEqual(response.status_code, 302)
+        metadata = SessionMetadata.objects.get(thread_id="thread-1")
+        self.assertEqual(metadata.pr_url, "")
+
+    @patch("hitch.main.views.Codex")
+    def test_renders_open_pr_action_when_session_has_worktree(
+        self, mock_codex: MagicMock
+    ) -> None:
+        SessionMetadata.objects.create(thread_id="thread-1", cwd="/tmp/wt")
+        thread = _thread([_turn([_user_message("hi")])])
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            reverse("open_session_pr", kwargs={"session_id": "thread-1"}),
+        )
+        self.assertContains(response, ">Open PR</button>", html=False)
+
+    @patch("hitch.main.views.github_pr.open_or_update_pr")
+    @patch("hitch.main.views.github_pr.current_branch", return_value="feature")
+    @patch("hitch.main.views.Codex")
+    def test_persisted_pr_url_renders_view_pr_link(
+        self,
+        mock_codex: MagicMock,
+        mock_branch: MagicMock,
+        mock_open_pr: MagicMock,
+    ) -> None:
+        url = "https://github.com/cberner/hitch/pull/7"
+        SessionMetadata.objects.create(thread_id="thread-1", cwd="/tmp/wt", pr_url=url)
+        thread = _thread([_turn([_user_message("hi")])])
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            f'<a href="{url}" role="menuitem" target="_blank" rel="noopener noreferrer">View PR</a>',
+            html=True,
+        )
+
     @patch("hitch.main.views.Codex")
     def test_renders_open_pr_menu_link_when_detected(
         self, mock_codex: MagicMock
@@ -654,7 +738,7 @@ class SessionViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(
             response,
-            f'<a href="{url}" role="menuitem" target="_blank" rel="noopener noreferrer">Open PR</a>',
+            f'<a href="{url}" role="menuitem" target="_blank" rel="noopener noreferrer">View PR</a>',
             html=True,
         )
 
@@ -688,7 +772,7 @@ class SessionViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(
             response,
-            f'<a href="{url}" role="menuitem" target="_blank" rel="noopener noreferrer">Open PR</a>',
+            f'<a href="{url}" role="menuitem" target="_blank" rel="noopener noreferrer">View PR</a>',
             html=True,
         )
         self.assertContains(

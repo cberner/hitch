@@ -56,6 +56,7 @@ from hitch.main import (
     codex_pool,
     coding_agents,
     demo,
+    github_pr,
     rollout,
     session_index,
     session_stage,
@@ -3302,12 +3303,18 @@ def _render_session_detail(
     if metadata is not None:
         metadata_by_thread[session_id] = metadata
     session_project = _project_for_thread(thread, metadata_by_thread, projects)
-    pr_url = (
-        rollout_data.latest_pr_url
-        if rollout_data is not None
-        else _pr_url_for_thread(thread)
-    )
     latest_pr_workflow = _latest_pr_workflow_for_thread(session_id)
+    # Prefer the PR Hitch opened itself (persisted on metadata or carried in the
+    # PR-QA workflow handoff) over the Codex GitHub-MCP rollout parse, which is
+    # now only a fallback for PRs a coding agent opened on its own.
+    pr_url = (
+        _hitch_pr_url(metadata, active_system_workflow or latest_pr_workflow)
+        or (
+            rollout_data.latest_pr_url
+            if rollout_data is not None
+            else _pr_url_for_thread(thread)
+        )
+    )
     stage_workflow = active_system_workflow or latest_pr_workflow
     stage_pr_workflow = (
         active_system_workflow
@@ -3439,6 +3446,10 @@ def _render_session_detail(
             "set_project_url": reverse(
                 "set_session_project", kwargs={"session_id": session_id}
             ),
+            "open_pr_url": reverse(
+                "open_session_pr", kwargs={"session_id": session_id}
+            ),
+            "can_open_pr": bool(metadata is not None and metadata.cwd),
             "is_archived": is_archived,
             "send_message_url": reverse("send_message", kwargs={"session_id": session_id}),
             "stop_url": reverse("stop_session", kwargs={"session_id": session_id}),
@@ -7115,6 +7126,31 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
     return redirect("session", session_id=session_id)
 
 
+def open_session_pr(request: HttpRequest, session_id: str) -> HttpResponse:
+    """Open or update a PR for the session's branch using ``gh`` (via Hitch).
+
+    Hitch pushes the session worktree's current branch and opens/updates the
+    PR itself rather than relying on the coding agent's GitHub MCP connector.
+    """
+    metadata = SessionMetadata.objects.filter(thread_id=session_id).first()
+    cwd = metadata.cwd if metadata is not None and metadata.cwd else ""
+    if not cwd:
+        return HttpResponseBadRequest("session has no working directory")
+    try:
+        branch = github_pr.current_branch(cwd)
+        snapshot = github_pr.open_or_update_pr(cwd, branch=branch)
+    except github_pr.GithubCliError:
+        logger.exception("failed to open PR for session %s", session_id)
+        return redirect("session", session_id=session_id)
+    pr_url = snapshot.get("url") if isinstance(snapshot, dict) else ""
+    if isinstance(pr_url, str) and pr_url:
+        SessionMetadata.objects.update_or_create(
+            thread_id=session_id,
+            defaults={"pr_url": pr_url, "cwd": cwd},
+        )
+    return redirect("session", session_id=session_id)
+
+
 def _mark_workflow_failed(workflow: SystemWorkflow) -> None:
     SystemWorkflow.objects.filter(pk=workflow.pk).update(
         status=SystemWorkflow.STATUS_FAILED,
@@ -7701,6 +7737,22 @@ def _latest_rollout_collaboration_mode(thread: Any) -> str | None:
     if rollout_path is None:
         return None
     return rollout.latest_collaboration_mode(rollout_path)
+
+
+def _hitch_pr_url(
+    metadata: SessionMetadata | None, pr_workflow: SystemWorkflow | None
+) -> str | None:
+    """Return the PR URL Hitch tracks itself, if any.
+
+    Prefers the URL persisted on the session metadata (set when Hitch opened
+    the PR via ``gh``), then the URL carried in an active/last PR-QA workflow's
+    handoff. Both are authoritative over the Codex GitHub-MCP rollout parse.
+    """
+    if metadata is not None and metadata.pr_url:
+        return metadata.pr_url
+    handoff = system_agents.pr_handoff_for_workflow(pr_workflow)
+    url = handoff.get("url")
+    return url if isinstance(url, str) and url else None
 
 
 def _pr_url_for_thread(thread: Any) -> str | None:

@@ -1,0 +1,322 @@
+"""Tests for the ``gh``/``git``-backed PR helper."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from typing import Any
+from unittest.mock import MagicMock, patch
+
+from django.test import SimpleTestCase
+
+from hitch.main import github_pr
+
+
+def _completed(
+    args: list[str], *, returncode: int = 0, stdout: str = "", stderr: str = ""
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(args, returncode, stdout, stderr)
+
+
+_PR_VIEW_JSON = {
+    "number": 42,
+    "url": "https://github.com/cberner/hitch/pull/42",
+    "state": "OPEN",
+    "isDraft": False,
+    "merged": False,
+    "mergedAt": None,
+    "mergeCommit": None,
+    "mergeable": "MERGEABLE",
+    "title": "Add feature",
+    "baseRefName": "master",
+    "headRefName": "feature",
+    "headRefOid": "abc123",
+    "createdAt": "2026-05-01T00:00:00Z",
+    "updatedAt": "2026-05-02T00:00:00Z",
+    "closedAt": None,
+    "reviewDecision": "CHANGES_REQUESTED",
+    "reviews": [{"state": "CHANGES_REQUESTED"}],
+    "latestReviews": [{"state": "CHANGES_REQUESTED"}],
+    "reviewThreads": [
+        {"isResolved": False, "isOutdated": False, "path": "a.py", "line": 3, "id": "t1"},
+        {"isResolved": True, "isOutdated": False, "path": "b.py", "id": "t2"},
+    ],
+    "comments": [
+        {"body": "please   fix this", "url": "https://x/1", "createdAt": "2026-05-02T00:00:00Z"}
+    ],
+    "reactionGroups": [{"content": "THUMBS_UP", "users": {"totalCount": 2}}],
+    "statusCheckRollup": [
+        {"__typename": "CheckRun", "name": "tests", "status": "COMPLETED", "conclusion": "FAILURE"},
+        {"__typename": "CheckRun", "name": "lint", "status": "IN_PROGRESS"},
+        {"__typename": "StatusContext", "context": "ci/ext", "state": "SUCCESS"},
+    ],
+}
+
+
+class GithubPrHelperTests(SimpleTestCase):
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_current_branch_returns_named_branch(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = _completed(["git"], stdout="feature\n")
+
+        self.assertEqual(github_pr.current_branch("/repo"), "feature")
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_current_branch_rejects_detached_head(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = _completed(["git"], stdout="HEAD\n")
+
+        with self.assertRaises(github_pr.GithubCliError):
+            github_pr.current_branch("/repo")
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_run_raises_on_nonzero_exit(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = _completed(["git"], returncode=1, stderr="boom")
+
+        with self.assertRaises(github_pr.GithubCliError) as ctx:
+            github_pr.push_branch("/repo", "feature")
+        self.assertIn("boom", str(ctx.exception))
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_run_wraps_os_error(self, mock_run: MagicMock) -> None:
+        mock_run.side_effect = FileNotFoundError("gh missing")
+
+        with self.assertRaises(github_pr.GithubCliError):
+            github_pr.push_branch("/repo", "feature")
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_fetch_pr_snapshot_maps_review_ci_and_threads(
+        self, mock_run: MagicMock
+    ) -> None:
+        mock_run.return_value = _completed(["gh"], stdout=json.dumps(_PR_VIEW_JSON))
+
+        snapshot = github_pr.fetch_pr_snapshot("/repo", branch="feature")
+
+        assert snapshot is not None
+        self.assertEqual(snapshot["url"], "https://github.com/cberner/hitch/pull/42")
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertEqual(snapshot["pr_number"], 42)
+        self.assertEqual(snapshot["state"], "open")
+        self.assertIs(snapshot["merged"], False)
+        self.assertIs(snapshot["draft"], False)
+        self.assertIs(snapshot["mergeable"], True)
+        self.assertEqual(snapshot["head_sha"], "abc123")
+        self.assertEqual(snapshot["latest_commit_sha"], "abc123")
+        # An explicit changes-requested decision wins over the thumbs-up reaction.
+        self.assertEqual(snapshot["review_signal"], "changes_requested")
+        self.assertEqual(snapshot["reaction_count"], 2)
+        self.assertEqual(snapshot["unresolved_thread_count"], 1)
+        self.assertEqual(snapshot["review_thread_count"], 2)
+        self.assertEqual(snapshot["unresolved_threads"], [{"path": "a.py", "line": 3, "id": "t1"}])
+        self.assertEqual(snapshot["comment_count"], 1)
+        self.assertEqual(snapshot["latest_comments"][0]["body"], "please fix this")
+        self.assertEqual(snapshot["ci_status"], "failure")
+        self.assertEqual(snapshot["failing_jobs"], [{"name": "tests"}])
+        self.assertEqual(snapshot["pending_jobs"], [{"name": "lint"}])
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_fetch_pr_snapshot_thumbs_up_and_clean_ci(
+        self, mock_run: MagicMock
+    ) -> None:
+        data = {
+            **_PR_VIEW_JSON,
+            "reviewDecision": "",
+            "reviews": [],
+            "reviewThreads": [],
+            "statusCheckRollup": [
+                {"__typename": "CheckRun", "name": "tests", "status": "COMPLETED", "conclusion": "SUCCESS"},
+            ],
+        }
+        mock_run.return_value = _completed(["gh"], stdout=json.dumps(data))
+
+        snapshot = github_pr.fetch_pr_snapshot("/repo", pr_number=42)
+
+        assert snapshot is not None
+        self.assertEqual(snapshot["review_signal"], "thumbs_up")
+        self.assertEqual(snapshot["ci_status"], "success")
+        self.assertEqual(snapshot["failing_jobs"], [])
+        self.assertEqual(snapshot["pending_jobs"], [])
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_fetch_pr_snapshot_no_checks_is_success(self, mock_run: MagicMock) -> None:
+        data = {**_PR_VIEW_JSON, "statusCheckRollup": []}
+        mock_run.return_value = _completed(["gh"], stdout=json.dumps(data))
+
+        snapshot = github_pr.fetch_pr_snapshot("/repo", pr_number=42)
+
+        assert snapshot is not None
+        self.assertEqual(snapshot["ci_status"], "success")
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_fetch_pr_snapshot_returns_none_when_no_pr(
+        self, mock_run: MagicMock
+    ) -> None:
+        mock_run.return_value = _completed(
+            ["gh"], returncode=1, stderr="no pull requests found for branch feature"
+        )
+
+        self.assertIsNone(github_pr.fetch_pr_snapshot("/repo", branch="feature"))
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_fetch_pr_snapshot_raises_on_real_error(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = _completed(["gh"], returncode=1, stderr="network down")
+
+        with self.assertRaises(github_pr.GithubCliError):
+            github_pr.fetch_pr_snapshot("/repo", branch="feature")
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_open_or_update_pr_creates_when_missing(self, mock_run: MagicMock) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(argv)
+            if argv[:2] == ["git", "push"]:
+                return _completed(argv)
+            if argv[:3] == ["gh", "pr", "list"]:
+                return _completed(argv, stdout="[]")
+            if argv[:3] == ["gh", "pr", "create"]:
+                return _completed(argv, stdout="created")
+            if argv[:3] == ["gh", "pr", "view"]:
+                return _completed(argv, stdout=json.dumps(_PR_VIEW_JSON))
+            raise AssertionError(f"unexpected argv {argv}")
+
+        mock_run.side_effect = fake_run
+
+        snapshot = github_pr.open_or_update_pr("/repo", branch="feature")
+
+        self.assertEqual(snapshot["pr_number"], 42)
+        commands = [argv[:3] for argv in calls]
+        self.assertIn(["git", "push", "-u"], [argv[:3] for argv in calls if argv[0] == "git"])
+        self.assertIn(["gh", "pr", "create"], commands)
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_open_or_update_pr_passes_title_base_draft(
+        self, mock_run: MagicMock
+    ) -> None:
+        create_argv: list[str] = []
+
+        def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv[:2] == ["git", "push"]:
+                return _completed(argv)
+            if argv[:3] == ["gh", "pr", "list"]:
+                return _completed(argv, returncode=1, stderr="boom")
+            if argv[:3] == ["gh", "pr", "create"]:
+                create_argv.extend(argv)
+                return _completed(argv)
+            if argv[:3] == ["gh", "pr", "view"]:
+                return _completed(argv, stdout=json.dumps(_PR_VIEW_JSON))
+            raise AssertionError(f"unexpected argv {argv}")
+
+        mock_run.side_effect = fake_run
+
+        github_pr.open_or_update_pr(
+            "/repo", branch="feature", base="main", title="Feat", body="body", draft=True
+        )
+
+        self.assertIn("--base", create_argv)
+        self.assertIn("--title", create_argv)
+        self.assertIn("--draft", create_argv)
+        self.assertNotIn("--fill", create_argv)
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_open_or_update_pr_raises_when_snapshot_unreadable(
+        self, mock_run: MagicMock
+    ) -> None:
+        def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv[:2] == ["git", "push"]:
+                return _completed(argv)
+            if argv[:3] == ["gh", "pr", "list"]:
+                return _completed(argv, stdout="[]")
+            if argv[:3] == ["gh", "pr", "create"]:
+                return _completed(argv)
+            if argv[:3] == ["gh", "pr", "view"]:
+                return _completed(argv, returncode=1, stderr="no pull requests found")
+            raise AssertionError(f"unexpected argv {argv}")
+
+        mock_run.side_effect = fake_run
+
+        with self.assertRaises(github_pr.GithubCliError):
+            github_pr.open_or_update_pr("/repo", branch="feature")
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_fetch_pr_snapshot_maps_conflicting_merged_and_status_context(
+        self, mock_run: MagicMock
+    ) -> None:
+        data = {
+            **_PR_VIEW_JSON,
+            "state": "MERGED",
+            "merged": True,
+            "mergedAt": "2026-05-03T00:00:00Z",
+            "mergeCommit": {"oid": "deadbeef"},
+            "mergeable": "CONFLICTING",
+            "reviewDecision": "APPROVED",
+            "reactionGroups": [],
+            "comments": {"nodes": [{"body": "hi"}]},
+            "reviewThreads": {"nodes": []},
+            "statusCheckRollup": [
+                {"__typename": "StatusContext", "context": "ci/ext", "state": "FAILURE"},
+            ],
+        }
+        mock_run.return_value = _completed(["gh"], stdout=json.dumps(data))
+
+        snapshot = github_pr.fetch_pr_snapshot("/repo", pr_number=42)
+
+        assert snapshot is not None
+        self.assertEqual(snapshot["state"], "merged")
+        self.assertIs(snapshot["merged"], True)
+        self.assertEqual(snapshot["merged_at"], "2026-05-03T00:00:00Z")
+        self.assertEqual(snapshot["merge_commit_sha"], "deadbeef")
+        self.assertIs(snapshot["mergeable"], False)
+        self.assertEqual(snapshot["review_signal"], "approved")
+        self.assertEqual(snapshot["ci_status"], "failure")
+        self.assertEqual(snapshot["failing_jobs"], [{"name": "ci/ext"}])
+        # ``comments`` arrived in {"nodes": [...]} GraphQL shape.
+        self.assertEqual(snapshot["comment_count"], 1)
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_fetch_pr_snapshot_commented_signal_and_pending_status_context(
+        self, mock_run: MagicMock
+    ) -> None:
+        data = {
+            **_PR_VIEW_JSON,
+            "reviewDecision": "REVIEW_REQUIRED",
+            "reviews": [{"state": "COMMENTED"}],
+            "reactionGroups": [],
+            "statusCheckRollup": [
+                {"__typename": "StatusContext", "context": "ci/ext", "state": "PENDING"},
+            ],
+        }
+        mock_run.return_value = _completed(["gh"], stdout=json.dumps(data))
+
+        snapshot = github_pr.fetch_pr_snapshot("/repo", pr_number=42)
+
+        assert snapshot is not None
+        self.assertEqual(snapshot["review_signal"], "commented")
+        self.assertEqual(snapshot["ci_status"], "pending")
+        self.assertEqual(snapshot["pending_jobs"], [{"name": "ci/ext"}])
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_fetch_pr_snapshot_raises_on_bad_json(self, mock_run: MagicMock) -> None:
+        mock_run.return_value = _completed(["gh"], stdout="not json")
+
+        with self.assertRaises(github_pr.GithubCliError):
+            github_pr.fetch_pr_snapshot("/repo", pr_number=42)
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_open_or_update_pr_skips_create_when_pr_exists(
+        self, mock_run: MagicMock
+    ) -> None:
+        def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv[:2] == ["git", "push"]:
+                return _completed(argv)
+            if argv[:3] == ["gh", "pr", "list"]:
+                return _completed(argv, stdout=json.dumps([{"number": 42}]))
+            if argv[:3] == ["gh", "pr", "view"]:
+                return _completed(argv, stdout=json.dumps(_PR_VIEW_JSON))
+            if argv[:3] == ["gh", "pr", "create"]:
+                raise AssertionError("should not create when a PR already exists")
+            raise AssertionError(f"unexpected argv {argv}")
+
+        mock_run.side_effect = fake_run
+
+        snapshot = github_pr.open_or_update_pr("/repo", branch="feature")
+
+        self.assertEqual(snapshot["pr_number"], 42)

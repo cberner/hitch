@@ -332,6 +332,10 @@ class SessionMetadata(models.Model):
     auto_qa_enabled = models.BooleanField(default=False)
     auto_merge_to_local_branch = models.BooleanField(default=False)
     auto_merge_branch = models.CharField(max_length=255, blank=True, default="")
+    # URL of the PR Hitch opened for this session via ``gh`` (the source of
+    # truth for the session's PR; the Codex GitHub-MCP rollout parse is a
+    # fallback for PRs an agent opened itself).
+    pr_url = models.CharField(max_length=512, blank=True, default="")
     codex_display_title = models.CharField(max_length=200, blank=True, default="")
     codex_name = models.CharField(max_length=200, blank=True, default="")
     codex_preview = models.TextField(blank=True, default="")

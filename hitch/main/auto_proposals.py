@@ -68,6 +68,7 @@ def _run_auto_proposal_scheduler_tick() -> None:
     close_old_connections()
     try:
         codex_pool.reconcile_dead()
+        system_agents.maybe_advance_pr_monitors()
         started = system_agents.maybe_start_auto_proposal_workflows()
         if started:
             logger.info("started %s auto-proposal workflow(s)", started)

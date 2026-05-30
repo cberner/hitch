@@ -2058,8 +2058,14 @@
                     {% if active_session_demo %}
                         <a href="{{ demo_url }}" role="menuitem" target="_blank" rel="noopener noreferrer">Open demo</a>
                     {% endif %}
+                    {% if can_open_pr %}
+                    <form method="post" action="{{ open_pr_url }}" role="none">
+                        {% csrf_token %}
+                        <button type="submit" role="menuitem">Open PR</button>
+                    </form>
+                    {% endif %}
                     {% if pr_url %}
-                        <a href="{{ pr_url }}" role="menuitem" target="_blank" rel="noopener noreferrer">Open PR</a>
+                        <a href="{{ pr_url }}" role="menuitem" target="_blank" rel="noopener noreferrer">View PR</a>
                     {% endif %}
                     <form method="post" action="{{ set_archived_url }}" role="none">
                         {% csrf_token %}
