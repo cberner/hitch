@@ -6085,6 +6085,35 @@ class StreamForInstanceTests(TestCase):
         self.assertTrue(frames[-1].startswith(b"event: end"))
         self.assertIn(b'"completed"', frames[-1])
 
+    def test_streams_tolerate_partial_multibyte_trailing_line(self) -> None:
+        # The worker writes line-buffered UTF-8; a reader can observe a flush
+        # that ends mid-multibyte-character. A strict text-mode read raised
+        # UnicodeDecodeError and dropped the connection with no end frame.
+        # Binary buffering must hold the torn tail and still emit the complete
+        # line that preceded it.
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            complete = (
+                json.dumps(
+                    {"method": "item/started", "payload": {"item": {"id": "café"}}},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            ).encode("utf-8")
+            snowman = "☃".encode()  # 3 bytes; keep only the first
+            with open(events_path, "wb") as fh:
+                fh.write(complete)
+                fh.write(b'{"method": "agent/delta", "payload": "' + snowman[:1])
+
+            instance = _make_streaming_instance(events_path, status=CodexInstance.STATUS_COMPLETED)
+            frames = list(streaming.stream_for_instance(instance))
+
+        data_frames = [f for f in frames if f.startswith(b"data: ")]
+        self.assertEqual(len(data_frames), 1)
+        self.assertIn(b"item/started", data_frames[0])
+        self.assertIn("café".encode(), data_frames[0])
+        self.assertTrue(frames[-1].startswith(b"event: end"))
+
     def test_qa_instance_heartbeat_reports_goal_tokens(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             events_path = str(Path(raw) / "events.jsonl")
@@ -6348,9 +6377,9 @@ class StreamForInstanceTests(TestCase):
         fake_file.__enter__.return_value = fake_file
         fake_file.__exit__.return_value = False
         fake_file.read.side_effect = [
-            "",
-            json.dumps({"method": "turn/completed", "payload": {}}) + "\n",
-            "",
+            b"",
+            (json.dumps({"method": "turn/completed", "payload": {}}) + "\n").encode("utf-8"),
+            b"",
         ]
 
         instance = _make_streaming_instance(
