@@ -9838,6 +9838,35 @@ class NewSessionViewTests(TestCase):
         )
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5.4")
 
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_claude_plan_mode_defaults_model_instead_of_400(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        from hitch.main import claude_options
+
+        # A fresh Claude user (provider set, no saved model) starting a /plan turn
+        # must default to a Claude model rather than 400 on the plan-mode guard.
+        _seed_cookies(self.client, hitch_provider="claude")
+        mock_discover.return_value = [Path(self.REPO)]
+        _setup_codex(mock_codex, models=[])
+        mock_spawn.return_value = SimpleNamespace(thread_id="claude-plan")
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "Build a feature", "cwd": self.REPO, "plan_mode": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(kwargs["backend"], CodexInstance.BACKEND_CLAUDE)
+        self.assertTrue(kwargs.get("plan_mode"))
+        self.assertEqual(kwargs["model"], claude_options.DEFAULT_CLAUDE_MODEL)
+
     @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
     @patch("hitch.main.views.codex_pool.create_session_thread", return_value="thread-spec")

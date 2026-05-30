@@ -12053,6 +12053,37 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_default_sha.assert_not_called()
         mock_spawn.assert_not_called()
 
+    def test_codex_quota_pause_skips_only_codex_goals(self) -> None:
+        # The usage-quota pause reads the Codex account, so Claude-provider goals
+        # (which run on the local backend) must still start when Codex is paused.
+        self.mock_auto_proposals_paused_by_quota.return_value = True
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Codex goal",
+            goal="Codex work.",
+            auto_proposal_enabled=True,
+            provider="codex",
+        )
+        claude_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Claude goal",
+            goal="Claude work.",
+            auto_proposal_enabled=True,
+            provider="claude",
+        )
+
+        with patch.object(
+            system_agents, "_maybe_start_auto_proposal_workflow", return_value=True
+        ) as mock_start:
+            started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 1)
+        self.assertEqual(
+            [invocation.args[0] for invocation in mock_start.call_args_list],
+            [claude_goal.pk],
+        )
+
     @patch(
         "hitch.main.system_agents.default_branch_commit_hash",
         return_value="a" * 40,

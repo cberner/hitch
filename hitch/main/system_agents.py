@@ -1069,8 +1069,13 @@ def maybe_start_auto_proposal_workflows(*, project: Project | None = None) -> in
     )
     if project is not None:
         goals = goals.filter(project=project)
-    if goals.exists() and _auto_proposals_paused_by_usage_quota_throttled():
-        return 0
+    # The usage-quota pause reads the Codex account rate limits, so it only
+    # applies to Codex-provider goals. Claude goals run on the local backend, so
+    # drop only the Codex goals when the account is below quota rather than
+    # short-circuiting the whole batch.
+    codex_goals = goals.exclude(provider=coding_agents.PROVIDER_CLAUDE)
+    if codex_goals.exists() and _auto_proposals_paused_by_usage_quota_throttled():
+        goals = goals.filter(provider=coding_agents.PROVIDER_CLAUDE)
 
     started = 0
     for autonomous_goal_id in goals.order_by("created_at", "id").values_list(

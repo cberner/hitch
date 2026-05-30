@@ -12005,6 +12005,20 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         if coding_agent_override
         else settings
     )
+    # A Claude session needs a valid Claude model before the plan-mode guard
+    # below. A fresh Claude user has no saved model, so default it here rather
+    # than 400 -- the spawn path would otherwise only apply the default later.
+    if (
+        coding_agents.backend_for_provider(_effective_provider(spawn_settings))
+        == coding_agents.BACKEND_CLAUDE
+        and settings.model not in claude_options.VALID_CLAUDE_MODELS
+    ):
+        settings = settings._replace(model=claude_options.DEFAULT_CLAUDE_MODEL)
+        spawn_settings = (
+            spawn_settings._replace(model=claude_options.DEFAULT_CLAUDE_MODEL)
+            if coding_agent_override
+            else settings
+        )
     use_worktrees, use_worktrees_error = _posted_use_worktree_override(
         request.POST.get("use_worktrees"), default=settings.use_worktrees
     )

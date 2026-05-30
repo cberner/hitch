@@ -130,8 +130,15 @@ class _Handler(BaseHTTPRequestHandler):
             return
         try:
             text = _call_ollama(anthropic_to_openai_messages(payload))
-        except Exception as exc:  # noqa: BLE001 - surface as a model reply
-            text = f"proxy error: {exc}"
+        except Exception as exc:  # noqa: BLE001 - fail the turn, don't mask it
+            # Surface proxy/Ollama failures as an HTTP error rather than a normal
+            # assistant message: otherwise the integration test sees a completed
+            # turn with text and passes even though the leg it validates is broken.
+            self.send_response(502)
+            self.send_header("Content-Type", "text/plain")
+            self.end_headers()
+            self.wfile.write(f"proxy error: {exc}".encode())
+            return
         model = payload.get("model", "claude")
         body = anthropic_sse(text, model if isinstance(model, str) else "claude")
         self.send_response(200)
