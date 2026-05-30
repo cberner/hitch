@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 from claude_agent_sdk import (
     AssistantMessage,
+    PermissionResultAllow,
     ResultMessage,
     TextBlock,
     ThinkingBlock,
@@ -296,7 +297,12 @@ class ClaudeOptionsTests(TestCase):
         )
         self.assertEqual(options.resume, "sess-9")
         self.assertIsNone(options.session_id)
-        self.assertEqual(options.output_format, {"type": "object"})
+        # A bare schema must be wrapped so the SDK actually forwards it to the
+        # CLI; otherwise it is silently dropped and no structured_output is set.
+        self.assertEqual(
+            options.output_format,
+            {"type": "json_schema", "schema": {"type": "object"}},
+        )
         self.assertIsInstance(options.system_prompt, dict)
 
 
@@ -316,9 +322,23 @@ class ClaudeOptionsTests(TestCase):
         self.assertIn(claude_tools.PROPOSE_SESSION_TOOL_NAME, options.allowed_tools)
         assert isinstance(options.mcp_servers, dict)
         self.assertIn(claude_tools.HITCH_MCP_SERVER_NAME, options.mcp_servers)
-        self.assertEqual(options.output_format, {"type": "object"})
+        self.assertEqual(
+            options.output_format,
+            {"type": "json_schema", "schema": {"type": "object"}},
+        )
         # can_use_tool requires the companion PreToolUse hook.
         self.assertIn("PreToolUse", options.hooks or {})
+
+    @patch("hitch.main.claude_options.claude_bin", return_value=None)
+    def test_build_options_passes_prewrapped_output_format(
+        self, _bin: MagicMock
+    ) -> None:
+        # A caller that already wrapped the schema must not be double-wrapped.
+        wrapped = {"type": "json_schema", "schema": {"type": "object"}}
+        options = claude_options.build_options(
+            cwd="/repo", model="claude-opus-4-8", output_schema=wrapped
+        )
+        self.assertEqual(options.output_format, wrapped)
 
 
 class ProposeSessionHandlerTests(TestCase):
@@ -1095,3 +1115,150 @@ class WorkerTurnTests(TestCase):
         self.assertIn("first", written)
         self.assertIn("steered reply", written)
         self.assertFalse(runner.failed)
+
+
+class WorkerApprovalTests(TestCase):
+    def _runner(self, *, purpose: str, approval_mode: str | None) -> Any:
+        import io
+
+        from hitch.main.management.commands import claude_worker
+
+        instance = CodexInstance.objects.create(
+            thread_id="thread-x",
+            cwd="/repo",
+            prompt="p",
+            events_path="/dev/null",
+            pid=0,
+            status=CodexInstance.STATUS_RUNNING,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            purpose=purpose,
+        )
+        return claude_worker._TurnRunner(
+            instance=instance,
+            events_file=io.StringIO(),
+            model="claude-opus-4-8",
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode=approval_mode,
+            web_search_mode=None,
+            plan_mode=False,
+        )
+
+    def test_auto_review_hidden_run_auto_approves_without_pending(self) -> None:
+        import asyncio
+
+        from hitch.main.management.commands import claude_worker
+
+        runner = self._runner(
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT, approval_mode="auto_review"
+        )
+        with patch.object(claude_worker, "_create_pending_approval") as mock_pending:
+            result = asyncio.run(runner._can_use_tool("Bash", {"command": "ls"}, None))
+        # A hidden system-agent run must not block on an unanswerable browser
+        # approval; it auto-approves under auto_review.
+        self.assertIsInstance(result, PermissionResultAllow)
+        mock_pending.assert_not_called()
+
+    def test_auto_review_user_turn_still_requests_approval(self) -> None:
+        import asyncio
+
+        from hitch.main.management.commands import claude_worker
+
+        runner = self._runner(
+            purpose=CodexInstance.PURPOSE_USER, approval_mode="auto_review"
+        )
+        # A visible user turn still escalates: stub the pending-approval create
+        # and decision so the call returns without real I/O.
+        with (
+            patch.object(
+                claude_worker, "_create_pending_approval", return_value=7
+            ) as mock_pending,
+            patch.object(claude_worker, "_wait_for_decision", return_value="approved"),
+        ):
+            asyncio.run(runner._can_use_tool("Bash", {"command": "ls"}, None))
+        mock_pending.assert_called_once()
+
+
+class ClaudeFollowUpAutoQaTests(TestCase):
+    def _settings(self, **overrides: Any) -> Any:
+        from hitch.main import views
+
+        base: dict[str, Any] = dict(
+            model="claude-opus-4-8",
+            reasoning_effort="",
+            sandbox_policy="",
+            approval_mode="auto_review",
+            coding_agent="",
+            extra_system_prompt="",
+            use_worktrees=False,
+            auto_pr_enabled=False,
+            auto_qa_enabled=True,
+            qa_panel_enabled=False,
+            spec_critic_enabled=False,
+            web_search_mode="",
+            show_archived_sessions=False,
+            last_selected_repo="",
+            selected_project_id=None,
+            enable_memories=False,
+            provider=coding_agents.PROVIDER_CLAUDE,
+        )
+        base.update(overrides)
+        return views.SettingsValues(**base)
+
+    def _claude_instance(self, **overrides: Any) -> CodexInstance:
+        from hitch.main.models import SessionMetadata
+
+        SessionMetadata.objects.update_or_create(
+            thread_id="claude-thread",
+            defaults={"cwd": "/repo", "auto_qa_enabled": True},
+        )
+        defaults: dict[str, Any] = dict(
+            thread_id="claude-thread",
+            cwd="/repo",
+            prompt="p",
+            events_path="/dev/null",
+            pid=0,
+            status=CodexInstance.STATUS_COMPLETED,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            purpose=CodexInstance.PURPOSE_USER,
+        )
+        defaults.update(overrides)
+        return CodexInstance.objects.create(**defaults)
+
+    def test_follow_up_forwards_auto_qa(self) -> None:
+        from hitch.main import views
+
+        self._claude_instance()
+        with (
+            patch.object(codex_pool, "spawn_turn") as mock_spawn,
+            patch.object(views, "_allowed_session_cwds", return_value={"/repo"}),
+            patch.object(views, "_claude_user_message_index", return_value=2),
+        ):
+            response = views._send_claude_follow_up(
+                session_id="claude-thread",
+                prompt="next",
+                plan_mode=False,
+                settings=self._settings(),
+                input_image_paths=[],
+            )
+        self.assertEqual(response.status_code, 302)
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertTrue(kwargs["auto_qa_enabled"])
+        self.assertEqual(kwargs["user_message_index"], 2)
+
+    def test_follow_up_in_plan_mode_skips_auto_qa(self) -> None:
+        from hitch.main import views
+
+        self._claude_instance()
+        with (
+            patch.object(codex_pool, "spawn_turn") as mock_spawn,
+            patch.object(views, "_allowed_session_cwds", return_value={"/repo"}),
+        ):
+            views._send_claude_follow_up(
+                session_id="claude-thread",
+                prompt="next",
+                plan_mode=True,
+                settings=self._settings(),
+                input_image_paths=[],
+            )
+        self.assertNotIn("auto_qa_enabled", mock_spawn.call_args.kwargs)

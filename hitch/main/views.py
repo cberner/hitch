@@ -5621,6 +5621,24 @@ def _send_claude_follow_up(
         spawn_kwargs["web_search_mode"] = web_search_mode
     if previous_instance is None and developer_instructions:
         spawn_kwargs["developer_instructions"] = developer_instructions
+    # Carry the session's Auto-QA configuration onto every follow-up turn.
+    # ``_maybe_start_auto_review_workflow`` fires off the completed instance's
+    # ``auto_qa_enabled`` flag, so without this a Claude session would only run
+    # QA after its initial turn and silently skip it on every follow-up. Auto-PR
+    # stays off for Claude (no GitHub PR-open path), and plan turns never
+    # auto-review.
+    auto_qa_enabled = not plan_mode and _auto_qa_enabled_for_session(session_id)
+    if auto_qa_enabled:
+        auto_merge_to_local_branch, auto_merge_branch = (
+            _auto_merge_to_local_branch_for_session(session_id)
+        )
+        spawn_kwargs["auto_qa_enabled"] = True
+        spawn_kwargs["user_message_index"] = _claude_user_message_index(session_id)
+        if settings.qa_panel_enabled:
+            spawn_kwargs["qa_panel_enabled"] = True
+        if auto_merge_to_local_branch:
+            spawn_kwargs["auto_merge_to_local_branch"] = True
+            spawn_kwargs["auto_merge_branch"] = auto_merge_branch
     try:
         codex_pool.spawn_turn(**spawn_kwargs)
     except Exception:
@@ -10813,6 +10831,30 @@ def _clear_plan_actions(entries: list[dict[str, Any]]) -> None:
             entry["show_plan_actions"] = False
         elif entry.get("kind") == "intermediate":
             _clear_plan_actions(entry.get("items", []))
+
+
+def _claude_user_message_index(session_id: str) -> int:
+    """Count user messages across a Claude thread's events files.
+
+    Claude threads have no app-server rollout to resume, so the auto-review
+    ``user_message_index`` is derived from the per-worker events JSONL the
+    Claude backend writes instead.
+    """
+    count = 0
+    paths = (
+        CodexInstance.objects.filter(
+            thread_id=session_id, backend=CodexInstance.BACKEND_CLAUDE
+        )
+        .order_by("started_at", "pk")
+        .values_list("events_path", flat=True)
+    )
+    for path in paths:
+        if not path:
+            continue
+        for entry in claude_session_entries.session_entries(path):
+            if entry.get("kind") == "user":
+                count += 1
+    return count
 
 
 def _count_user_entries(entries: list[dict[str, Any]]) -> int:

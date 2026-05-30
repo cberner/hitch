@@ -300,6 +300,17 @@ class _TurnRunner:
         method = _approval_method(tool_name)
         if self._approval_mode == claude_options.APPROVAL_DENY_ALL:
             return claude_options.deny_result("Denied by Hitch approval policy.")
+        # Hidden system-agent runs (QA/spec/autonomous) have no visible approval
+        # UI, so a browser ``ApprovalRequest`` would just wait out the timeout
+        # and be denied. Under ``auto_review`` -- the mode these runs are pinned
+        # to -- auto-approve instead, matching how the Codex backend lets its
+        # hidden reviewer runs proceed. Sandbox/read-only tool gating still
+        # bounds what these runs can do.
+        if (
+            self._instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
+            and self._approval_mode == claude_options.APPROVAL_AUTO_REVIEW
+        ):
+            return claude_options.allow_result()
         params = _approval_params(method, tool_name, tool_input)
         request_id = await asyncio.to_thread(
             _create_pending_approval,

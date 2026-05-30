@@ -79,7 +79,13 @@ class EventTranslator:
 
     def _translate_assistant(self, message: AssistantMessage) -> list[Event]:
         events: list[Event] = []
-        base_id = message.message_id or message.uuid or "assistant"
+        # ``message_id``/``uuid`` exist on the current SDK dataclass; guard with
+        # getattr so a differing SDK shape can't crash the whole turn translation.
+        base_id = (
+            message.message_id
+            or getattr(message, "uuid", None)
+            or "assistant"
+        )
         for index, block in enumerate(message.content):
             item_id = f"{base_id}:{index}"
             if isinstance(block, TextBlock):

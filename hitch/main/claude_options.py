@@ -68,6 +68,7 @@ SANDBOX_DANGER_FULL_ACCESS = "dangerFullAccess"
 # Codex approval mode strings.
 APPROVAL_APPROVE_ALL = "approve_all"
 APPROVAL_DENY_ALL = "deny_all"
+APPROVAL_AUTO_REVIEW = "auto_review"
 
 # Codex reasoning-effort strings that line up with a Claude effort level. Other
 # values (e.g. Codex's "minimal") are dropped so the CLI uses its default.
@@ -229,7 +230,14 @@ def build_options(
     if sandbox is not None:
         options.sandbox = sandbox
     if output_schema is not None:
-        options.output_format = output_schema
+        # The SDK only forwards a schema to the CLI (``--json-schema``) when
+        # ``output_format`` is shaped ``{"type": "json_schema", "schema": ...}``;
+        # a bare JSON Schema is silently ignored, leaving no ``structured_output``
+        # for the workflow parser. Wrap it unless the caller already did.
+        if output_schema.get("type") == "json_schema":
+            options.output_format = output_schema
+        else:
+            options.output_format = {"type": "json_schema", "schema": output_schema}
     if resume_session_id:
         options.resume = resume_session_id
     elif session_id:
