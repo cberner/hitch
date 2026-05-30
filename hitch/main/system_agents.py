@@ -128,7 +128,6 @@ _QA_DESIGN_FEEDBACK_SUMMARY_CHARS = 360
 _PR_HANDOFF_STATE_KEY = "pr_handoff"
 _PR_MONITOR_STATE_KEY = "last_pr_monitor"
 _PR_GATES_STATE_KEY = "pr_gates"
-_PR_PENDING_CHECKS_STATE_KEY = "pr_pending_checks"
 _PR_HEAD_BRANCH_STATE_KEY = "pr_head_branch"
 _PR_MONITOR_NEXT_POLL_STATE_KEY = "pr_monitor_next_poll_at"
 _PR_DETAIL_LIMIT = 5
@@ -2393,7 +2392,6 @@ def _advance_pr_after_observation(
 
     if actionable_blockers:
         feedback = _pr_actionable_feedback(gates, parsed)
-        workflow.state = {**workflow.state, _PR_PENDING_CHECKS_STATE_KEY: 0}
         workflow.iteration += 1
         workflow.step = STEP_PR_FEEDBACK_RUNNING
         workflow.save(update_fields=["iteration", "step", "state", "updated_at"])
@@ -2403,16 +2401,10 @@ def _advance_pr_after_observation(
             _block_workflow(workflow, f"failed to start PR follow-up turn: {exc!r}")
         return
 
-    feedback = _pr_gate_pending_feedback(gates) or _pr_monitor_feedback(parsed)
-    pending_checks = _state_int(workflow, _PR_PENDING_CHECKS_STATE_KEY) + 1
-    workflow.state = {**workflow.state, _PR_PENDING_CHECKS_STATE_KEY: pending_checks}
-    if pending_checks >= workflow.max_iterations:
-        workflow.status = SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED
-        workflow.step = STEP_MAX_ITERATIONS_REACHED
-        workflow.save(update_fields=["status", "step", "state", "updated_at"])
-        _surface_workflow_failure(workflow, feedback)
-        return
-    # Stay in the monitoring step; the next debounced poll re-checks the PR.
+    # Only agent revisions (the actionable feedback turn above) consume a
+    # max-iteration slot. A pending re-check is just Hitch waiting on external
+    # PR state (CI, mergeability, review), so it must not advance the cap: it
+    # stays in the monitoring step and the next debounced poll re-checks.
     workflow.step = STEP_PR_MONITORING
     workflow.save(update_fields=["step", "state", "updated_at"])
 
@@ -2420,17 +2412,36 @@ def _advance_pr_after_observation(
 def _handle_pr_feedback_finished(
     instance: CodexInstance, workflow: SystemWorkflow
 ) -> None:
-    # The coding agent committed its fix on the branch; Hitch pushes it so the
-    # PR head advances, then re-checks the PR gates.
+    # The coding agent committed its fix on the branch. Before Hitch pushes,
+    # re-check the PR: if it was merged/closed (or its branch is gone) while the
+    # agent worked, pushing would resurrect a stale branch, so finish instead.
+    handoff = _pr_handoff_from_workflow(workflow)
+    pr_number = handoff.get("pr_number")
+    pr_number = pr_number if isinstance(pr_number, int) and not isinstance(pr_number, bool) else None
+    branch = _state_string(workflow, _PR_HEAD_BRANCH_STATE_KEY) or None
     try:
-        branch = _state_string(
-            workflow, _PR_HEAD_BRANCH_STATE_KEY
-        ) or github_pr.current_branch(workflow.cwd)
-        github_pr.push_branch(workflow.cwd, branch)
+        snapshot = github_pr.fetch_pr_snapshot(
+            workflow.cwd, pr_number=pr_number, branch=branch
+        )
+    except github_pr.GithubCliError as exc:
+        _block_workflow(workflow, f"failed to read PR state: {exc}")
+        return
+    if snapshot is None or _pr_handoff_is_terminal(_compact_pr_handoff(snapshot)):
+        if snapshot is not None:
+            _merge_pr_handoff(workflow, snapshot)
+        workflow.status = SystemWorkflow.STATUS_COMPLETED
+        workflow.step = STEP_PR_CLOSED
+        workflow.save(update_fields=["status", "step", "state", "updated_at"])
+        return
+    # PR is still open: push the committed fix so the PR head advances, then
+    # re-check the gates.
+    try:
+        push_branch = branch or github_pr.current_branch(workflow.cwd)
+        github_pr.push_branch(workflow.cwd, push_branch)
     except github_pr.GithubCliError as exc:
         _block_workflow(workflow, f"failed to push the PR branch: {exc}")
         return
-    workflow.state = {**workflow.state, _PR_HEAD_BRANCH_STATE_KEY: branch}
+    workflow.state = {**workflow.state, _PR_HEAD_BRANCH_STATE_KEY: push_branch}
     workflow.save(update_fields=["state", "updated_at"])
     _enter_pr_monitoring(workflow)
 
@@ -4575,7 +4586,6 @@ def _merge_pr_handoff(workflow: SystemWorkflow, update: dict[str, Any]) -> None:
     workflow.state = {**workflow.state, _PR_HANDOFF_STATE_KEY: merged}
     if reset_gates:
         workflow.state.pop(_PR_GATES_STATE_KEY, None)
-        workflow.state.pop(_PR_PENDING_CHECKS_STATE_KEY, None)
 
 
 def _merge_pr_handoff_dicts(

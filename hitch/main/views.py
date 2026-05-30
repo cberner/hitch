@@ -7126,6 +7126,7 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
     return redirect("session", session_id=session_id)
 
 
+@require_http_methods(["POST"])
 def open_session_pr(request: HttpRequest, session_id: str) -> HttpResponse:
     """Open or update a PR for the session's branch using ``gh`` (via Hitch).
 

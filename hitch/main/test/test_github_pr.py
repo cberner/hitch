@@ -86,7 +86,29 @@ class GithubPrHelperTests(SimpleTestCase):
     def test_fetch_pr_snapshot_maps_review_ci_and_threads(
         self, mock_run: MagicMock
     ) -> None:
-        mock_run.return_value = _completed(["gh"], stdout=json.dumps(_PR_VIEW_JSON))
+        threads_json = json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [
+                                    {"isResolved": False, "isOutdated": False, "path": "a.py", "line": 3, "id": "t1"},
+                                    {"isResolved": True, "isOutdated": False, "path": "b.py", "id": "t2"},
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        )
+
+        def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv[:3] == ["gh", "api", "graphql"]:
+                return _completed(argv, stdout=threads_json)
+            return _completed(argv, stdout=json.dumps(_PR_VIEW_JSON))
+
+        mock_run.side_effect = fake_run
 
         snapshot = github_pr.fetch_pr_snapshot("/repo", branch="feature")
 
@@ -170,6 +192,8 @@ class GithubPrHelperTests(SimpleTestCase):
             calls.append(argv)
             if argv[:2] == ["git", "push"]:
                 return _completed(argv)
+            if argv[:3] == ["gh", "api", "graphql"]:
+                return _completed(argv, stdout="{}")
             if argv[:3] == ["gh", "pr", "list"]:
                 return _completed(argv, stdout="[]")
             if argv[:3] == ["gh", "pr", "create"]:
@@ -184,7 +208,8 @@ class GithubPrHelperTests(SimpleTestCase):
 
         self.assertEqual(snapshot["pr_number"], 42)
         commands = [argv[:3] for argv in calls]
-        self.assertIn(["git", "push", "-u"], [argv[:3] for argv in calls if argv[0] == "git"])
+        push_calls = [argv for argv in calls if argv[0] == "git"]
+        self.assertIn("--force-with-lease", push_calls[0])
         self.assertIn(["gh", "pr", "create"], commands)
 
     @patch("hitch.main.github_pr.subprocess.run")
@@ -196,6 +221,8 @@ class GithubPrHelperTests(SimpleTestCase):
         def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
             if argv[:2] == ["git", "push"]:
                 return _completed(argv)
+            if argv[:3] == ["gh", "api", "graphql"]:
+                return _completed(argv, stdout="{}")
             if argv[:3] == ["gh", "pr", "list"]:
                 return _completed(argv, returncode=1, stderr="boom")
             if argv[:3] == ["gh", "pr", "create"]:
@@ -307,6 +334,8 @@ class GithubPrHelperTests(SimpleTestCase):
         def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
             if argv[:2] == ["git", "push"]:
                 return _completed(argv)
+            if argv[:3] == ["gh", "api", "graphql"]:
+                return _completed(argv, stdout="{}")
             if argv[:3] == ["gh", "pr", "list"]:
                 return _completed(argv, stdout=json.dumps([{"number": 42}]))
             if argv[:3] == ["gh", "pr", "view"]:

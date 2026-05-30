@@ -47,11 +47,19 @@ _PR_VIEW_FIELDS = ",".join(
         "reviewDecision",
         "reviews",
         "latestReviews",
-        "reviewThreads",
         "comments",
         "reactionGroups",
         "statusCheckRollup",
     )
+)
+
+# ``gh pr view --json`` does not expose ``reviewThreads`` (it is a GraphQL-only
+# field), so unresolved review threads are fetched separately via ``gh api
+# graphql``.
+_REVIEW_THREADS_QUERY = (
+    "query($owner:String!,$name:String!,$number:Int!){"
+    "repository(owner:$owner,name:$name){pullRequest(number:$number){"
+    "reviewThreads(first:100){nodes{id isResolved isOutdated path line}}}}}"
 )
 
 _GITHUB_PR_URL_RE = re.compile(
@@ -108,9 +116,15 @@ def current_branch(cwd: str) -> str:
 
 
 def push_branch(cwd: str, branch: str) -> None:
-    """Push ``branch`` to ``origin``, setting upstream tracking."""
+    """Push ``branch`` to ``origin``, setting upstream tracking.
+
+    The coding agent is asked to rebase before Hitch pushes, so an existing
+    PR branch has rewritten history and a plain push would be rejected as a
+    non-fast-forward. ``--force-with-lease`` makes the rebased update succeed
+    while still refusing to clobber unexpected remote work.
+    """
     _run(
-        ["git", "push", "-u", "origin", branch],
+        ["git", "push", "--force-with-lease", "-u", "origin", branch],
         cwd=cwd,
         timeout=_GIT_TIMEOUT_SECONDS,
     )
@@ -201,7 +215,59 @@ def fetch_pr_snapshot(
     data = _json_or_none(result.stdout)
     if not isinstance(data, dict):
         raise GithubCliError("gh pr view returned unexpected output")
-    return _snapshot_from_pr_view(data)
+    snapshot = _snapshot_from_pr_view(data)
+    _apply_review_threads(
+        snapshot,
+        _fetch_review_threads(
+            cwd,
+            repo_full_name=snapshot.get("repository_full_name"),
+            pr_number=snapshot.get("pr_number"),
+        ),
+    )
+    return snapshot
+
+
+def _fetch_review_threads(
+    cwd: str, *, repo_full_name: Any, pr_number: Any
+) -> list[Any]:
+    """Return the PR's review threads via ``gh api graphql`` (best effort).
+
+    ``gh pr view --json`` cannot return review threads, so they are fetched
+    separately. A failure here degrades to no thread data rather than blocking
+    the whole snapshot: the review gate still acts on ``reviewDecision``.
+    """
+    if not isinstance(repo_full_name, str) or "/" not in repo_full_name:
+        return []
+    if not isinstance(pr_number, int) or isinstance(pr_number, bool):
+        return []
+    owner, _, name = repo_full_name.partition("/")
+    result = _run(
+        [
+            "gh",
+            "api",
+            "graphql",
+            "-f",
+            f"query={_REVIEW_THREADS_QUERY}",
+            "-f",
+            f"owner={owner}",
+            "-f",
+            f"name={name}",
+            "-F",
+            f"number={pr_number}",
+        ],
+        cwd=cwd,
+        timeout=_GH_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        logger.warning("failed to fetch review threads: %s", result.stderr.strip())
+        return []
+    parsed = _json_or_none(result.stdout)
+    try:
+        nodes = parsed["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+    except (TypeError, KeyError):
+        return []
+    return nodes if isinstance(nodes, list) else []
 
 
 def _snapshot_from_pr_view(data: dict[str, Any]) -> dict[str, Any]:
@@ -253,7 +319,6 @@ def _snapshot_from_pr_view(data: dict[str, Any]) -> dict[str, Any]:
             snapshot["merge_commit_sha"] = oid
 
     _copy_review_fields(snapshot, data)
-    _copy_thread_fields(snapshot, data)
     _copy_comment_fields(snapshot, data)
     _copy_ci_fields(snapshot, data)
     return snapshot
@@ -293,8 +358,11 @@ def _copy_review_fields(snapshot: dict[str, Any], data: dict[str, Any]) -> None:
         snapshot["review_signal"] = ""
 
 
-def _copy_thread_fields(snapshot: dict[str, Any], data: dict[str, Any]) -> None:
-    threads = _as_node_list(data.get("reviewThreads"))
+def _apply_review_threads(snapshot: dict[str, Any], threads: list[Any]) -> None:
+    # Always record an integer unresolved count (0 when none/unavailable) so the
+    # review gate's "approved and unresolved_thread_count == 0" pass condition
+    # can be satisfied; a missing count would otherwise keep an approved PR
+    # pending forever.
     snapshot["review_thread_count"] = len(threads)
     unresolved = [
         thread

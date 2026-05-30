@@ -2918,7 +2918,39 @@ class SpecCriticWorkflowTests(TestCase):
             "newsha",
         )
         mock_push.assert_called_once_with("/repo", "feature")
-        mock_fetch.assert_called_once()
+        # Fetched once to confirm the PR is still open before pushing, then
+        # again as the immediate monitoring poll after the push.
+        self.assertEqual(mock_fetch.call_count, 2)
+
+    @patch("hitch.main.system_agents.github_pr.push_branch")
+    @patch("hitch.main.system_agents.github_pr.fetch_pr_snapshot")
+    def test_pr_feedback_completion_skips_push_when_pr_closed(
+        self, mock_fetch: MagicMock, mock_push: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_FEEDBACK_RUNNING,
+            state={
+                system_agents._PR_HEAD_BRANCH_STATE_KEY: "feature",
+                system_agents._PR_HANDOFF_STATE_KEY: {"pr_number": 169},
+            },
+        )
+        mock_fetch.return_value = {"pr_number": 169, "state": "closed", "merged": False}
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            workflow_id=workflow.pk,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
+        mock_push.assert_not_called()
 
     @patch("hitch.main.system_agents.github_pr.fetch_pr_snapshot")
     def test_monitor_ready_completes_workflow(self, mock_fetch: MagicMock) -> None:
@@ -2946,7 +2978,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
 
     @patch("hitch.main.system_agents.github_pr.fetch_pr_snapshot")
-    def test_pending_only_gates_do_not_consume_remediation_iteration(
+    def test_pending_only_gates_do_not_consume_iteration_or_terminate(
         self, mock_fetch: MagicMock
     ) -> None:
         workflow = SystemWorkflow.objects.create(
@@ -2956,6 +2988,7 @@ class SpecCriticWorkflowTests(TestCase):
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_PR_MONITORING,
             iteration=3,
+            max_iterations=3,
             state={system_agents._PR_HANDOFF_STATE_KEY: {"pr_number": 169}},
         )
         mock_fetch.return_value = {
@@ -2964,12 +2997,15 @@ class SpecCriticWorkflowTests(TestCase):
             "ci_status": "pending",
         }
 
-        system_agents._run_pr_monitor_poll(workflow)
+        # Even at the iteration limit, a pending re-check must keep waiting:
+        # only agent revisions consume the cap, not poll attempts.
+        for _ in range(3):
+            system_agents._run_pr_monitor_poll(workflow)
+            workflow.refresh_from_db()
 
-        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
         self.assertEqual(workflow.iteration, 3)
-        self.assertEqual(workflow.state[system_agents._PR_PENDING_CHECKS_STATE_KEY], 1)
 
     @patch("hitch.main.system_agents._surface_workflow_failure")
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
@@ -3006,7 +3042,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch("hitch.main.system_agents._surface_workflow_failure")
     @patch("hitch.main.system_agents.github_pr.fetch_pr_snapshot")
-    def test_pending_gate_at_monitor_limit_stops_monitoring(
+    def test_pending_gate_keeps_monitoring_without_terminating(
         self, mock_fetch: MagicMock, mock_surface: MagicMock
     ) -> None:
         workflow = SystemWorkflow.objects.create(
@@ -3016,10 +3052,7 @@ class SpecCriticWorkflowTests(TestCase):
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_PR_MONITORING,
             max_iterations=3,
-            state={
-                system_agents._PR_HANDOFF_STATE_KEY: {"pr_number": 169},
-                system_agents._PR_PENDING_CHECKS_STATE_KEY: 2,
-            },
+            state={system_agents._PR_HANDOFF_STATE_KEY: {"pr_number": 169}},
         )
         mock_fetch.return_value = {
             "pr_number": 169,
@@ -3030,9 +3063,9 @@ class SpecCriticWorkflowTests(TestCase):
         system_agents._run_pr_monitor_poll(workflow)
 
         workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED)
-        self.assertEqual(workflow.step, system_agents.STEP_MAX_ITERATIONS_REACHED)
-        mock_surface.assert_called_once()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+        mock_surface.assert_not_called()
 
     @patch("hitch.main.system_agents.github_pr.fetch_pr_snapshot")
     def test_run_pr_monitor_poll_blocks_on_gh_error(
@@ -4239,7 +4272,6 @@ class SpecCriticWorkflowTests(TestCase):
                 system_agents._PR_GATES_STATE_KEY: [
                     {"key": "ci", "label": "CI", "status": "passed"}
                 ],
-                system_agents._PR_PENDING_CHECKS_STATE_KEY: 2,
             },
         )
 
@@ -4248,7 +4280,6 @@ class SpecCriticWorkflowTests(TestCase):
         )
 
         self.assertNotIn(system_agents._PR_GATES_STATE_KEY, workflow.state)
-        self.assertNotIn(system_agents._PR_PENDING_CHECKS_STATE_KEY, workflow.state)
         handoff = workflow.state[system_agents._PR_HANDOFF_STATE_KEY]
         self.assertEqual(handoff["latest_commit_sha"], "new")
         self.assertEqual(handoff["head_sha"], "new")
@@ -4268,7 +4299,6 @@ class SpecCriticWorkflowTests(TestCase):
                 system_agents._PR_GATES_STATE_KEY: [
                     {"key": "ci", "label": "CI", "status": "passed"}
                 ],
-                system_agents._PR_PENDING_CHECKS_STATE_KEY: 2,
             },
         )
 
@@ -4281,7 +4311,6 @@ class SpecCriticWorkflowTests(TestCase):
         )
 
         self.assertNotIn(system_agents._PR_GATES_STATE_KEY, workflow.state)
-        self.assertNotIn(system_agents._PR_PENDING_CHECKS_STATE_KEY, workflow.state)
         handoff = workflow.state[system_agents._PR_HANDOFF_STATE_KEY]
         self.assertEqual(handoff["pr_number"], 170)
         self.assertNotIn("ci_status", handoff)
