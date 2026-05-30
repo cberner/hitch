@@ -127,8 +127,16 @@ def stream_for_instance(
             last_heartbeat = time.monotonic()
         time.sleep(_POLL_INTERVAL)
 
-    with path.open("r", encoding="utf-8") as fh:
-        buffer = ""
+    # Read in binary and split on the newline byte: the worker writes
+    # line-buffered UTF-8, so a concurrent reader can observe a flush that ends
+    # mid-multibyte-character. A strict text-mode read would raise
+    # UnicodeDecodeError on that torn prefix, abort the generator, and drop the
+    # connection with no terminating frame; on EventSource reconnect the stream
+    # re-reads from byte 0 and replays additive deltas. Buffering raw bytes and
+    # forwarding only complete lines keeps the torn tail until the worker
+    # finishes writing it.
+    with path.open("rb") as fh:
+        buffer = b""
         deadline = time.monotonic() + _MAX_STREAM_SECONDS
         while True:
             chunk = fh.read()
@@ -286,16 +294,22 @@ def _demo_changed(session_id: str, demo_baseline: str | None) -> bool:
     return demo_baseline is not None and demo_stream_token(session_id) != demo_baseline
 
 
-def _emit_complete_lines(buffer: str) -> Generator[bytes, None, str]:
+def _emit_complete_lines(buffer: bytes) -> Generator[bytes, None, bytes]:
     """Emit one SSE frame per newline-terminated line; return the trailing
     partial line so the caller can fold the next read into it.
+
+    Operates on bytes: a complete (newline-terminated) line the worker wrote is
+    always well-formed UTF-8, so the raw bytes are forwarded as-is. An
+    unterminated trailing fragment — which may end mid-multibyte-character if it
+    was observed during a partial flush — is returned untouched and completed by
+    the next read instead of being decoded eagerly.
     """
-    while "\n" in buffer:
-        line, buffer = buffer.split("\n", 1)
+    while b"\n" in buffer:
+        line, buffer = buffer.split(b"\n", 1)
         line = line.strip()
         if not line:
             continue
-        yield b"data: " + line.encode("utf-8") + b"\n\n"
+        yield b"data: " + line + b"\n\n"
     return buffer
 
 
