@@ -9,24 +9,46 @@ or backtick are not reformatted.
 
 The CommonMark renderer is configured with ``html=False`` because the
 ``commonmark`` preset enables raw HTML by default; without that override the
-agent could inject ``<script>`` tags into the page. ``javascript:`` URLs are
-dropped by markdown-it-py's built-in link validator, so a separate output
-sanitiser is not required. The ``image`` rule is also disabled so that an
+agent could inject ``<script>`` tags into the page. markdown-it-py's built-in
+link validator drops bare ``javascript:`` URLs, but it runs *after* the
+destination is percent-encoded, so an entity-encoded control character
+(``[x](java&#9;script:alert(1))`` -> ``java%09script:alert(1)``) slips past it
+while browsers still strip the tab and execute it; ``_is_safe_link`` re-checks
+the decoded scheme to close that hole. The ``image`` rule is also disabled so that an
 ``![alt](https://attacker.example/pixel)`` in an agent reply doesn't make
 the browser fetch a third-party URL the moment the session page is viewed
 (IP/referrer leakage); image syntax degrades to a clickable link instead.
 """
 
 import re
+from urllib.parse import unquote
 
 from django.utils.safestring import SafeString, mark_safe
 from markdown_it import MarkdownIt
+
+# markdown-it normalizes (percent-encodes) link destinations before validating
+# them, so control characters smuggled in via HTML entities survive as ``%09``
+# / ``%0A`` and defeat its literal ``^javascript:`` check. Browsers strip those
+# characters from the scheme and execute the link, so decode and strip them the
+# same way before deciding whether a scheme is dangerous.
+_LINK_CONTROL_CHARS = re.compile(r"[\x00-\x20\x7f]+")
+_DANGEROUS_LINK_SCHEMES = ("javascript:", "vbscript:", "data:", "file:")
+
+
+def _is_safe_link(url: str) -> bool:
+    cleaned = _LINK_CONTROL_CHARS.sub("", unquote(url)).strip().lower()
+    return not cleaned.startswith(_DANGEROUS_LINK_SCHEMES)
+
 
 _RENDERER = (
     MarkdownIt("commonmark", {"html": False, "breaks": False})
     .enable("table")
     .disable("image")
 )
+# Override the built-in validator (see module docstring) to also reject
+# encoded-control-character scheme smuggling. markdown-it looks this up on the
+# instance, so assigning the attribute is the supported override hook.
+_RENDERER.validateLink = _is_safe_link  # type: ignore[method-assign]
 
 _FENCED_CODE = re.compile(r"^```", re.MULTILINE)
 _ATX_HEADING = re.compile(r"^#{1,6} \S", re.MULTILINE)
