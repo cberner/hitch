@@ -432,6 +432,41 @@ def _copy_review_fields(snapshot: dict[str, Any], data: dict[str, Any]) -> None:
         snapshot["review_signal"] = ""
 
 
+def _copy_review_body_comments(snapshot: dict[str, Any], data: dict[str, Any]) -> None:
+    """Surface review bodies (untrusted) so the fix agent sees requested changes.
+
+    A reviewer can request changes (or comment) in the main review body without
+    leaving an inline thread; that text is otherwise dropped from the handoff.
+    Prepended to ``latest_comments`` (which the feedback turn relays as untrusted
+    PR data) so the agent has an actionable description, not just the gate's
+    generic "address the requested changes".
+    """
+    reviews = data.get("reviews")
+    reviews = reviews if isinstance(reviews, list) else []
+    bodies: list[dict[str, Any]] = []
+    for review in reviews:
+        if not isinstance(review, dict):
+            continue
+        state = _str(review.get("state")).upper()
+        if state not in {"CHANGES_REQUESTED", "COMMENTED"}:
+            continue
+        body = _str(review.get("body"))
+        if not body:
+            continue
+        item: dict[str, Any] = {
+            "body": _compact_text(f"[review {state.lower()}] {' '.join(body.split())}")
+        }
+        url = _str(review.get("url"))
+        if url:
+            item["url"] = url[:_PR_TEXT_MAX_CHARS]
+        bodies.append(item)
+    if not bodies:
+        return
+    existing = snapshot.get("latest_comments")
+    existing = existing if isinstance(existing, list) else []
+    snapshot["latest_comments"] = (bodies + existing)[:_PR_DETAIL_LIMIT]
+
+
 def _apply_review_threads(snapshot: dict[str, Any], threads: list[Any]) -> None:
     # A successful (possibly empty) thread fetch always records an integer
     # unresolved count so the review gate's "approved and unresolved_thread_count
