@@ -4090,6 +4090,34 @@ class CodexWorkerCommandTests(TestCase):
         self.assertIsNotNone(instance.ended_at)
         self.assertEqual(instance.error, "")
 
+    @patch("hitch.main.management.commands.codex_worker._notify_system_agents")
+    @patch("hitch.main.management.commands.codex_worker._run_turn")
+    def test_worker_completed_save_does_not_resurrect_parent_forced_stop(
+        self, mock_run_turn: MagicMock, _mock_notify: MagicMock
+    ) -> None:
+        # A forced Stop (``_force_kill_instance``/``_mark_failed``) or a
+        # ``reconcile_dead`` sweep flips the row to FAILED with a conditional
+        # UPDATE while the turn is mid-flight. The worker's own end-of-turn save
+        # must honour that terminal state rather than resurrecting the row as
+        # COMPLETED -- which would silently drop the user's Stop.
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(Path(raw))
+
+            def _forced_stop_then_complete(*args: object, **kwargs: object) -> SimpleNamespace:
+                CodexInstance.objects.filter(pk=instance.pk).update(
+                    status=CodexInstance.STATUS_FAILED,
+                    ended_at=timezone.now(),
+                    error="forcibly stopped by user",
+                )
+                return SimpleNamespace(status=TurnStatus.completed)
+
+            mock_run_turn.side_effect = _forced_stop_then_complete
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertEqual(instance.error, "forcibly stopped by user")
+
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_enable_memories_row_sets_app_server_override(
         self, mock_codex: MagicMock
