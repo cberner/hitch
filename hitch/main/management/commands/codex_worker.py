@@ -1264,7 +1264,11 @@ def _create_pending_user_input(
 
 def _wait_for_user_input_response(request_id: int) -> dict[str, Any]:
     deadline = time.monotonic() + _APPROVAL_WAIT_SECONDS
-    while time.monotonic() < deadline:
+    # Stop on cancellation too: while blocked here the main stream loop can't act
+    # on a SIGTERM, so a Stop click would otherwise hang until SIGKILL. Falling
+    # through records the empty-answer fallback (the conditional UPDATE preserves
+    # a real answer submitted at the boundary) and lets the main loop interrupt.
+    while time.monotonic() < deadline and not _cancel_requested:
         response = _user_input_response_value(request_id)
         if isinstance(response, dict):
             return response
@@ -1353,7 +1357,12 @@ def _wait_for_decision(request_id: int) -> str | dict[str, Any]:
             connection.close()
         if decision:
             return _stored_approval_decision(decision, payload)
-        if time.monotonic() >= deadline:
+        # A Stop click (SIGTERM) can't be acted on by the main stream loop while
+        # it is blocked here awaiting the JSON-RPC reply, so honour cancellation
+        # in this wait: decline the pending action and return so codex unblocks
+        # and the main loop can issue turn.interrupt(). Without this the first
+        # Stop click is a silent no-op until a second click escalates to SIGKILL.
+        if _cancel_requested or time.monotonic() >= deadline:
             try:
                 updated = ApprovalRequest.objects.filter(
                     pk=request_id, decision=""

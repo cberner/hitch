@@ -5107,6 +5107,26 @@ class ApprovalHandlerTests(TestCase):
         self.assertEqual(approval.decision, "decline")
         self.assertIsNotNone(approval.decided_at)
 
+    @patch("hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001)
+    @patch("hitch.main.management.commands.codex_worker._cancel_requested", True)
+    def test_wait_for_decision_declines_on_cancellation(self) -> None:
+        """A Stop click sets ``_cancel_requested``; the main stream loop can't
+        act on it while blocked awaiting this reply, so the wait itself must
+        decline the pending action and return — letting codex unblock and the
+        loop interrupt — instead of hanging until a second (SIGKILL) click."""
+        from hitch.main.management.commands.codex_worker import _wait_for_decision
+
+        approval = ApprovalRequest.objects.create(
+            instance=self._make_instance(),
+            method="item/commandExecution/requestApproval",
+            params={},
+        )
+
+        self.assertEqual(_wait_for_decision(approval.pk), "decline")
+        approval.refresh_from_db()
+        self.assertEqual(approval.decision, "decline")
+        self.assertIsNotNone(approval.decided_at)
+
     @patch(
         "hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001
     )
@@ -5214,6 +5234,29 @@ class ApprovalHandlerTests(TestCase):
         input_request.refresh_from_db()
         self.assertEqual(input_request.response, {"answers": {}})
         self.assertIsNotNone(input_request.responded_at)
+
+    @patch("hitch.main.management.commands.codex_worker._APPROVAL_POLL_INTERVAL", 0.001)
+    @patch("hitch.main.management.commands.codex_worker._cancel_requested", True)
+    def test_wait_for_user_input_response_returns_empty_on_cancellation(self) -> None:
+        """A Stop click must also release a worker blocked on a structured input
+        request, recording the empty-answer fallback so codex unblocks and the
+        main loop can interrupt rather than hanging until SIGKILL."""
+        from hitch.main.management.commands.codex_worker import (
+            _wait_for_user_input_response,
+        )
+
+        input_request = UserInputRequest.objects.create(
+            instance=self._make_instance(),
+            method="request_user_input",
+            params={},
+        )
+
+        self.assertEqual(
+            _wait_for_user_input_response(input_request.pk),
+            {"answers": {}},
+        )
+        input_request.refresh_from_db()
+        self.assertEqual(input_request.response, {"answers": {}})
 
     @patch(
         "hitch.main.management.commands.codex_worker._APPROVAL_WAIT_SECONDS", 0.0
