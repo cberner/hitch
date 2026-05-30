@@ -3214,6 +3214,16 @@ def _render_session_detail(
     active_instance = _active_instance_for(session_id)
     active_system_workflow = system_agents.active_workflow_for_thread(session_id)
     metadata = _session_detail_metadata(session_id)
+    # Capture the rollout mtime *before* any entries are read (the resume helper
+    # below reads them off disk), so a concurrent append surfaces as a cache
+    # miss on the next read rather than being masked behind a post-read stat.
+    # See the matching rule in ``token_usage_snapshot`` and
+    # ``_attach_session_stage_context``.
+    stage_cache_mtime_ns = (
+        _rollout_mtime_ns(_rollout_path_from_value(metadata.codex_path))
+        if metadata is not None
+        else 0
+    )
     metadata_resume = _metadata_resume_for_inactive_session(
         session_id,
         metadata,
@@ -3262,6 +3272,9 @@ def _render_session_detail(
             settings = resolved_settings.values
             cookie_updates = resolved_settings.cookie_updates
             plan_model = _plan_mode_model_from_models(resumed, settings, models_data)
+        # Capture the rollout mtime before reading entries; see the
+        # metadata-resume branch above for why the order matters.
+        stage_cache_mtime_ns = _rollout_mtime_ns(_rollout_path_for(thread))
         raw_entries = list(_entries_for(thread))
     is_archived = _thread_is_archived(thread)
     entries = _apply_system_authors(raw_entries, session_id)
@@ -3311,9 +3324,7 @@ def _render_session_detail(
             and stage_workflow is None
             and stage_pr_workflow is None
         ):
-            _update_cached_stage(
-                session_id, stage, _rollout_mtime_ns(_rollout_path_for(thread))
-            )
+            _update_cached_stage(session_id, stage, stage_cache_mtime_ns)
         stage_context = stage.as_context()
     show_active_worker_transcript = _show_active_worker_transcript(active_instance)
     active_demo_worker = (
