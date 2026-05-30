@@ -3110,6 +3110,14 @@
                 lastFrame = Date.now();
                 problemStartedAt = 0;
                 clearRetryTimer();
+                // A frame arrived, so the transport is healthy. Heartbeats set
+                // the precise working/idle state; for plain data frames during a
+                // recovery, clear the stale "reconnecting"/"disconnected" pill
+                // optimistically rather than leave it lying until the next
+                // heartbeat lands.
+                if (connState === "reconnecting" || connState === "disconnected") {
+                    setState("working");
+                }
             }
             function retryNow() {
                 if (streamEnded) return;
