@@ -354,7 +354,11 @@ def _load_rollout_lines(rollout_path: Path) -> list[dict[str, Any]] | None:
         logger.warning("failed to read rollout %s: %s", rollout_path, exc)
         return None
     lines: list[dict[str, Any]] = []
-    for raw in text.splitlines():
+    # Split on real newlines only. str.splitlines() also breaks on U+2028/U+2029/
+    # U+0085, which are valid *unescaped* inside JSON strings, so a message body
+    # containing one would be chopped into two invalid fragments and the whole
+    # rollout record silently dropped (losing its transcript/token/PR/stage data).
+    for raw in text.split("\n"):
         raw = raw.strip()
         if not raw:
             continue

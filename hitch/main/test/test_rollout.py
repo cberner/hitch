@@ -908,6 +908,25 @@ class IterEntriesTests(TestCase):
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0]["text"], "hi")
 
+    def test_unicode_line_separators_in_message_are_not_dropped(self) -> None:
+        # Codex writes rollout JSONL as raw UTF-8, so U+2028/U+2029/U+0085 can
+        # appear unescaped inside a message body. str.splitlines() would split
+        # the physical record on those and drop the whole (now-unparseable)
+        # entry; splitting on real newlines keeps it intact.
+        message = "Line one Line two tailend"
+        raw = json.dumps(
+            {
+                "timestamp": "2025-01-05T12:00:00Z",
+                "type": "event_msg",
+                "payload": {"type": "user_message", "message": message},
+            },
+            ensure_ascii=False,
+        )
+        path = self._make([raw])
+        entries = list(rollout.iter_entries(path))
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["text"], message)
+
     def test_missing_file_returns_empty(self) -> None:
         self.assertEqual(list(rollout.iter_entries(Path("/nonexistent/rollout.jsonl"))), [])
 
