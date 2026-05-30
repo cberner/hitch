@@ -53,8 +53,10 @@ from hitch.main.codex_pool import (
 from hitch.main.management.commands.codex_worker import (
     _apply_worker_oom_score_adjust,
     _create_pending_approval,
+    _create_pending_user_input,
     _notify_system_agents,
     _wait_for_decision,
+    _wait_for_user_input_response,
     request_cancel,
 )
 from hitch.main.models import ApprovalRequest, CodexInstance
@@ -74,6 +76,13 @@ _FILE_APPROVAL_METHOD = "item/fileChange/requestApproval"
 # ungated tool here would bypass Hitch's approval modes.
 _TOOL_APPROVAL_METHOD = "item/tool/requestApproval"
 _FILE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+# The SDK's ``AskUserQuestion`` tool (common in plan mode) reaches the same
+# ``can_use_tool`` callback. Rather than a bare allow/deny, it is routed to the
+# structured-input handoff (``UserInputRequest`` + the ``input/requested`` UI
+# the Codex ``request_user_input`` tool already uses) so the user picks from the
+# generated choices.
+_ASK_USER_QUESTION_TOOL = "AskUserQuestion"
+_ASK_USER_QUESTION_METHOD = "item/userInput/askUserQuestion"
 _STEER_POLL_INTERVAL = 0.2
 # Grace window at turn end: a steer can be queued (the row is still marked
 # running until ``handle`` flips its status) between the loop's last drain and
@@ -332,6 +341,8 @@ class _TurnRunner:
             return claude_options.deny_result(
                 "Hidden system-agent runs may only auto-run built-in Bash/file tools."
             )
+        if tool_name == _ASK_USER_QUESTION_TOOL:
+            return await self._ask_user_question(tool_input)
         params = _approval_params(method, tool_name, tool_input)
         request_id = await asyncio.to_thread(
             _create_pending_approval,
@@ -350,6 +361,42 @@ class _TurnRunner:
         if _decision_allows(decision):
             return claude_options.allow_result()
         return claude_options.deny_result("Declined by the user.")
+
+    async def _ask_user_question(self, tool_input: dict[str, Any]) -> Any:
+        """Collect answers to a Claude ``AskUserQuestion`` via the input UI.
+
+        Reuses the ``UserInputRequest`` handoff the Codex ``request_user_input``
+        tool uses: render the generated questions/options, wait for the user's
+        picks, then return them to the model. ``AskUserQuestionInput`` has no
+        field to carry answers, so ``updated_input`` cannot deliver them; the
+        ``deny`` message channel is what the model receives as the tool outcome,
+        so the selections ride there.
+        """
+        questions = _ask_user_question_params(tool_input)
+        if not questions:
+            return claude_options.deny_result("No question to ask.")
+        params = {"questions": questions}
+        request_id = await asyncio.to_thread(
+            _create_pending_user_input,
+            instance_id=self._instance.pk,
+            method=_ASK_USER_QUESTION_METHOD,
+            params=params,
+        )
+        self._write_event(
+            "input/requested",
+            {"id": request_id, "method": _ASK_USER_QUESTION_METHOD, "params": params},
+        )
+        response = await asyncio.to_thread(_wait_for_user_input_response, request_id)
+        self._write_event(
+            "input/resolved",
+            {"id": request_id, "method": _ASK_USER_QUESTION_METHOD, "response": response},
+        )
+        answers = response.get("answers") if isinstance(response, dict) else None
+        if not isinstance(answers, dict) or not any(
+            _str(value) for value in answers.values()
+        ):
+            return claude_options.deny_result("The user did not answer the question.")
+        return claude_options.deny_result(_format_ask_user_answers(questions, answers))
 
     # -- steering & interrupt ---------------------------------------------
 
@@ -462,6 +509,59 @@ def _approval_params(
         # approves a mutating tool seeing only its name, not what it will do.
         item = {"type": "toolCall", "tool": tool_name, "arguments": tool_input}
     return {"item": item, "tool": tool_name}
+
+
+def _ask_user_question_params(tool_input: dict[str, Any]) -> list[dict[str, Any]]:
+    """Map an ``AskUserQuestion`` tool input onto the ``input/requested`` schema.
+
+    The browser input UI keys answers by a per-question ``id`` (which
+    ``AskUserQuestion`` does not provide) and renders ``options`` as single
+    select; a synthetic id is added per question and each option's
+    label/description is carried through.
+    """
+    raw_questions = tool_input.get("questions")
+    if not isinstance(raw_questions, list):
+        return []
+    questions: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_questions):
+        if not isinstance(raw, dict):
+            continue
+        text = _str(raw.get("question"))
+        if not text:
+            continue
+        options: list[dict[str, Any]] = []
+        for raw_option in raw.get("options") or []:
+            if not isinstance(raw_option, dict):
+                continue
+            label = _str(raw_option.get("label"))
+            if label:
+                options.append(
+                    {"label": label, "description": _str(raw_option.get("description"))}
+                )
+        questions.append(
+            {
+                "id": f"q{index}",
+                "header": _str(raw.get("header")),
+                "question": text,
+                "options": options,
+                # Clarifying questions need a real answer, so don't pre-select.
+                "requires_explicit_choice": True,
+            }
+        )
+    return questions
+
+
+def _format_ask_user_answers(
+    questions: list[dict[str, Any]], answers: dict[str, Any]
+) -> str:
+    lines = ["The user answered your questions:"]
+    for question in questions:
+        value = _str(answers.get(question["id"]))
+        if not value:
+            continue
+        label = question.get("header") or question.get("question") or question["id"]
+        lines.append(f"- {label}: {value}")
+    return "\n".join(lines)
 
 
 _IMAGE_MEDIA_TYPES = {

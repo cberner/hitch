@@ -5621,7 +5621,15 @@ def _send_claude_follow_up(
         return HttpResponseBadRequest("session cwd is not an allowed repository")
     model = settings.model
     if model not in claude_options.VALID_CLAUDE_MODELS:
-        model = claude_options.DEFAULT_CLAUDE_MODEL
+        # The settings cookie may hold a Codex model id (provider switched back).
+        # Prefer the session's own prior Claude model so a follow-up keeps the
+        # same model instead of silently jumping to the default.
+        prior_model = previous_instance.model if previous_instance is not None else ""
+        model = (
+            prior_model
+            if prior_model in claude_options.VALID_CLAUDE_MODELS
+            else claude_options.DEFAULT_CLAUDE_MODEL
+        )
     web_search_mode = _valid_web_search_mode_or_default(settings.web_search_mode)
     developer_instructions = (
         previous_instance.developer_instructions
@@ -11215,6 +11223,10 @@ def _is_allowed_session_cwd(cwd: str) -> bool:
 def _candidate_thread_user_message_index(
     thread_id: str, settings: SettingsValues
 ) -> int:
+    # Claude candidate threads are local-only, so count their user turns from the
+    # worker events instead of a Codex ``thread_resume`` that would fail.
+    if _session_is_claude(thread_id):
+        return _claude_user_message_index(thread_id)
     resumed = codex_pool.run_borrowed_op_with_retry(
         Codex,
         lambda codex: codex._client.thread_resume(thread_id),

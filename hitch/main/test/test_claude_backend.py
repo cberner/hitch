@@ -528,6 +528,136 @@ class StopUnblocksApprovalWaitTests(TestCase):
         self.assertTrue(runner._cancelled)
 
 
+class AskUserQuestionTests(TestCase):
+    """Claude's ``AskUserQuestion`` (plan-mode clarifications) is routed to the
+    structured-input UI instead of a bare Run/Skip approval, and the selections
+    are returned to the model."""
+
+    def _runner(self) -> Any:
+        import io
+
+        from hitch.main.management.commands import claude_worker
+
+        instance = CodexInstance(
+            thread_id="t",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_RUNNING,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            purpose=CodexInstance.PURPOSE_USER,
+        )
+        return claude_worker._TurnRunner(
+            instance=instance,
+            events_file=io.StringIO(),
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode="prompt_user",
+            web_search_mode=None,
+            plan_mode=True,
+        )
+
+    def test_params_mapping_adds_ids_and_carries_options(self) -> None:
+        from hitch.main.management.commands import claude_worker
+
+        questions = claude_worker._ask_user_question_params(
+            {
+                "questions": [
+                    {
+                        "question": "Which library?",
+                        "header": "Library",
+                        "options": [
+                            {"label": "requests", "description": "simple"},
+                            {"label": "httpx", "description": "async"},
+                        ],
+                        "multiSelect": False,
+                    }
+                ]
+            }
+        )
+        self.assertEqual(len(questions), 1)
+        question = questions[0]
+        self.assertEqual(question["id"], "q0")
+        self.assertEqual(question["question"], "Which library?")
+        self.assertEqual(question["header"], "Library")
+        self.assertEqual([o["label"] for o in question["options"]], ["requests", "httpx"])
+        self.assertTrue(question["requires_explicit_choice"])
+
+    def test_routes_to_input_request_and_returns_answers(self) -> None:
+        import asyncio
+
+        from claude_agent_sdk import PermissionResultDeny
+
+        from hitch.main.management.commands import claude_worker
+
+        runner = self._runner()
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Which library?",
+                    "header": "Library",
+                    "options": [
+                        {"label": "requests", "description": ""},
+                        {"label": "httpx", "description": ""},
+                    ],
+                }
+            ]
+        }
+        with (
+            patch.object(
+                claude_worker, "_create_pending_user_input", return_value=7
+            ) as mock_create,
+            patch.object(
+                claude_worker,
+                "_wait_for_user_input_response",
+                return_value={"answers": {"q0": "httpx"}},
+            ) as mock_wait,
+        ):
+            result = asyncio.run(
+                runner._can_use_tool("AskUserQuestion", tool_input, None)
+            )
+        mock_create.assert_called_once()
+        mock_wait.assert_called_once()
+        # The input has no answer field, so selections come back via the deny
+        # message channel the model reads as the tool outcome.
+        self.assertIsInstance(result, PermissionResultDeny)
+        self.assertIn("httpx", result.message)
+        self.assertIn("Library", result.message)
+
+    def test_unanswered_question_declines(self) -> None:
+        import asyncio
+
+        from claude_agent_sdk import PermissionResultDeny
+
+        from hitch.main.management.commands import claude_worker
+
+        runner = self._runner()
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Which library?",
+                    "header": "Library",
+                    "options": [{"label": "requests", "description": ""}],
+                }
+            ]
+        }
+        with (
+            patch.object(claude_worker, "_create_pending_user_input", return_value=7),
+            patch.object(
+                claude_worker,
+                "_wait_for_user_input_response",
+                return_value={"answers": {}},
+            ),
+        ):
+            result = asyncio.run(
+                runner._can_use_tool("AskUserQuestion", tool_input, None)
+            )
+        self.assertIsInstance(result, PermissionResultDeny)
+        self.assertIn("did not answer", result.message)
+
+
 class HiddenAutoReviewApprovalTests(TestCase):
     """Hidden auto-review runs auto-approve only built-in mutating tools; a
     project/user MCP tool reaching ``can_use_tool`` must be denied, since these
@@ -1486,3 +1616,51 @@ class ClaudeFollowUpAutoQaTests(TestCase):
                 input_image_paths=[],
             )
         self.assertNotIn("auto_qa_enabled", mock_spawn.call_args.kwargs)
+
+    def test_follow_up_prefers_prior_claude_model_over_codex_cookie(self) -> None:
+        from hitch.main import views
+
+        self._claude_instance(model="claude-sonnet-4-6")
+        with (
+            patch.object(codex_pool, "spawn_turn") as mock_spawn,
+            patch.object(views, "_allowed_session_cwds", return_value={"/repo"}),
+            patch.object(views, "_claude_user_message_index", return_value=0),
+        ):
+            views._send_claude_follow_up(
+                session_id="claude-thread",
+                prompt="next",
+                plan_mode=False,
+                # Settings cookie holds a Codex model id (provider switched back).
+                settings=self._settings(model="gpt-5-codex"),
+                input_image_paths=[],
+            )
+        # The session's prior Claude model is preserved rather than defaulting.
+        self.assertEqual(mock_spawn.call_args.kwargs["model"], "claude-sonnet-4-6")
+
+
+class CandidateThreadIndexTests(TestCase):
+    """A Claude candidate thread is local-only, so its user-message index must
+    come from the worker events, not a Codex ``thread_resume``."""
+
+    def test_claude_candidate_index_skips_codex_resume(self) -> None:
+        from hitch.main import views
+
+        CodexInstance.objects.create(
+            thread_id="cand",
+            cwd="/repo",
+            prompt="x",
+            events_path="",
+            pid=0,
+            status=CodexInstance.STATUS_COMPLETED,
+            backend=CodexInstance.BACKEND_CLAUDE,
+        )
+        with (
+            patch.object(views, "Codex") as mock_codex,
+            patch.object(
+                views, "_claude_user_message_index", return_value=3
+            ) as mock_count,
+        ):
+            result = views._candidate_thread_user_message_index("cand", MagicMock())
+        self.assertEqual(result, 3)
+        mock_codex.assert_not_called()
+        mock_count.assert_called_once_with("cand")
