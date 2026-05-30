@@ -395,18 +395,32 @@ class DemoProxyTests(TestCase):
 
     @patch("hitch.main.demo.http.client.HTTPConnection")
     def test_proxy_reports_unavailable_demo_target(self, mock_connection: MagicMock) -> None:
-        mock_connection.return_value.request.side_effect = OSError("refused")
-        request = RequestFactory().get("/sessions/thread-1/demo/asset")
-
-        response = demo.proxy_demo_request(
-            request,
-            "thread-1",
-            "asset",
-            path_prefix="/sessions/thread-1/demo/",
+        # A socket error on request() and a malformed status line on
+        # getresponse() (http.client.HTTPException, not an OSError) must both
+        # surface as a 502 and close the connection so its socket is not leaked.
+        cases = (
+            ("request", OSError("refused"), b"refused"),
+            ("getresponse", http.client.BadStatusLine("garbage"), b"demo target unavailable"),
         )
+        for failing_call, exc, expected in cases:
+            with self.subTest(failing_call=failing_call):
+                conn = mock_connection.return_value
+                conn.reset_mock()
+                conn.request.side_effect = None
+                conn.getresponse.side_effect = None
+                getattr(conn, failing_call).side_effect = exc
+                request = RequestFactory().get("/sessions/thread-1/demo/asset")
 
-        self.assertEqual(response.status_code, 502)
-        self.assertIn(b"demo target unavailable: refused", response.content)
+                response = demo.proxy_demo_request(
+                    request,
+                    "thread-1",
+                    "asset",
+                    path_prefix="/sessions/thread-1/demo/",
+                )
+
+                self.assertEqual(response.status_code, 502)
+                self.assertIn(expected, response.content)
+                conn.close.assert_called_once()
 
     @patch("hitch.main.demo.http.client.HTTPConnection")
     def test_proxy_closes_connection_when_body_read_fails(self, mock_connection: MagicMock) -> None:
