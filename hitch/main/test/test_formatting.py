@@ -179,6 +179,27 @@ class RenderMarkdownTests(SimpleTestCase):
                 ('href="javascript:',),
             ),
             (
+                # markdown-it percent-encodes the smuggled control char, so a
+                # naive ``^javascript:`` check passes ``java%09script:`` even
+                # though browsers strip the tab and execute it.
+                "entity-encoded tab javascript URL does not become link",
+                "[click](java&#9;script:alert(1))",
+                (),
+                ("<a ", "href="),
+            ),
+            (
+                "entity-encoded newline javascript URL does not become link",
+                "# Heading\n\n[click](java&#10;script:alert(document.cookie))",
+                (),
+                ("<a ", "href="),
+            ),
+            (
+                "vbscript URL does not become link",
+                "[click](vbscript:msgbox(1))",
+                (),
+                ("<a ",),
+            ),
+            (
                 "HTTPS link is rendered",
                 "[ok](https://example.com)",
                 ('<a href="https://example.com">ok</a>',),
