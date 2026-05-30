@@ -281,7 +281,7 @@ def fetch_pr_snapshot(
 
 
 def _fetch_review_threads(
-    cwd: str, *, repo_full_name: Any, pr_number: Any
+    cwd: str, *, repo_full_name: Any, pr_number: Any, host: str = ""
 ) -> list[Any] | None:
     """Return the PR's review threads via ``gh api graphql``.
 
@@ -301,10 +301,12 @@ def _fetch_review_threads(
     collected: list[Any] = []
     after: str | None = None
     for _ in range(_MAX_REVIEW_THREAD_PAGES):
-        argv = [
-            "gh",
-            "api",
-            "graphql",
+        argv = ["gh", "api", "graphql"]
+        if host:
+            # gh api defaults to github.com; a GitHub Enterprise PR needs the
+            # explicit host or the GraphQL call hits the wrong server.
+            argv += ["--hostname", host]
+        argv += [
             "-f",
             f"query={_REVIEW_THREADS_QUERY}",
             "-f",

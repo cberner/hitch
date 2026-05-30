@@ -130,6 +130,49 @@ class GithubPrHelperTests(SimpleTestCase):
             github_pr.push_branch("/repo", "feature")
 
     @patch("hitch.main.github_pr.subprocess.run")
+    def test_enterprise_pr_threads_pass_hostname(self, mock_run: MagicMock) -> None:
+        # A GitHub Enterprise PR URL must route the GraphQL thread fetch to that
+        # host via --hostname, not the default github.com.
+        enterprise = {
+            **_PR_VIEW_JSON,
+            "url": "https://ghe.example.com/cberner/hitch/pull/42",
+        }
+        graphql_argv: list[str] = []
+
+        def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv[:3] == ["gh", "api", "graphql"]:
+                graphql_argv.extend(argv)
+                return _completed(
+                    argv,
+                    stdout=json.dumps(
+                        {
+                            "data": {
+                                "repository": {
+                                    "pullRequest": {
+                                        "reviewThreads": {
+                                            "nodes": [],
+                                            "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ),
+                )
+            return _completed(argv, stdout=json.dumps(enterprise))
+
+        mock_run.side_effect = fake_run
+
+        snapshot = github_pr.fetch_pr_snapshot("/repo", pr_number=42)
+
+        assert snapshot is not None
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertIn("--hostname", graphql_argv)
+        self.assertIn("ghe.example.com", graphql_argv)
+        # A plain github.com PR must NOT pass --hostname.
+        self.assertEqual(github_pr._host_from_url("https://github.com/o/r/pull/1"), "")
+
+    @patch("hitch.main.github_pr.subprocess.run")
     def test_fetch_pr_snapshot_maps_review_ci_and_threads(
         self, mock_run: MagicMock
     ) -> None:
