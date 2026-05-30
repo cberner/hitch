@@ -11348,8 +11348,10 @@ def _start_candidate_proposal_session(
         ),
     )
     if candidate_backend == CodexInstance.BACKEND_CLAUDE:
+        # Auto-PR (GitHub PR-open) and the manual PR/QA activation are not wired
+        # for Claude, but auto-QA review runs on the local worker backend, so it
+        # is preserved here (matching new-session and follow-up Claude turns).
         auto_pr_enabled = False
-        auto_qa_enabled = False
         qa_workflow_activation = False
     base_instructions = _base_instructions_for_settings(spawn_settings)
     project = None if target.project_cleared else candidate_session.project or target.project

@@ -11337,6 +11337,72 @@ class NewSessionViewTests(TestCase):
         self.assertTrue(candidate.auto_merge_to_local_branch)
         self.assertEqual(candidate.auto_merge_branch, "release")
 
+    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    def test_claude_candidate_acceptance_preserves_auto_qa(
+        self,
+        mock_turn: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_managed_worktrees: MagicMock,
+    ) -> None:
+        # A Claude-backed candidate accepted from the inbox keeps its configured
+        # auto-QA: that review runs on the local worker backend, so only Auto-PR
+        # (the unsupported GitHub PR-open path) is disabled for Claude.
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
+        _setup_codex(mock_codex, models=[])
+        mock_turn.return_value = MagicMock()
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            auto_qa_enabled=True,
+            provider="claude",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+            is_hidden_system_session=True,
+        )
+        # A prior Claude worker fixes the candidate thread's backend.
+        CodexInstance.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            prompt="prev",
+            events_path="y",
+            pid=0,
+            status=CodexInstance.STATUS_COMPLETED,
+            backend=CodexInstance.BACKEND_CLAUDE,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            title="Add parser coverage",
+            outcome_metadata={"auto_pr_enabled": False, "auto_qa_enabled": True},
+        )
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Add parser coverage",
+                "cwd": self.REPO,
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(mock_turn.call_args.kwargs["auto_qa_enabled"])
+        self.assertNotIn("auto_pr_enabled", mock_turn.call_args.kwargs)
+        candidate.refresh_from_db()
+        self.assertTrue(candidate.auto_qa_enabled)
+        self.assertFalse(candidate.auto_pr_enabled)
+
     @patch("hitch.main.views.system_agents.spec_critic_should_run")
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
     @patch("hitch.main.views.discover_managed_worktrees")

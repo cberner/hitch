@@ -55,6 +55,7 @@ from hitch.main.management.commands.codex_worker import (
     _create_pending_approval,
     _notify_system_agents,
     _wait_for_decision,
+    request_cancel,
 )
 from hitch.main.models import ApprovalRequest, CodexInstance
 
@@ -373,6 +374,11 @@ class _TurnRunner:
         if self._cancelled or self._client is None:
             return
         self._cancelled = True
+        # ``can_use_tool`` may be blocked in ``_wait_for_decision`` (a worker
+        # thread) awaiting a browser approval. That wait polls the shared cancel
+        # flag, so set it -- otherwise the approval sits until its timeout and the
+        # interrupt below never runs because the turn is parked on the callback.
+        request_cancel()
         asyncio.create_task(self._interrupt())
 
     async def _interrupt(self) -> None:
@@ -451,7 +457,10 @@ def _approval_params(
                 break
         item = {"type": "fileChange", "changes": [{"path": path}]}
     else:
-        item = {"type": "toolCall", "tool": tool_name}
+        # The browser renders the item JSON as the approval detail, so carry the
+        # arguments (like the translated ``mcpToolCall``) -- otherwise the user
+        # approves a mutating tool seeing only its name, not what it will do.
+        item = {"type": "toolCall", "tool": tool_name, "arguments": tool_input}
     return {"item": item, "tool": tool_name}
 
 

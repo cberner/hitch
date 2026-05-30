@@ -471,7 +471,7 @@ class ApprovalRoutingTests(TestCase):
             claude_worker._TOOL_APPROVAL_METHOD,
         )
 
-    def test_generic_tool_approval_params_carry_tool_name(self) -> None:
+    def test_generic_tool_approval_params_carry_tool_name_and_arguments(self) -> None:
         from hitch.main.management.commands import claude_worker
 
         params = claude_worker._approval_params(
@@ -481,6 +481,51 @@ class ApprovalRoutingTests(TestCase):
         )
         self.assertEqual(params["tool"], "mcp__github__create_pr")
         self.assertEqual(params["item"]["type"], "toolCall")
+        # The browser renders the item JSON, so the user must see the arguments
+        # they are approving -- not just the tool name.
+        self.assertEqual(params["item"]["arguments"], {"title": "x"})
+
+
+class StopUnblocksApprovalWaitTests(TestCase):
+    """A Stop click while ``can_use_tool`` waits on a browser approval must set
+    the shared cancel flag ``_wait_for_decision`` polls, or the approval sits
+    until its timeout instead of declining and interrupting the turn."""
+
+    def test_sigterm_sets_shared_cancel_flag(self) -> None:
+        import io
+
+        from hitch.main.management.commands import claude_worker
+
+        instance = CodexInstance(
+            thread_id="t",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_RUNNING,
+            backend=CodexInstance.BACKEND_CLAUDE,
+        )
+        runner = claude_worker._TurnRunner(
+            instance=instance,
+            events_file=io.StringIO(),
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode=None,
+            web_search_mode=None,
+            plan_mode=False,
+        )
+        runner._client = MagicMock()
+        with (
+            patch.object(claude_worker, "request_cancel") as mock_cancel,
+            patch(
+                "hitch.main.management.commands.claude_worker.asyncio.create_task"
+            ),
+            patch.object(runner, "_interrupt", new=MagicMock()),
+        ):
+            runner._on_sigterm()
+        mock_cancel.assert_called_once()
+        self.assertTrue(runner._cancelled)
 
 
 class HiddenAutoReviewApprovalTests(TestCase):
