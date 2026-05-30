@@ -271,7 +271,7 @@ class Command(BaseCommand):
             instance.status = CodexInstance.STATUS_FAILED
             instance.ended_at = timezone.now()
             instance.error = repr(exc)
-            instance.save(update_fields=["status", "ended_at", "error"])
+            _commit_terminal_status(instance)
             _notify_system_agents(instance)
             cleanup_requested_input_images_for(instance)
             raise
@@ -293,9 +293,34 @@ class Command(BaseCommand):
                 if error is not None and error.message
                 else f"turn ended with status {final_turn.status.value}"
             )
-        instance.save(update_fields=["status", "ended_at", "error"])
+        _commit_terminal_status(instance)
         _notify_system_agents(instance)
         cleanup_requested_input_images_for(instance)
+
+
+def _commit_terminal_status(instance: CodexInstance) -> None:
+    """Persist the worker's terminal status without clobbering a parent write.
+
+    The parent (a forced Stop in ``_force_kill_instance``/``_mark_failed`` or a
+    ``reconcile_dead`` sweep) flips a row to a terminal state with a conditional
+    ``UPDATE ... WHERE status IN (starting, running)`` so an already-terminal row
+    is preserved. The worker's own end-of-turn save must use the same guard: an
+    unconditional save that lands just after the parent forced the row to FAILED
+    would resurrect it as COMPLETED, silently dropping the user's Stop and
+    leaving the cancelled approval/input prompts inconsistent with the status.
+    If the guarded update matches no row, the parent already wrote a terminal
+    state; adopt it rather than overwriting it.
+    """
+    updated = CodexInstance.objects.filter(
+        pk=instance.pk,
+        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+    ).update(
+        status=instance.status,
+        ended_at=instance.ended_at,
+        error=instance.error,
+    )
+    if updated == 0:
+        instance.refresh_from_db()
 
 
 def _notify_system_agents(instance: CodexInstance) -> None:
