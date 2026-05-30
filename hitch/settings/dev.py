@@ -7,7 +7,14 @@ from hitch.settings.common import *  # noqa: F403
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = "django-insecure-_+&3jq$3=lc^c7t9p#sahy0v6=l8u@wfs+0nf!d2zo)kk1m_v0"
+# A deployment (e.g. the install-systemd unit) injects a strong, host-unique key
+# via DJANGO_SECRET_KEY. Without it the published "insecure" default is used,
+# which is fine for local dev but would let anyone forge Hitch's signed cookies
+# (model/sandbox/approval settings) on a publicly reachable host.
+SECRET_KEY = (
+    os.environ.get("DJANGO_SECRET_KEY")
+    or "django-insecure-_+&3jq$3=lc^c7t9p#sahy0v6=l8u@wfs+0nf!d2zo)kk1m_v0"
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
