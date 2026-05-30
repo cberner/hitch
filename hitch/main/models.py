@@ -551,6 +551,10 @@ class SystemWorkflow(models.Model):
     iteration = models.PositiveIntegerField(default=0)
     max_iterations = models.PositiveIntegerField(default=3)
     state = models.JSONField(default=dict, blank=True)
+    # Debounce timestamp for Hitch-driven PR monitor polls. A column (not a
+    # state key) so the poll claim is a single atomic conditional UPDATE that
+    # is race-safe even on SQLite, where select_for_update is a no-op.
+    pr_monitor_next_poll_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

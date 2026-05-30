@@ -158,6 +158,26 @@ class GithubPrHelperTests(SimpleTestCase):
         self.assertEqual(snapshot["pending_jobs"], [])
 
     @patch("hitch.main.github_pr.subprocess.run")
+    def test_fetch_pr_snapshot_unknown_check_status_is_pending(
+        self, mock_run: MagicMock
+    ) -> None:
+        # A check with neither a usable status nor state must not be counted as
+        # a passed check; treat it as still pending.
+        data = {
+            **_PR_VIEW_JSON,
+            "reviewDecision": "APPROVED",
+            "statusCheckRollup": [{"__typename": "CheckRun", "name": "mystery"}],
+        }
+        mock_run.return_value = _completed(["gh"], stdout=json.dumps(data))
+
+        snapshot = github_pr.fetch_pr_snapshot("/repo", pr_number=42)
+
+        assert snapshot is not None
+        self.assertEqual(snapshot["ci_status"], "pending")
+        self.assertEqual(snapshot["pending_jobs"], [{"name": "mystery"}])
+        self.assertEqual(snapshot["failing_jobs"], [])
+
+    @patch("hitch.main.github_pr.subprocess.run")
     def test_fetch_pr_snapshot_no_checks_is_success(self, mock_run: MagicMock) -> None:
         data = {**_PR_VIEW_JSON, "statusCheckRollup": []}
         mock_run.return_value = _completed(["gh"], stdout=json.dumps(data))

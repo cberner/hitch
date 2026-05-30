@@ -3105,6 +3105,26 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
 
     @patch("hitch.main.system_agents.github_pr.fetch_pr_snapshot")
+    def test_run_pr_monitor_poll_blocks_without_pr_identity(
+        self, mock_fetch: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={},
+        )
+
+        system_agents._run_pr_monitor_poll(workflow)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        # Never shelled out to gh: there was no PR number or branch to look up.
+        mock_fetch.assert_not_called()
+
+    @patch("hitch.main.system_agents.github_pr.fetch_pr_snapshot")
     def test_run_pr_monitor_poll_completes_on_merged_pr(
         self, mock_fetch: MagicMock
     ) -> None:
@@ -3128,14 +3148,14 @@ class SpecCriticWorkflowTests(TestCase):
     def test_maybe_advance_pr_monitors_respects_debounce(
         self, mock_poll: MagicMock
     ) -> None:
-        future = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+        future = datetime.now(UTC) + timedelta(minutes=5)
         not_due = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
             main_thread_id="thread-not-due",
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_PR_MONITORING,
-            state={system_agents._PR_MONITOR_NEXT_POLL_STATE_KEY: future},
+            pr_monitor_next_poll_at=future,
         )
         due = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -3143,7 +3163,6 @@ class SpecCriticWorkflowTests(TestCase):
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_PR_MONITORING,
-            state={},
         )
 
         advanced = system_agents.maybe_advance_pr_monitors()
@@ -3154,7 +3173,26 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertNotIn(not_due.pk, polled_ids)
         # The claim stamps a next-poll time so a concurrent reconcile debounces.
         due.refresh_from_db()
-        self.assertIn(system_agents._PR_MONITOR_NEXT_POLL_STATE_KEY, due.state)
+        self.assertIsNotNone(due.pr_monitor_next_poll_at)
+
+    def test_claim_pr_monitor_poll_is_exclusive(self) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+        )
+        now = datetime.now(UTC)
+
+        # First claim wins; a second concurrent claim for the same due window is
+        # rejected so two reconciles cannot both poll (and double-spawn a turn).
+        self.assertTrue(system_agents._claim_pr_monitor_poll(workflow, now))
+        self.assertFalse(
+            system_agents._claim_pr_monitor_poll(
+                SystemWorkflow.objects.get(pk=workflow.pk), now
+            )
+        )
 
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
     def test_qa_completion_recovers_when_run_row_does_not_exist_yet(

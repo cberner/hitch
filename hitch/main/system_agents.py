@@ -129,7 +129,6 @@ _PR_HANDOFF_STATE_KEY = "pr_handoff"
 _PR_MONITOR_STATE_KEY = "last_pr_monitor"
 _PR_GATES_STATE_KEY = "pr_gates"
 _PR_HEAD_BRANCH_STATE_KEY = "pr_head_branch"
-_PR_MONITOR_NEXT_POLL_STATE_KEY = "pr_monitor_next_poll_at"
 _PR_DETAIL_LIMIT = 5
 # Hitch polls GitHub for PR state itself (via ``github_pr``) instead of
 # spawning a coding-agent monitor. This bounds how often the reconcile path
@@ -1970,13 +1969,10 @@ def _open_or_update_pr_for_workflow(workflow: SystemWorkflow) -> dict[str, Any]:
 
 def _enter_pr_monitoring(workflow: SystemWorkflow) -> None:
     workflow.step = STEP_PR_MONITORING
-    workflow.state = {
-        **workflow.state,
-        _PR_MONITOR_NEXT_POLL_STATE_KEY: (
-            timezone.now() + _PR_MONITOR_POLL_INTERVAL
-        ).isoformat(),
-    }
-    workflow.save(update_fields=["step", "state", "updated_at"])
+    # Debounce the next reconcile-driven poll; the immediate poll below covers
+    # the transition itself.
+    workflow.pr_monitor_next_poll_at = timezone.now() + _PR_MONITOR_POLL_INTERVAL
+    workflow.save(update_fields=["step", "pr_monitor_next_poll_at", "updated_at"])
     _run_pr_monitor_poll(workflow)
 
 
@@ -2219,20 +2215,21 @@ def maybe_advance_pr_monitors(
     monitor, the reconcile/scheduler path polls ``gh`` for the persisted PR's
     state on a debounced cadence and advances the workflow gates.
     """
+    now = timezone.now()
     workflows = SystemWorkflow.objects.filter(
         kind=SystemWorkflow.KIND_PR_QA,
         status=SystemWorkflow.STATUS_RUNNING,
         step=STEP_PR_MONITORING,
+    ).filter(
+        models.Q(pr_monitor_next_poll_at__isnull=True)
+        | models.Q(pr_monitor_next_poll_at__lte=now)
     )
     if main_thread_id is not None:
         workflows = workflows.filter(main_thread_id=main_thread_id)
     if workflow_id is not None:
         workflows = workflows.filter(pk=workflow_id)
     advanced = 0
-    now = timezone.now()
     for workflow in workflows.order_by("created_at", "id"):
-        if not _pr_monitor_poll_due(workflow, now):
-            continue
         if not _claim_pr_monitor_poll(workflow, now):
             continue
         try:
@@ -2245,42 +2242,26 @@ def maybe_advance_pr_monitors(
     return advanced
 
 
-def _pr_monitor_poll_due(workflow: SystemWorkflow, now: datetime) -> bool:
-    raw = (
-        workflow.state.get(_PR_MONITOR_NEXT_POLL_STATE_KEY)
-        if isinstance(workflow.state, dict)
-        else None
-    )
-    if not isinstance(raw, str) or not raw:
-        return True
-    parsed = parse_datetime(raw)
-    if parsed is None:
-        return True
-    if timezone.is_naive(parsed):
-        parsed = parsed.replace(tzinfo=UTC)
-    return now >= parsed
-
-
 def _claim_pr_monitor_poll(workflow: SystemWorkflow, now: datetime) -> bool:
-    with transaction.atomic():
-        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
-        if (
-            locked.status != SystemWorkflow.STATUS_RUNNING
-            or locked.step != STEP_PR_MONITORING
-            or not _pr_monitor_poll_due(locked, now)
-        ):
-            return False
-        locked.state = {
-            **locked.state,
-            _PR_MONITOR_NEXT_POLL_STATE_KEY: (
-                now + _PR_MONITOR_POLL_INTERVAL
-            ).isoformat(),
-        }
-        locked.save(update_fields=["state", "updated_at"])
-    workflow.status = locked.status
-    workflow.step = locked.step
-    workflow.state = locked.state
-    workflow.iteration = locked.iteration
+    # A single conditional UPDATE is the atomic claim: only the caller whose
+    # UPDATE matched the due row (rowcount 1) proceeds to poll, so concurrent
+    # reconciles cannot double-poll (and thus cannot double-spawn a feedback
+    # turn) even on SQLite, where select_for_update is a no-op.
+    claimed = (
+        SystemWorkflow.objects.filter(
+            pk=workflow.pk,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=STEP_PR_MONITORING,
+        )
+        .filter(
+            models.Q(pr_monitor_next_poll_at__isnull=True)
+            | models.Q(pr_monitor_next_poll_at__lte=now)
+        )
+        .update(pr_monitor_next_poll_at=now + _PR_MONITOR_POLL_INTERVAL)
+    )
+    if not claimed:
+        return False
+    workflow.refresh_from_db()
     return True
 
 
@@ -2295,6 +2276,14 @@ def _run_pr_monitor_poll(workflow: SystemWorkflow) -> None:
     if not isinstance(pr_number, int) or isinstance(pr_number, bool):
         pr_number = None
     branch = _state_string(workflow, _PR_HEAD_BRANCH_STATE_KEY) or None
+    if pr_number is None and branch is None:
+        # Without a PR number or head branch a ``gh pr view`` would fall back to
+        # the worktree's current branch and could observe an unrelated PR, so
+        # refuse rather than guess.
+        _block_workflow(
+            workflow, "Hitch lost track of which PR to monitor for this workflow"
+        )
+        return
     try:
         snapshot = github_pr.fetch_pr_snapshot(
             workflow.cwd, pr_number=pr_number, branch=branch
@@ -2306,6 +2295,15 @@ def _run_pr_monitor_poll(workflow: SystemWorkflow) -> None:
         _block_workflow(
             workflow, "the PR could not be found while Hitch was monitoring it"
         )
+        return
+    # The ``gh`` call above can take a second or two; re-read the workflow so a
+    # concurrent stop/terminal transition during that window is not clobbered by
+    # the gate advance below.
+    workflow.refresh_from_db()
+    if (
+        workflow.status != SystemWorkflow.STATUS_RUNNING
+        or workflow.step != STEP_PR_MONITORING
+    ):
         return
     _advance_pr_after_observation(workflow, _pr_monitor_parsed_from_snapshot(snapshot))
 
@@ -4586,6 +4584,10 @@ def _merge_pr_handoff(workflow: SystemWorkflow, update: dict[str, Any]) -> None:
     workflow.state = {**workflow.state, _PR_HANDOFF_STATE_KEY: merged}
     if reset_gates:
         workflow.state.pop(_PR_GATES_STATE_KEY, None)
+    # Persist immediately: callers such as the PR-prompt handler enter monitoring
+    # (which reloads the row) without separately saving state, so an unsaved
+    # merge would be lost on the next poll's refresh.
+    workflow.save(update_fields=["state", "updated_at"])
 
 
 def _merge_pr_handoff_dicts(

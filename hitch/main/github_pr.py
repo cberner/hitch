@@ -406,7 +406,10 @@ def _copy_ci_fields(snapshot: dict[str, Any], data: dict[str, Any]) -> None:
             else:
                 failing.append(name)
             continue
-        if status and status != "COMPLETED":
+        # CheckRun entries report ``status``; only a COMPLETED run counts as a
+        # finished check. A missing/unknown status is treated as still pending
+        # rather than silently counted as a passed check.
+        if status != "COMPLETED":
             pending.append(name)
             continue
         saw_completed = True
