@@ -581,6 +581,30 @@ class ClaudeSystemAgentIndexingTests(TestCase):
             self.assertFalse(row.is_hidden_system_session)
 
 
+class CreateClaudeSessionThreadTests(TestCase):
+    """The Spec Critic preflight needs a Claude thread shell before the visible
+    implementation turn: a metadata row plus a completed placeholder instance so
+    the backend is recoverable from history."""
+
+    def test_creates_metadata_and_claude_placeholder(self) -> None:
+        from hitch.main.models import SessionMetadata
+
+        thread_id = codex_pool.create_claude_session_thread(
+            cwd="/repo",
+            name="Spec preflight",
+            model=claude_options.DEFAULT_CLAUDE_MODEL,
+        )
+        self.assertTrue(thread_id)
+        row = SessionMetadata.objects.get(thread_id=thread_id)
+        self.assertEqual(row.cwd, "/repo")
+        placeholder = CodexInstance.objects.get(thread_id=thread_id)
+        self.assertEqual(placeholder.backend, CodexInstance.BACKEND_CLAUDE)
+        self.assertEqual(placeholder.status, CodexInstance.STATUS_COMPLETED)
+        self.assertEqual(placeholder.pid, 0)
+        # No worker is launched -- the placeholder only fixes the backend.
+        self.assertEqual(placeholder.events_path, "")
+
+
 class CodexFollowupModelTests(TestCase):
     """A resumed Codex thread must never be queued with a ``claude-*`` model id
     that leaked in from the global provider cookie."""

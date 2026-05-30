@@ -23,6 +23,8 @@ from django.conf import settings
 from django.db import models
 from django.utils.dateparse import parse_datetime
 
+from hitch.main import coding_agents
+
 
 class Project(models.Model):
     """A git repository grouping for visible Codex sessions."""
@@ -146,6 +148,13 @@ class AutonomousGoal(models.Model):
     auto_merge_to_local_branch = models.BooleanField(default=False)
     auto_merge_branch = models.CharField(max_length=255, blank=True, default="")
     deleted_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    # Coding-agent provider whose backend runs this goal's candidate/judge
+    # sub-agents. Validated in the view against ``coding_agents.VALID_PROVIDERS``.
+    provider = models.CharField(
+        max_length=16,
+        choices=coding_agents.PROVIDER_OPTIONS,
+        default=coding_agents.DEFAULT_PROVIDER,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

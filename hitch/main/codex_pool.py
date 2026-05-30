@@ -334,6 +334,54 @@ def _spawn_claude_session(
     )
 
 
+def create_claude_session_thread(
+    *,
+    cwd: str,
+    name: str,
+    model: str | None = None,
+    project: Project | None = None,
+    auto_pr_enabled: bool = False,
+    auto_qa_enabled: bool = False,
+    auto_merge_to_local_branch: bool = False,
+    auto_merge_branch: str = "",
+) -> str:
+    """Create a Claude session-thread shell without starting a turn.
+
+    The Claude analog of :func:`create_session_thread`. Claude has no app-server
+    thread to pre-create, so we mint a local thread id, register its metadata,
+    and add a completed placeholder ``CodexInstance`` carrying the Claude backend.
+    That placeholder makes the backend recoverable from history -- so the Spec
+    Critic preflight (which needs the thread before the visible implementation
+    turn) records the right backend and ``spawn_turn`` later resumes as Claude --
+    and lets the session page render an empty transcript while the preflight runs.
+    """
+    from hitch.main import session_index
+
+    thread_id = uuid.uuid4().hex
+    session_index.upsert_local_session(
+        thread_id=thread_id,
+        cwd=cwd,
+        project=project,
+        name=_initial_thread_name(name),
+        auto_pr_enabled=auto_pr_enabled,
+        auto_qa_enabled=auto_qa_enabled,
+        auto_merge_to_local_branch=auto_merge_to_local_branch,
+        auto_merge_branch=auto_merge_branch,
+    )
+    CodexInstance.objects.create(
+        thread_id=thread_id,
+        cwd=cwd,
+        prompt="",
+        events_path="",
+        pid=0,
+        status=CodexInstance.STATUS_COMPLETED,
+        backend=CodexInstance.BACKEND_CLAUDE,
+        purpose=CodexInstance.PURPOSE_USER,
+        model=model or "",
+    )
+    return thread_id
+
+
 def create_session_thread(
     *,
     cwd: str,

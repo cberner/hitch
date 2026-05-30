@@ -19182,6 +19182,100 @@ class AutonomousGoalViewTests(TestCase):
             AutonomousGoal.CONFIDENCE_VERY_HIGH,
         )
 
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.demo.start_demo_prompt_for", return_value="do the demo")
+    @patch("hitch.main.views.demo.request_demo_start")
+    @patch("hitch.main.views.demo.demo_runtime")
+    @patch("hitch.main.views._allowed_session_cwds", return_value={"/repo"})
+    def test_start_session_demo_supported_for_claude_session(
+        self,
+        _allowed: MagicMock,
+        _runtime: MagicMock,
+        mock_request_demo: MagicMock,
+        _prompt: MagicMock,
+        mock_spawn_turn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        # A Claude session has no Codex app-server thread; the demo flow must
+        # resolve the cwd from local rows (not ``thread_resume``) and run the
+        # demo turn as a Claude worker via the backend-aware ``spawn_turn``.
+        CodexInstance.objects.create(
+            thread_id="claude-demo",
+            cwd="/repo",
+            prompt="hi",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_COMPLETED,
+            backend=CodexInstance.BACKEND_CLAUDE,
+        )
+        mock_request_demo.return_value = MagicMock(pk=1)
+
+        def _spawn(**_kwargs: object) -> CodexInstance:
+            # Created lazily during the request, after the active-instance guard.
+            return CodexInstance.objects.create(
+                thread_id="claude-demo",
+                cwd="/repo",
+                prompt="do the demo",
+                events_path="y",
+                pid=0,
+                status=CodexInstance.STATUS_RUNNING,
+                backend=CodexInstance.BACKEND_CLAUDE,
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            )
+
+        mock_spawn_turn.side_effect = _spawn
+
+        response = self.client.post(
+            reverse("start_session_demo", kwargs={"session_id": "claude-demo"})
+        )
+
+        self.assertIn(response.status_code, (200, 302))
+        mock_codex.assert_not_called()
+        self.assertEqual(mock_spawn_turn.call_args.kwargs["cwd"], "/repo")
+        self.assertEqual(
+            mock_spawn_turn.call_args.kwargs["thread_id"], "claude-demo"
+        )
+
+    def test_create_autonomous_goal_stores_claude_provider(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+
+        response = self.client.post(
+            reverse("create_autonomous_goal"),
+            {
+                "title": "Improve tests",
+                "goal": "Find useful test coverage increments.",
+                "ambition": AutonomousGoal.AMBITION_INCREMENTAL,
+                "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+                "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
+                "provider": "claude",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        goal = AutonomousGoal.objects.get()
+        self.assertEqual(goal.provider, "claude")
+
+    def test_create_autonomous_goal_rejects_invalid_provider(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+
+        response = self.client.post(
+            reverse("create_autonomous_goal"),
+            {
+                "title": "Improve tests",
+                "goal": "Find useful test coverage increments.",
+                "ambition": AutonomousGoal.AMBITION_INCREMENTAL,
+                "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+                "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
+                "provider": "bogus",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(AutonomousGoal.objects.exists())
+
     def test_create_autonomous_goal_stores_auto_merge_branch(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))

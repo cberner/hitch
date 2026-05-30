@@ -222,6 +222,7 @@ class AutonomousGoalValues(NamedTuple):
     web_search_mode: str
     auto_merge_to_local_branch: bool
     auto_merge_branch: str
+    provider: str
 
 
 class AutonomousGoalRunBadge(NamedTuple):
@@ -3498,6 +3499,8 @@ def autonomous_goals(request: HttpRequest) -> HttpResponse:
             "default_confidence": AutonomousGoal.CONFIDENCE_HIGH,
             "web_search_mode_choices": _WEB_SEARCH_MODE_OPTIONS,
             "default_web_search_mode": AutonomousGoal.WEB_SEARCH_DEFAULT,
+            "provider_choices": coding_agents.PROVIDER_OPTIONS,
+            "default_provider": coding_agents.DEFAULT_PROVIDER,
             "local_branch_choices": local_branch_choices,
             "title_max_len": _AUTONOMOUS_GOAL_TITLE_MAX_LEN,
             **settings_context,
@@ -3533,6 +3536,7 @@ def create_autonomous_goal(request: HttpRequest) -> HttpResponse:
         web_search_mode=values.web_search_mode,
         auto_merge_to_local_branch=values.auto_merge_to_local_branch,
         auto_merge_branch=values.auto_merge_branch,
+        provider=values.provider,
     )
     return redirect("autonomous_goals")
 
@@ -3557,6 +3561,7 @@ def edit_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpR
         auto_proposal_default=autonomous_goal.auto_proposal_enabled,
         stacked_diff_depth_default=autonomous_goal.stacked_diff_depth,
         proposal_budget_default=autonomous_goal.proposal_budget,
+        provider_default=autonomous_goal.provider,
         local_branches=local_branch_names(project.repo_path),
     )
     if error is not None:
@@ -3577,6 +3582,7 @@ def edit_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpR
         "web_search_mode",
         "auto_merge_to_local_branch",
         "auto_merge_branch",
+        "provider",
     ):
         value = getattr(values, field)
         if getattr(autonomous_goal, field) != value:
@@ -3876,6 +3882,7 @@ def _validated_autonomous_goal_values(
     auto_proposal_default: bool = False,
     stacked_diff_depth_default: int = AutonomousGoal.STACKED_DIFF_DEPTH_MIN,
     proposal_budget_default: int | None = None,
+    provider_default: str = coding_agents.DEFAULT_PROVIDER,
     local_branches: list[str] | None = None,
 ) -> tuple[AutonomousGoalValues | None, str | None]:
     title, error = _validated_autonomous_goal_title(request.POST.get("title", ""))
@@ -3943,6 +3950,11 @@ def _validated_autonomous_goal_values(
     if auto_merge not in {"", "false", "true"}:
         return None, "auto merge setting is invalid"
     auto_merge_to_local_branch = auto_merge == "true"
+    provider = (
+        request.POST.get("provider", provider_default).strip() or provider_default
+    )
+    if provider not in coding_agents.VALID_PROVIDERS:
+        return None, "provider is invalid"
     auto_merge_branch = request.POST.get("auto_merge_branch", "").strip()
     valid_local_branches = set(local_branches or [])
     if auto_merge_to_local_branch:
@@ -3967,6 +3979,7 @@ def _validated_autonomous_goal_values(
         web_search_mode=web_search_mode,
         auto_merge_to_local_branch=auto_merge_to_local_branch,
         auto_merge_branch=auto_merge_branch,
+        provider=provider,
     ), None
 
 
@@ -5565,6 +5578,19 @@ def _session_is_claude(session_id: str) -> bool:
         .first()
     )
     return backend == CodexInstance.BACKEND_CLAUDE
+
+
+def _local_session_cwd(session_id: str) -> str:
+    """Resolve a session's cwd from local rows, for backends with no Codex thread.
+
+    Claude threads are not known to the Codex app-server, so the cwd is read
+    from the latest worker row (or the metadata row) instead of ``thread_resume``.
+    """
+    previous_instance = codex_pool.latest_for_thread(session_id)
+    if previous_instance is not None and previous_instance.cwd:
+        return previous_instance.cwd
+    metadata = SessionMetadata.objects.filter(thread_id=session_id).first()
+    return metadata.cwd if metadata is not None else ""
 
 
 def _send_claude_follow_up(
@@ -9952,10 +9978,6 @@ def _mark_workflow_failed(workflow: SystemWorkflow) -> None:
 
 @require_http_methods(["POST"])
 def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
-    # The demo flow resumes a Codex app-server thread; Claude sessions have no
-    # such thread, so reject rather than fail against Codex.
-    if _session_is_claude(session_id):
-        return HttpResponseBadRequest("demo is not supported for Claude sessions")
     if system_agents.active_workflow_for_thread(session_id) is not None:
         return HttpResponseBadRequest("PR workflow is running for this session")
     active_instance = codex_pool.latest_active_for_thread(session_id)
@@ -9974,13 +9996,21 @@ def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
     ).exists():
         return HttpResponseBadRequest("demo setup workflow is already running")
     settings = _stored_settings(request)
-    resumed = codex_pool.run_borrowed_op_with_retry(
-        Codex,
-        lambda codex: codex._client.thread_resume(session_id),
-        enable_memories=settings.enable_memories,
-    )
-    thread = resumed.thread
-    cwd = _thread_cwd(thread)
+    # ``spawn_turn`` below inherits the session backend from its history, so the
+    # demo turn runs as a Claude worker for Claude sessions. Only the cwd lookup
+    # differs: a Claude thread has no Codex app-server thread to ``thread_resume``,
+    # so read its cwd from the local rows instead.
+    cwd: str | None
+    if _session_is_claude(session_id):
+        cwd = _local_session_cwd(session_id)
+    else:
+        resumed = codex_pool.run_borrowed_op_with_retry(
+            Codex,
+            lambda codex: codex._client.thread_resume(session_id),
+            enable_memories=settings.enable_memories,
+        )
+        thread = resumed.thread
+        cwd = _thread_cwd(thread)
     if not cwd:
         return HttpResponseBadRequest("thread has no cwd")
     if cwd not in _allowed_session_cwds():
@@ -11297,9 +11327,10 @@ def _start_candidate_proposal_session(
     # The candidate thread's backend is fixed by its history. Normalize the
     # per-turn model to that backend so selecting Claude (or Codex) in settings
     # can't queue a worker with a model id the CLI will reject, and gate the
-    # Codex-only auto-review/Spec Critic workflows off for a Claude thread. A
+    # Codex-only auto-review (GitHub PR-open) workflow off for a Claude thread. A
     # Codex thread keeps its own prior model as the fallback so a plan turn
-    # (which requires a concrete model) is not left without one.
+    # (which requires a concrete model) is not left without one. The Spec Critic
+    # runs on the resolved backend (its sub-agents spawn as Claude workers).
     prior_candidate_instance = codex_pool.latest_for_thread(
         candidate_session.thread_id
     )
@@ -11424,7 +11455,6 @@ def _start_candidate_proposal_session(
             spawn_kwargs["auto_merge_branch"] = auto_merge_branch
     if (
         settings.spec_critic_enabled
-        and candidate_backend != CodexInstance.BACKEND_CLAUDE
         and not input_image_paths
         and not plan_mode
         and system_agents.spec_critic_should_run(original_prompt, cwd=candidate_cwd)
@@ -12222,27 +12252,49 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
     if (
         proposed_session is None
         and settings.spec_critic_enabled
-        and session_backend != coding_agents.BACKEND_CLAUDE
         and not input_image_paths
         and not plan_mode
     ):
-        spec_create_thread_kwargs: dict[str, Any] = {
-            "cwd": session_cwd,
-            "name": (
-                proposed_session.title
-                if proposed_session is not None
-                else prompt.split("\n", 1)[0]
-            ),
-            "developer_instructions": developer_instructions or None,
-            "model": settings.model or None,
-            "enable_memories": settings.enable_memories,
-        }
-        if web_search_mode:
-            spec_create_thread_kwargs["web_search_mode"] = web_search_mode
-        if base_instructions:
-            spec_create_thread_kwargs["base_instructions"] = base_instructions
+        spec_thread_name = (
+            proposed_session.title
+            if proposed_session is not None
+            else prompt.split("\n", 1)[0]
+        )
+        # The Spec Critic records the main thread's backend and runs its
+        # sub-agents (and the deferred implementation turn) on it. Claude has no
+        # app-server thread, so mint a local shell; normalize the model so the
+        # Claude workers are never handed a Codex model id.
+        spec_model = settings.model or None
+        if (
+            session_backend == coding_agents.BACKEND_CLAUDE
+            and spec_model not in claude_options.VALID_CLAUDE_MODELS
+        ):
+            spec_model = claude_options.DEFAULT_CLAUDE_MODEL
         try:
-            thread_id = codex_pool.create_session_thread(**spec_create_thread_kwargs)
+            if session_backend == coding_agents.BACKEND_CLAUDE:
+                thread_id = codex_pool.create_claude_session_thread(
+                    cwd=session_cwd,
+                    name=spec_thread_name,
+                    model=spec_model,
+                    project=None if target.project_cleared else session_project,
+                    auto_pr_enabled=auto_pr_enabled,
+                    auto_qa_enabled=auto_qa_enabled,
+                )
+            else:
+                spec_create_thread_kwargs: dict[str, Any] = {
+                    "cwd": session_cwd,
+                    "name": spec_thread_name,
+                    "developer_instructions": developer_instructions or None,
+                    "model": spec_model,
+                    "enable_memories": settings.enable_memories,
+                }
+                if web_search_mode:
+                    spec_create_thread_kwargs["web_search_mode"] = web_search_mode
+                if base_instructions:
+                    spec_create_thread_kwargs["base_instructions"] = base_instructions
+                thread_id = codex_pool.create_session_thread(
+                    **spec_create_thread_kwargs
+                )
         except Exception:
             if managed_worktree is not None:
                 try:
@@ -12258,7 +12310,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             "prompt": prompt,
             "sandbox_policy": sandbox_policy or None,
             "approval_mode": settings.approval_mode,
-            "model": settings.model or None,
+            "model": spec_model,
             "reasoning_effort": settings.reasoning_effort or None,
             "developer_instructions": developer_instructions or None,
             "enable_memories": settings.enable_memories,
@@ -12284,11 +12336,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
                         "failed to clean up managed worktree %s", managed_worktree.path
                     )
             raise
-        spec_thread_name = (
-            proposed_session.title
-            if proposed_session is not None
-            else prompt.split("\n", 1)[0]
-        )
         session_metadata = session_index.upsert_local_session(
             thread_id=thread_id,
             cwd=session_cwd,

@@ -30,7 +30,15 @@ from openai_codex.generated.v2_all import (
     TurnStatus,
 )
 
-from hitch.main import codex_events, codex_pool, demo, rate_limit, rollout, session_index
+from hitch.main import (
+    codex_events,
+    codex_pool,
+    coding_agents,
+    demo,
+    rate_limit,
+    rollout,
+    session_index,
+)
 from hitch.main.diffs import build_worktree_diff_text
 from hitch.main.local_merges import (
     LocalBranchMergeError,
@@ -1672,6 +1680,10 @@ def _create_autonomous_goal_workflow_record(
         _AUTONOMOUS_GOAL_STACKED_ITERATION_STATE_KEY: 1,
         "autonomous_goal_updated_at": autonomous_goal.updated_at.isoformat(),
         "web_search_mode": autonomous_goal.web_search_mode,
+        # The goal carries no resumable thread, so record the backend up front
+        # (``_workflow_backend`` would otherwise default to Codex) so the
+        # candidate/judge sub-agents spawn on the goal's chosen provider.
+        "backend": coding_agents.backend_for_provider(autonomous_goal.provider),
     }
     if autonomous_goal.proposal_budget is not None:
         state[_AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY] = (

@@ -20,7 +20,15 @@ from openai_codex.generated.v2_all import (
     TurnStatus,
 )
 
-from hitch.main import codex_events, demo, rate_limit, streaming, system_agents
+from hitch.main import (
+    claude_options,
+    codex_events,
+    codex_pool,
+    demo,
+    rate_limit,
+    streaming,
+    system_agents,
+)
 from hitch.main.local_merges import (
     AutoMergeReviewPatch,
     LocalBranchMergeError,
@@ -9409,6 +9417,78 @@ class AutonomousGoalWorkflowTests(TestCase):
             message_fallback["next_steps_summary"],
             "Use the message as the durable summary.",
         )
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_claude_goal_runs_candidate_on_claude_backend(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+            ambition=AutonomousGoal.AMBITION_INCREMENTAL,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            provider="claude",
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+
+        workflow = system_agents.start_autonomous_goal_workflow(
+            autonomous_goal=autonomous_goal
+        )
+
+        # The goal carries no resumable thread, so the backend must be recorded
+        # up front and forwarded to the candidate spawn rather than defaulting to
+        # Codex.
+        self.assertEqual(workflow.state["backend"], CodexInstance.BACKEND_CLAUDE)
+        self.assertEqual(
+            mock_spawn.call_args.kwargs["backend"], CodexInstance.BACKEND_CLAUDE
+        )
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_spec_critic_runs_hidden_agents_on_claude_backend(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        def _spawn(**kwargs: Any) -> CodexInstance:
+            return _instance(
+                thread_id=f"{kwargs['agent_kind']}-thread",
+                purpose=kwargs["purpose"],
+                status=CodexInstance.STATUS_RUNNING,
+                agent_kind=kwargs["agent_kind"],
+            )
+
+        mock_spawn.side_effect = _spawn
+        # A Claude thread shell makes the backend recoverable from history, so
+        # the workflow records it and the hidden sub-agents spawn as Claude.
+        thread_id = codex_pool.create_claude_session_thread(
+            cwd="/repo",
+            name="Improve onboarding",
+            model=claude_options.DEFAULT_CLAUDE_MODEL,
+        )
+
+        workflow = system_agents.start_spec_critic_workflow(
+            main_thread_id=thread_id,
+            cwd="/repo",
+            prompt="Improve onboarding",
+            sandbox_policy="workspaceWrite",
+            approval_mode="prompt_user",
+            model=claude_options.DEFAULT_CLAUDE_MODEL,
+            reasoning_effort="high",
+        )
+
+        self.assertEqual(workflow.state["backend"], CodexInstance.BACKEND_CLAUDE)
+        self.assertEqual(mock_spawn.call_count, 3)
+        for call in mock_spawn.call_args_list:
+            self.assertEqual(
+                call.kwargs["backend"], CodexInstance.BACKEND_CLAUDE
+            )
+            self.assertEqual(
+                call.kwargs["model"], claude_options.DEFAULT_CLAUDE_MODEL
+            )
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_workflow_starts_hidden_candidate_thread(
