@@ -1689,6 +1689,57 @@ class ReconcileAndLookupTests(TestCase):
         self.assertIn("exited", dead_running.error)
 
     @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_cancels_pending_requests_of_dead_worker(
+        self, _mock_alive: MagicMock
+    ) -> None:
+        # A worker that dies mid-approval leaves the ApprovalRequest/UserInputRequest
+        # rows pending. Nothing alive will ever consume them, so the reconcile sweep
+        # must cancel them — otherwise the browser keeps an actionable card for a
+        # dead turn and a click returns 200 while the decision is silently dropped.
+        instance = self._make(pid=30, status=CodexInstance.STATUS_RUNNING)
+        approval = ApprovalRequest.objects.create(
+            instance=instance,
+            method="item/commandExecution/requestApproval",
+            params={},
+        )
+        input_request = UserInputRequest.objects.create(
+            instance=instance,
+            method="item/userInput/request",
+            params={},
+        )
+
+        n = codex_pool.reconcile_dead()
+
+        self.assertEqual(n, 1)
+        instance.refresh_from_db()
+        approval.refresh_from_db()
+        input_request.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertEqual(approval.decision, ApprovalRequest.DECISION_CANCEL)
+        self.assertIsNotNone(approval.decided_at)
+        self.assertEqual(input_request.response, {"answers": {}})
+        self.assertIsNotNone(input_request.responded_at)
+
+    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_preserves_resolved_request_of_dead_worker(
+        self, _mock_alive: MagicMock
+    ) -> None:
+        # A decision the user already made (and the worker may have consumed) must
+        # not be retroactively overwritten with "cancel" by the reconcile sweep.
+        instance = self._make(pid=31, status=CodexInstance.STATUS_RUNNING)
+        approval = ApprovalRequest.objects.create(
+            instance=instance,
+            method="item/commandExecution/requestApproval",
+            params={},
+            decision=ApprovalRequest.DECISION_ACCEPT,
+        )
+
+        codex_pool.reconcile_dead()
+
+        approval.refresh_from_db()
+        self.assertEqual(approval.decision, ApprovalRequest.DECISION_ACCEPT)
+
+    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_preserves_row_that_completed_during_sweep(
         self, _mock_alive: MagicMock
     ) -> None:

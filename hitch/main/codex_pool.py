@@ -36,7 +36,7 @@ from openai_codex import AppServerConfig, Codex
 from openai_codex.generated.v2_all import ThreadSource, WebSearchMode
 
 from hitch.main.codex_tools import registered_dynamic_tool_specs
-from hitch.main.models import CodexInstance
+from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
 
 logger = logging.getLogger(__name__)
 
@@ -781,8 +781,31 @@ def _mark_failed(instance: CodexInstance, error: str) -> CodexInstance | None:
     )
     if updated == 0:
         return None
+    _resolve_dangling_requests(instance.pk)
     instance.refresh_from_db()
     return instance
+
+
+def _resolve_dangling_requests(instance_pk: int) -> None:
+    """Close out approval/input rows a dead worker left pending.
+
+    Only call this once the owning instance has been flipped to FAILED — the
+    worker is then confirmed gone and can never consume an answer. Without this
+    the browser keeps rendering an actionable approval/input card for a turn
+    that is over: a click would flip the row and return 200 while the decision
+    is silently dropped, and a page reload re-renders the same stale card.
+    Cancelling the rows makes a late click resolve to 409 and a reload show no
+    pending prompt.
+    """
+    now = timezone.now()
+    ApprovalRequest.objects.filter(instance_id=instance_pk, decision="").update(
+        decision=ApprovalRequest.DECISION_CANCEL,
+        decided_at=now,
+    )
+    UserInputRequest.objects.filter(instance_id=instance_pk, response__isnull=True).update(
+        response={"answers": {}},
+        responded_at=now,
+    )
 
 
 def _force_kill_instance(instance: CodexInstance) -> None:
@@ -972,6 +995,7 @@ def _mark_dead_instances_failed(pending: Iterable[CodexInstance]) -> int:
                 _notify_system_agents_if_needed(instance)
                 cleanup_requested_input_images_for(instance)
             continue
+        _resolve_dangling_requests(instance.pk)
         instance.refresh_from_db()
         _notify_system_agents_if_needed(instance)
         cleanup_requested_input_images_for(instance)
