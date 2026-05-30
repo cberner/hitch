@@ -8666,7 +8666,20 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             spec_workflow_kwargs["web_search_mode"] = web_search_mode
         if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
             spec_workflow_kwargs["qa_panel_enabled"] = True
-        system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
+        try:
+            system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
+        except Exception:
+            # The worktree is only referenced by the not-yet-started workflow, so
+            # reclaim it before bubbling up rather than leaking it on disk (and
+            # into the cwd allowlist) on every failed-then-retried new session.
+            if managed_worktree is not None:
+                try:
+                    cleanup_worktree(managed_worktree)
+                except WorktreeCleanupError:
+                    logger.exception(
+                        "failed to clean up managed worktree %s", managed_worktree.path
+                    )
+            raise
         spec_thread_name = (
             proposed_session.title
             if proposed_session is not None
