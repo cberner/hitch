@@ -188,6 +188,88 @@ class GithubPrHelperTests(SimpleTestCase):
         self.assertEqual(snapshot["ci_status"], "success")
 
     @patch("hitch.main.github_pr.subprocess.run")
+    def test_thread_fetch_failure_leaves_unresolved_count_unknown(
+        self, mock_run: MagicMock
+    ) -> None:
+        # A failed GraphQL thread fetch must not record zero unresolved threads,
+        # or an approved PR could pass the review gate without observing threads.
+        def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv[:3] == ["gh", "api", "graphql"]:
+                return _completed(argv, returncode=1, stderr="rate limited")
+            return _completed(argv, stdout=json.dumps(_PR_VIEW_JSON))
+
+        mock_run.side_effect = fake_run
+
+        snapshot = github_pr.fetch_pr_snapshot("/repo", pr_number=42)
+
+        assert snapshot is not None
+        self.assertNotIn("unresolved_thread_count", snapshot)
+        self.assertNotIn("review_thread_count", snapshot)
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_inline_review_comment_text_surfaced_to_feedback(
+        self, mock_run: MagicMock
+    ) -> None:
+        threads_json = json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [
+                                    {
+                                        "id": "t1",
+                                        "isResolved": False,
+                                        "isOutdated": False,
+                                        "path": "a.py",
+                                        "line": 3,
+                                        "comments": {
+                                            "nodes": [
+                                                {"body": "please rename this", "url": "https://x/c1"}
+                                            ]
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        )
+
+        def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv[:3] == ["gh", "api", "graphql"]:
+                return _completed(argv, stdout=threads_json)
+            return _completed(argv, stdout=json.dumps({**_PR_VIEW_JSON, "comments": []}))
+
+        mock_run.side_effect = fake_run
+
+        snapshot = github_pr.fetch_pr_snapshot("/repo", pr_number=42)
+
+        assert snapshot is not None
+        self.assertEqual(snapshot["unresolved_thread_count"], 1)
+        bodies = [c.get("body", "") for c in snapshot["latest_comments"]]
+        self.assertTrue(any("please rename this" in b for b in bodies))
+        self.assertTrue(any("a.py" in b for b in bodies))
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_fetch_pr_snapshot_derives_merged_from_state(
+        self, mock_run: MagicMock
+    ) -> None:
+        data = {**_PR_VIEW_JSON, "state": "MERGED", "mergedAt": "2026-05-03T00:00:00Z"}
+        data.pop("merged", None)
+        mock_run.return_value = _completed(["gh"], stdout=json.dumps(data))
+
+        snapshot = github_pr.fetch_pr_snapshot("/repo", pr_number=42)
+
+        assert snapshot is not None
+        self.assertIs(snapshot["merged"], True)
+        self.assertEqual(snapshot["state"], "merged")
+        # ``merged`` must not be requested from gh (unsupported --json field).
+        self.assertNotIn("merged", github_pr._PR_VIEW_FIELDS.split(","))
+        self.assertNotIn("reviewThreads", github_pr._PR_VIEW_FIELDS.split(","))
+
+    @patch("hitch.main.github_pr.subprocess.run")
     def test_fetch_pr_snapshot_returns_none_when_no_pr(
         self, mock_run: MagicMock
     ) -> None:

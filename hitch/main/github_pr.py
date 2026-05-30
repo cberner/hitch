@@ -33,7 +33,6 @@ _PR_VIEW_FIELDS = ",".join(
         "url",
         "state",
         "isDraft",
-        "merged",
         "mergedAt",
         "mergeCommit",
         "mergeable",
@@ -59,7 +58,8 @@ _PR_VIEW_FIELDS = ",".join(
 _REVIEW_THREADS_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!){"
     "repository(owner:$owner,name:$name){pullRequest(number:$number){"
-    "reviewThreads(first:100){nodes{id isResolved isOutdated path line}}}}}"
+    "reviewThreads(first:100){nodes{id isResolved isOutdated path line "
+    "comments(first:5){nodes{body url}}}}}}}"
 )
 
 _GITHUB_PR_URL_RE = re.compile(
@@ -216,30 +216,34 @@ def fetch_pr_snapshot(
     if not isinstance(data, dict):
         raise GithubCliError("gh pr view returned unexpected output")
     snapshot = _snapshot_from_pr_view(data)
-    _apply_review_threads(
-        snapshot,
-        _fetch_review_threads(
-            cwd,
-            repo_full_name=snapshot.get("repository_full_name"),
-            pr_number=snapshot.get("pr_number"),
-        ),
+    threads = _fetch_review_threads(
+        cwd,
+        repo_full_name=snapshot.get("repository_full_name"),
+        pr_number=snapshot.get("pr_number"),
     )
+    # ``None`` means the thread fetch failed/was unobservable; leave the thread
+    # fields unset so the review gate stays pending rather than treating the PR
+    # as having zero unresolved threads.
+    if threads is not None:
+        _apply_review_threads(snapshot, threads)
     return snapshot
 
 
 def _fetch_review_threads(
     cwd: str, *, repo_full_name: Any, pr_number: Any
-) -> list[Any]:
-    """Return the PR's review threads via ``gh api graphql`` (best effort).
+) -> list[Any] | None:
+    """Return the PR's review threads via ``gh api graphql``.
 
     ``gh pr view --json`` cannot return review threads, so they are fetched
-    separately. A failure here degrades to no thread data rather than blocking
-    the whole snapshot: the review gate still acts on ``reviewDecision``.
+    separately. Returns ``None`` when the threads could not be observed (bad
+    identity, CLI error, or unexpected payload) so the caller can keep the
+    unresolved-thread state unknown instead of falsely clearing it; returns a
+    (possibly empty) list on a successful query.
     """
     if not isinstance(repo_full_name, str) or "/" not in repo_full_name:
-        return []
+        return None
     if not isinstance(pr_number, int) or isinstance(pr_number, bool):
-        return []
+        return None
     owner, _, name = repo_full_name.partition("/")
     result = _run(
         [
@@ -261,13 +265,13 @@ def _fetch_review_threads(
     )
     if result.returncode != 0:
         logger.warning("failed to fetch review threads: %s", result.stderr.strip())
-        return []
+        return None
     parsed = _json_or_none(result.stdout)
     try:
         nodes = parsed["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
     except (TypeError, KeyError):
-        return []
-    return nodes if isinstance(nodes, list) else []
+        return None
+    return nodes if isinstance(nodes, list) else None
 
 
 def _snapshot_from_pr_view(data: dict[str, Any]) -> dict[str, Any]:
@@ -287,7 +291,9 @@ def _snapshot_from_pr_view(data: dict[str, Any]) -> dict[str, Any]:
     state = _str(data.get("state")).lower()
     if state:
         snapshot["state"] = state
-    snapshot["merged"] = bool(data.get("merged"))
+    # ``gh pr view --json`` has no ``merged`` field; derive it from the
+    # supported ``state``/``mergedAt`` fields instead.
+    snapshot["merged"] = state == "merged" or bool(_str(data.get("mergedAt")))
     snapshot["draft"] = bool(data.get("isDraft"))
 
     mergeable = _str(data.get("mergeable")).upper()
@@ -359,10 +365,9 @@ def _copy_review_fields(snapshot: dict[str, Any], data: dict[str, Any]) -> None:
 
 
 def _apply_review_threads(snapshot: dict[str, Any], threads: list[Any]) -> None:
-    # Always record an integer unresolved count (0 when none/unavailable) so the
-    # review gate's "approved and unresolved_thread_count == 0" pass condition
-    # can be satisfied; a missing count would otherwise keep an approved PR
-    # pending forever.
+    # A successful (possibly empty) thread fetch always records an integer
+    # unresolved count so the review gate's "approved and unresolved_thread_count
+    # == 0" pass condition can be satisfied.
     snapshot["review_thread_count"] = len(threads)
     unresolved = [
         thread
@@ -373,6 +378,38 @@ def _apply_review_threads(snapshot: dict[str, Any], threads: list[Any]) -> None:
     ]
     snapshot["unresolved_thread_count"] = len(unresolved)
     snapshot["unresolved_threads"] = _compact_threads(unresolved)
+    # The unresolved-thread identifiers (path/line/id) tell the fix agent where
+    # to look but not what was asked. Surface the inline review-comment text
+    # itself through the untrusted comment channel so the follow-up turn sees
+    # the actual requested change.
+    thread_comments = _review_thread_comments(unresolved)
+    if thread_comments:
+        existing = snapshot.get("latest_comments")
+        existing = existing if isinstance(existing, list) else []
+        snapshot["latest_comments"] = (thread_comments + existing)[:_PR_DETAIL_LIMIT]
+
+
+def _review_thread_comments(threads: list[Any]) -> list[dict[str, Any]]:
+    collected: list[dict[str, Any]] = []
+    for thread in threads:
+        if not isinstance(thread, dict):
+            continue
+        path = _str(thread.get("path"))
+        for comment in _as_node_list(thread.get("comments"))[:1]:
+            if not isinstance(comment, dict):
+                continue
+            body = _str(comment.get("body"))
+            if not body:
+                continue
+            prefix = f"[review thread {path}] " if path else "[review thread] "
+            item: dict[str, Any] = {
+                "body": _compact_text(f"{prefix}{' '.join(body.split())}")
+            }
+            url = _str(comment.get("url"))
+            if url:
+                item["url"] = url[:_PR_TEXT_MAX_CHARS]
+            collected.append(item)
+    return collected
 
 
 def _copy_comment_fields(snapshot: dict[str, Any], data: dict[str, Any]) -> None:
