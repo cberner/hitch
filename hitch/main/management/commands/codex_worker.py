@@ -83,6 +83,7 @@ from hitch.main.codex_pool import (
     cleanup_requested_input_images_for,
     control_path_for,
     discard_input_attachment_paths,
+    resolve_dangling_requests_for_instance,
 )
 from hitch.main.codex_tools import (
     ToolContext,
@@ -272,6 +273,8 @@ class Command(BaseCommand):
             instance.ended_at = timezone.now()
             instance.error = repr(exc)
             _commit_terminal_status(instance)
+            if instance.status == CodexInstance.STATUS_FAILED:
+                resolve_dangling_requests_for_instance(instance.pk)
             _notify_system_agents(instance)
             cleanup_requested_input_images_for(instance)
             raise
@@ -294,6 +297,8 @@ class Command(BaseCommand):
                 else f"turn ended with status {final_turn.status.value}"
             )
         _commit_terminal_status(instance)
+        if instance.status == CodexInstance.STATUS_FAILED:
+            resolve_dangling_requests_for_instance(instance.pk)
         _notify_system_agents(instance)
         cleanup_requested_input_images_for(instance)
 

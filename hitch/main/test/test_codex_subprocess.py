@@ -3966,6 +3966,31 @@ class CodexWorkerCommandTests(TestCase):
         instance.save(update_fields=["input_image_paths", "input_attachment_paths"])
         return image_path
 
+    def _make_pending_requests(
+        self, instance: CodexInstance
+    ) -> tuple[ApprovalRequest, UserInputRequest]:
+        approval = ApprovalRequest.objects.create(
+            instance=instance,
+            method="item/commandExecution/requestApproval",
+            params={},
+        )
+        input_request = UserInputRequest.objects.create(
+            instance=instance,
+            method="request_user_input",
+            params={},
+        )
+        return approval, input_request
+
+    def _assert_requests_cancelled(
+        self, approval: ApprovalRequest, input_request: UserInputRequest
+    ) -> None:
+        approval.refresh_from_db()
+        input_request.refresh_from_db()
+        self.assertEqual(approval.decision, ApprovalRequest.DECISION_CANCEL)
+        self.assertIsNotNone(approval.decided_at)
+        self.assertEqual(input_request.response, {"answers": {}})
+        self.assertIsNotNone(input_request.responded_at)
+
     @patch("hitch.main.demo.on_codex_instance_finished")
     @patch("hitch.main.system_agents.on_codex_instance_finished")
     def test_notify_system_agents_does_not_double_route_demo_system_agent(
@@ -4448,6 +4473,7 @@ class CodexWorkerCommandTests(TestCase):
                     override_settings(CODEX_EVENTS_DIR=Path(raw)),
                 ):
                     instance = self._make_instance(Path(raw))
+                    approval, input_request = self._make_pending_requests(instance)
                     image_path = self._attach_input_image(instance)
                     call_command("codex_worker", "--instance-id", str(instance.pk))
                     self.assertTrue(image_path.exists())
@@ -4457,6 +4483,7 @@ class CodexWorkerCommandTests(TestCase):
                 self.assertIsNotNone(instance.ended_at)
                 self.assertEqual(instance.input_image_paths, [str(image_path)])
                 self.assertEqual(instance.input_attachment_paths, [str(image_path)])
+                self._assert_requests_cancelled(approval, input_request)
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_records_failure_when_codex_raises(self, mock_codex: MagicMock) -> None:
@@ -4467,6 +4494,7 @@ class CodexWorkerCommandTests(TestCase):
             override_settings(CODEX_EVENTS_DIR=Path(raw)),
         ):
             instance = self._make_instance(Path(raw))
+            approval, input_request = self._make_pending_requests(instance)
             image_path = self._attach_input_image(instance)
             with self.assertRaises(RuntimeError):
                 call_command(
@@ -4483,6 +4511,7 @@ class CodexWorkerCommandTests(TestCase):
         self.assertIsNotNone(instance.ended_at)
         self.assertEqual(instance.input_image_paths, [str(image_path)])
         self.assertEqual(instance.input_attachment_paths, [str(image_path)])
+        self._assert_requests_cancelled(approval, input_request)
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_typed_cli_args_round_trip_to_turn_kwargs(self, mock_codex: MagicMock) -> None:

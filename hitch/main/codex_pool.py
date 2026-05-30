@@ -792,7 +792,7 @@ def _mark_failed(instance: CodexInstance, error: str) -> CodexInstance | None:
     return instance
 
 
-def _resolve_dangling_requests(instance_pk: int) -> None:
+def resolve_dangling_requests_for_instance(instance_pk: int) -> None:
     """Close out approval/input rows a dead worker left pending.
 
     Only call this once the owning instance has been flipped to FAILED — the
@@ -812,6 +812,10 @@ def _resolve_dangling_requests(instance_pk: int) -> None:
         response={"answers": {}},
         responded_at=now,
     )
+
+
+def _resolve_dangling_requests(instance_pk: int) -> None:
+    resolve_dangling_requests_for_instance(instance_pk)
 
 
 def _force_kill_instance(instance: CodexInstance) -> None:
