@@ -439,7 +439,13 @@ def _linux_proc_state(pid: int) -> str | None:
     if not proc_root.exists():
         return None
     try:
-        stat = (proc_root / str(pid) / "stat").read_text(encoding="utf-8")
+        # The comm field holds the raw executable basename and may contain
+        # arbitrary non-UTF-8 bytes (pids are recycled, so this can be a
+        # foreign process). Decode tolerantly: the state char we want sits
+        # after the final ')', which is always ASCII.
+        stat = (proc_root / str(pid) / "stat").read_bytes().decode(
+            "utf-8", errors="replace"
+        )
     except FileNotFoundError:
         return ""
     except OSError:

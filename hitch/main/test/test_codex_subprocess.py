@@ -1494,6 +1494,18 @@ class IsAliveTests(TestCase):
             if proc.returncode is None:
                 proc.wait(timeout=5)
 
+    def test_linux_proc_state_tolerates_non_utf8_comm(self) -> None:
+        # A recycled pid can point at a foreign process whose comm (executable
+        # basename) holds arbitrary non-UTF-8 bytes. Reading its state must not
+        # raise UnicodeDecodeError out of the liveness check.
+        raw = b"1234 (we\xffird) R 1 0 0 0 -1"
+        with patch("hitch.main.codex_pool.Path") as mock_path:
+            proc_root = mock_path.return_value
+            proc_root.exists.return_value = True
+            stat_path = proc_root.__truediv__.return_value.__truediv__.return_value
+            stat_path.read_bytes.return_value = raw
+            self.assertEqual(codex_pool._linux_proc_state(1234), "R")
+
     def test_worker_is_alive_uses_reaped_instance_key(self) -> None:
         pid = 98765
         instance = CodexInstance.objects.create(
@@ -1584,14 +1596,14 @@ class IsAliveTests(TestCase):
             proc_root = mock_path.return_value
             proc_root.exists.return_value = True
             stat_path = proc_root.__truediv__.return_value.__truediv__.return_value
-            stat_path.read_text.side_effect = FileNotFoundError
+            stat_path.read_bytes.side_effect = FileNotFoundError
             self.assertEqual(codex_pool._linux_proc_state(1), "")
 
         with patch("hitch.main.codex_pool.Path") as mock_path:
             proc_root = mock_path.return_value
             proc_root.exists.return_value = True
             stat_path = proc_root.__truediv__.return_value.__truediv__.return_value
-            stat_path.read_text.return_value = "malformed"
+            stat_path.read_bytes.return_value = b"malformed"
             self.assertIsNone(codex_pool._linux_proc_state(1))
 
     @patch("hitch.main.codex_pool.os.kill")
