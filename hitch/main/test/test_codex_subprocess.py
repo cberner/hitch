@@ -4,6 +4,7 @@ the CodexInstance row in sync with the OS process.
 """
 
 import dataclasses
+import itertools
 import json
 import os
 import signal
@@ -6112,14 +6113,27 @@ class StreamForInstanceTests(TestCase):
         self.assertTrue(frames[-1].startswith(b"event: end"))
         self.assertIn(b'"demo"', frames[-1])
 
-    @patch("hitch.main.streaming._HEARTBEAT_INTERVAL", 0.0)
-    @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
-    @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.005)
     def test_idle_stream_resends_heartbeats_at_cadence(self) -> None:
         # With the heartbeat cadence collapsed to zero we should observe
         # multiple heartbeat frames before the per-stream cap closes the
         # stream — confirming the periodic refresh path actually runs.
-        frames = list(streaming.idle_stream("thread-none", baseline_id=None))
+        #
+        # Drive the clock deterministically (monotonic from a fixed step,
+        # sleep no-op) rather than racing a real wall-clock budget: under
+        # coverage instrumentation on a loaded CI runner a real 5ms cap can
+        # elapse before the loop emits its second heartbeat, making the test
+        # flaky. The controlled clock keeps the same intent without the race.
+        ticks = itertools.count(0.0, 0.001)
+        with (
+            patch("hitch.main.streaming._HEARTBEAT_INTERVAL", 0.0),
+            patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.02),
+            patch("hitch.main.streaming.time.sleep"),
+            patch(
+                "hitch.main.streaming.time.monotonic",
+                side_effect=lambda: next(ticks),
+            ),
+        ):
+            frames = list(streaming.idle_stream("thread-none", baseline_id=None))
         heartbeats = [f for f in frames if f.startswith(b"event: heartbeat")]
         self.assertGreater(len(heartbeats), 1)
         for frame in heartbeats:
