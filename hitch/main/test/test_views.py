@@ -474,6 +474,79 @@ class SessionDetailFastPathTests(TestCase):
 
     @patch("hitch.main.views._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
+    def test_inactive_session_detail_stamps_stage_cache_with_pre_read_mtime(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        # The stage cache is keyed on the rollout mtime. If the detail view
+        # re-stats the file *after* reading entries, a worker append that lands
+        # during the read would stamp the (pre-append) stage with the post-append
+        # mtime -- so a later index render would compare equal mtimes, serve the
+        # stale stage, and never re-derive. The mtime must be captured before the
+        # entries are read.
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Read from rollout"},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Implemented."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        pre_read_mtime_ns = rollout_path.stat().st_mtime_ns
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        metadata = SessionMetadata.objects.create(
+            thread_id="mtime-race",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Mtime race",
+            codex_preview="Read from rollout",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+
+        real_entries_for = views._entries_for
+
+        def _append_during_read(thread: object) -> object:
+            entries = list(real_entries_for(thread))
+            # Simulate a worker appending a new turn while the request reads the
+            # rollout, advancing the file's mtime past the captured value.
+            with open(rollout_path, "a", encoding="utf-8") as handle:
+                handle.write(
+                    "\n"
+                    + _rollout_line(
+                        "event_msg", {"type": "user_message", "message": "Next"}
+                    )
+                )
+            os.utime(rollout_path, ns=(pre_read_mtime_ns + 1000, pre_read_mtime_ns + 1000))
+            return iter(entries)
+
+        with patch("hitch.main.views._entries_for", side_effect=_append_during_read):
+            response = self.client.get(
+                reverse("session", kwargs={"session_id": "mtime-race"})
+            )
+
+        self.assertEqual(response.status_code, 200)
+        metadata.refresh_from_db()
+        # The stage was derived from the pre-append entries, so it must be
+        # stamped with the pre-append mtime; otherwise the post-append mtime
+        # would mask the staleness and the cache would never invalidate.
+        self.assertEqual(metadata.derived_stage_source_mtime_ns, pre_read_mtime_ns)
+        self.assertNotEqual(
+            metadata.derived_stage_source_mtime_ns, rollout_path.stat().st_mtime_ns
+        )
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
     def test_active_session_detail_does_not_cache_forced_stage(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
