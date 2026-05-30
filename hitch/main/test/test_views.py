@@ -795,23 +795,27 @@ class SessionDetailFastPathTests(TestCase):
             codex_updated_at=now,
         )
 
-        real_entries_for = views._entries_for
+        real_session_detail_data = views._session_detail_data_for_metadata_resume
 
-        def _append_during_read(thread: object) -> object:
-            entries = list(real_entries_for(thread))
+        def _append_during_read(path: Path) -> rollout_module.SessionDetailData | None:
+            rollout_data = real_session_detail_data(path)
             # Simulate a worker appending a new turn while the request reads the
             # rollout, advancing the file's mtime past the captured value.
-            with open(rollout_path, "a", encoding="utf-8") as handle:
+            with path.open("a", encoding="utf-8") as handle:
                 handle.write(
                     "\n"
                     + _rollout_line(
                         "event_msg", {"type": "user_message", "message": "Next"}
                     )
                 )
-            os.utime(rollout_path, ns=(pre_read_mtime_ns + 1000, pre_read_mtime_ns + 1000))
-            return iter(entries)
+            post_read_mtime_ns = pre_read_mtime_ns + 1_000_000_000
+            os.utime(path, ns=(post_read_mtime_ns, post_read_mtime_ns))
+            return rollout_data
 
-        with patch("hitch.main.views._entries_for", side_effect=_append_during_read):
+        with patch(
+            "hitch.main.views._session_detail_data_for_metadata_resume",
+            side_effect=_append_during_read,
+        ):
             response = self.client.get(
                 reverse("session", kwargs={"session_id": "mtime-race"})
             )
