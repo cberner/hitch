@@ -2952,6 +2952,43 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
         mock_push.assert_not_called()
 
+    @patch("hitch.main.system_agents.github_pr.push_branch")
+    @patch("hitch.main.system_agents.github_pr.fetch_pr_snapshot")
+    def test_pr_feedback_completion_pushes_when_terminal_check_read_fails(
+        self, mock_fetch: MagicMock, mock_push: MagicMock
+    ) -> None:
+        # A transient read failure during the pre-push terminal check must not
+        # block the workflow: push anyway and keep monitoring.
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_FEEDBACK_RUNNING,
+            state={
+                system_agents._PR_HEAD_BRANCH_STATE_KEY: "feature",
+                system_agents._PR_HANDOFF_STATE_KEY: {"pr_number": 169},
+            },
+        )
+        # First call (terminal check) fails transiently; the monitoring poll
+        # after the push reads a pending PR.
+        mock_fetch.side_effect = [
+            github_pr.GithubCliError("transient"),
+            {"pr_number": 169, "mergeable": True, "ci_status": "pending"},
+        ]
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            workflow_id=workflow.pk,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+        mock_push.assert_called_once_with("/repo", "feature")
+
     @patch("hitch.main.system_agents.github_pr.fetch_pr_snapshot")
     def test_monitor_ready_completes_workflow(self, mock_fetch: MagicMock) -> None:
         workflow = SystemWorkflow.objects.create(

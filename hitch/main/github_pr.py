@@ -195,7 +195,17 @@ def open_or_update_pr(
             argv += ["--fill"]
         if draft:
             argv += ["--draft"]
-        _run(argv, cwd=cwd, timeout=_GH_TIMEOUT_SECONDS)
+        result = _run(argv, cwd=cwd, timeout=_GH_TIMEOUT_SECONDS, check=False)
+        if result.returncode != 0:
+            # A PR can already exist for the head (e.g. a closed one not caught
+            # by the open-only lookup, or a race); fall through to reading it
+            # back rather than failing. Any other error surfaces below when the
+            # snapshot read also fails.
+            stderr = (result.stderr or "").lower()
+            if "already exists" not in stderr and "a pull request for" not in stderr:
+                raise GithubCliError(
+                    (result.stderr or result.stdout or "gh pr create failed").strip()
+                )
     snapshot = fetch_pr_snapshot(cwd, branch=branch)
     if snapshot is None:
         raise GithubCliError("opened a PR but could not read its state back")
