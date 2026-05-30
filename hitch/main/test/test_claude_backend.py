@@ -210,6 +210,31 @@ class ClaudeOptionsTests(TestCase):
         self.assertIn("WebSearch", disallowed)
         self.assertNotIn("WebSearch", allowed)
 
+    def test_workspace_write_enables_bash_sandbox(self) -> None:
+        # workspaceWrite must confine approved/auto-approved Bash to the repo;
+        # the SDK does that via the sandbox setting, not the tool lists.
+        self.assertEqual(
+            claude_options.resolve_sandbox_settings("workspaceWrite"),
+            {"enabled": True},
+        )
+        # Read-only blocks Bash outright, and dangerFullAccess is the opt-out,
+        # so neither carries a bash sandbox.
+        self.assertIsNone(claude_options.resolve_sandbox_settings("readOnly"))
+        self.assertIsNone(claude_options.resolve_sandbox_settings("dangerFullAccess"))
+        self.assertIsNone(claude_options.resolve_sandbox_settings(None))
+
+    @patch("hitch.main.claude_options.claude_bin", return_value=None)
+    def test_build_options_sets_sandbox_for_workspace_write(
+        self, _bin: MagicMock
+    ) -> None:
+        options = claude_options.build_options(
+            cwd="/repo", model="claude-opus-4-8", sandbox_policy="workspaceWrite"
+        )
+        self.assertEqual(options.sandbox, {"enabled": True})
+        # The default (no sandbox policy) leaves the SDK at its own default.
+        plain = claude_options.build_options(cwd="/repo", model="claude-opus-4-8")
+        self.assertIsNone(plain.sandbox)
+
     def test_map_effort_filters_unknown(self) -> None:
         self.assertEqual(claude_options.map_effort("high"), "high")
         self.assertIsNone(claude_options.map_effort("minimal"))
@@ -439,6 +464,72 @@ class ProviderBackendTests(TestCase):
         self.assertEqual(
             coding_agents.backend_for_provider("bogus"),
             coding_agents.BACKEND_CODEX,
+        )
+
+
+class CandidateBackendNormalizationTests(TestCase):
+    """A candidate thread's per-turn model must match its fixed backend."""
+
+    def _instance(self, thread_id: str, backend: str) -> None:
+        CodexInstance.objects.create(
+            thread_id=thread_id,
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_COMPLETED,
+            backend=backend,
+        )
+
+    def test_thread_backend_resolved_from_history(self) -> None:
+        from hitch.main import views
+
+        self._instance("claude-cand", CodexInstance.BACKEND_CLAUDE)
+        self._instance("codex-cand", CodexInstance.BACKEND_CODEX)
+        self.assertEqual(
+            views._candidate_thread_backend("claude-cand"),
+            CodexInstance.BACKEND_CLAUDE,
+        )
+        self.assertEqual(
+            views._candidate_thread_backend("codex-cand"),
+            CodexInstance.BACKEND_CODEX,
+        )
+        # No history defaults to Codex.
+        self.assertEqual(
+            views._candidate_thread_backend("missing"),
+            CodexInstance.BACKEND_CODEX,
+        )
+
+    def test_model_snapped_to_backend(self) -> None:
+        from hitch.main import claude_options, views
+
+        claude_model = next(iter(claude_options.VALID_CLAUDE_MODELS))
+        # A Claude thread handed a Codex model id snaps to the Claude default.
+        self.assertEqual(
+            views._model_for_thread_backend(
+                backend=CodexInstance.BACKEND_CLAUDE, model="gpt-5-codex"
+            ),
+            claude_options.DEFAULT_CLAUDE_MODEL,
+        )
+        # A valid Claude model id is preserved.
+        self.assertEqual(
+            views._model_for_thread_backend(
+                backend=CodexInstance.BACKEND_CLAUDE, model=claude_model
+            ),
+            claude_model,
+        )
+        # A Codex thread must not be handed a Claude model id; drop to default.
+        self.assertIsNone(
+            views._model_for_thread_backend(
+                backend=CodexInstance.BACKEND_CODEX, model=claude_model
+            )
+        )
+        # A Codex model id passes through untouched for a Codex thread.
+        self.assertEqual(
+            views._model_for_thread_backend(
+                backend=CodexInstance.BACKEND_CODEX, model="gpt-5-codex"
+            ),
+            "gpt-5-codex",
         )
 
 

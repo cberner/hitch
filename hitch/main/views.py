@@ -11229,6 +11229,18 @@ def _start_candidate_proposal_session(
             "candidate session cwd is not an allowed repository"
         )
     prompt = _candidate_proposal_continuation_prompt(prompt)
+    # The candidate thread's backend is fixed by its history. Normalize the
+    # per-turn model to that backend so selecting Claude (or Codex) in settings
+    # can't queue a worker with a model id the CLI will reject, and gate the
+    # Codex-only auto-review/Spec Critic workflows off for a Claude thread.
+    candidate_backend = _candidate_thread_backend(candidate_session.thread_id)
+    candidate_model = _model_for_thread_backend(
+        backend=candidate_backend, model=settings.model or None
+    )
+    if candidate_backend == CodexInstance.BACKEND_CLAUDE:
+        auto_pr_enabled = False
+        auto_qa_enabled = False
+        qa_workflow_activation = False
     base_instructions = _base_instructions_for_settings(spawn_settings)
     project = None if target.project_cleared else candidate_session.project or target.project
     developer_instructions = _developer_instructions_for_project(settings, project)
@@ -11250,7 +11262,7 @@ def _start_candidate_proposal_session(
             "cwd": candidate_cwd,
             "sandbox_policy": sandbox_policy or None,
             "approval_mode": approval_mode,
-            "model": settings.model or None,
+            "model": candidate_model,
             "reasoning_effort": settings.reasoning_effort or None,
             "developer_instructions": developer_instructions or None,
             "enable_memories": settings.enable_memories,
@@ -11303,7 +11315,7 @@ def _start_candidate_proposal_session(
         "cwd": candidate_cwd,
         "prompt": prompt,
         "developer_instructions": developer_instructions or None,
-        "model": settings.model or None,
+        "model": candidate_model,
         "reasoning_effort": settings.reasoning_effort or None,
         "sandbox_policy": sandbox_policy or None,
         "approval_mode": approval_mode,
@@ -11323,7 +11335,7 @@ def _start_candidate_proposal_session(
     if auto_qa_enabled:
         spawn_kwargs["auto_qa_enabled"] = True
     if auto_pr_enabled or auto_qa_enabled:
-        spawn_kwargs["stored_model"] = settings.model or None
+        spawn_kwargs["stored_model"] = candidate_model
         spawn_kwargs["stored_reasoning_effort"] = settings.reasoning_effort or None
         spawn_kwargs["user_message_index"] = _next_user_message_index_for_candidate_thread(
             candidate_session.thread_id, settings
@@ -11331,6 +11343,50 @@ def _start_candidate_proposal_session(
         if auto_merge_to_local_branch:
             spawn_kwargs["auto_merge_to_local_branch"] = True
             spawn_kwargs["auto_merge_branch"] = auto_merge_branch
+    if (
+        settings.spec_critic_enabled
+        and candidate_backend != CodexInstance.BACKEND_CLAUDE
+        and not input_image_paths
+        and not plan_mode
+        and system_agents.spec_critic_should_run(original_prompt, cwd=candidate_cwd)
+    ):
+        spec_workflow_kwargs: dict[str, Any] = {
+            "main_thread_id": candidate_session.thread_id,
+            "cwd": candidate_cwd,
+            "prompt": prompt,
+            "sandbox_policy": settings.sandbox_policy or None,
+            "approval_mode": settings.approval_mode,
+            "model": candidate_model,
+            "reasoning_effort": settings.reasoning_effort or None,
+            "developer_instructions": developer_instructions or None,
+            "enable_memories": settings.enable_memories,
+            "initial_user_message_index": _next_user_message_index_for_candidate_thread(
+                candidate_session.thread_id, settings
+            ),
+            "auto_pr_enabled": auto_pr_enabled,
+            "auto_qa_enabled": auto_qa_enabled,
+        }
+        if base_instructions:
+            spec_workflow_kwargs["base_instructions"] = base_instructions
+        if web_search_mode:
+            spec_workflow_kwargs["web_search_mode"] = web_search_mode
+        if auto_merge_to_local_branch:
+            spec_workflow_kwargs["auto_merge_to_local_branch"] = True
+            spec_workflow_kwargs["auto_merge_branch"] = auto_merge_branch
+        if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
+            spec_workflow_kwargs["qa_panel_enabled"] = True
+        system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
+        return _finish_candidate_proposal_start(
+            request=request,
+            proposed_session=proposed_session,
+            candidate_session=candidate_session,
+            cwd=cwd,
+            target=target,
+            settings=settings,
+            cookie_updates=cookie_updates,
+            auto_pr_enabled=auto_pr_enabled,
+            auto_qa_enabled=auto_qa_enabled,
+        )
 
     input_images_owned = False
     claim_response = _claim_candidate_proposal_start(
@@ -11367,6 +11423,36 @@ def _start_candidate_proposal_session(
     )
     _stop_autonomous_goal_stack_after_proposal_resolution(proposed_session)
     return response
+
+
+def _candidate_thread_backend(thread_id: str) -> str:
+    """Return the backend a candidate thread's turns must run on.
+
+    The backend is fixed by the thread's history (``spawn_turn`` recovers it),
+    so the provider chosen in settings can't change it. Callers use this to
+    normalize the per-turn model and to gate Codex-only auto-review workflows.
+    """
+    prior = codex_pool.latest_for_thread(thread_id)
+    if prior is not None and prior.backend == CodexInstance.BACKEND_CLAUDE:
+        return CodexInstance.BACKEND_CLAUDE
+    return CodexInstance.BACKEND_CODEX
+
+
+def _model_for_thread_backend(*, backend: str, model: str | None) -> str | None:
+    """Snap a settings model id onto one valid for ``backend``.
+
+    A Claude thread handed a Codex model id (or vice versa) would have the CLI
+    reject the turn, so a mismatched id is replaced with the backend's default.
+    """
+    if backend == CodexInstance.BACKEND_CLAUDE:
+        if model not in claude_options.VALID_CLAUDE_MODELS:
+            return claude_options.DEFAULT_CLAUDE_MODEL
+        return model
+    # A Codex thread must not be handed a Claude model id; drop it so Codex
+    # falls back to its own default for the turn.
+    if model in claude_options.VALID_CLAUDE_MODELS:
+        return None
+    return model
 
 
 def _candidate_proposal_continuation_prompt(prompt: str) -> str:

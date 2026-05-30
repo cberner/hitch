@@ -12,6 +12,7 @@
     </label>
     <label>
         Model
+        <span data-settings-model-field data-current-model="{{ current_model }}">
         {% if model_options %}
         <select name="model" data-settings-model-select>
             {% for option in model_options %}
@@ -19,8 +20,9 @@
             {% endfor %}
         </select>
         {% else %}
-        <input type="text" name="model" value="{{ current_model }}" placeholder="Codex returned no models" autocomplete="off">
+        <input type="text" name="model" data-settings-model-input value="{{ current_model }}" placeholder="Codex returned no models" autocomplete="off">
         {% endif %}
+        </span>
     </label>
     <label>
         Reasoning effort
@@ -120,9 +122,9 @@
 <script>
 (function () {
     const providerSelect = document.querySelector("[data-settings-provider-select]");
-    const modelSelect = document.querySelector("[data-settings-model-select]");
+    const fieldNode = document.querySelector("[data-settings-model-field]");
     const optionsNode = document.getElementById("provider-model-options");
-    if (!providerSelect || !modelSelect || !optionsNode) {
+    if (!providerSelect || !fieldNode || !optionsNode) {
         return;
     }
     let optionsByProvider = {};
@@ -131,29 +133,74 @@
     } catch (err) {
         return;
     }
-    const initialModel = modelSelect.value;
+    // Seed from the saved model so switching away and back restores it. Read it
+    // off whichever control was rendered, falling back to the data attribute the
+    // server stamped (set even when the field rendered as a plain text input).
+    const initialModel =
+        fieldNode.dataset.currentModel ||
+        (function () {
+            const ctrl = fieldNode.querySelector("[name=model]");
+            return ctrl ? ctrl.value : "";
+        })();
 
-    function repopulateModels() {
-        const provider = providerSelect.value;
-        const options = optionsByProvider[provider] || [];
-        const previous = modelSelect.value;
-        modelSelect.innerHTML = "";
+    function buildSelect(options, selected) {
+        // Reuse the existing <select> when present so the effort-filter script's
+        // change listener (bound once on page load) keeps firing for the common
+        // Codex case; only its <option>s are rebuilt.
+        let select = fieldNode.querySelector("[data-settings-model-select]");
+        if (!select) {
+            select = document.createElement("select");
+            select.name = "model";
+            select.setAttribute("data-settings-model-select", "");
+            fieldNode.innerHTML = "";
+            fieldNode.appendChild(select);
+        }
+        select.innerHTML = "";
         options.forEach(function (option) {
             const el = document.createElement("option");
             el.value = option.id;
             el.textContent = option.display_name;
             el.dataset.supportedEfforts = option.supported_efforts || "";
-            modelSelect.appendChild(el);
+            select.appendChild(el);
         });
+        if (selected) {
+            select.value = selected;
+        }
+        // Let the reasoning-effort filter re-evaluate against the new model.
+        select.dispatchEvent(new Event("change"));
+    }
+
+    function buildTextInput(value) {
+        let input = fieldNode.querySelector("[data-settings-model-input]");
+        if (!input) {
+            input = document.createElement("input");
+            input.type = "text";
+            input.name = "model";
+            input.autocomplete = "off";
+            input.placeholder = "Codex returned no models";
+            input.setAttribute("data-settings-model-input", "");
+            fieldNode.innerHTML = "";
+            fieldNode.appendChild(input);
+        }
+        input.value = value || "";
+    }
+
+    function repopulateModels() {
+        const provider = providerSelect.value;
+        const options = optionsByProvider[provider] || [];
+        const current = fieldNode.querySelector("[name=model]");
+        const previous = current ? current.value : "";
+        if (options.length === 0) {
+            // No catalog for this provider (e.g. Codex listing unavailable):
+            // fall back to a free-text model field rather than an empty select.
+            buildTextInput(previous || initialModel);
+            return;
+        }
         // Keep the saved model selected when it still belongs to this provider.
         const keep = options.some(function (o) { return o.id === previous; })
             ? previous
             : (options.some(function (o) { return o.id === initialModel; }) ? initialModel : "");
-        if (keep) {
-            modelSelect.value = keep;
-        }
-        // Let the reasoning-effort filter re-evaluate against the new model.
-        modelSelect.dispatchEvent(new Event("change"));
+        buildSelect(options, keep);
     }
 
     function toggleCodexOnly() {

@@ -19,6 +19,7 @@ from claude_agent_sdk import (
     PermissionMode,
     PermissionResultAllow,
     PermissionResultDeny,
+    SandboxSettings,
     ToolPermissionContext,
 )
 
@@ -130,6 +131,21 @@ def resolve_tool_lists(
     return allowed, disallowed
 
 
+def resolve_sandbox_settings(sandbox_policy: str | None) -> SandboxSettings | None:
+    """Map a Codex sandbox policy onto Claude ``SandboxSettings``.
+
+    ``workspaceWrite`` confines edits to the repo, so the bash sandbox is
+    enabled to keep approved/auto-approved shell commands from reaching the
+    host filesystem outside ``cwd``. ``readOnly`` already blocks Bash and the
+    write tools in :func:`resolve_tool_lists`, and ``dangerFullAccess`` is the
+    deliberate opt-out, so neither needs a sandbox here. ``None`` (Codex
+    default) leaves the SDK at its own default.
+    """
+    if sandbox_policy == SANDBOX_WORKSPACE_WRITE:
+        return SandboxSettings(enabled=True)
+    return None
+
+
 def build_options(
     *,
     cwd: str,
@@ -192,6 +208,9 @@ def build_options(
     effort = map_effort(reasoning_effort)
     if effort is not None:
         options.effort = effort  # type: ignore[assignment]
+    sandbox = resolve_sandbox_settings(sandbox_policy)
+    if sandbox is not None:
+        options.sandbox = sandbox
     if output_schema is not None:
         options.output_format = output_schema
     if resume_session_id:
