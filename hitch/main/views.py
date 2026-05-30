@@ -11232,10 +11232,24 @@ def _start_candidate_proposal_session(
     # The candidate thread's backend is fixed by its history. Normalize the
     # per-turn model to that backend so selecting Claude (or Codex) in settings
     # can't queue a worker with a model id the CLI will reject, and gate the
-    # Codex-only auto-review/Spec Critic workflows off for a Claude thread.
-    candidate_backend = _candidate_thread_backend(candidate_session.thread_id)
+    # Codex-only auto-review/Spec Critic workflows off for a Claude thread. A
+    # Codex thread keeps its own prior model as the fallback so a plan turn
+    # (which requires a concrete model) is not left without one.
+    prior_candidate_instance = codex_pool.latest_for_thread(
+        candidate_session.thread_id
+    )
+    candidate_backend = (
+        CodexInstance.BACKEND_CLAUDE
+        if prior_candidate_instance is not None
+        and prior_candidate_instance.backend == CodexInstance.BACKEND_CLAUDE
+        else CodexInstance.BACKEND_CODEX
+    )
     candidate_model = _model_for_thread_backend(
-        backend=candidate_backend, model=settings.model or None
+        backend=candidate_backend,
+        model=settings.model or None,
+        codex_fallback_model=(
+            prior_candidate_instance.model if prior_candidate_instance else None
+        ),
     )
     if candidate_backend == CodexInstance.BACKEND_CLAUDE:
         auto_pr_enabled = False
@@ -11438,19 +11452,29 @@ def _candidate_thread_backend(thread_id: str) -> str:
     return CodexInstance.BACKEND_CODEX
 
 
-def _model_for_thread_backend(*, backend: str, model: str | None) -> str | None:
+def _model_for_thread_backend(
+    *, backend: str, model: str | None, codex_fallback_model: str | None = None
+) -> str | None:
     """Snap a settings model id onto one valid for ``backend``.
 
     A Claude thread handed a Codex model id (or vice versa) would have the CLI
     reject the turn, so a mismatched id is replaced with the backend's default.
+    For a Codex thread handed a Claude model, ``codex_fallback_model`` (the
+    thread's own prior Codex model) is used when available so plan turns -- which
+    require a concrete model -- keep one instead of being dropped to ``None``.
     """
     if backend == CodexInstance.BACKEND_CLAUDE:
         if model not in claude_options.VALID_CLAUDE_MODELS:
             return claude_options.DEFAULT_CLAUDE_MODEL
         return model
-    # A Codex thread must not be handed a Claude model id; drop it so Codex
-    # falls back to its own default for the turn.
+    # A Codex thread must not be handed a Claude model id; fall back to the
+    # thread's prior Codex model (so plan mode still has one), else drop it and
+    # let Codex apply its own default for the turn.
     if model in claude_options.VALID_CLAUDE_MODELS:
+        if codex_fallback_model and codex_fallback_model not in (
+            claude_options.VALID_CLAUDE_MODELS
+        ):
+            return codex_fallback_model
         return None
     return model
 

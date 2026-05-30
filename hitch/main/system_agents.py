@@ -2623,7 +2623,15 @@ def _reconcile_terminal_system_agent_instances(workflows: list[SystemWorkflow]) 
         agent_kinds = _expected_system_agent_kinds_for_step(workflow)
         if not agent_kinds:
             continue
-        filters |= models.Q(workflow_id=workflow.pk, agent_kind__in=agent_kinds)
+        # The backend constraint must ride inside each per-workflow term: a
+        # workflow only ever spawns its own backend's sub-agents, and applying a
+        # single backend to the whole OR'd queryset would drop terminal rows for
+        # every workflow whose backend differs from the last loop iteration.
+        filters |= models.Q(
+            workflow_id=workflow.pk,
+            agent_kind__in=agent_kinds,
+            backend=_workflow_backend(workflow),
+        )
         has_instance_filter = True
     if not has_instance_filter:
         return 0
@@ -2631,7 +2639,6 @@ def _reconcile_terminal_system_agent_instances(workflows: list[SystemWorkflow]) 
         CodexInstance.objects.filter(
             filters,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            backend=_workflow_backend(workflow),
             status__in=(
                 CodexInstance.STATUS_COMPLETED,
                 CodexInstance.STATUS_FAILED,

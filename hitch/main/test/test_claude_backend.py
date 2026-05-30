@@ -211,6 +211,23 @@ class ClaudeOptionsTests(TestCase):
         self.assertIn("WebSearch", disallowed)
         self.assertNotIn("WebSearch", allowed)
 
+    def test_cached_web_mode_blocks_live_web_access(self) -> None:
+        # Claude has no cached-search mode, so "cached" must not grant live web
+        # access: both WebSearch and (live-fetching) WebFetch are blocked.
+        allowed, disallowed = claude_options.resolve_tool_lists(
+            sandbox_policy=None, web_search_mode="cached"
+        )
+        self.assertIn("WebSearch", disallowed)
+        self.assertIn("WebFetch", disallowed)
+        self.assertNotIn("WebSearch", allowed)
+        self.assertNotIn("WebFetch", allowed)
+
+    def test_live_web_mode_allows_search(self) -> None:
+        allowed, _disallowed = claude_options.resolve_tool_lists(
+            sandbox_policy=None, web_search_mode="live"
+        )
+        self.assertIn("WebSearch", allowed)
+
     def test_workspace_write_enables_bash_sandbox(self) -> None:
         # workspaceWrite must confine approved/auto-approved Bash to the repo;
         # the SDK does that via the sandbox setting, not the tool lists. It must
@@ -536,6 +553,24 @@ class CandidateBackendNormalizationTests(TestCase):
         self.assertIsNone(
             views._model_for_thread_backend(
                 backend=CodexInstance.BACKEND_CODEX, model=claude_model
+            )
+        )
+        # A Codex thread handed a Claude model keeps its own prior Codex model
+        # as the fallback so plan turns (which require a model) still have one.
+        self.assertEqual(
+            views._model_for_thread_backend(
+                backend=CodexInstance.BACKEND_CODEX,
+                model=claude_model,
+                codex_fallback_model="gpt-5-codex",
+            ),
+            "gpt-5-codex",
+        )
+        # A Claude fallback is itself rejected for a Codex thread (drop to None).
+        self.assertIsNone(
+            views._model_for_thread_backend(
+                backend=CodexInstance.BACKEND_CODEX,
+                model=claude_model,
+                codex_fallback_model=claude_model,
             )
         )
         # A Codex model id passes through untouched for a Codex thread.

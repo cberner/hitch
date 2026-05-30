@@ -109,13 +109,19 @@ def resolve_tool_lists(
 ) -> tuple[list[str], list[str]]:
     """Return ``(allowed_tools, disallowed_tools)`` for a turn.
 
-    Read-only tools are auto-approved. When web access is switched off, both
-    ``WebSearch`` and ``WebFetch`` are blocked (``WebFetch`` can also reach
-    external pages). The read-only sandbox blocks write tools outright.
+    Read-only tools are auto-approved. Web access is blocked -- both
+    ``WebSearch`` and ``WebFetch`` (which also reaches live external pages) --
+    whenever the user did not opt into live web. Claude has no cached-search
+    mode, so ``cached`` (like ``disabled``) must not grant live web access. The
+    read-only sandbox blocks write tools outright.
     """
     allowed = list(READ_ONLY_TOOLS)
     disallowed: list[str] = []
-    web_search_off = bool(web_search_mode) and web_search_mode in {"disabled", "off"}
+    web_search_off = bool(web_search_mode) and web_search_mode in {
+        "disabled",
+        "off",
+        "cached",
+    }
     if web_search_off:
         disallowed.extend([_WEB_SEARCH_TOOL, _WEB_FETCH_TOOL])
         allowed = [tool for tool in allowed if tool != _WEB_FETCH_TOOL]

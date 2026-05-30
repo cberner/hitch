@@ -7797,6 +7797,83 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
         mock_spawn.assert_not_called()
 
+    @patch("hitch.main.system_agents._route_terminal_workflow_instance")
+    def test_reconcile_selects_terminal_rows_across_mixed_backends(
+        self, mock_route: MagicMock
+    ) -> None:
+        # Two running workflows with different backends, each with a terminal
+        # sub-agent row. The backend constraint must ride per-workflow, so both
+        # rows are selected -- not just the ones matching the last loop's
+        # backend.
+        mock_route.return_value = True
+        claude_workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="claude-main",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_QA_RUNNING,
+            state={"backend": CodexInstance.BACKEND_CLAUDE},
+        )
+        codex_workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="codex-main",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_QA_RUNNING,
+            state={"backend": CodexInstance.BACKEND_CODEX},
+        )
+        claude_instance = _instance(
+            thread_id="claude-qa",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=claude_workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            status=CodexInstance.STATUS_COMPLETED,
+            backend=CodexInstance.BACKEND_CLAUDE,
+        )
+        codex_instance = _instance(
+            thread_id="codex-qa",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=codex_workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            status=CodexInstance.STATUS_COMPLETED,
+            backend=CodexInstance.BACKEND_CODEX,
+        )
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances()
+
+        self.assertEqual(reconciled, 2)
+        routed_ids = {call.args[0].pk for call in mock_route.call_args_list}
+        self.assertEqual(routed_ids, {claude_instance.pk, codex_instance.pk})
+
+    @patch("hitch.main.system_agents._route_terminal_workflow_instance")
+    def test_reconcile_skips_row_whose_backend_mismatches_workflow(
+        self, mock_route: MagicMock
+    ) -> None:
+        # A row whose backend disagrees with its workflow's recorded backend is
+        # not this workflow's sub-agent and must not be routed for it.
+        mock_route.return_value = True
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="claude-main",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_QA_RUNNING,
+            state={"backend": CodexInstance.BACKEND_CLAUDE},
+        )
+        _instance(
+            thread_id="codex-qa",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            status=CodexInstance.STATUS_COMPLETED,
+            backend=CodexInstance.BACKEND_CODEX,
+        )
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances()
+
+        self.assertEqual(reconciled, 0)
+        mock_route.assert_not_called()
+
     @patch("hitch.main.system_agents._handle_pr_qa_agent_finished")
     def test_system_agent_finish_claims_instance_before_routing(
         self, mock_route: MagicMock
