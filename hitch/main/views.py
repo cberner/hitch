@@ -2568,8 +2568,9 @@ def _usage_context(request: HttpRequest) -> UsageContext:
     resolved_settings = _resolved_settings(request, models_data)
     current_settings = resolved_settings.values
     cookie_updates = resolved_settings.cookie_updates
-    rate_limits = _cached_rate_limits()
-    _schedule_rate_limits_refresh(enable_memories=current_settings.enable_memories)
+    rate_limits = _rate_limits_for_usage_context(
+        enable_memories=current_settings.enable_memories
+    )
     session_index_state = _usage_session_index_state()
     _schedule_usage_session_index_refresh_if_needed(
         enable_memories=current_settings.enable_memories,
@@ -6098,6 +6099,22 @@ def _refresh_models_cache_best_effort(*, enable_memories: bool) -> None:
 def _cached_rate_limits() -> dict[str, Any] | None:
     with _RATE_LIMITS_REFRESH_LOCK:
         return _RATE_LIMITS_CACHE_VALUE if _RATE_LIMITS_CACHE_HAS_VALUE else None
+
+
+def _rate_limits_for_usage_context(*, enable_memories: bool) -> dict[str, Any] | None:
+    _refresh_rate_limits_cache_if_cold(enable_memories=enable_memories)
+    rate_limits = _cached_rate_limits()
+    _schedule_rate_limits_refresh(enable_memories=enable_memories)
+    return rate_limits
+
+
+def _refresh_rate_limits_cache_if_cold(*, enable_memories: bool) -> None:
+    global _RATE_LIMITS_REFRESH_IN_FLIGHT
+    with _RATE_LIMITS_REFRESH_LOCK:
+        if _RATE_LIMITS_CACHE_HAS_VALUE or _RATE_LIMITS_REFRESH_IN_FLIGHT:
+            return
+        _RATE_LIMITS_REFRESH_IN_FLIGHT = True
+    _refresh_rate_limits_cache_best_effort(enable_memories=enable_memories)
 
 
 def _schedule_rate_limits_refresh(*, enable_memories: bool) -> None:
