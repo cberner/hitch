@@ -4939,6 +4939,42 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_default_sha.assert_not_called()
         mock_spawn.assert_not_called()
 
+    def test_auto_proposal_batch_survives_a_goal_raising_mid_iteration(self) -> None:
+        # The goal ids are a snapshot, so a goal (or its project) deleted between
+        # the snapshot and the select_for_update().get() makes the per-goal call
+        # raise. One bad row must not abort the rest of the batch.
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        first = AutonomousGoal.objects.create(
+            project=project,
+            title="First",
+            goal="First goal.",
+            auto_proposal_enabled=True,
+        )
+        second = AutonomousGoal.objects.create(
+            project=project,
+            title="Second",
+            goal="Second goal.",
+            auto_proposal_enabled=True,
+        )
+
+        def fake_start(goal_id: int) -> bool:
+            if goal_id == first.pk:
+                raise AutonomousGoal.DoesNotExist
+            return True
+
+        with patch.object(
+            system_agents,
+            "_maybe_start_auto_proposal_workflow",
+            side_effect=fake_start,
+        ) as mock_start:
+            started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 1)
+        self.assertEqual(
+            [invocation.args[0] for invocation in mock_start.call_args_list],
+            [first.pk, second.pk],
+        )
+
     @patch("hitch.main.system_agents.default_branch_checkout_commit_hash")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_pauses_when_usage_quota_is_low(

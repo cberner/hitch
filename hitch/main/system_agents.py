@@ -789,8 +789,20 @@ def maybe_start_auto_proposal_workflows(*, project: Project | None = None) -> in
     for autonomous_goal_id in goals.order_by("created_at", "id").values_list(
         "id", flat=True
     ):
-        if _maybe_start_auto_proposal_workflow(autonomous_goal_id):
-            started += 1
+        # The id list is a snapshot, so a goal (or its project) deleted mid-tick
+        # makes the select_for_update().get() raise. Isolate each goal so one bad
+        # row can't abort the rest of the batch -- the scheduler loop swallows the
+        # tick error, but the run_auto_proposals command does not.
+        try:
+            if _maybe_start_auto_proposal_workflow(autonomous_goal_id):
+                started += 1
+        except (AutonomousGoal.DoesNotExist, Project.DoesNotExist):
+            continue
+        except Exception:
+            logger.exception(
+                "failed to start auto-proposal workflow for goal %s",
+                autonomous_goal_id,
+            )
     return started
 
 
