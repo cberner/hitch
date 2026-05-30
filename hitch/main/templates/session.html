@@ -2176,9 +2176,9 @@
             {% endif %}
             {% for entry in entries %}
                 {% if entry.kind == "intermediate" %}
-                <details class="intermediate">
+                <details class="intermediate"{% if entry.lazy_url %} data-lazy-intermediate data-body-url="{{ entry.lazy_url }}"{% endif %}>
                     <summary>{% if entry.thinking_count and entry.tool_call_count %}{{ entry.thinking_count }} thinking message{{ entry.thinking_count|pluralize }} and {{ entry.tool_call_count }} tool call{{ entry.tool_call_count|pluralize }}{% elif entry.thinking_count %}{{ entry.thinking_count }} thinking message{{ entry.thinking_count|pluralize }}{% else %}{{ entry.tool_call_count }} tool call{{ entry.tool_call_count|pluralize }}{% endif %}</summary>
-                    <div class="intermediate-body">
+                    <div class="intermediate-body" data-intermediate-body{% if entry.lazy_url %} hidden{% endif %}>
                         {% for item in entry.items %}{% include "_session_entry.html" with entry=item %}{% endfor %}
                     </div>
                 </details>
@@ -2451,6 +2451,35 @@
                 el.title = date.toString();
                 const fmt = el.dataset.format === "time" ? timeOnly : dateTime;
                 el.textContent = fmt.format(date);
+            }
+
+            async function loadIntermediateDetails(details) {
+                if (!details || details.dataset.loaded === "true" || details.dataset.loading === "true") return;
+                const url = details.dataset.bodyUrl;
+                const body = details.querySelector("[data-intermediate-body]");
+                if (!url || !body) return;
+                details.dataset.loading = "true";
+                body.hidden = false;
+                body.setAttribute("aria-busy", "true");
+                try {
+                    const response = await fetch(url, {
+                        headers: { "X-Requested-With": "XMLHttpRequest" },
+                    });
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    body.innerHTML = await response.text();
+                    details.dataset.loaded = "true";
+                } catch (_error) {
+                    body.textContent = "Unable to load details.";
+                } finally {
+                    delete details.dataset.loading;
+                    body.removeAttribute("aria-busy");
+                }
+            }
+            for (const details of document.querySelectorAll("[data-lazy-intermediate]")) {
+                details.addEventListener("toggle", () => {
+                    if (details.open) loadIntermediateDetails(details);
+                });
+                if (details.open) loadIntermediateDetails(details);
             }
 
             function showDialog(dialog) {

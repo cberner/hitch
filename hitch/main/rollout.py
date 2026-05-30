@@ -19,6 +19,7 @@ import logging
 import re
 from collections import Counter
 from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -72,6 +73,29 @@ _PR_PROMPT_ALIASES = frozenset(
 _PLAN_APPROVAL_PROMPT = "Implement the plan."
 _COLLABORATION_MODE_PLAN = "plan"
 _COLLABORATION_MODE_DEFAULT = "default"
+
+
+@dataclass(frozen=True)
+class SessionDetailData:
+    flat_entries: tuple[dict[str, Any], ...]
+    latest_token_usage: dict[str, int] | None
+    latest_collaboration_mode: str | None
+    latest_pr_url: str | None
+    pr_observation: codex_events.PrObservationResult
+
+
+def session_detail_data(rollout_path: Path) -> SessionDetailData | None:
+    """Return rollout-derived session-detail data from one JSONL load."""
+    lines = _load_rollout_lines(rollout_path)
+    if lines is None:
+        return None
+    return SessionDetailData(
+        flat_entries=tuple(_entries_from_lines(lines)),
+        latest_token_usage=_latest_token_usage_from_lines(lines),
+        latest_collaboration_mode=_latest_collaboration_mode_from_lines(lines),
+        latest_pr_url=_latest_pr_url_from_lines(lines),
+        pr_observation=_latest_pr_observation_result_from_lines(lines),
+    )
 
 
 def iter_entries(rollout_path: Path) -> Iterator[dict[str, Any]]:
@@ -252,6 +276,10 @@ def latest_collaboration_mode(rollout_path: Path) -> str | None:
     lines = _load_rollout_lines(rollout_path)
     if lines is None:
         return None
+    return _latest_collaboration_mode_from_lines(lines)
+
+
+def _latest_collaboration_mode_from_lines(lines: list[dict[str, Any]]) -> str | None:
     modes = _collaboration_modes_by_turn(lines)
     if not modes:
         return None
@@ -288,6 +316,10 @@ def latest_pr_url(rollout_path: Path) -> str | None:
     lines = _load_rollout_lines(rollout_path)
     if lines is None:
         return None
+    return _latest_pr_url_from_lines(lines)
+
+
+def _latest_pr_url_from_lines(lines: list[dict[str, Any]]) -> str | None:
     function_calls_by_id = _function_calls_by_id(lines)
     latest: str | None = None
     for _, turn_lines in _lines_by_turn(lines):
@@ -322,6 +354,12 @@ def latest_pr_observation_result(rollout_path: Path) -> codex_events.PrObservati
     lines = _load_rollout_lines(rollout_path)
     if lines is None:
         return codex_events.PrObservationResult(snapshot=None)
+    return _latest_pr_observation_result_from_lines(lines)
+
+
+def _latest_pr_observation_result_from_lines(
+    lines: list[dict[str, Any]],
+) -> codex_events.PrObservationResult:
     turns: list[codex_events.PrObservationTurn] = []
     for _, turn_lines in _lines_by_turn(lines):
         is_pr_prompt = _turn_is_pr_prompt(turn_lines)

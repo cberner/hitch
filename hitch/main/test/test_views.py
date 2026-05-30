@@ -50,6 +50,9 @@ from hitch.main import (
     system_agents,
     views,
 )
+from hitch.main import (
+    rollout as rollout_module,
+)
 from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
@@ -392,6 +395,140 @@ class SessionDetailFastPathTests(TestCase):
         )
         self.assertContains(response, f'data-ts="{now.timestamp()}"')
         self.assertNotContains(response, "Jan. 5, 2025")
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_inactive_session_detail_reuses_loaded_rollout_data(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Read once"},
+                ),
+                _token_count_line(
+                    input_tokens=100,
+                    cached_input_tokens=20,
+                    output_tokens=30,
+                    total_tokens=130,
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "One pass"}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="one-pass-rollout",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="One pass rollout",
+            codex_preview="Read once",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+
+        with patch(
+            "hitch.main.rollout._load_rollout_lines",
+            wraps=rollout_module._load_rollout_lines,
+        ) as load_rollout_lines:
+            response = self.client.get(
+                reverse("session", kwargs={"session_id": "one-pass-rollout"})
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "One pass")
+        self.assertContains(
+            response,
+            '<span class="usage-label">in</span><span class="usage-value">80</span>',
+        )
+        self.assertContains(
+            response,
+            '<span class="usage-label">out</span><span class="usage-value">30</span>',
+        )
+        self.assertEqual(load_rollout_lines.call_count, 1)
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_inactive_session_detail_lazy_loads_intermediate_body(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Run a command"},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "arguments": json.dumps({"cmd": "printf lazy-loaded-command"}),
+                        "call_id": "call-lazy",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Done."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="lazy-intermediate",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Lazy intermediate",
+            codex_preview="Run a command",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+
+        with patch(
+            "hitch.main.rollout._load_rollout_lines",
+            wraps=rollout_module._load_rollout_lines,
+        ) as load_rollout_lines:
+            response = self.client.get(
+                reverse("session", kwargs={"session_id": "lazy-intermediate"})
+            )
+            fragment = self.client.get(
+                reverse(
+                    "session_intermediate",
+                    kwargs={"session_id": "lazy-intermediate", "entry_index": 1},
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "1 tool call")
+        self.assertContains(response, "data-lazy-intermediate")
+        self.assertContains(
+            response,
+            reverse(
+                "session_intermediate",
+                kwargs={"session_id": "lazy-intermediate", "entry_index": 1},
+            ),
+        )
+        self.assertNotContains(response, "printf lazy-loaded-command")
+        self.assertEqual(fragment.status_code, 200)
+        self.assertContains(fragment, "printf lazy-loaded-command")
+        self.assertEqual(load_rollout_lines.call_count, 1)
         mock_codex.assert_not_called()
 
     @patch("hitch.main.views._start_models_refresh_thread")
