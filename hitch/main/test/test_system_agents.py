@@ -62,12 +62,14 @@ def _instance(
     enable_memories: bool = False,
     user_message_index: int | None = None,
     error: str = "",
+    backend: str = CodexInstance.BACKEND_CODEX,
 ) -> CodexInstance:
     return CodexInstance.objects.create(
         pid=1,
         thread_id=thread_id,
         cwd="/repo",
         prompt="prompt",
+        backend=backend,
         developer_instructions=developer_instructions,
         enable_memories=enable_memories,
         model=model,
@@ -2603,6 +2605,38 @@ class SpecCriticWorkflowTests(TestCase):
         kwargs = mock_spawn.call_args.kwargs
         self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
         self.assertEqual(kwargs["sandbox_policy"], "workspaceWrite")
+
+    @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_qa_on_claude_session_spawns_claude_qa_subagent(
+        self, mock_spawn: MagicMock, _mock_diff: MagicMock
+    ) -> None:
+        # Auto-QA is allowed for Claude sessions: the workflow records the
+        # session's backend and its QA sub-agent must spawn as a Claude worker,
+        # never falling back to the Codex app-server.
+        mock_spawn.return_value = _instance(
+            thread_id="qa-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            backend=CodexInstance.BACKEND_CLAUDE,
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            auto_qa_enabled=True,
+            model="claude-opus-4-8",
+            approval_mode="auto_review",
+            backend=CodexInstance.BACKEND_CLAUDE,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow = SystemWorkflow.objects.get(main_thread_id="main-thread")
+        self.assertEqual(workflow.state["backend"], CodexInstance.BACKEND_CLAUDE)
+        # An LGTM must not open a PR for a Claude session (no GitHub path wired).
+        self.assertFalse(workflow.state["open_pr_on_lgtm"])
+        mock_spawn.assert_called_once()
+        self.assertEqual(
+            mock_spawn.call_args.kwargs["backend"], CodexInstance.BACKEND_CLAUDE
+        )
 
     @patch("hitch.main.system_agents.start_pr_qa_workflow")
     def test_auto_qa_does_not_start_when_approval_requires_visible_control(

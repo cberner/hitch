@@ -12100,12 +12100,12 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         # Claude model so the CLI does not reject the turn.
         if spawn_kwargs.get("model") not in claude_options.VALID_CLAUDE_MODELS:
             spawn_kwargs["model"] = claude_options.DEFAULT_CLAUDE_MODEL
-        # The PR/QA auto-review workflows spawn Codex workers using the
-        # instance model; a Claude session would hand them a Claude model id
-        # and fail. Disable them (and the Codex-only Spec Critic preflight) for
-        # Claude sessions rather than starting workers that cannot run.
+        # Auto-QA runs entirely on the local worker backend: the QA workflow
+        # records the session's backend and spawns its sub-agents as Claude
+        # workers, and an LGTM with ``open_pr_on_lgtm=False`` just completes the
+        # workflow. Auto-PR (GitHub PR-open) and the Spec Critic preflight are
+        # not wired for Claude yet, so they stay disabled here.
         auto_pr_enabled = False
-        auto_qa_enabled = False
     if input_image_paths:
         spawn_kwargs["input_image_paths"] = input_image_paths
     if web_search_mode:
