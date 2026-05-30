@@ -119,19 +119,54 @@ def current_branch(cwd: str) -> str:
     return branch
 
 
+_PROTECTED_BRANCH_NAMES = frozenset({"master", "main"})
+
+
+def _default_branch(cwd: str) -> str:
+    result = _run(
+        ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"],
+        cwd=cwd,
+        timeout=_GIT_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        return ""
+    ref = result.stdout.strip()
+    return ref.split("/", 1)[1] if "/" in ref else ref
+
+
 def push_branch(cwd: str, branch: str) -> None:
-    """Push ``branch`` to ``origin``, setting upstream tracking.
+    """Force-push ``branch`` to ``origin``, setting upstream tracking.
 
     The coding agent is asked to rebase before Hitch pushes, so an existing
     PR branch has rewritten history and a plain push would be rejected as a
     non-fast-forward. ``--force-with-lease`` makes the rebased update succeed
     while still refusing to clobber unexpected remote work.
+
+    Because this is a force update, it refuses the repository's default branch
+    (and the common ``master``/``main`` names): a session checked out on the
+    default branch must never have it force-updated by an Open-PR/auto-PR push.
     """
+    if branch in _PROTECTED_BRANCH_NAMES or branch == _default_branch(cwd):
+        raise GithubCliError(
+            f"refusing to force-push the default/protected branch {branch!r}; "
+            "open the PR from a feature branch instead"
+        )
     _run(
         ["git", "push", "--force-with-lease", "-u", "origin", branch],
         cwd=cwd,
         timeout=_GIT_TIMEOUT_SECONDS,
     )
+
+
+def mark_ready(cwd: str, *, pr_number: int | None = None, branch: str | None = None) -> None:
+    """Mark a draft PR ready for review via ``gh pr ready``."""
+    ref = str(pr_number) if pr_number else (branch or "")
+    argv = ["gh", "pr", "ready"]
+    if ref:
+        argv.append(ref)
+    _run(argv, cwd=cwd, timeout=_GH_TIMEOUT_SECONDS)
+
 
 
 def open_or_update_pr(

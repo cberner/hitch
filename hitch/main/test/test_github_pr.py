@@ -76,6 +76,53 @@ class GithubPrHelperTests(SimpleTestCase):
         self.assertIn("boom", str(ctx.exception))
 
     @patch("hitch.main.github_pr.subprocess.run")
+    def test_push_branch_refuses_protected_branches(self, mock_run: MagicMock) -> None:
+        # Default branch resolves to master; force-pushing it must be refused.
+        def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+                return _completed(argv, stdout="origin/master\n")
+            raise AssertionError(f"should not run {argv}")
+
+        mock_run.side_effect = fake_run
+
+        for branch in ("master", "main"):
+            with self.assertRaises(github_pr.GithubCliError):
+                github_pr.push_branch("/repo", branch)
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_push_branch_refuses_custom_default_branch(
+        self, mock_run: MagicMock
+    ) -> None:
+        pushed: list[list[str]] = []
+
+        def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+                return _completed(argv, stdout="origin/trunk\n")
+            pushed.append(argv)
+            return _completed(argv)
+
+        mock_run.side_effect = fake_run
+
+        with self.assertRaises(github_pr.GithubCliError):
+            github_pr.push_branch("/repo", "trunk")
+        self.assertEqual(pushed, [])
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_mark_ready_invokes_gh_pr_ready(self, mock_run: MagicMock) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            calls.append(argv)
+            return _completed(argv)
+
+        mock_run.side_effect = fake_run
+
+        github_pr.mark_ready("/repo", pr_number=42)
+
+        self.assertEqual(calls, [["gh", "pr", "ready", "42"]])
+
+
+    @patch("hitch.main.github_pr.subprocess.run")
     def test_run_wraps_os_error(self, mock_run: MagicMock) -> None:
         mock_run.side_effect = FileNotFoundError("gh missing")
 
@@ -375,6 +422,8 @@ class GithubPrHelperTests(SimpleTestCase):
 
         def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
             calls.append(argv)
+            if argv[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+                return _completed(argv, stdout="origin/main\n")
             if argv[:2] == ["git", "push"]:
                 return _completed(argv)
             if argv[:3] == ["gh", "api", "graphql"]:
@@ -404,6 +453,8 @@ class GithubPrHelperTests(SimpleTestCase):
         create_argv: list[str] = []
 
         def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+                return _completed(argv, stdout="origin/main\n")
             if argv[:2] == ["git", "push"]:
                 return _completed(argv)
             if argv[:3] == ["gh", "api", "graphql"]:
@@ -433,6 +484,8 @@ class GithubPrHelperTests(SimpleTestCase):
         self, mock_run: MagicMock
     ) -> None:
         def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+                return _completed(argv, stdout="origin/main\n")
             if argv[:2] == ["git", "push"]:
                 return _completed(argv)
             if argv[:3] == ["gh", "pr", "list"]:
@@ -517,6 +570,8 @@ class GithubPrHelperTests(SimpleTestCase):
         self, mock_run: MagicMock
     ) -> None:
         def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+                return _completed(argv, stdout="origin/main\n")
             if argv[:2] == ["git", "push"]:
                 return _completed(argv)
             if argv[:3] == ["gh", "api", "graphql"]:

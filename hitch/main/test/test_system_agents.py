@@ -3068,7 +3068,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_surface.assert_not_called()
 
     @patch("hitch.main.system_agents.github_pr.fetch_pr_snapshot")
-    def test_run_pr_monitor_poll_blocks_on_gh_error(
+    def test_run_pr_monitor_poll_retries_then_blocks_on_gh_error(
         self, mock_fetch: MagicMock
     ) -> None:
         mock_fetch.side_effect = github_pr.GithubCliError("gh down")
@@ -3081,10 +3081,78 @@ class SpecCriticWorkflowTests(TestCase):
             state={system_agents._PR_HANDOFF_STATE_KEY: {"pr_number": 169}},
         )
 
+        # A transient read failure keeps the workflow monitoring and retries.
+        for _ in range(system_agents._PR_MONITOR_MAX_READ_FAILURES - 1):
+            system_agents._run_pr_monitor_poll(workflow)
+            workflow.refresh_from_db()
+            self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+            self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+
+        # Only after repeated consecutive failures does it give up.
+        system_agents._run_pr_monitor_poll(workflow)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+
+    @patch("hitch.main.system_agents.github_pr.fetch_pr_snapshot")
+    def test_run_pr_monitor_poll_resets_failures_on_success(
+        self, mock_fetch: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={
+                system_agents._PR_HANDOFF_STATE_KEY: {"pr_number": 169},
+                system_agents._PR_MONITOR_READ_FAILURES_STATE_KEY: 3,
+            },
+        )
+        mock_fetch.return_value = {
+            "pr_number": 169,
+            "mergeable": True,
+            "ci_status": "pending",
+        }
+
         system_agents._run_pr_monitor_poll(workflow)
 
         workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(
+            workflow.state.get(system_agents._PR_MONITOR_READ_FAILURES_STATE_KEY), 0
+        )
+
+    @patch("hitch.main.system_agents.github_pr.mark_ready")
+    @patch("hitch.main.system_agents.github_pr.fetch_pr_snapshot")
+    def test_run_pr_monitor_poll_marks_draft_ready(
+        self, mock_fetch: MagicMock, mock_ready: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={system_agents._PR_HANDOFF_STATE_KEY: {"pr_number": 169}},
+        )
+        mock_fetch.return_value = {
+            "pr_number": 169,
+            "state": "open",
+            "draft": True,
+            "mergeable": True,
+            "review_signal": "approved",
+            "unresolved_thread_count": 0,
+            "ci_status": "success",
+        }
+
+        system_agents._run_pr_monitor_poll(workflow)
+
+        mock_ready.assert_called_once()
+        workflow.refresh_from_db()
+        # With the draft cleared by Hitch, an otherwise-clean PR can complete.
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
+
 
     @patch("hitch.main.system_agents.github_pr.fetch_pr_snapshot", return_value=None)
     def test_run_pr_monitor_poll_blocks_when_pr_missing(

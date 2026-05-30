@@ -130,6 +130,11 @@ _PR_MONITOR_STATE_KEY = "last_pr_monitor"
 _PR_GATES_STATE_KEY = "pr_gates"
 _PR_HEAD_BRANCH_STATE_KEY = "pr_head_branch"
 _PR_DETAIL_LIMIT = 5
+_PR_MONITOR_READ_FAILURES_STATE_KEY = "pr_monitor_read_failures"
+# Consecutive ``gh`` read failures tolerated before a monitor gives up; a
+# transient network/5xx/rate-limit blip should retry on the next poll instead
+# of permanently blocking the workflow.
+_PR_MONITOR_MAX_READ_FAILURES = 5
 # Hitch polls GitHub for PR state itself (via ``github_pr``) instead of
 # spawning a coding-agent monitor. This bounds how often the reconcile path
 # shells out to ``gh`` for a workflow that is only waiting on external state.
@@ -2289,7 +2294,21 @@ def _run_pr_monitor_poll(workflow: SystemWorkflow) -> None:
             workflow.cwd, pr_number=pr_number, branch=branch
         )
     except github_pr.GithubCliError as exc:
-        _block_workflow(workflow, f"failed to read PR state: {exc}")
+        # Reads can fail transiently (network, GitHub 5xx/rate-limit, a gh auth
+        # refresh). Keep monitoring and retry on the next poll; only block after
+        # repeated consecutive failures.
+        failures = _state_int(workflow, _PR_MONITOR_READ_FAILURES_STATE_KEY) + 1
+        if failures >= _PR_MONITOR_MAX_READ_FAILURES:
+            _block_workflow(
+                workflow,
+                f"failed to read PR state {failures} times in a row: {exc}",
+            )
+            return
+        workflow.state = {
+            **workflow.state,
+            _PR_MONITOR_READ_FAILURES_STATE_KEY: failures,
+        }
+        workflow.save(update_fields=["state", "updated_at"])
         return
     if snapshot is None:
         _block_workflow(
@@ -2305,7 +2324,36 @@ def _run_pr_monitor_poll(workflow: SystemWorkflow) -> None:
         or workflow.step != STEP_PR_MONITORING
     ):
         return
+    if _state_int(workflow, _PR_MONITOR_READ_FAILURES_STATE_KEY):
+        workflow.state = {**workflow.state, _PR_MONITOR_READ_FAILURES_STATE_KEY: 0}
+        workflow.save(update_fields=["state", "updated_at"])
+    snapshot = _maybe_mark_pr_ready(workflow, snapshot, pr_number=pr_number, branch=branch)
     _advance_pr_after_observation(workflow, _pr_monitor_parsed_from_snapshot(snapshot))
+
+
+def _maybe_mark_pr_ready(
+    workflow: SystemWorkflow,
+    snapshot: dict[str, Any],
+    *,
+    pr_number: int | None,
+    branch: str | None,
+) -> dict[str, Any]:
+    """Mark an observed draft PR ready so the review gate is not deadlocked.
+
+    The follow-up agent only commits code now, so nobody else would clear a
+    draft. Hitch owns PR-level operations, so it marks the PR ready itself; a
+    failure leaves the snapshot's draft state untouched (the gate stays blocked).
+    """
+    if snapshot.get("draft") is not True:
+        return snapshot
+    if _pr_handoff_is_terminal(_compact_pr_handoff(snapshot)):
+        return snapshot
+    try:
+        github_pr.mark_ready(workflow.cwd, pr_number=pr_number, branch=branch)
+    except github_pr.GithubCliError:
+        logger.warning("failed to mark PR ready for workflow %s", workflow.pk)
+        return snapshot
+    return {**snapshot, "draft": False}
 
 
 def _pr_monitor_parsed_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
