@@ -74,10 +74,10 @@ QA_SLASH_DISPLAY_PROMPT = (
     "Run the QA agent on the current diff and fix anything it finds"
 )
 PR_SLASH_PROMPT = (
-    "Polish the change, rebase it on master, and commit your work on the "
-    "current branch. Do not push the branch or open/update a pull request "
-    "yourself: Hitch pushes the branch and opens or updates the PR once this "
-    "turn finishes."
+    "Polish the change, rebase it onto the repository's default branch, and "
+    "commit your work on the current branch. Do not push the branch or "
+    "open/update a pull request yourself: Hitch pushes the branch and opens or "
+    "updates the PR once this turn finishes."
 )
 SYSTEM_AGENT_APPROVAL_MODE = "auto_review"
 # Auto-review workflows (auto-QA and auto-PR) start without an explicit

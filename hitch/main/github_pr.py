@@ -66,8 +66,10 @@ _REVIEW_THREADS_QUERY = (
 # Bound on review-thread pagination so a pathological PR cannot loop forever.
 _MAX_REVIEW_THREAD_PAGES = 20
 
+# Accept any host (github.com or a GitHub Enterprise host) so PR identity is
+# parsed for enterprise PRs too; ``gh`` itself targets the configured host.
 _GITHUB_PR_URL_RE = re.compile(
-    r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([0-9]+)"
+    r"https://[^/]+/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([0-9]+)"
 )
 _SUCCESS_CONCLUSIONS = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
 _PR_TEXT_MAX_CHARS = 500

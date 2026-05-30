@@ -14,25 +14,25 @@ class AutoProposalSchedulerTests(SimpleTestCase):
     @patch.dict(os.environ, {}, clear=True)
     @patch.object(sys, "argv", ["manage.py", "runserver", "--noreload"])
     def test_scheduler_disabled_during_tests_by_default(self) -> None:
-        self.assertFalse(auto_proposals._auto_proposal_scheduler_enabled())
+        self.assertFalse(auto_proposals._scheduler_thread_enabled())
 
     @override_settings(TESTING=False)
     @patch.dict(os.environ, {"RUN_MAIN": "true"}, clear=True)
     @patch.object(sys, "argv", ["manage.py", "runserver"])
     def test_scheduler_enabled_in_runserver_child(self) -> None:
-        self.assertTrue(auto_proposals._auto_proposal_scheduler_enabled())
+        self.assertTrue(auto_proposals._scheduler_thread_enabled())
 
     @override_settings(TESTING=False)
     @patch.dict(os.environ, {}, clear=True)
     @patch.object(sys, "argv", ["manage.py", "migrate"])
     def test_scheduler_disabled_for_management_commands(self) -> None:
-        self.assertFalse(auto_proposals._auto_proposal_scheduler_enabled())
+        self.assertFalse(auto_proposals._scheduler_thread_enabled())
 
     @override_settings(TESTING=True)
     @patch.dict(os.environ, {"HITCH_AUTO_PROPOSAL_SCHEDULER": "1"}, clear=True)
     @patch.object(sys, "argv", ["manage.py", "migrate"])
     def test_scheduler_env_override_can_enable(self) -> None:
-        self.assertTrue(auto_proposals._auto_proposal_scheduler_enabled())
+        self.assertTrue(auto_proposals._scheduler_thread_enabled())
 
     @patch("hitch.main.auto_proposals.system_agents.maybe_advance_pr_monitors")
     @patch(

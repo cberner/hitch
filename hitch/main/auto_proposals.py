@@ -24,9 +24,15 @@ _scheduler_started = False
 
 
 def start_auto_proposal_scheduler() -> bool:
-    """Start the in-process auto-proposal scheduler when enabled."""
+    """Start the in-process background scheduler when enabled.
+
+    The scheduler also drives Hitch's PR monitoring, so it is decoupled from the
+    auto-proposal opt-out: the thread starts under ``runserver`` regardless of
+    ``HITCH_AUTO_PROPOSAL_SCHEDULER`` (which now only gates auto-proposal
+    workflow creation within the tick).
+    """
     global _scheduler_started
-    if not _auto_proposal_scheduler_enabled():
+    if not _scheduler_thread_enabled():
         return False
     with _scheduler_lock:
         if _scheduler_started:
@@ -40,21 +46,27 @@ def start_auto_proposal_scheduler() -> bool:
         return True
 
 
-def _auto_proposal_scheduler_enabled() -> bool:
+def _scheduler_thread_enabled() -> bool:
+    # Explicit opt-IN still force-starts the thread (e.g. non-runserver deploys).
+    # Explicit opt-OUT no longer disables the thread, because PR monitoring
+    # depends on it; the opt-out only suppresses auto-proposal creation (see
+    # _auto_proposal_workflows_enabled).
     configured = os.environ.get(_SCHEDULER_ENV)
-    if configured is not None:
-        normalized = configured.strip().lower()
-        if normalized in _TRUE_VALUES:
-            return True
-        if normalized in _FALSE_VALUES:
-            return False
-
+    if configured is not None and configured.strip().lower() in _TRUE_VALUES:
+        return True
     if getattr(settings, "TESTING", False):
         return False
     argv = sys.argv[1:]
     if not argv or argv[0] != "runserver":
         return False
     return os.environ.get("RUN_MAIN") == "true" or "--noreload" in argv
+
+
+def _auto_proposal_workflows_enabled() -> bool:
+    configured = os.environ.get(_SCHEDULER_ENV)
+    return not (
+        configured is not None and configured.strip().lower() in _FALSE_VALUES
+    )
 
 
 def _auto_proposal_scheduler_loop() -> None:
@@ -68,10 +80,12 @@ def _run_auto_proposal_scheduler_tick() -> None:
     close_old_connections()
     try:
         codex_pool.reconcile_dead()
+        # PR monitoring runs every tick, independent of the auto-proposal opt-out.
         system_agents.maybe_advance_pr_monitors()
-        started = system_agents.maybe_start_auto_proposal_workflows()
-        if started:
-            logger.info("started %s auto-proposal workflow(s)", started)
+        if _auto_proposal_workflows_enabled():
+            started = system_agents.maybe_start_auto_proposal_workflows()
+            if started:
+                logger.info("started %s auto-proposal workflow(s)", started)
     except Exception:
         logger.exception("failed to run auto-proposal scheduler tick")
     finally:
