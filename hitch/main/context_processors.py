@@ -13,8 +13,13 @@ def server_git_hash() -> str:
             capture_output=True,
             check=True,
             text=True,
+            # Bound the call like every other git invocation in the codebase: a
+            # hung filesystem or an unexpected git prompt would otherwise block
+            # the first request that renders any template forever, since this
+            # runs inside a context processor.
+            timeout=5,
         )
-    except (OSError, subprocess.CalledProcessError):
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return ""
     return result.stdout.strip()
 

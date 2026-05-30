@@ -230,6 +230,7 @@ class ServerRevisionContextTests(SimpleTestCase):
             capture_output=True,
             check=True,
             text=True,
+            timeout=5,
         )
 
     @patch("hitch.main.context_processors.subprocess.run")
