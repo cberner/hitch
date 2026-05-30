@@ -57,10 +57,10 @@ _PR_PROMPT_ALIASES = frozenset(
         # by hand because system_agents imports rollout, so rollout cannot
         # import the constant back without a circular import.
         (
-            "Polish the change, rebase it on master, and commit your work on "
-            "the current branch. Do not push the branch or open/update a pull "
-            "request yourself: Hitch pushes the branch and opens or updates the "
-            "PR once this turn finishes."
+            "Polish the change, rebase it onto the repository's default branch, "
+            "and commit your work on the current branch. Do not push the branch "
+            "or open/update a pull request yourself: Hitch pushes the branch and "
+            "opens or updates the PR once this turn finishes."
         ),
         (
             "Do a thorough review of the diff. Rebase on master, clean it up, "
