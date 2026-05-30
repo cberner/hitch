@@ -497,7 +497,13 @@ def proxy_demo_request(
             headers=_proxy_request_headers(request, demo, path_prefix=path_prefix),
         )
         upstream = connection.getresponse()
-    except OSError as exc:
+    except (OSError, http.client.HTTPException) as exc:
+        # A socket error (OSError) or a malformed status line
+        # (http.client.HTTPException, e.g. BadStatusLine) both mean the target
+        # misbehaved. Close the connection so its socket is not leaked for the
+        # life of the process, and surface either as a 502 rather than letting
+        # an HTTPException escape as an unhandled 500.
+        connection.close()
         return HttpResponse(f"demo target unavailable: {exc}", status=502)
 
     response_headers = _proxy_response_headers(
