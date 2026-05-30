@@ -3740,8 +3740,12 @@
                 const entry = items.get(item.id);
                 if (!entry) {
                     // Item that completed without a prior started event —
-                    // render now so the user still sees it.
+                    // render now so the user still sees it. A frame with no
+                    // usable id can't be registered by handleItemStarted, so
+                    // guard against recursing forever on it.
+                    if (!item.id) return;
                     handleItemStarted(payload);
+                    if (!items.has(item.id)) return;
                     return handleItemCompleted(payload);
                 }
                 if (entry.kind === "agent" && item.type === "agentMessage") {
