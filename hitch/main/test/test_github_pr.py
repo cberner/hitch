@@ -442,7 +442,8 @@ class GithubPrHelperTests(SimpleTestCase):
 
         self.assertEqual(snapshot["pr_number"], 42)
         commands = [argv[:3] for argv in calls]
-        push_calls = [argv for argv in calls if argv[0] == "git"]
+        push_calls = [argv for argv in calls if argv[:2] == ["git", "push"]]
+        self.assertTrue(push_calls)
         self.assertIn("--force-with-lease", push_calls[0])
         self.assertIn(["gh", "pr", "create"], commands)
 
