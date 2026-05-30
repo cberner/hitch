@@ -2477,10 +2477,18 @@ def _handle_pr_feedback_finished(
         snapshot = github_pr.fetch_pr_snapshot(
             workflow.cwd, pr_number=pr_number, branch=branch
         )
-    except github_pr.GithubCliError as exc:
-        _block_workflow(workflow, f"failed to read PR state: {exc}")
-        return
-    if snapshot is None or _pr_handoff_is_terminal(_compact_pr_handoff(snapshot)):
+    except github_pr.GithubCliError:
+        # Transient read failure during the pre-push terminal check: don't block
+        # permanently. Assume the PR is still open and push the fix; pushing to
+        # a rare already-closed branch is harmless (force-with-lease just moves
+        # the ref) and the retry-tolerant monitor poll reconciles real state.
+        snapshot = None
+        read_failed = True
+    else:
+        read_failed = False
+    if not read_failed and (
+        snapshot is None or _pr_handoff_is_terminal(_compact_pr_handoff(snapshot))
+    ):
         if snapshot is not None:
             _merge_pr_handoff(workflow, snapshot)
         workflow.status = SystemWorkflow.STATUS_COMPLETED
