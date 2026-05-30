@@ -34,7 +34,12 @@ from django.test import (
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from openai_codex.errors import AppServerError, InvalidRequestError, MethodNotFoundError
-from openai_codex.generated.v2_all import SortDirection, ThreadSortKey, ThreadSource
+from openai_codex.generated.v2_all import (
+    GetAccountRateLimitsResponse,
+    SortDirection,
+    ThreadSortKey,
+    ThreadSource,
+)
 
 from hitch.main import (
     codex_pool,
@@ -4226,6 +4231,53 @@ class IndexViewTests(TestCase):
         cache.refresh_from_db()
         self.assertEqual(cache.total_tokens, 999_999)
         self.assertEqual(cache.rollout_mtime_ns, 2_000_000_000)
+
+    @patch("hitch.main.views.Codex")
+    def test_usage_page_fetches_rate_limits_before_first_render(
+        self, mock_codex: MagicMock
+    ) -> None:
+        session_index.mark_synced(archived=False, complete=True)
+        session_index.mark_synced(archived=True, complete=True)
+        client = _setup_codex(mock_codex)
+        client._client.request.side_effect = None
+        client._client.request.return_value = SimpleNamespace(
+            rate_limits=SimpleNamespace(
+                primary=SimpleNamespace(
+                    used_percent=73,
+                    resets_at="2026-05-30T12:00:00Z",
+                    window_duration_mins=300,
+                ),
+                secondary=None,
+                limit_name="Codex",
+                plan_type=SimpleNamespace(value="Pro"),
+            )
+        )
+
+        with (
+            patch("hitch.main.views._RATE_LIMITS_CACHE_VALUE", None),
+            patch("hitch.main.views._RATE_LIMITS_CACHE_HAS_VALUE", False),
+            patch("hitch.main.views._RATE_LIMITS_CACHE_FETCHED_AT", None),
+            patch("hitch.main.views._RATE_LIMITS_REFRESH_IN_FLIGHT", False),
+            patch("hitch.main.views._start_models_refresh_thread"),
+            patch(
+                "hitch.main.views._start_rate_limits_refresh_thread"
+            ) as start_rate_limits,
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            response = self.client.get(reverse("usage"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Codex rate limits")
+        self.assertContains(response, "Plan: Pro")
+        self.assertContains(response, "27% remaining")
+        self.assertContains(response, "5-hour window")
+        self.assertNotContains(response, "Usage unavailable.")
+        client._client.request.assert_called_once_with(
+            "account/rateLimits/read",
+            None,
+            response_model=GetAccountRateLimitsResponse,
+        )
+        start_rate_limits.assert_not_called()
 
     def test_lifetime_usage_skips_stale_file_backed_cache(self) -> None:
         rollout_path = _make_rollout(
