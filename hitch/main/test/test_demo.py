@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import http.client
 import json
 import subprocess
 import tempfile
@@ -406,6 +407,37 @@ class DemoProxyTests(TestCase):
 
         self.assertEqual(response.status_code, 502)
         self.assertIn(b"demo target unavailable: refused", response.content)
+
+    @patch("hitch.main.demo.http.client.HTTPConnection")
+    def test_proxy_closes_connection_when_body_read_fails(self, mock_connection: MagicMock) -> None:
+        # Both a socket drop (OSError) and an early body close such as a short
+        # Content-Length (http.client.IncompleteRead, an HTTPException -- not an
+        # OSError) must close the connection and surface as a 502.
+        for exc in (
+            ConnectionResetError("peer reset"),
+            http.client.IncompleteRead(b"partial"),
+        ):
+            with self.subTest(exc=type(exc).__name__):
+                conn = mock_connection.return_value
+                conn.reset_mock()
+                upstream = conn.getresponse.return_value
+                upstream.getheader.side_effect = lambda name, default="": {
+                    "Content-Type": "text/html"
+                }.get(name, default)
+                upstream.status = 200
+                upstream.read.side_effect = exc
+                request = RequestFactory().get("/sessions/thread-1/demo/index.html")
+
+                response = demo.proxy_demo_request(
+                    request,
+                    "thread-1",
+                    "index.html",
+                    path_prefix="/sessions/thread-1/demo/",
+                )
+
+                self.assertEqual(response.status_code, 502)
+                self.assertIn(b"demo target unavailable", response.content)
+                conn.close.assert_called_once()
 
     def test_localhost_demo_url_uses_isolated_demo_host_for_loopback(self) -> None:
         request = RequestFactory().get("/", headers={"host": "127.0.0.1:8000"})

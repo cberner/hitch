@@ -508,8 +508,19 @@ def proxy_demo_request(
     content_type = upstream.getheader("Content-Type", "")
     content_encoding = upstream.getheader("Content-Encoding", "").lower()
     if _should_rewrite_body(content_type, path_prefix) and content_encoding in {"", "identity"}:
-        body_bytes = upstream.read()
-        connection.close()
+        # The streaming path closes the connection in _stream_upstream's
+        # finally; the buffered path must do the same even when the upstream
+        # drops mid-read, or the socket leaks for the life of the process.
+        try:
+            body_bytes = upstream.read()
+        except (OSError, http.client.HTTPException) as exc:
+            # A socket drop (OSError) or an early body close such as a short
+            # Content-Length (http.client.IncompleteRead, an HTTPException) both
+            # mean the target misbehaved; surface either as the same 502 the
+            # connect path returns rather than letting it escape as a 500.
+            return HttpResponse(f"demo target unavailable: {exc}", status=502)
+        finally:
+            connection.close()
         response = HttpResponse(
             _rewrite_body(body_bytes, content_type, path_prefix),
             status=upstream.status,
