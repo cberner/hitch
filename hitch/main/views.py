@@ -10409,7 +10409,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             auto_merge_branch = ""
         if qa_workflow_activation:
             workflow_model = (
-                _string_value(getattr(resumed, "model", None)) or settings.model
+                _codex_followup_model(resumed, settings)
             )
             workflow_reasoning_effort = (
                 _string_value(getattr(resumed, "reasoning_effort", None))
@@ -10471,7 +10471,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             spawn_kwargs["enable_memories"] = True
         if auto_pr_enabled or auto_qa_enabled:
             auto_review_model = (
-                _string_value(getattr(resumed, "model", None)) or settings.model
+                _codex_followup_model(resumed, settings)
             )
             auto_review_reasoning_effort = (
                 _string_value(getattr(resumed, "reasoning_effort", None))
@@ -10510,7 +10510,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             and not collaboration_mode
         ):
             workflow_model = (
-                _string_value(getattr(resumed, "model", None)) or settings.model
+                _codex_followup_model(resumed, settings)
             )
             workflow_reasoning_effort = (
                 _string_value(getattr(resumed, "reasoning_effort", None))
@@ -11104,6 +11104,29 @@ def _is_qa_activation(request: HttpRequest) -> bool:
     return (
         bool(parts and parts[0].lower() == _QA_SLASH_COMMAND)
         or prompt == _QA_SLASH_PROMPT
+    )
+
+
+def _plan_mode_model(codex: Codex, resumed: Any, settings: SettingsValues) -> str | None:
+    models_data = _models_for_plan_mode_fallback(codex)
+    return _plan_mode_model_from_models(resumed, settings, models_data)
+
+
+def _codex_followup_model(resumed: Any, settings: SettingsValues) -> str | None:
+    """Resumed Codex thread's model, falling back to the settings model.
+
+    The settings (cookie) model can hold a ``claude-*`` id when the user
+    switches the global provider to Claude while a Codex session stays open.
+    This path only runs for Codex-backed sessions, so the Codex normalization in
+    ``_model_for_thread_backend`` drops a Claude id rather than queue a Codex
+    worker/workflow with a model the app-server would reject. The thread's own
+    model keeps priority over the cookie.
+    """
+    resumed_model = _string_value(getattr(resumed, "model", None))
+    return _model_for_thread_backend(
+        backend=CodexInstance.BACKEND_CODEX,
+        model=resumed_model or settings.model,
+        codex_fallback_model=resumed_model or None,
     )
 
 

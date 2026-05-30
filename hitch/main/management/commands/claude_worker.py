@@ -310,7 +310,17 @@ class _TurnRunner:
             self._instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
             and self._approval_mode == claude_options.APPROVAL_AUTO_REVIEW
         ):
-            return claude_options.allow_result()
+            # Auto-approve only the built-in mutating tools these runs are
+            # expected to use. ``build_options`` loads user/project/local
+            # settings, so a project ``.claude`` MCP server can expose other
+            # mutating tools; those reach here (they are not in the read-only
+            # allow list) and must not run unattended through the same blanket
+            # approval -- deny them, since hidden runs have no approval UI.
+            if tool_name == "Bash" or tool_name in _FILE_TOOLS:
+                return claude_options.allow_result()
+            return claude_options.deny_result(
+                "Hidden system-agent runs may only auto-run built-in Bash/file tools."
+            )
         params = _approval_params(method, tool_name, tool_input)
         request_id = await asyncio.to_thread(
             _create_pending_approval,

@@ -7,7 +7,7 @@ the Codex app-server.
 import json
 import tempfile
 from pathlib import Path
-from typing import Any, override
+from typing import Any, cast, override
 from unittest.mock import MagicMock, patch
 
 from claude_agent_sdk import (
@@ -460,6 +460,140 @@ class ApprovalRoutingTests(TestCase):
         )
         self.assertEqual(params["tool"], "mcp__github__create_pr")
         self.assertEqual(params["item"]["type"], "toolCall")
+
+
+class HiddenAutoReviewApprovalTests(TestCase):
+    """Hidden auto-review runs auto-approve only built-in mutating tools; a
+    project/user MCP tool reaching ``can_use_tool`` must be denied, since these
+    runs have no approval UI to gate it."""
+
+    def _runner(self) -> Any:
+        import io
+
+        from hitch.main.management.commands import claude_worker
+
+        instance = CodexInstance(
+            thread_id="t",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_RUNNING,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        )
+        return claude_worker._TurnRunner(
+            instance=instance,
+            events_file=io.StringIO(),
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode=claude_options.APPROVAL_AUTO_REVIEW,
+            web_search_mode=None,
+            plan_mode=False,
+        )
+
+    def test_builtin_mutating_tools_are_auto_allowed(self) -> None:
+        import asyncio
+
+        runner = self._runner()
+        for tool in ("Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"):
+            result = asyncio.run(runner._can_use_tool(tool, {}, None))
+            self.assertIsInstance(result, PermissionResultAllow, tool)
+
+    def test_mcp_tool_is_denied_without_approval_ui(self) -> None:
+        import asyncio
+
+        from claude_agent_sdk import PermissionResultDeny
+
+        runner = self._runner()
+        result = asyncio.run(
+            runner._can_use_tool("mcp__github__create_pr", {"title": "x"}, None)
+        )
+        self.assertIsInstance(result, PermissionResultDeny)
+
+
+class ClaudeSystemAgentIndexingTests(TestCase):
+    """A Claude system-agent spawn must stamp the row hidden and resolve its
+    project from ``cwd``; otherwise the ``codex_updated_at`` it writes makes the
+    indexer skip the backfill, leaking the run into normal views and dropping it
+    from project-filtered System Sessions."""
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    def test_system_agent_session_is_hidden_and_project_scoped(
+        self, mock_launch: MagicMock
+    ) -> None:
+        from hitch.main.models import Project, SessionMetadata
+
+        mock_launch.return_value = codex_pool.WorkerLaunch(pid=7)
+        with (
+            tempfile.TemporaryDirectory() as repo,
+            override_settings(CODEX_EVENTS_DIR=Path(repo)),
+        ):
+            project = Project.objects.create(name="p", repo_path=repo)
+            instance = codex_pool.spawn_new_session(
+                cwd=repo,
+                prompt="review this",
+                backend=CodexInstance.BACKEND_CLAUDE,
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                agent_kind="pr_qa_correctness",
+            )
+            row = SessionMetadata.objects.get(thread_id=instance.thread_id)
+            self.assertTrue(row.is_hidden_system_session)
+            self.assertEqual(row.project_id, project.pk)
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    def test_user_session_is_not_flagged_hidden(self, mock_launch: MagicMock) -> None:
+        from hitch.main.models import SessionMetadata
+
+        mock_launch.return_value = codex_pool.WorkerLaunch(pid=8)
+        with (
+            tempfile.TemporaryDirectory() as repo,
+            override_settings(CODEX_EVENTS_DIR=Path(repo)),
+        ):
+            instance = codex_pool.spawn_new_session(
+                cwd=repo,
+                prompt="hi",
+                backend=CodexInstance.BACKEND_CLAUDE,
+            )
+            row = SessionMetadata.objects.get(thread_id=instance.thread_id)
+            self.assertFalse(row.is_hidden_system_session)
+
+
+class CodexFollowupModelTests(TestCase):
+    """A resumed Codex thread must never be queued with a ``claude-*`` model id
+    that leaked in from the global provider cookie."""
+
+    def test_resumed_model_wins_and_claude_cookie_is_dropped(self) -> None:
+        from types import SimpleNamespace
+
+        from hitch.main import views
+
+        claude_model = next(iter(claude_options.VALID_CLAUDE_MODELS))
+
+        def _settings(model: str | None) -> Any:
+            return cast(Any, SimpleNamespace(model=model))
+
+        # The thread's own model takes priority over the cookie.
+        self.assertEqual(
+            views._codex_followup_model(
+                SimpleNamespace(model="gpt-5-codex"), _settings(claude_model)
+            ),
+            "gpt-5-codex",
+        )
+        # No thread model + a Claude cookie -> drop it so Codex picks its default.
+        self.assertIsNone(
+            views._codex_followup_model(
+                SimpleNamespace(model=""), _settings(claude_model)
+            )
+        )
+        # A Codex cookie is preserved when the thread has no model yet.
+        self.assertEqual(
+            views._codex_followup_model(
+                SimpleNamespace(model=None), _settings("gpt-5-codex")
+            ),
+            "gpt-5-codex",
+        )
 
 
 class SessionIndexInvalidationTests(TestCase):

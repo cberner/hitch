@@ -45,7 +45,12 @@ from openai_codex.generated.v2_all import ThreadSource, WebSearchMode
 from hitch.main import rate_limit
 from hitch.main.codex_tools import registered_dynamic_tool_specs
 from hitch.main.db import is_database_locked_error
-from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
+from hitch.main.models import (
+    ApprovalRequest,
+    CodexInstance,
+    Project,
+    UserInputRequest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -274,19 +279,31 @@ def _spawn_claude_session(
     registered up front so the new session shows up in the index immediately,
     matching the visible-thread behaviour ``thread/set-name`` gives Codex.
     """
-    from hitch.main import session_index
+    from hitch.main import demo, session_index
 
     thread_id = uuid.uuid4().hex
     name_source = thread_name if thread_name and thread_name.strip() else prompt
+    # Mirror the Codex indexer: resolve the project from ``cwd`` and flag hidden
+    # QA/spec/autonomous system-agent runs. This upsert stamps ``codex_updated_at``,
+    # which ``_ensure_indexed_system_threads`` treats as "already indexed" -- so if
+    # we leave ``project``/``is_hidden_system_session`` unset here the backfill is
+    # skipped and Claude system sessions both leak into normal views and vanish from
+    # project-filtered System Sessions views.
+    is_hidden_system = (
+        purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
+        and agent_kind != demo.DEMO_AGENT_KIND
+    )
     session_index.upsert_local_session(
         thread_id=thread_id,
         cwd=cwd,
+        projects=list(Project.objects.all()),
         name=_initial_thread_name(name_source),
         preview=prompt,
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
         auto_merge_to_local_branch=auto_merge_to_local_branch,
         auto_merge_branch=auto_merge_branch,
+        is_hidden_system_session=is_hidden_system,
     )
     return _spawn_worker(
         thread_id=thread_id,
