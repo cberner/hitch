@@ -8,6 +8,7 @@ import os
 import re
 import threading
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
@@ -293,6 +294,7 @@ class _MetadataResume:
     entries: tuple[dict[str, Any], ...]
     model: str = ""
     reasoning_effort: str = ""
+    rollout_data: rollout.SessionDetailData | None = None
 
 
 # Sandbox-policy variants offered in the settings dialog. Stored as the
@@ -600,6 +602,12 @@ _HUMAN_TOKEN_UNITS = (
     (1_000, "K"),
 )
 _MISSING_TOKEN_USAGE_CACHE = object()
+_ROLLOUT_COLLABORATION_MODE_NOT_PROVIDED = object()
+_INTERMEDIATE_DETAIL_CACHE_LOCK = threading.Lock()
+_INTERMEDIATE_DETAIL_CACHE_MAX_SIZE = 1024
+_INTERMEDIATE_DETAIL_CACHE: OrderedDict[
+    tuple[str, str, int, bool, int], dict[str, Any]
+] = OrderedDict()
 
 
 def _settings_context(
@@ -3218,6 +3226,7 @@ def _render_session_detail(
         resumed = metadata_resume
         thread = metadata_resume.thread
         raw_entries = list(metadata_resume.entries)
+        rollout_data = metadata_resume.rollout_data
         models_data = _cached_models_for_session_detail(
             enable_memories=initial_settings.enable_memories
         )
@@ -3253,6 +3262,7 @@ def _render_session_detail(
             cookie_updates = resolved_settings.cookie_updates
             plan_model = _plan_mode_model_from_models(resumed, settings, models_data)
         raw_entries = list(_entries_for(thread))
+        rollout_data = None
     is_archived = _thread_is_archived(thread)
     entries = _apply_system_authors(raw_entries, session_id)
     entries = _apply_qa_approval_messages(entries, session_id)
@@ -3264,7 +3274,11 @@ def _render_session_detail(
     if metadata is not None:
         metadata_by_thread[session_id] = metadata
     session_project = _project_for_thread(thread, metadata_by_thread, projects)
-    pr_url = _pr_url_for_thread(thread)
+    pr_url = (
+        rollout_data.latest_pr_url
+        if rollout_data is not None
+        else _pr_url_for_thread(thread)
+    )
     latest_pr_workflow = _latest_pr_workflow_for_thread(session_id)
     stage_workflow = active_system_workflow or latest_pr_workflow
     stage_pr_workflow = (
@@ -3275,7 +3289,11 @@ def _render_session_detail(
     )
     stage_context: dict[str, str] | None = None
     if not read_only:
-        pr_observation = _pr_observation_result_for_thread(thread)
+        pr_observation = (
+            rollout_data.pr_observation
+            if rollout_data is not None
+            else _pr_observation_result_for_thread(thread)
+        )
         main_updated_at = getattr(thread, "updated_at", None)
         stage_workflow = _workflow_after_main_lifecycle(
             stage_workflow, pr_observation, main_updated_at=main_updated_at
@@ -3320,10 +3338,29 @@ def _render_session_detail(
         thread,
         entries,
         active_instance=active_instance,
+        latest_collaboration_mode=(
+            rollout_data.latest_collaboration_mode
+            if rollout_data is not None
+            else _ROLLOUT_COLLABORATION_MODE_NOT_PROVIDED
+        ),
     )
     default_plan_mode = plan_mode_state.active
     _mark_pending_plan_actions(entries, enabled=plan_mode_state.awaiting_approval)
-    token_usage = _token_usage_for(thread)
+    if rollout_data is not None:
+        token_usage = (
+            _format_session_token_usage(rollout_data.latest_token_usage)
+            if rollout_data.latest_token_usage is not None
+            else None
+        )
+    else:
+        token_usage = _token_usage_for(thread)
+    _attach_lazy_intermediate_context(
+        entries,
+        session_id=session_id,
+        enabled=rollout_data is not None,
+        hide_demo_agent_entries=hide_demo_agent_entries,
+        rollout_state=_rollout_file_state_from_value(getattr(thread, "path", None)),
+    )
     goal_objective = codex_events.latest_goal_for_thread(session_id)
     task_plan = _task_plan_context(
         codex_events.latest_task_plan_for_instance(active_instance)
@@ -3599,10 +3636,14 @@ def _metadata_resume_for_inactive_session(
         or require_system_agent_thread
     ):
         return None
-    if _rollout_path_from_value(metadata.codex_path) is None:
+    rollout_path = _rollout_path_from_value(metadata.codex_path)
+    if rollout_path is None:
+        return None
+    rollout_data = rollout.session_detail_data(rollout_path)
+    if rollout_data is None:
         return None
     thread = _metadata_thread(metadata)
-    entries = tuple(_entries_for(thread))
+    entries = tuple(_collapse_flat_entries(list(rollout_data.flat_entries)))
     if not _entries_include_transcript(entries):
         return None
     latest_instance = _latest_instance_for_next_message(session_id)
@@ -3613,6 +3654,7 @@ def _metadata_resume_for_inactive_session(
         reasoning_effort=(
             latest_instance.reasoning_effort if latest_instance is not None else ""
         ),
+        rollout_data=rollout_data,
     )
 
 
@@ -3654,6 +3696,10 @@ def _token_usage_for(thread: Any) -> dict[str, str] | None:
     usage = _token_usage_numbers_for(thread)
     if usage is None:
         return None
+    return _format_session_token_usage(usage)
+
+
+def _format_session_token_usage(usage: Mapping[str, int]) -> dict[str, str]:
     formatted = {
         "input": _format_token_count(_non_cached_input_tokens(usage)),
         "cached": _format_token_count(usage["cached_input_tokens"]),
@@ -3671,6 +3717,158 @@ def _token_usage_for(thread: Any) -> dict[str, str] | None:
             }
         )
     return formatted
+
+
+def _attach_lazy_intermediate_context(
+    entries: list[dict[str, Any]],
+    *,
+    session_id: str,
+    enabled: bool,
+    hide_demo_agent_entries: bool,
+    rollout_state: _RolloutFileState | None,
+) -> None:
+    if not enabled or rollout_state is None:
+        return
+    query = "" if hide_demo_agent_entries else f"?{urlencode({'hide_demo': '0'})}"
+    for entry_index, entry in enumerate(entries):
+        if entry.get("kind") != "intermediate":
+            continue
+        _cache_intermediate_detail(
+            session_id=session_id,
+            rollout_state=rollout_state,
+            hide_demo_agent_entries=hide_demo_agent_entries,
+            entry_index=entry_index,
+            entry=entry,
+        )
+        entry["lazy_url"] = (
+            reverse(
+                "session_intermediate",
+                kwargs={"session_id": session_id, "entry_index": entry_index},
+            )
+            + query
+        )
+        entry["item_count"] = len(entry.get("items", []))
+        entry["items"] = []
+
+
+def _intermediate_detail_cache_key(
+    *,
+    session_id: str,
+    rollout_state: _RolloutFileState,
+    hide_demo_agent_entries: bool,
+    entry_index: int,
+) -> tuple[str, str, int, bool, int]:
+    return (
+        session_id,
+        str(rollout_state.path),
+        rollout_state.mtime_ns,
+        hide_demo_agent_entries,
+        entry_index,
+    )
+
+
+def _cache_intermediate_detail(
+    *,
+    session_id: str,
+    rollout_state: _RolloutFileState,
+    hide_demo_agent_entries: bool,
+    entry_index: int,
+    entry: dict[str, Any],
+) -> None:
+    key = _intermediate_detail_cache_key(
+        session_id=session_id,
+        rollout_state=rollout_state,
+        hide_demo_agent_entries=hide_demo_agent_entries,
+        entry_index=entry_index,
+    )
+    cached_entry = {
+        "kind": "intermediate",
+        "thinking_count": entry.get("thinking_count", 0),
+        "tool_call_count": entry.get("tool_call_count", 0),
+        "items": entry.get("items", []),
+    }
+    with _INTERMEDIATE_DETAIL_CACHE_LOCK:
+        _INTERMEDIATE_DETAIL_CACHE[key] = cached_entry
+        _INTERMEDIATE_DETAIL_CACHE.move_to_end(key)
+        while len(_INTERMEDIATE_DETAIL_CACHE) > _INTERMEDIATE_DETAIL_CACHE_MAX_SIZE:
+            _INTERMEDIATE_DETAIL_CACHE.popitem(last=False)
+
+
+def _cached_intermediate_detail(
+    *,
+    session_id: str,
+    rollout_state: _RolloutFileState,
+    hide_demo_agent_entries: bool,
+    entry_index: int,
+) -> dict[str, Any] | None:
+    key = _intermediate_detail_cache_key(
+        session_id=session_id,
+        rollout_state=rollout_state,
+        hide_demo_agent_entries=hide_demo_agent_entries,
+        entry_index=entry_index,
+    )
+    with _INTERMEDIATE_DETAIL_CACHE_LOCK:
+        entry = _INTERMEDIATE_DETAIL_CACHE.get(key)
+        if entry is not None:
+            _INTERMEDIATE_DETAIL_CACHE.move_to_end(key)
+        return entry
+
+
+@require_http_methods(["GET"])
+def session_intermediate(
+    request: HttpRequest, session_id: str, entry_index: int
+) -> HttpResponse:
+    if entry_index < 0:
+        raise Http404("intermediate entry not found")
+    hide_demo_agent_entries = request.GET.get("hide_demo") != "0"
+    entry = _rollout_intermediate_entry_for_detail(
+        session_id,
+        entry_index=entry_index,
+        hide_demo_agent_entries=hide_demo_agent_entries,
+    )
+    return render(request, "_session_intermediate_body.html", {"entry": entry})
+
+
+def _rollout_intermediate_entry_for_detail(
+    session_id: str, *, entry_index: int, hide_demo_agent_entries: bool
+) -> dict[str, Any]:
+    metadata = _session_detail_metadata(session_id)
+    if metadata is None:
+        raise Http404("session not found")
+    rollout_state = _rollout_file_state_from_value(metadata.codex_path)
+    if rollout_state is None:
+        raise Http404("session not found")
+    cached = _cached_intermediate_detail(
+        session_id=session_id,
+        rollout_state=rollout_state,
+        hide_demo_agent_entries=hide_demo_agent_entries,
+        entry_index=entry_index,
+    )
+    if cached is not None:
+        return cached
+    rollout_data = rollout.session_detail_data(rollout_state.path)
+    if rollout_data is None:
+        raise Http404("session not found")
+    entries = list(_collapse_flat_entries(list(rollout_data.flat_entries)))
+    if not _entries_include_transcript(entries):
+        raise Http404("session not found")
+    entries = _apply_system_authors(entries, session_id)
+    entries = _apply_qa_approval_messages(entries, session_id)
+    if hide_demo_agent_entries:
+        entries = _filter_demo_agent_entries(entries, session_id)
+    if entry_index >= len(entries):
+        raise Http404("intermediate entry not found")
+    entry = entries[entry_index]
+    if entry.get("kind") != "intermediate":
+        raise Http404("intermediate entry not found")
+    _cache_intermediate_detail(
+        session_id=session_id,
+        rollout_state=rollout_state,
+        hide_demo_agent_entries=hide_demo_agent_entries,
+        entry_index=entry_index,
+        entry=entry,
+    )
+    return entry
 
 
 def _token_usage_numbers_for(thread: Any) -> dict[str, int] | None:
@@ -7325,10 +7523,17 @@ def _thread_plan_mode_state(
     entries: list[dict[str, Any]],
     *,
     active_instance: CodexInstance | None = None,
+    latest_collaboration_mode: str
+    | None
+    | object = _ROLLOUT_COLLABORATION_MODE_NOT_PROVIDED,
 ) -> _ThreadPlanModeState:
     """Return the Plan Mode state Codex recorded for this thread."""
     awaiting_approval = _entries_await_plan_approval(entries)
-    latest_mode = _latest_rollout_collaboration_mode(thread)
+    latest_mode = (
+        _latest_rollout_collaboration_mode(thread)
+        if latest_collaboration_mode is _ROLLOUT_COLLABORATION_MODE_NOT_PROVIDED
+        else latest_collaboration_mode
+    )
     stored_plan_mode = (
         _latest_user_instance_ended_in_plan_mode(session_id)
         if latest_mode is None

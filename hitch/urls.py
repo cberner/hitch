@@ -82,6 +82,11 @@ urlpatterns = [
     ),
     path("sessions/<str:session_id>/", hitch.main.views.session, name="session"),
     path(
+        "sessions/<str:session_id>/intermediate/<int:entry_index>/",
+        hitch.main.views.session_intermediate,
+        name="session_intermediate",
+    ),
+    path(
         "sessions/<str:session_id>/name/",
         hitch.main.views.set_session_name,
         name="set_session_name",
