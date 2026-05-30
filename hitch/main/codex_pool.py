@@ -1472,17 +1472,27 @@ def _spawn_worker(
         instance.save(update_fields=["status", "ended_at", "error"])
         cleanup_input_images_for(instance)
         raise
-    update_fields: list[str] = []
     launch_pid = getattr(launch, "pid", 0)
     scope_unit = getattr(launch, "scope_unit", "")
-    if launch_pid > 0:
-        instance.pid = launch_pid
-        update_fields.append("pid")
     if scope_unit:
+        # The worker never touches systemd_scope_unit, so the parent owns it
+        # outright; force-kill escalation needs it.
         instance.systemd_scope_unit = scope_unit
-        update_fields.append("systemd_scope_unit")
-    if update_fields:
-        instance.save(update_fields=update_fields)
+        instance.save(update_fields=["systemd_scope_unit"])
+    if launch_pid > 0:
+        # The worker's first action is to overwrite pid with its own real pid.
+        # Under systemd isolation launch_pid is only the systemd-run wrapper, so
+        # a parent that is slow to reach this point must not clobber a real pid
+        # the worker has already recorded -- aiming a polite interrupt at the
+        # systemd-run wrapper would never reach the scoped worker (it does not
+        # forward SIGTERM). Fill pid only while it is still unset.
+        claimed = CodexInstance.objects.filter(pk=instance.pk, pid=0).update(
+            pid=launch_pid
+        )
+        if claimed:
+            instance.pid = launch_pid
+        else:
+            instance.refresh_from_db(fields=["pid"])
     launch_proc = getattr(launch, "proc", None)
     if isinstance(launch_proc, subprocess.Popen):
         _track_worker_process(instance.pk, cast(subprocess.Popen[bytes], launch_proc))
