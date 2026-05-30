@@ -3067,9 +3067,10 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
         mock_surface.assert_not_called()
 
+    @patch("hitch.main.system_agents._surface_workflow_failure")
     @patch("hitch.main.system_agents.github_pr.fetch_pr_snapshot")
     def test_run_pr_monitor_poll_retries_then_blocks_on_gh_error(
-        self, mock_fetch: MagicMock
+        self, mock_fetch: MagicMock, mock_surface: MagicMock
     ) -> None:
         mock_fetch.side_effect = github_pr.GithubCliError("gh down")
         workflow = SystemWorkflow.objects.create(
@@ -3154,9 +3155,10 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
 
 
+    @patch("hitch.main.system_agents._surface_workflow_failure")
     @patch("hitch.main.system_agents.github_pr.fetch_pr_snapshot", return_value=None)
     def test_run_pr_monitor_poll_blocks_when_pr_missing(
-        self, mock_fetch: MagicMock
+        self, mock_fetch: MagicMock, mock_surface: MagicMock
     ) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -3172,9 +3174,10 @@ class SpecCriticWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
 
+    @patch("hitch.main.system_agents._surface_workflow_failure")
     @patch("hitch.main.system_agents.github_pr.fetch_pr_snapshot")
     def test_run_pr_monitor_poll_blocks_without_pr_identity(
-        self, mock_fetch: MagicMock
+        self, mock_fetch: MagicMock, mock_surface: MagicMock
     ) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -3484,6 +3487,26 @@ class SpecCriticWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         mock_spawn.assert_not_called()
+
+    @patch("hitch.main.system_agents._surface_workflow_failure")
+    def test_stop_active_workflow_cancels_pr_monitoring(
+        self, mock_surface: MagicMock
+    ) -> None:
+        # Hitch-driven PR monitoring has no running agent run, but the Stop
+        # button must still cancel it.
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+        )
+
+        stopped = system_agents.stop_active_workflow("main-thread")
+
+        self.assertTrue(stopped)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
 
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
     def test_active_workflow_reconciles_terminal_hidden_run(

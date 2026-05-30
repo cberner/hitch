@@ -1202,9 +1202,6 @@ def reconcile_terminal_workflow_instances(
         return 0
     reconciled = _reconcile_terminal_system_agent_instances(workflows)
     reconciled += _reconcile_terminal_workflow_turns(workflows)
-    reconciled += maybe_advance_pr_monitors(
-        main_thread_id=main_thread_id, workflow_id=workflow_id
-    )
     return reconciled
 
 
@@ -1350,6 +1347,15 @@ def stop_active_workflow(main_thread_id: str) -> bool:
             error = "Spec Critic workflow stopped by user"
             _cancel_pending_spec_critic_input_requests(workflow, error)
             _block_spec_critic_workflow(workflow, error)
+            return True
+        # Hitch-driven PR monitoring has no spawned agent run to interrupt, so
+        # stop it directly; otherwise the Stop button could never cancel a
+        # workflow only waiting on review/CI.
+        if (
+            workflow.kind == SystemWorkflow.KIND_PR_QA
+            and workflow.step == STEP_PR_MONITORING
+        ):
+            _block_workflow(workflow, "PR workflow stopped by user")
             return True
         return False
     interrupted_runs = _interrupt_system_agent_runs(runs)
@@ -2217,8 +2223,10 @@ def maybe_advance_pr_monitors(
     """Poll GitHub for PRs whose Hitch workflow is in the monitoring step.
 
     Hitch owns PR monitoring directly: instead of spawning a coding-agent
-    monitor, the reconcile/scheduler path polls ``gh`` for the persisted PR's
-    state on a debounced cadence and advances the workflow gates.
+    monitor, the auto-proposal scheduler tick polls ``gh`` for the persisted
+    PR's state on a debounced cadence and advances the workflow gates. (It is
+    deliberately not called from the per-request reconcile path, which runs in
+    the hot SSE/page-load loop.)
     """
     now = timezone.now()
     workflows = SystemWorkflow.objects.filter(
