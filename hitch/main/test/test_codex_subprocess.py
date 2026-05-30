@@ -238,6 +238,47 @@ class SpawnNewSessionTests(TestCase):
 
     @patch("hitch.main.codex_pool._launch_worker_process")
     @patch("hitch.main.codex_pool.Codex")
+    def test_systemd_post_launch_pid_write_does_not_clobber_worker_pid(
+        self, mock_codex: MagicMock, mock_launch: MagicMock
+    ) -> None:
+        # Under systemd isolation the launch pid is only the systemd-run
+        # wrapper; the worker overwrites pid with its own real pid as its first
+        # action. If the parent's post-launch write lands after the worker's,
+        # it must not clobber the real pid back to the wrapper -- otherwise a
+        # polite interrupt would signal systemd-run, which never forwards it to
+        # the scoped worker.
+        _stub_codex_thread_start(mock_codex, "thread-scoped")
+        real_worker_pid = 4242
+        wrapper_pid = 999
+
+        def _launch(
+            *, instance_id: int, **_kwargs: object
+        ) -> codex_pool.WorkerLaunch:
+            # Simulate the worker winning the pid/status handshake race.
+            CodexInstance.objects.filter(pk=instance_id).update(
+                pid=real_worker_pid, status=CodexInstance.STATUS_RUNNING
+            )
+            return codex_pool.WorkerLaunch(
+                pid=wrapper_pid, scope_unit="hitch-codex-worker-7.scope"
+            )
+
+        mock_launch.side_effect = _launch
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_new_session(cwd="/repo", prompt="hi")
+
+        instance.refresh_from_db()
+        self.assertEqual(instance.pid, real_worker_pid)
+        self.assertEqual(
+            instance.systemd_scope_unit,
+            "hitch-codex-worker-7.scope",
+        )
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.codex_pool.Codex")
     def test_spawn_new_session_persists_auto_qa_and_auto_merge_fields(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
