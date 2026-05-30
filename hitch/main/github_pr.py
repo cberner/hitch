@@ -393,6 +393,7 @@ def _snapshot_from_pr_view(data: dict[str, Any]) -> dict[str, Any]:
 
     _copy_review_fields(snapshot, data)
     _copy_comment_fields(snapshot, data)
+    _copy_review_body_comments(snapshot, data)
     _copy_ci_fields(snapshot, data)
     return snapshot
 

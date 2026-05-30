@@ -302,6 +302,81 @@ class GithubPrHelperTests(SimpleTestCase):
         self.assertTrue(any("a.py" in b for b in bodies))
 
     @patch("hitch.main.github_pr.subprocess.run")
+    def test_changes_requested_review_body_surfaced(self, mock_run: MagicMock) -> None:
+        # A changes-requested review with only a main body (no inline thread)
+        # must still surface its text so the fix agent knows what to change.
+        data = {
+            **_PR_VIEW_JSON,
+            "reviewDecision": "CHANGES_REQUESTED",
+            "reviews": [
+                {"state": "CHANGES_REQUESTED", "body": "Please add tests", "url": "https://x/r1"}
+            ],
+            "comments": [],
+        }
+        mock_run.return_value = _completed(["gh"], stdout=json.dumps(data))
+
+        snapshot = github_pr.fetch_pr_snapshot("/repo", pr_number=42)
+
+        assert snapshot is not None
+        self.assertEqual(snapshot["review_signal"], "changes_requested")
+        bodies = [c.get("body", "") for c in snapshot["latest_comments"]]
+        self.assertTrue(any("Please add tests" in b for b in bodies))
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_open_or_update_pr_tolerates_existing_pr_on_create(
+        self, mock_run: MagicMock
+    ) -> None:
+        # A closed PR for the head is not found by the open-only lookup, so
+        # create is attempted and gh reports it already exists; fall through to
+        # reading the PR back rather than failing.
+        def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+                return _completed(argv, stdout="origin/main\n")
+            if argv[:2] == ["git", "push"]:
+                return _completed(argv)
+            if argv[:3] == ["gh", "api", "graphql"]:
+                return _completed(argv, stdout="{}")
+            if argv[:3] == ["gh", "pr", "list"]:
+                return _completed(argv, stdout="[]")
+            if argv[:3] == ["gh", "pr", "create"]:
+                return _completed(
+                    argv,
+                    returncode=1,
+                    stderr="a pull request for branch feature already exists",
+                )
+            if argv[:3] == ["gh", "pr", "view"]:
+                return _completed(argv, stdout=json.dumps(_PR_VIEW_JSON))
+            raise AssertionError(f"unexpected argv {argv}")
+
+        mock_run.side_effect = fake_run
+
+        snapshot = github_pr.open_or_update_pr("/repo", branch="feature")
+
+        self.assertEqual(snapshot["pr_number"], 42)
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_open_or_update_pr_raises_on_real_create_error(
+        self, mock_run: MagicMock
+    ) -> None:
+        def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv[:3] == ["git", "rev-parse", "--abbrev-ref"]:
+                return _completed(argv, stdout="origin/main\n")
+            if argv[:2] == ["git", "push"]:
+                return _completed(argv)
+            if argv[:3] == ["gh", "pr", "list"]:
+                return _completed(argv, stdout="[]")
+            if argv[:3] == ["gh", "pr", "create"]:
+                return _completed(argv, returncode=1, stderr="validation failed")
+            if argv[:3] == ["gh", "pr", "view"]:
+                return _completed(argv, returncode=1, stderr="no pull requests found")
+            raise AssertionError(f"unexpected argv {argv}")
+
+        mock_run.side_effect = fake_run
+
+        with self.assertRaises(github_pr.GithubCliError):
+            github_pr.open_or_update_pr("/repo", branch="feature")
+
+    @patch("hitch.main.github_pr.subprocess.run")
     def test_review_threads_paginate_across_pages(self, mock_run: MagicMock) -> None:
         def thread_page(node_id: str, *, resolved: bool, has_next: bool, cursor: str | None) -> str:
             return json.dumps(
