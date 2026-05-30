@@ -152,6 +152,15 @@ class EventTranslatorTests(TestCase):
         self.assertEqual(events[1][1]["item"]["type"], "userMessage")
         self.assertEqual(events[1][1]["item"]["text"], "hi there")
 
+    def test_image_only_user_message_records_image_marker(self) -> None:
+        # The SDK strips image blocks while parsing the echoed user message, so an
+        # image-only turn arrives empty; it must still produce a userMessage event
+        # so the turn is recorded and the auto-QA turn count stays accurate.
+        translator = claude_translate.EventTranslator()
+        events = translator.translate(UserMessage(content=[]))
+        self.assertEqual(events[-1][1]["item"]["type"], "userMessage")
+        self.assertEqual(events[-1][1]["item"]["text"], "[image]")
+
 
 class ClaudeOptionsTests(TestCase):
     def test_plan_mode_takes_precedence(self) -> None:
@@ -228,6 +237,18 @@ class ClaudeOptionsTests(TestCase):
             sandbox_policy=None, web_search_mode="live"
         )
         self.assertIn("WebSearch", allowed)
+
+    def test_default_web_mode_blocks_live_web(self) -> None:
+        # The Codex-default (empty) and unset web settings must not grant live
+        # web access for Claude; only an explicit "live" opt-in does.
+        for mode in ("", None):
+            allowed, disallowed = claude_options.resolve_tool_lists(
+                sandbox_policy=None, web_search_mode=mode
+            )
+            self.assertIn("WebSearch", disallowed, mode)
+            self.assertIn("WebFetch", disallowed, mode)
+            self.assertNotIn("WebSearch", allowed, mode)
+            self.assertNotIn("WebFetch", allowed, mode)
 
     def test_workspace_write_enables_bash_sandbox(self) -> None:
         # workspaceWrite must confine approved/auto-approved Bash to the repo;

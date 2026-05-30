@@ -74,6 +74,11 @@ _FILE_APPROVAL_METHOD = "item/fileChange/requestApproval"
 _TOOL_APPROVAL_METHOD = "item/tool/requestApproval"
 _FILE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 _STEER_POLL_INTERVAL = 0.2
+# Grace window at turn end: a steer can be queued (the row is still marked
+# running until ``handle`` flips its status) between the loop's last drain and
+# teardown. Give the control-file tailer a brief window to surface that steer
+# before exiting so the prompt is not silently dropped.
+_STEER_DRAIN_GRACE = 0.05
 
 
 class Command(BaseCommand):
@@ -204,6 +209,11 @@ class _TurnRunner:
                         if isinstance(message, ResultMessage):
                             self._record_result(message)
                     outstanding = outstanding - 1 + self._take_steer_pending()
+                    if outstanding == 0:
+                        # Let the tailer catch a steer that landed just as this
+                        # response drained, before we tear the turn down.
+                        await asyncio.sleep(_STEER_DRAIN_GRACE)
+                        outstanding += self._take_steer_pending()
             finally:
                 steer_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):

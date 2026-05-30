@@ -118,16 +118,16 @@ def resolve_tool_lists(
     """
     allowed = list(READ_ONLY_TOOLS)
     disallowed: list[str] = []
-    web_search_off = bool(web_search_mode) and web_search_mode in {
-        "disabled",
-        "off",
-        "cached",
-    }
-    if web_search_off:
+    # Only an explicit ``live`` opt-in grants web. Claude has no cached-search
+    # mode, and the Codex "default" (empty) setting must not silently grant live
+    # external access -- so everything other than ``live`` blocks both WebSearch
+    # and the (live-fetching) WebFetch.
+    web_search_on = web_search_mode == "live"
+    if web_search_on:
+        allowed.append(_WEB_SEARCH_TOOL)
+    else:
         disallowed.extend([_WEB_SEARCH_TOOL, _WEB_FETCH_TOOL])
         allowed = [tool for tool in allowed if tool != _WEB_FETCH_TOOL]
-    else:
-        allowed.append(_WEB_SEARCH_TOOL)
     if sandbox_policy == SANDBOX_READ_ONLY:
         # Block file-edit tools AND Bash: a shell command can mutate the
         # workspace just as a write tool can, so a read-only session must deny

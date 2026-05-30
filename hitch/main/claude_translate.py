@@ -151,6 +151,16 @@ class EventTranslator:
                         _user_item_id(message, index), "userMessage", block.text
                     )
                 )
+        # The SDK strips image blocks when parsing an echoed user message, so an
+        # image-only turn arrives with empty content. Emit an "[image]" marker so
+        # the turn is still recorded -- otherwise the transcript loses the user's
+        # input and auto-QA's user-message count comes up short by a turn.
+        if not content:
+            events.extend(
+                _complete_text_item(
+                    _user_item_id(message, 0), "userMessage", "[image]"
+                )
+            )
         return events
 
     def _close_tool(self, block: ToolResultBlock) -> list[Event]:
