@@ -4,9 +4,10 @@ the in-process propose_session tool, worker-command routing, and the
 the Codex app-server.
 """
 
+import json
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, override
 from unittest.mock import MagicMock, patch
 
 from claude_agent_sdk import (
@@ -212,10 +213,16 @@ class ClaudeOptionsTests(TestCase):
 
     def test_workspace_write_enables_bash_sandbox(self) -> None:
         # workspaceWrite must confine approved/auto-approved Bash to the repo;
-        # the SDK does that via the sandbox setting, not the tool lists.
+        # the SDK does that via the sandbox setting, not the tool lists. It must
+        # also close the unsandboxed-command escape so approve_all
+        # (bypassPermissions) can't run Bash outside the sandbox unprompted.
         self.assertEqual(
             claude_options.resolve_sandbox_settings("workspaceWrite"),
-            {"enabled": True},
+            {
+                "enabled": True,
+                "allowUnsandboxedCommands": False,
+                "autoAllowBashIfSandboxed": False,
+            },
         )
         # Read-only blocks Bash outright, and dangerFullAccess is the opt-out,
         # so neither carries a bash sandbox.
@@ -230,7 +237,14 @@ class ClaudeOptionsTests(TestCase):
         options = claude_options.build_options(
             cwd="/repo", model="claude-opus-4-8", sandbox_policy="workspaceWrite"
         )
-        self.assertEqual(options.sandbox, {"enabled": True})
+        self.assertEqual(
+            options.sandbox,
+            {
+                "enabled": True,
+                "allowUnsandboxedCommands": False,
+                "autoAllowBashIfSandboxed": False,
+            },
+        )
         # The default (no sandbox policy) leaves the SDK at its own default.
         plain = claude_options.build_options(cwd="/repo", model="claude-opus-4-8")
         self.assertIsNone(plain.sandbox)
@@ -544,7 +558,11 @@ class ProposeSessionToolTests(TestCase):
         )
 
 
-def _result(subtype: str = "success", is_error: bool = False) -> ResultMessage:
+def _result(
+    subtype: str = "success",
+    is_error: bool = False,
+    structured_output: Any = None,
+) -> ResultMessage:
     return ResultMessage(
         subtype=subtype,
         duration_ms=1,
@@ -552,6 +570,7 @@ def _result(subtype: str = "success", is_error: bool = False) -> ResultMessage:
         is_error=is_error,
         num_turns=1,
         session_id="sess-final",
+        structured_output=structured_output,
     )
 
 
@@ -830,6 +849,40 @@ class TranslateCoverageTests(TestCase):
         self.assertEqual(item["type"], "dynamicToolCall")
         self.assertEqual(item["tool"], "Task")
 
+    def test_structured_output_result_becomes_agent_message(self) -> None:
+        # With an output_schema the SDK returns the validated JSON on the
+        # ResultMessage, not in an agentMessage; the translator must surface it
+        # as a final agentMessage so the workflow's events-file parser sees it.
+        translator = claude_translate.EventTranslator()
+        verdict = {"verdict": "LGTM", "confidence": "high"}
+        events = translator.translate(_result(structured_output=verdict))
+        completed = [e for e in events if e[0] == "item/completed"]
+        self.assertEqual(len(completed), 1)
+        item = completed[0][1]["item"]
+        self.assertEqual(item["type"], "agentMessage")
+        self.assertEqual(json.loads(item["text"]), verdict)
+
+    def test_structured_output_absent_emits_nothing(self) -> None:
+        translator = claude_translate.EventTranslator()
+        self.assertEqual(translator.translate(_result()), [])
+
+    def test_structured_output_read_back_by_final_agent_text(self) -> None:
+        # End-to-end: a worker stream whose only agent output is the structured
+        # result must leave parseable JSON for system_agents._final_agent_text.
+        from hitch.main import system_agents
+
+        verdict = {"verdict": "request_changes", "confidence": "medium"}
+        translator = claude_translate.EventTranslator()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "events.jsonl"
+            with open(path, "w", encoding="utf-8") as fh:
+                for method, payload in translator.translate(
+                    _result(structured_output=verdict)
+                ):
+                    fh.write(json.dumps({"method": method, "payload": payload}) + "\n")
+            text = system_agents._final_agent_text(str(path))
+        self.assertEqual(json.loads(text), verdict)
+
 
 class _FakeClient:
     """Stand-in for ClaudeSDKClient yielding a scripted message stream."""
@@ -930,4 +983,80 @@ class WorkerTurnTests(TestCase):
         # A truncated/aborted stream (no ResultMessage) must not look successful.
         runner, _written = self._run([_assistant(TextBlock(text="partial"))])
         self.assertFalse(runner.saw_result)
+        self.assertFalse(runner.failed)
+
+    def test_steered_followup_response_is_drained(self) -> None:
+        # A steer issued mid-turn schedules a second query; the runner must keep
+        # draining so the steered prompt's response is translated, not dropped
+        # when the first response's ResultMessage ends ``receive_response``.
+        import asyncio
+
+        from hitch.main.management.commands import claude_worker
+
+        # First response: registers a pending steer (as the steer thread would)
+        # then ends. Second response: the steered prompt's output.
+        responses = [
+            [_assistant(TextBlock(text="first")), _result()],
+            [_assistant(TextBlock(text="steered reply")), _result()],
+        ]
+
+        class _SteeringClient(_FakeClient):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__([], **kwargs)
+                self._scripts = list(responses)
+                self._runner: Any = None
+
+            @override
+            async def receive_response(self) -> Any:
+                script = self._scripts.pop(0)
+                for message in script:
+                    # Simulate a steer arriving during the first response.
+                    if (
+                        isinstance(message, ResultMessage)
+                        and self._scripts
+                        and self._runner is not None
+                    ):
+                        with self._runner._steer_lock:
+                            self._runner._steer_pending += 1
+                    yield message
+
+        with tempfile.TemporaryDirectory() as tmp:
+            events_path = Path(tmp) / "events.jsonl"
+            instance = CodexInstance(
+                pk=1,
+                thread_id="thread-x",
+                cwd=tmp,
+                prompt="please help",
+                events_path=str(events_path),
+                pid=0,
+                status=CodexInstance.STATUS_RUNNING,
+                backend=CodexInstance.BACKEND_CLAUDE,
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            )
+            client = _SteeringClient()
+
+            def _factory(*, options: Any) -> _SteeringClient:
+                client.options = options
+                return client
+
+            with (
+                open(events_path, "a", encoding="utf-8") as events_file,
+                patch.object(claude_worker, "ClaudeSDKClient", _factory),
+            ):
+                runner = claude_worker._TurnRunner(
+                    instance=instance,
+                    events_file=events_file,
+                    model="claude-opus-4-8",
+                    reasoning_effort=None,
+                    sandbox_policy=None,
+                    approval_mode=None,
+                    web_search_mode=None,
+                    plan_mode=False,
+                )
+                client._runner = runner
+                asyncio.run(runner.run())
+            written = events_path.read_text(encoding="utf-8")
+        # Both the original and the steered response were translated.
+        self.assertIn("first", written)
+        self.assertIn("steered reply", written)
         self.assertFalse(runner.failed)

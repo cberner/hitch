@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import signal
+import threading
 import time
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -166,6 +167,12 @@ class _TurnRunner:
         self._client: ClaudeSDKClient | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._steer_wakeup: asyncio.Event | None = None
+        # Count of steered follow-up queries issued mid-turn. Incremented in the
+        # steer thread before the query is scheduled, drained on the loop thread
+        # to decide whether more responses still need draining. The lock guards
+        # the cross-thread read/modify/write.
+        self._steer_pending = 0
+        self._steer_lock = threading.Lock()
         self._cancelled = False
         self.session_id = instance.claude_session_id
         self.failed = False
@@ -183,16 +190,31 @@ class _TurnRunner:
             await client.query(self._turn_input())
             steer_task = asyncio.create_task(self._forward_steer_requests())
             try:
-                async for message in client.receive_response():
-                    self._capture_session_id(message)
-                    for method, payload in self._translator.translate(message):
-                        self._write_event(method, payload)
-                    if isinstance(message, ResultMessage):
-                        self._record_result(message)
+                # ``receive_response`` stops after one ResultMessage, but a steer
+                # issued mid-turn schedules another ``query`` whose response then
+                # needs its own drain. Loop until every issued query (the initial
+                # one plus any steered follow-ups) has produced its result, so a
+                # steered prompt's output is never dropped at context close.
+                outstanding = 1
+                while outstanding > 0:
+                    async for message in client.receive_response():
+                        self._capture_session_id(message)
+                        for method, payload in self._translator.translate(message):
+                            self._write_event(method, payload)
+                        if isinstance(message, ResultMessage):
+                            self._record_result(message)
+                    outstanding = outstanding - 1 + self._take_steer_pending()
             finally:
                 steer_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await steer_task
+
+    def _take_steer_pending(self) -> int:
+        """Return and reset the count of steered queries awaiting a drain."""
+        with self._steer_lock:
+            pending = self._steer_pending
+            self._steer_pending = 0
+        return pending
 
     # -- options & prompt --------------------------------------------------
 
@@ -361,6 +383,11 @@ class _TurnRunner:
             text, image_paths = _steer_request(raw)
             if (text or image_paths) and self._client is not None and self._loop is not None:
                 query_input = _build_query_input(text, image_paths)
+                # Register the follow-up before scheduling so the loop thread
+                # can't finish draining the prior response and exit before it
+                # learns another response is coming.
+                with self._steer_lock:
+                    self._steer_pending += 1
                 asyncio.run_coroutine_threadsafe(
                     self._client.query(query_input), self._loop
                 )

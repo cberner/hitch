@@ -142,7 +142,18 @@ def resolve_sandbox_settings(sandbox_policy: str | None) -> SandboxSettings | No
     default) leaves the SDK at its own default.
     """
     if sandbox_policy == SANDBOX_WORKSPACE_WRITE:
-        return SandboxSettings(enabled=True)
+        # enabled: confine bash command execution to the sandbox.
+        # allowUnsandboxedCommands=False: a command must not escape the sandbox
+        #   via ``dangerouslyDisableSandbox`` -- otherwise under approve_all
+        #   (bypassPermissions) it could run unsandboxed with no approval gate,
+        #   defeating the workspace-write boundary.
+        # autoAllowBashIfSandboxed=False: keep Hitch's ``can_use_tool`` approval
+        #   gate authoritative rather than auto-approving sandboxed bash.
+        return SandboxSettings(
+            enabled=True,
+            allowUnsandboxedCommands=False,
+            autoAllowBashIfSandboxed=False,
+        )
     return None
 
 

@@ -15,10 +15,12 @@ ordering, and the approval/turn-completion bookkeeping.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from claude_agent_sdk import (
     AssistantMessage,
+    ResultMessage,
     TextBlock,
     ThinkingBlock,
     ToolResultBlock,
@@ -53,7 +55,25 @@ class EventTranslator:
             return self._translate_assistant(message)
         if isinstance(message, UserMessage):
             return self._translate_user(message)
+        if isinstance(message, ResultMessage):
+            return self._translate_result(message)
         return []
+
+    def _translate_result(self, message: ResultMessage) -> list[Event]:
+        # With an ``output_schema`` the SDK puts the validated JSON on
+        # ``ResultMessage.structured_output`` rather than in an ``agentMessage``
+        # text block, so a structured-output turn (QA/spec/autonomous subagents)
+        # would otherwise leave no agent text for ``_final_agent_text`` to read.
+        # Emit the JSON as a final ``agentMessage`` so the existing
+        # events-file parsers recover the structured verdict unchanged.
+        structured = message.structured_output
+        if structured is None:
+            return []
+        try:
+            text = json.dumps(structured)
+        except (TypeError, ValueError):
+            return []
+        return _complete_text_item("result:structured_output", "agentMessage", text)
 
     # -- assistant content -------------------------------------------------
 
