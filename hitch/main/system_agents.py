@@ -74,7 +74,7 @@ QA_SLASH_DISPLAY_PROMPT = (
     "Run the QA agent on the current diff and fix anything it finds"
 )
 PR_SLASH_PROMPT = (
-    "Polish the change, rebase it onto the repository's default branch, and "
+    "Polish the change, rebase it onto the repository default branch, and "
     "commit your work on the current branch. Do not push the branch or "
     "open/update a pull request yourself: Hitch pushes the branch and opens or "
     "updates the PR once this turn finishes."
