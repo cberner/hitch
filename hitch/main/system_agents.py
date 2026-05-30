@@ -5225,10 +5225,19 @@ def _create_autonomous_goal_skipped_notice(
 def _block_workflow(
     workflow: SystemWorkflow, error: str, *, surface_to_thread: bool = True
 ) -> None:
-    workflow.status = SystemWorkflow.STATUS_BLOCKED
-    workflow.step = STEP_BLOCKED
-    workflow.state = {**workflow.state, "error": error}
-    workflow.save(update_fields=["status", "step", "state", "updated_at"])
+    # Panel mode fans out into several concurrently-routed lane instances, so
+    # two lanes failing at once can drive this from different threads. Lock and
+    # re-read the row (as the Spec Critic equivalents do) so the state-column
+    # overwrite cannot lose a concurrent write.
+    with transaction.atomic():
+        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        locked.status = SystemWorkflow.STATUS_BLOCKED
+        locked.step = STEP_BLOCKED
+        locked.state = {**locked.state, "error": error}
+        locked.save(update_fields=["status", "step", "state", "updated_at"])
+        workflow.status = locked.status
+        workflow.step = locked.step
+        workflow.state = locked.state
     _interrupt_orphaned_qa_review_runs(workflow, error)
     if surface_to_thread:
         _surface_workflow_failure(workflow, error)
@@ -5261,10 +5270,17 @@ def _interrupt_orphaned_qa_review_runs(workflow: SystemWorkflow, error: str) -> 
 
 
 def _surface_workflow_failure(workflow: SystemWorkflow, error: str) -> None:
-    if workflow.state.get("failure_surfaced") is True:
-        return
-    workflow.state = {**workflow.state, "failure_surfaced": True}
-    workflow.save(update_fields=["state", "updated_at"])
+    # Make the check-then-set atomic per workflow so two concurrently-routed
+    # panel lanes that both fail cannot each spawn a failure turn (which would
+    # double-post the failure message and double-increment the user message
+    # index). Mirrors _surface_spec_critic_failure.
+    with transaction.atomic():
+        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        if locked.state.get("failure_surfaced") is True:
+            return
+        locked.state = {**locked.state, "failure_surfaced": True}
+        locked.save(update_fields=["state", "updated_at"])
+        workflow.state = locked.state
     try:
         _spawn_workflow_failure_turn(workflow, error)
     except Exception:

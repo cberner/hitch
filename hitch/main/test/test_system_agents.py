@@ -253,6 +253,34 @@ class PrQaWorkflowTests(TestCase):
         run = SystemAgentRun.objects.get(workflow=workflow)
         self.assertEqual(run.thread_id, "qa-thread")
 
+    @patch("hitch.main.system_agents._spawn_workflow_failure_turn")
+    def test_surface_workflow_failure_is_idempotent_across_stale_copies(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        # Panel mode routes several lane instances concurrently, so two stale
+        # in-memory copies of the same workflow can each reach
+        # _surface_workflow_failure. The check-then-set must re-read the row
+        # under a lock so only one failure turn is spawned -- otherwise the
+        # user sees a duplicate failure message and the user message index is
+        # double-incremented.
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_QA_RUNNING,
+            state={"next_user_message_index": 1},
+        )
+        stale_a = SystemWorkflow.objects.get(pk=workflow.pk)
+        stale_b = SystemWorkflow.objects.get(pk=workflow.pk)
+
+        system_agents._surface_workflow_failure(stale_a, "boom")
+        system_agents._surface_workflow_failure(stale_b, "boom")
+
+        mock_spawn.assert_called_once()
+        workflow.refresh_from_db()
+        self.assertTrue(workflow.state["failure_surfaced"])
+
 
 class SpecCriticWorkflowTests(TestCase):
     def test_prompt_classifier_targets_vague_broad_and_high_impact_prompts(self) -> None:
