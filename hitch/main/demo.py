@@ -997,8 +997,19 @@ def _proxy_response_headers(
             continue
         if lower == "location":
             value = _rewrite_location(value, path_prefix, upstream_netloc=upstream_netloc)
+        if _header_has_control_chars(key) or _header_has_control_chars(value):
+            # Obsolete RFC 7230 line folding (and outright header injection from a
+            # misbehaving demo container) arrives with embedded CR/LF. Copying it
+            # onto the Django response raises BadHeaderError, which 500s the proxy
+            # request and -- on the streaming path -- leaks the upstream socket
+            # because the generator's close() never runs. Drop such headers.
+            continue
         headers[key] = value
     return headers
+
+
+def _header_has_control_chars(value: str) -> bool:
+    return "\n" in value or "\r" in value
 
 
 def _connection_header_tokens(value: str) -> set[str]:

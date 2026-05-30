@@ -325,6 +325,28 @@ class DemoProxyTests(TestCase):
         ):
             self.assertNotIn(blocked, normalized)
 
+    def test_proxy_drops_response_headers_with_embedded_crlf(self) -> None:
+        # Obsolete header line folding / header injection from a misbehaving demo
+        # container arrives with embedded CR/LF; copying it onto a Django response
+        # would raise BadHeaderError (500 + leaked upstream socket). It must be
+        # dropped while well-formed headers pass through.
+        upstream = MagicMock(spec=http.client.HTTPResponse)
+        upstream.getheaders.return_value = [
+            ("X-Good", "fine"),
+            ("X-Folded", "bar\r\n\tInjected: 1"),
+            ("X-Bare-CR", "a\rb"),
+        ]
+
+        headers = demo._proxy_response_headers(
+            upstream,
+            "/sessions/thread-1/demo/",
+            upstream_netloc="127.0.0.1:12345",
+        )
+
+        self.assertEqual(headers.get("X-Good"), "fine")
+        self.assertNotIn("X-Folded", headers)
+        self.assertNotIn("X-Bare-CR", headers)
+
     def test_rewrite_body_preserves_protocol_relative_urls_and_rewrites_srcset(self) -> None:
         body = (
             b'<link href="//cdn.example.com/app.css">'
