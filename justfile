@@ -80,6 +80,17 @@ install-systemd:
   UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
   mkdir -p "${UNIT_DIR}"
   UNIT_PATH="${UNIT_DIR}/hitch.service"
+  # Generate a strong, host-unique signing key once and keep it across
+  # reinstalls so existing signed cookies/sessions stay valid. Without this the
+  # public host would fall back to the published "insecure" dev key, letting
+  # anyone forge Hitch's signed setting cookies (sandbox/approval modes).
+  ENV_PATH="${UNIT_DIR}/hitch.env"
+  if ! grep -q '^DJANGO_SECRET_KEY=' "${ENV_PATH}" 2>/dev/null; then
+    SECRET="$("${UV_BIN}" run --no-project python -c 'import secrets; print(secrets.token_urlsafe(64))')"
+    umask 077
+    printf 'DJANGO_SECRET_KEY=%s\n' "${SECRET}" > "${ENV_PATH}"
+    chmod 600 "${ENV_PATH}"
+  fi
   cat > "${UNIT_PATH}" <<EOF
   [Unit]
   Description=Hitch server (${REPO_DIR})
@@ -89,6 +100,7 @@ install-systemd:
   [Service]
   Type=simple
   WorkingDirectory=${REPO_DIR}
+  EnvironmentFile=${ENV_PATH}
   Environment=ADDITIONAL_ALLOWED_HOSTS=${DOMAIN}
   Environment=HITCH_ENABLE_DEBUG_TOOLBAR=0
   # Re-sync to the install-time branch and apply migrations on every (re)start
