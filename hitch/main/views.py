@@ -603,6 +603,7 @@ _HUMAN_TOKEN_UNITS = (
 )
 _MISSING_TOKEN_USAGE_CACHE = object()
 _ROLLOUT_COLLABORATION_MODE_NOT_PROVIDED = object()
+_SESSION_INTERMEDIATE_DEMO_CONTEXT_SALT = "hitch.session-intermediate.demo-context"
 _INTERMEDIATE_DETAIL_CACHE_LOCK = threading.Lock()
 _INTERMEDIATE_DETAIL_CACHE_MAX_SIZE = 1024
 _INTERMEDIATE_DETAIL_CACHE: OrderedDict[
@@ -2549,14 +2550,17 @@ def system_session(request: HttpRequest, session_id: str) -> HttpResponse:
             read_only=True,
             require_system_agent_thread=True,
         )
+    agent_kind = _system_agent_kind(run, instance)
+    hide_demo_agent_entries = agent_kind != demo.DEMO_AGENT_KIND
     return _render_session_detail(
         request,
         session_id,
         read_only=True,
         display_title=_system_agent_run_detail_title(run, instance),
         system_prompt=instance.prompt,
-        hide_demo_agent_entries=(
-            _system_agent_kind(run, instance) != demo.DEMO_AGENT_KIND
+        hide_demo_agent_entries=hide_demo_agent_entries,
+        demo_entries_run_id=(
+            run.pk if not hide_demo_agent_entries and run is not None else None
         ),
     )
 
@@ -3202,6 +3206,7 @@ def _render_session_detail(
     display_title: str | None = None,
     system_prompt: str = "",
     hide_demo_agent_entries: bool = True,
+    demo_entries_run_id: int | None = None,
     require_system_agent_thread: bool = False,
 ) -> HttpResponse:
     # Sweep stuck workers before reading status: a worker that died without
@@ -3359,6 +3364,7 @@ def _render_session_detail(
         session_id=session_id,
         enabled=rollout_data is not None,
         hide_demo_agent_entries=hide_demo_agent_entries,
+        demo_entries_run_id=demo_entries_run_id,
         rollout_state=_rollout_file_state_from_value(getattr(thread, "path", None)),
     )
     goal_objective = codex_events.latest_goal_for_thread(session_id)
@@ -3639,7 +3645,7 @@ def _metadata_resume_for_inactive_session(
     rollout_path = _rollout_path_from_value(metadata.codex_path)
     if rollout_path is None:
         return None
-    rollout_data = rollout.session_detail_data(rollout_path)
+    rollout_data = _session_detail_data_for_metadata_resume(rollout_path)
     if rollout_data is None:
         return None
     thread = _metadata_thread(metadata)
@@ -3670,6 +3676,19 @@ def _metadata_thread(metadata: SessionMetadata) -> _MetadataThread:
         archived=metadata.codex_archived,
         thread_source=metadata.codex_thread_source,
     )
+
+
+def _session_detail_data_for_metadata_resume(
+    rollout_path: Path,
+) -> rollout.SessionDetailData | None:
+    try:
+        return rollout.session_detail_data(rollout_path)
+    except Exception:
+        logger.exception(
+            "failed to parse rollout %s for metadata resume; falling back to SDK turns",
+            rollout_path,
+        )
+        return None
 
 
 def _entries_include_transcript(entries: Iterable[Mapping[str, Any]]) -> bool:
@@ -3725,11 +3744,17 @@ def _attach_lazy_intermediate_context(
     session_id: str,
     enabled: bool,
     hide_demo_agent_entries: bool,
+    demo_entries_run_id: int | None,
     rollout_state: _RolloutFileState | None,
 ) -> None:
     if not enabled or rollout_state is None:
         return
-    query = "" if hide_demo_agent_entries else f"?{urlencode({'hide_demo': '0'})}"
+    query_params: dict[str, str] = {}
+    if not hide_demo_agent_entries and demo_entries_run_id is not None:
+        query_params["demo_context"] = _session_intermediate_demo_context(
+            session_id, demo_entries_run_id
+        )
+    query = f"?{urlencode(query_params)}" if query_params else ""
     for entry_index, entry in enumerate(entries):
         if entry.get("kind") != "intermediate":
             continue
@@ -3820,13 +3845,43 @@ def session_intermediate(
 ) -> HttpResponse:
     if entry_index < 0:
         raise Http404("intermediate entry not found")
-    hide_demo_agent_entries = request.GET.get("hide_demo") != "0"
+    hide_demo_agent_entries = not _session_intermediate_allows_demo_entries(
+        session_id, request.GET.get("demo_context", "")
+    )
     entry = _rollout_intermediate_entry_for_detail(
         session_id,
         entry_index=entry_index,
         hide_demo_agent_entries=hide_demo_agent_entries,
     )
     return render(request, "_session_intermediate_body.html", {"entry": entry})
+
+
+def _session_intermediate_demo_context(session_id: str, run_id: int) -> str:
+    return signing.dumps(
+        {"session_id": session_id, "run_id": run_id},
+        salt=_SESSION_INTERMEDIATE_DEMO_CONTEXT_SALT,
+    )
+
+
+def _session_intermediate_allows_demo_entries(
+    session_id: str, raw_context: str | None
+) -> bool:
+    if not raw_context:
+        return False
+    try:
+        context = signing.loads(
+            raw_context,
+            salt=_SESSION_INTERMEDIATE_DEMO_CONTEXT_SALT,
+        )
+    except signing.BadSignature:
+        return False
+    if not isinstance(context, dict) or context.get("session_id") != session_id:
+        return False
+    run_id = context.get("run_id")
+    if not isinstance(run_id, int) or run_id <= 0:
+        return False
+    run = _system_agent_run_for_thread(session_id, run_id=run_id)
+    return run is not None and run.agent_kind == demo.DEMO_AGENT_KIND
 
 
 def _rollout_intermediate_entry_for_detail(
@@ -3846,7 +3901,13 @@ def _rollout_intermediate_entry_for_detail(
     )
     if cached is not None:
         return cached
-    rollout_data = rollout.session_detail_data(rollout_state.path)
+    try:
+        rollout_data = rollout.session_detail_data(rollout_state.path)
+    except Exception as exc:
+        logger.exception(
+            "failed to parse rollout %s for intermediate detail", rollout_state.path
+        )
+        raise Http404("intermediate entry not found") from exc
     if rollout_data is None:
         raise Http404("session not found")
     entries = list(_collapse_flat_entries(list(rollout_data.flat_entries)))

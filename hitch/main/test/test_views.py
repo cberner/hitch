@@ -455,6 +455,54 @@ class SessionDetailFastPathTests(TestCase):
 
     @patch("hitch.main.views._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
+    def test_inactive_session_detail_falls_back_when_rollout_fast_path_raises(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Schema drift"},
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="schema-drift",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Schema drift",
+            codex_preview="Fallback",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+        resumed_thread = _session("schema-drift", path=str(rollout_path))
+        codex = mock_codex.return_value.__enter__.return_value
+        codex._client.thread_resume.return_value = SimpleNamespace(thread=resumed_thread)
+        sdk_entries = [
+            {"kind": "user", "text": "SDK user"},
+            {"kind": "agent", "text": "SDK answer"},
+        ]
+
+        with (
+            patch(
+                "hitch.main.views.rollout.session_detail_data",
+                side_effect=ValueError("unexpected rollout shape"),
+            ),
+            patch("hitch.main.views._models_for_plan_mode_fallback", return_value=[]),
+            patch("hitch.main.views._entries_for", return_value=sdk_entries),
+        ):
+            response = self.client.get(
+                reverse("session", kwargs={"session_id": "schema-drift"})
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "SDK answer")
+        codex._client.thread_resume.assert_called_once_with("schema-drift")
+
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_lazy_loads_intermediate_body(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -524,6 +572,98 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(fragment.status_code, 200)
         self.assertContains(fragment, "printf lazy-loaded-command")
         self.assertEqual(load_rollout_lines.call_count, 1)
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_session_intermediate_derives_demo_visibility_from_signed_context(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        demo_prompt = "Start an interactive web demo"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": demo_prompt},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "exec_command",
+                        "arguments": json.dumps({"cmd": "printf demo-only-command"}),
+                        "call_id": "call-demo",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Demo ready."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="demo-fragment",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Demo fragment",
+            codex_preview=demo_prompt,
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=demo.DEMO_WORKFLOW_KIND,
+            main_thread_id="demo-fragment",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="demo-fragment",
+            cwd="/repo",
+            prompt=demo_prompt,
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            display_author=demo.DEMO_DISPLAY_AUTHOR,
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=demo.DEMO_AGENT_KIND,
+            thread_id="demo-fragment",
+            instance=instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+        )
+        fragment_url = reverse(
+            "session_intermediate",
+            kwargs={"session_id": "demo-fragment", "entry_index": 1},
+        )
+
+        insecure_fragment = self.client.get(f"{fragment_url}?hide_demo=0")
+        system_response = self.client.get(
+            reverse("system_session", kwargs={"session_id": "demo-fragment"}),
+            {"run_id": run.pk},
+        )
+        demo_context = views._session_intermediate_demo_context(
+            "demo-fragment", run.pk
+        )
+        signed_fragment = self.client.get(fragment_url, {"demo_context": demo_context})
+
+        self.assertEqual(insecure_fragment.status_code, 404)
+        self.assertEqual(system_response.status_code, 200)
+        self.assertContains(system_response, "data-lazy-intermediate")
+        self.assertContains(system_response, "demo_context=")
+        self.assertNotContains(system_response, "hide_demo=0")
+        self.assertEqual(signed_fragment.status_code, 200)
+        self.assertContains(signed_fragment, "printf demo-only-command")
         mock_codex.assert_not_called()
 
     @patch("hitch.main.views._start_models_refresh_thread")
