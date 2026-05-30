@@ -56,11 +56,15 @@ _PR_VIEW_FIELDS = ",".join(
 # field), so unresolved review threads are fetched separately via ``gh api
 # graphql``.
 _REVIEW_THREADS_QUERY = (
-    "query($owner:String!,$name:String!,$number:Int!){"
+    "query($owner:String!,$name:String!,$number:Int!,$after:String){"
     "repository(owner:$owner,name:$name){pullRequest(number:$number){"
-    "reviewThreads(first:100){nodes{id isResolved isOutdated path line "
-    "comments(first:5){nodes{body url}}}}}}}"
+    "reviewThreads(first:100,after:$after){"
+    "nodes{id isResolved isOutdated path line "
+    "comments(first:5){nodes{body url}}}"
+    "pageInfo{hasNextPage endCursor}}}}}"
 )
+# Bound on review-thread pagination so a pathological PR cannot loop forever.
+_MAX_REVIEW_THREAD_PAGES = 20
 
 _GITHUB_PR_URL_RE = re.compile(
     r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([0-9]+)"
@@ -235,18 +239,22 @@ def _fetch_review_threads(
     """Return the PR's review threads via ``gh api graphql``.
 
     ``gh pr view --json`` cannot return review threads, so they are fetched
-    separately. Returns ``None`` when the threads could not be observed (bad
-    identity, CLI error, or unexpected payload) so the caller can keep the
-    unresolved-thread state unknown instead of falsely clearing it; returns a
-    (possibly empty) list on a successful query.
+    separately, paging through all threads (GitHub caps each page at 100) so a
+    PR with many conversations is observed in full. Returns ``None`` when the
+    threads could not be observed (bad identity, CLI error, unexpected payload,
+    or an incomplete page set) so the caller can keep the unresolved-thread
+    state unknown instead of falsely clearing it; returns a (possibly empty)
+    list on a fully observed query.
     """
     if not isinstance(repo_full_name, str) or "/" not in repo_full_name:
         return None
     if not isinstance(pr_number, int) or isinstance(pr_number, bool):
         return None
     owner, _, name = repo_full_name.partition("/")
-    result = _run(
-        [
+    collected: list[Any] = []
+    after: str | None = None
+    for _ in range(_MAX_REVIEW_THREAD_PAGES):
+        argv = [
             "gh",
             "api",
             "graphql",
@@ -258,20 +266,34 @@ def _fetch_review_threads(
             f"name={name}",
             "-F",
             f"number={pr_number}",
-        ],
-        cwd=cwd,
-        timeout=_GH_TIMEOUT_SECONDS,
-        check=False,
-    )
-    if result.returncode != 0:
-        logger.warning("failed to fetch review threads: %s", result.stderr.strip())
-        return None
-    parsed = _json_or_none(result.stdout)
-    try:
-        nodes = parsed["data"]["repository"]["pullRequest"]["reviewThreads"]["nodes"]
-    except (TypeError, KeyError):
-        return None
-    return nodes if isinstance(nodes, list) else None
+        ]
+        if after:
+            argv += ["-f", f"after={after}"]
+        result = _run(argv, cwd=cwd, timeout=_GH_TIMEOUT_SECONDS, check=False)
+        if result.returncode != 0:
+            logger.warning(
+                "failed to fetch review threads: %s", result.stderr.strip()
+            )
+            return None
+        parsed = _json_or_none(result.stdout)
+        try:
+            block = parsed["data"]["repository"]["pullRequest"]["reviewThreads"]
+            nodes = block["nodes"]
+            page_info = block["pageInfo"]
+        except (TypeError, KeyError):
+            return None
+        if not isinstance(nodes, list) or not isinstance(page_info, dict):
+            return None
+        collected.extend(nodes)
+        if not page_info.get("hasNextPage"):
+            return collected
+        after = page_info.get("endCursor")
+        if not isinstance(after, str) or not after:
+            return None
+    # Hit the page cap without exhausting threads: treat as unobserved rather
+    # than authoritative so the review gate stays pending.
+    logger.warning("review-thread pagination exceeded %s pages", _MAX_REVIEW_THREAD_PAGES)
+    return None
 
 
 def _snapshot_from_pr_view(data: dict[str, Any]) -> dict[str, Any]:

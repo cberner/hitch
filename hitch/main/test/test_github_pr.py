@@ -95,7 +95,8 @@ class GithubPrHelperTests(SimpleTestCase):
                                 "nodes": [
                                     {"isResolved": False, "isOutdated": False, "path": "a.py", "line": 3, "id": "t1"},
                                     {"isResolved": True, "isOutdated": False, "path": "b.py", "id": "t2"},
-                                ]
+                                ],
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
                             }
                         }
                     }
@@ -229,7 +230,8 @@ class GithubPrHelperTests(SimpleTestCase):
                                             ]
                                         },
                                     }
-                                ]
+                                ],
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
                             }
                         }
                     }
@@ -251,6 +253,87 @@ class GithubPrHelperTests(SimpleTestCase):
         bodies = [c.get("body", "") for c in snapshot["latest_comments"]]
         self.assertTrue(any("please rename this" in b for b in bodies))
         self.assertTrue(any("a.py" in b for b in bodies))
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_review_threads_paginate_across_pages(self, mock_run: MagicMock) -> None:
+        def thread_page(node_id: str, *, resolved: bool, has_next: bool, cursor: str | None) -> str:
+            return json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": [
+                                        {
+                                            "id": node_id,
+                                            "isResolved": resolved,
+                                            "isOutdated": False,
+                                            "path": "a.py",
+                                            "line": 1,
+                                        }
+                                    ],
+                                    "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+                                }
+                            }
+                        }
+                    }
+                }
+            )
+
+        calls = {"n": 0}
+
+        def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv[:3] == ["gh", "api", "graphql"]:
+                calls["n"] += 1
+                if any(a.startswith("after=") for a in argv):
+                    # Second page: an unresolved thread beyond the first 100.
+                    return _completed(argv, stdout=thread_page("t2", resolved=False, has_next=False, cursor=None))
+                return _completed(argv, stdout=thread_page("t1", resolved=True, has_next=True, cursor="CUR"))
+            return _completed(argv, stdout=json.dumps(_PR_VIEW_JSON))
+
+        mock_run.side_effect = fake_run
+
+        snapshot = github_pr.fetch_pr_snapshot("/repo", pr_number=42)
+
+        assert snapshot is not None
+        self.assertEqual(calls["n"], 2)
+        self.assertEqual(snapshot["review_thread_count"], 2)
+        # The unresolved thread on the second page must be counted.
+        self.assertEqual(snapshot["unresolved_thread_count"], 1)
+
+    @patch("hitch.main.github_pr.subprocess.run")
+    def test_review_threads_incomplete_pages_stay_unknown(
+        self, mock_run: MagicMock
+    ) -> None:
+        # A page set that never terminates (always hasNextPage) must be treated
+        # as unobserved rather than authoritative.
+        def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv[:3] == ["gh", "api", "graphql"]:
+                return _completed(
+                    argv,
+                    stdout=json.dumps(
+                        {
+                            "data": {
+                                "repository": {
+                                    "pullRequest": {
+                                        "reviewThreads": {
+                                            "nodes": [],
+                                            "pageInfo": {"hasNextPage": True, "endCursor": "CUR"},
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    ),
+                )
+            return _completed(argv, stdout=json.dumps(_PR_VIEW_JSON))
+
+        mock_run.side_effect = fake_run
+
+        snapshot = github_pr.fetch_pr_snapshot("/repo", pr_number=42)
+
+        assert snapshot is not None
+        self.assertNotIn("unresolved_thread_count", snapshot)
 
     @patch("hitch.main.github_pr.subprocess.run")
     def test_fetch_pr_snapshot_derives_merged_from_state(
