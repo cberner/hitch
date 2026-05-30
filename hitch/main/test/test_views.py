@@ -6757,7 +6757,7 @@ class NewSessionViewTests(TestCase):
     ) -> None:
         mock_discover.return_value = [Path(self.REPO)]
         mock_managed_worktrees.return_value = [Path("/repo-worktree")]
-        _setup_codex(mock_codex, models=[])
+        codex = _setup_codex(mock_codex, models=[])
         project = Project.objects.create(name="Hitch", repo_path=self.REPO)
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -6831,9 +6831,14 @@ class NewSessionViewTests(TestCase):
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
         self.assertEqual(proposal.accepted_session, candidate)
         self.assertFalse(candidate.is_hidden_system_session)
+        self.assertEqual(candidate.codex_name, "Add parser coverage")
+        self.assertEqual(candidate.codex_display_title, "Add parser coverage")
         self.assertTrue(candidate.auto_qa_enabled)
         self.assertTrue(candidate.auto_merge_to_local_branch)
         self.assertEqual(candidate.auto_merge_branch, "release")
+        codex._client.thread_set_name.assert_called_once_with(
+            "candidate-thread", "Add parser coverage"
+        )
         mock_new_session.assert_not_called()
 
     @patch("hitch.main.views._auto_merge_to_local_branch_for_proposal")
@@ -13458,7 +13463,11 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.content, b"reason is required")
         mock_cleanup.assert_not_called()
 
-    def test_accept_proposed_session_links_candidate_session(self) -> None:
+    @patch("hitch.main.views.Codex")
+    def test_accept_proposed_session_links_candidate_session(
+        self, mock_codex: MagicMock
+    ) -> None:
+        codex = _setup_codex(mock_codex, models=[])
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
         goal = AutonomousGoal.objects.create(
@@ -13484,8 +13493,14 @@ class AutonomousGoalViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         proposal.refresh_from_db()
+        candidate.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
         self.assertEqual(proposal.accepted_session, candidate)
+        self.assertEqual(candidate.codex_name, "Add parser coverage")
+        self.assertEqual(candidate.codex_display_title, "Add parser coverage")
+        codex._client.thread_set_name.assert_called_once_with(
+            "candidate-thread", "Add parser coverage"
+        )
 
     def test_dismiss_notice_updates_outcome(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")

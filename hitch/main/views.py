@@ -2891,6 +2891,15 @@ def update_proposed_session_outcome(
     # Mirror the committed values onto the instance for the cleanup side effect.
     for field, value in update_values.items():
         setattr(proposed_session, field, value)
+    if (
+        outcome_status == ProposedSession.OUTCOME_ACCEPTED
+        and proposed_session.candidate_session is not None
+    ):
+        _rename_codex_thread_from_proposal(
+            proposed_session=proposed_session,
+            session_metadata=proposed_session.candidate_session,
+            settings=_stored_settings(request),
+        )
     if outcome_status in {
         ProposedSession.OUTCOME_DISMISSED,
         ProposedSession.OUTCOME_REJECTED,
@@ -6671,6 +6680,45 @@ def _accept_proposed_session_for_session(
     return True
 
 
+def _proposed_session_thread_title(proposed_session: ProposedSession) -> str:
+    return proposed_session.title.strip()[:_NAME_MAX_LEN].rstrip()
+
+
+def _apply_proposed_session_title_to_session_metadata(
+    proposed_session: ProposedSession,
+    session_metadata: SessionMetadata,
+) -> None:
+    title = _proposed_session_thread_title(proposed_session)
+    if not title:
+        return
+    session_index.update_cached_name(session_metadata.thread_id, title)
+
+
+def _rename_codex_thread_from_proposal(
+    *,
+    proposed_session: ProposedSession,
+    session_metadata: SessionMetadata,
+    settings: SettingsValues,
+) -> bool:
+    title = _proposed_session_thread_title(proposed_session)
+    if not title:
+        return False
+    try:
+        config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
+        with Codex(config=config) as codex:
+            codex._client.thread_set_name(session_metadata.thread_id, title)
+    except Exception:
+        logger.exception(
+            "failed to rename accepted proposed session thread %s",
+            session_metadata.thread_id,
+        )
+        return False
+    _apply_proposed_session_title_to_session_metadata(
+        proposed_session, session_metadata
+    )
+    return True
+
+
 def _proposal_outcome_metadata(
     proposed_session: ProposedSession, updates: dict[str, object]
 ) -> dict[str, object]:
@@ -7853,6 +7901,11 @@ def _finish_candidate_proposal_start(
         response = redirect("inbox")
         _apply_cookie_updates(response, cookie_updates)
         return response
+    _rename_codex_thread_from_proposal(
+        proposed_session=proposed_session,
+        session_metadata=candidate_session,
+        settings=settings,
+    )
     SessionMetadata.objects.filter(pk=candidate_session.pk).update(
         cwd=candidate_cwd,
         project=session_project,
