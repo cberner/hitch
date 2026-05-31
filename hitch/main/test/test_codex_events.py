@@ -1066,6 +1066,2294 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
         self.assertEqual(snapshot["ci_status"], "success")
         self.assertEqual(snapshot["latest_commit_sha"], "abc123")
 
+    def test_recovers_pr_handoff_from_successful_gh_pr_commands_after_mcp_failure(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_create_pull_request",
+                                    "status": "failed",
+                                    "result": {
+                                        "content": [
+                                            {
+                                                "type": "text",
+                                                "text": "GitHub API error 403",
+                                            }
+                                        ]
+                                    },
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "commandExecution",
+                                    "command": "gh pr create --repo cberner-ai/raptorq-ai",
+                                    "commandActions": [
+                                        {
+                                            "command": (
+                                                "gh pr create --repo "
+                                                "cberner-ai/raptorq-ai"
+                                            )
+                                        }
+                                    ],
+                                    "aggregatedOutput": (
+                                        "https://github.com/cberner-ai/"
+                                        "raptorq-ai/pull/4\n"
+                                    ),
+                                    "status": "completed",
+                                    "exitCode": 0,
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "commandExecution",
+                                    "command": (
+                                        "/bin/bash -lc 'gh pr view 4 --repo "
+                                        "cberner-ai/raptorq-ai --json "
+                                        "number,url,title,state,headRefName,baseRefName'"
+                                    ),
+                                    "commandActions": [
+                                        {
+                                            "command": (
+                                                "gh pr view 4 --repo "
+                                                "cberner-ai/raptorq-ai --json "
+                                                "number,url,title,state,"
+                                                "headRefName,baseRefName"
+                                            )
+                                        }
+                                    ],
+                                    "aggregatedOutput": json.dumps(
+                                        {
+                                            "baseRefName": "master",
+                                            "headRefName": (
+                                                "hitch/raptorq-ai/"
+                                                "20260531162202-36a73cb5"
+                                            ),
+                                            "number": 4,
+                                            "state": "OPEN",
+                                            "title": (
+                                                "Optimize no-HDPC decode with "
+                                                "binary solver"
+                                            ),
+                                            "url": (
+                                                "https://github.com/cberner-ai/"
+                                                "raptorq-ai/pull/4"
+                                            ),
+                                        }
+                                    )
+                                    + "\n",
+                                    "status": "completed",
+                                    "exitCode": 0,
+                                },
+                            },
+                            recorded_at=30,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(
+            snapshot["url"], "https://github.com/cberner-ai/raptorq-ai/pull/4"
+        )
+        self.assertEqual(snapshot["repository_full_name"], "cberner-ai/raptorq-ai")
+        self.assertEqual(snapshot["pr_number"], 4)
+        self.assertEqual(snapshot["state"], "open")
+        self.assertEqual(snapshot["base"], "master")
+        self.assertEqual(
+            snapshot["head"], "hitch/raptorq-ai/20260531162202-36a73cb5"
+        )
+        self.assertEqual(snapshot["source_tool"], "gh_pr_view")
+
+    def test_recovers_pr_identity_from_gh_pr_view_arguments(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr -R cberner/hitch view 4 "
+                                "--json number,state,isDraft"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                {"number": 4, "state": "OPEN", "isDraft": False}
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertEqual(snapshot["pr_number"], 4)
+        self.assertEqual(snapshot["state"], "open")
+        self.assertFalse(snapshot["draft"])
+        self.assertEqual(snapshot["source_tool"], "gh_pr_view")
+
+    def test_recovers_title_only_gh_json_when_command_has_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view 4 --repo cberner/hitch --json title"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                {"title": "Recover PR handoff"}
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertEqual(snapshot["pr_number"], 4)
+        self.assertEqual(snapshot["title"], "Recover PR handoff")
+
+    def test_recovers_gh_pr_view_after_unspaced_shell_separator(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "/bin/bash -lc 'cd /workspace/hitch;"
+                                " gh pr view 4 --repo cberner/hitch --json number,url'"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                {
+                                    "number": 4,
+                                    "url": "https://github.com/cberner/hitch/pull/4",
+                                }
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertEqual(snapshot["pr_number"], 4)
+        self.assertEqual(snapshot["source_tool"], "gh_pr_view")
+
+    def test_recovers_gh_pr_view_after_shell_newline_separator(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "cd /workspace/hitch\n"
+                                "gh pr view 4 --repo cberner/hitch --json number,url"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                {
+                                    "number": 4,
+                                    "url": "https://github.com/cberner/hitch/pull/4",
+                                }
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertEqual(snapshot["pr_number"], 4)
+        self.assertEqual(snapshot["source_tool"], "gh_pr_view")
+
+    def test_recovers_env_wrapped_gh_pr_view(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "env GH_TOKEN=$token gh pr view 4 "
+                                "--repo cberner/hitch --json number,url"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                {
+                                    "number": 4,
+                                    "url": "https://github.com/cberner/hitch/pull/4",
+                                }
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertEqual(snapshot["pr_number"], 4)
+        self.assertEqual(snapshot["source_tool"], "gh_pr_view")
+
+    def test_recovers_env_option_wrapped_gh_pr_view(self) -> None:
+        for command in (
+            "env -i GH_TOKEN=$token gh pr view 4 "
+            "--repo cberner/hitch --json number,url",
+            "env -u GH_CONFIG_DIR gh pr view 4 "
+            "--repo cberner/hitch --json number,url",
+        ):
+            with self.subTest(command=command):
+                with tempfile.TemporaryDirectory() as raw:
+                    path = Path(raw) / "events.jsonl"
+                    path.write_text(
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "commandExecution",
+                                    "command": command,
+                                    "aggregatedOutput": json.dumps(
+                                        {
+                                            "number": 4,
+                                            "url": (
+                                                "https://github.com/"
+                                                "cberner/hitch/pull/4"
+                                            ),
+                                        }
+                                    ),
+                                    "status": "completed",
+                                    "exitCode": 0,
+                                },
+                            },
+                            recorded_at=10,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+
+                    snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                        [path],
+                        thread_id="thread-1",
+                    )
+
+                self.assertIsNotNone(snapshot)
+                assert snapshot is not None
+                self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+                self.assertEqual(snapshot["pr_number"], 4)
+                self.assertEqual(snapshot["source_tool"], "gh_pr_view")
+
+    def test_recovers_env_launched_shell_gh_pr_view(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "/usr/bin/env bash -lc 'gh pr view 4 "
+                                "--repo cberner/hitch --json number,url'"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                {
+                                    "number": 4,
+                                    "url": "https://github.com/cberner/hitch/pull/4",
+                                }
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertEqual(snapshot["pr_number"], 4)
+        self.assertEqual(snapshot["source_tool"], "gh_pr_view")
+
+    def test_recovers_pr_identity_from_gh_repo_assignment(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "GH_REPO=cberner/hitch gh pr view 4 "
+                                "--json number,state,isDraft"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                {"number": 4, "state": "OPEN", "isDraft": False}
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertEqual(snapshot["pr_number"], 4)
+        self.assertEqual(snapshot["state"], "open")
+        self.assertFalse(snapshot["draft"])
+        self.assertEqual(snapshot["source_tool"], "gh_pr_view")
+
+    def test_host_qualified_repo_selector_matches_result_url(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view 4 -R github.com/cberner/hitch "
+                                "--json number,url"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                {
+                                    "number": 4,
+                                    "url": "https://github.com/cberner/hitch/pull/4",
+                                }
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertEqual(snapshot["pr_number"], 4)
+
+    def test_inline_gh_pr_option_value_preserves_positional_pr_number(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view --repo cberner/hitch "
+                                "--json=state,isDraft 4"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                {"state": "OPEN", "isDraft": True}
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertEqual(snapshot["pr_number"], 4)
+        self.assertTrue(snapshot["draft"])
+        self.assertEqual(snapshot["source_tool"], "gh_pr_view")
+
+    def test_recovers_pr_number_from_gh_pr_view_jq_output(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view --repo cberner/hitch "
+                                "--json number --jq .number"
+                            ),
+                            "aggregatedOutput": "4\n",
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertEqual(snapshot["pr_number"], 4)
+        self.assertEqual(snapshot["source_tool"], "gh_pr_view")
+
+    def test_gh_pr_view_jq_non_number_output_does_not_seed_pr_number(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view --repo cberner/hitch "
+                                "--json comments --jq '.comments | length'"
+                            ),
+                            "aggregatedOutput": "3\n",
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_gh_pr_view_jq_body_url_does_not_seed_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view --repo cberner/hitch "
+                                "--json body --jq .body"
+                            ),
+                            "aggregatedOutput": (
+                                "See https://github.com/cberner/hitch/pull/5\n"
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_gh_pr_view_template_body_url_does_not_seed_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view --repo cberner/hitch "
+                                "--json body --template '{{.body}}'"
+                            ),
+                            "aggregatedOutput": (
+                                "See https://github.com/cberner/hitch/pull/5\n"
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_gh_pr_view_jq_nested_array_does_not_seed_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view 4 --repo cberner/hitch "
+                                "--json latestReviews --jq '.latestReviews'"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                [{"state": "APPROVED", "author": {"login": "alice"}}]
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_gh_pr_view_jq_nested_object_does_not_seed_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view 4 --repo cberner/hitch "
+                                "--json latestReviews --jq '.latestReviews[0]'"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                {"state": "APPROVED", "author": {"login": "alice"}}
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_gh_pr_view_jq_identity_object_seeds_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view --repo cberner/hitch "
+                                "--json number,url,state --jq '{number,url,state}'"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                {
+                                    "number": 4,
+                                    "url": "https://github.com/cberner/hitch/pull/4",
+                                    "state": "OPEN",
+                                }
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertEqual(snapshot["pr_number"], 4)
+        self.assertEqual(snapshot["state"], "open")
+
+    def test_gh_pr_view_jq_transformed_object_does_not_copy_gate_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view --repo cberner/hitch "
+                                "--json number,url,body --jq '{number,url,state:.body}'"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                {
+                                    "number": 4,
+                                    "url": "https://github.com/cberner/hitch/pull/4",
+                                    "state": "MERGED",
+                                }
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_gh_pr_view_jq_computed_identity_object_does_not_seed_snapshot(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view --repo cberner/hitch "
+                                "--json comments,state "
+                                "--jq '{number: (.comments | length), state}'"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                {"number": 3, "state": "OPEN"}
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_gh_pr_view_merged_state_marks_snapshot_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view "
+                                "https://github.com/cberner/hitch/pull/4 "
+                                "--json number,state,url"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                {
+                                    "number": 4,
+                                    "state": "MERGED",
+                                    "url": (
+                                        "https://github.com/cberner/hitch/pull/4"
+                                    ),
+                                }
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["state"], "closed")
+        self.assertTrue(snapshot["merged"])
+
+    def test_gh_pr_view_merged_at_marks_snapshot_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view 4 --repo cberner/hitch "
+                                "--json number,url,mergedAt"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                {
+                                    "number": 4,
+                                    "url": "https://github.com/cberner/hitch/pull/4",
+                                    "mergedAt": "2026-05-31T19:50:00Z",
+                                }
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["state"], "closed")
+        self.assertTrue(snapshot["merged"])
+        self.assertEqual(snapshot["merged_at"], "2026-05-31T19:50:00Z")
+
+    def test_gh_pr_view_closed_fields_mark_snapshot_terminal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view 4 --repo cberner/hitch "
+                                "--json number,url,closed,closedAt"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                {
+                                    "closed": True,
+                                    "closedAt": "2026-05-31T20:20:00Z",
+                                    "number": 4,
+                                    "url": "https://github.com/cberner/hitch/pull/4",
+                                }
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["state"], "closed")
+        self.assertEqual(snapshot["closed_at"], "2026-05-31T20:20:00Z")
+
+    def test_gh_pr_view_mergeable_enum_maps_to_boolean(self) -> None:
+        for raw_mergeable, expected in (("MERGEABLE", True), ("CONFLICTING", False)):
+            with self.subTest(raw_mergeable=raw_mergeable):
+                with tempfile.TemporaryDirectory() as raw:
+                    path = Path(raw) / "events.jsonl"
+                    path.write_text(
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "commandExecution",
+                                    "command": (
+                                        "gh pr view 4 --repo cberner/hitch "
+                                        "--json number,url,mergeable"
+                                    ),
+                                    "aggregatedOutput": json.dumps(
+                                        {
+                                            "mergeable": raw_mergeable,
+                                            "number": 4,
+                                            "url": (
+                                                "https://github.com/"
+                                                "cberner/hitch/pull/4"
+                                            ),
+                                        }
+                                    ),
+                                    "status": "completed",
+                                    "exitCode": 0,
+                                },
+                            },
+                            recorded_at=10,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+
+                    snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                        [path],
+                        thread_id="thread-1",
+                    )
+
+                self.assertIsNotNone(snapshot)
+                assert snapshot is not None
+                self.assertIs(snapshot["mergeable"], expected)
+
+    def test_gh_pr_view_unknown_mergeable_clears_stale_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "commandExecution",
+                                    "command": (
+                                        "gh pr view 4 --repo cberner/hitch "
+                                        "--json number,url,mergeable"
+                                    ),
+                                    "aggregatedOutput": json.dumps(
+                                        {
+                                            "mergeable": "CONFLICTING",
+                                            "number": 4,
+                                            "url": (
+                                                "https://github.com/"
+                                                "cberner/hitch/pull/4"
+                                            ),
+                                        }
+                                    ),
+                                    "status": "completed",
+                                    "exitCode": 0,
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "commandExecution",
+                                    "command": (
+                                        "gh pr view 4 --repo cberner/hitch "
+                                        "--json number,url,mergeable"
+                                    ),
+                                    "aggregatedOutput": json.dumps(
+                                        {
+                                            "mergeable": "UNKNOWN",
+                                            "number": 4,
+                                            "url": (
+                                                "https://github.com/"
+                                                "cberner/hitch/pull/4"
+                                            ),
+                                        }
+                                    ),
+                                    "status": "completed",
+                                    "exitCode": 0,
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["mergeable"], "")
+
+    def test_gh_pr_view_review_decision_maps_to_review_signal(self) -> None:
+        cases = (
+            ("APPROVED", "approved"),
+            ("CHANGES_REQUESTED", "changes_requested"),
+        )
+        for raw_decision, expected in cases:
+            with self.subTest(raw_decision=raw_decision):
+                with tempfile.TemporaryDirectory() as raw:
+                    path = Path(raw) / "events.jsonl"
+                    path.write_text(
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "commandExecution",
+                                    "command": (
+                                        "gh pr view 4 --repo cberner/hitch "
+                                        "--json number,url,isDraft,reviewDecision"
+                                    ),
+                                    "aggregatedOutput": json.dumps(
+                                        {
+                                            "isDraft": False,
+                                            "number": 4,
+                                            "reviewDecision": raw_decision,
+                                            "url": (
+                                                "https://github.com/"
+                                                "cberner/hitch/pull/4"
+                                            ),
+                                        }
+                                    ),
+                                    "status": "completed",
+                                    "exitCode": 0,
+                                },
+                            },
+                            recorded_at=10,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+
+                    snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                        [path],
+                        thread_id="thread-1",
+                    )
+
+                self.assertIsNotNone(snapshot)
+                assert snapshot is not None
+                self.assertEqual(snapshot["review_signal"], expected)
+
+    def test_review_required_decision_clears_stale_review_signal(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "commandExecution",
+                                    "command": (
+                                        "gh pr view 4 --repo cberner/hitch "
+                                        "--json number,url,reviewDecision"
+                                    ),
+                                    "aggregatedOutput": json.dumps(
+                                        {
+                                            "number": 4,
+                                            "reviewDecision": "CHANGES_REQUESTED",
+                                            "url": (
+                                                "https://github.com/"
+                                                "cberner/hitch/pull/4"
+                                            ),
+                                        }
+                                    ),
+                                    "status": "completed",
+                                    "exitCode": 0,
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "commandExecution",
+                                    "command": (
+                                        "gh pr view 4 --repo cberner/hitch "
+                                        "--json number,url,reviewDecision"
+                                    ),
+                                    "aggregatedOutput": json.dumps(
+                                        {
+                                            "number": 4,
+                                            "reviewDecision": "REVIEW_REQUIRED",
+                                            "url": (
+                                                "https://github.com/"
+                                                "cberner/hitch/pull/4"
+                                            ),
+                                        }
+                                    ),
+                                    "status": "completed",
+                                    "exitCode": 0,
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["review_signal"], "")
+
+    def test_gh_status_check_rollup_clears_stale_ci_jobs(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "commandExecution",
+                                    "command": (
+                                        "gh pr view 4 --repo cberner/hitch "
+                                        "--json number,url,statusCheckRollup"
+                                    ),
+                                    "aggregatedOutput": json.dumps(
+                                        {
+                                            "number": 4,
+                                            "statusCheckRollup": [
+                                                {
+                                                    "conclusion": "FAILURE",
+                                                    "name": "ci",
+                                                    "status": "COMPLETED",
+                                                }
+                                            ],
+                                            "url": (
+                                                "https://github.com/"
+                                                "cberner/hitch/pull/4"
+                                            ),
+                                        }
+                                    ),
+                                    "status": "completed",
+                                    "exitCode": 0,
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "commandExecution",
+                                    "command": (
+                                        "gh pr view 4 --repo cberner/hitch "
+                                        "--json number,url,statusCheckRollup"
+                                    ),
+                                    "aggregatedOutput": json.dumps(
+                                        {
+                                            "number": 4,
+                                            "statusCheckRollup": [
+                                                {
+                                                    "conclusion": "SUCCESS",
+                                                    "name": "ci",
+                                                    "status": "COMPLETED",
+                                                }
+                                            ],
+                                            "url": (
+                                                "https://github.com/"
+                                                "cberner/hitch/pull/4"
+                                            ),
+                                        }
+                                    ),
+                                    "status": "completed",
+                                    "exitCode": 0,
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["ci_status"], "success")
+        self.assertEqual(snapshot["failing_jobs"], [])
+        self.assertEqual(snapshot["pending_jobs"], [])
+
+    def test_gh_status_check_rollup_expected_state_is_pending(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view 4 --repo cberner/hitch "
+                                "--json number,url,statusCheckRollup"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                {
+                                    "number": 4,
+                                    "statusCheckRollup": [
+                                        {
+                                            "conclusion": "SUCCESS",
+                                            "name": "unit",
+                                            "status": "COMPLETED",
+                                        },
+                                        {
+                                            "context": "required-check",
+                                            "state": "EXPECTED",
+                                        },
+                                    ],
+                                    "url": "https://github.com/cberner/hitch/pull/4",
+                                }
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["ci_status"], "pending")
+        self.assertEqual(snapshot["failing_jobs"], [])
+        self.assertEqual(snapshot["pending_jobs"], ["required-check"])
+
+    def test_gh_head_change_clears_stale_status_rollup(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "commandExecution",
+                                    "command": (
+                                        "gh pr view 4 --repo cberner/hitch "
+                                        "--json number,url,headRefOid,"
+                                        "statusCheckRollup"
+                                    ),
+                                    "aggregatedOutput": json.dumps(
+                                        {
+                                            "headRefOid": "head-a",
+                                            "number": 4,
+                                            "statusCheckRollup": [
+                                                {
+                                                    "conclusion": "FAILURE",
+                                                    "name": "ci",
+                                                    "status": "COMPLETED",
+                                                }
+                                            ],
+                                            "url": (
+                                                "https://github.com/"
+                                                "cberner/hitch/pull/4"
+                                            ),
+                                        }
+                                    ),
+                                    "status": "completed",
+                                    "exitCode": 0,
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "commandExecution",
+                                    "command": (
+                                        "gh pr view 4 --repo cberner/hitch "
+                                        "--json number,url,headRefOid"
+                                    ),
+                                    "aggregatedOutput": json.dumps(
+                                        {
+                                            "headRefOid": "head-b",
+                                            "number": 4,
+                                            "url": (
+                                                "https://github.com/"
+                                                "cberner/hitch/pull/4"
+                                            ),
+                                        }
+                                    ),
+                                    "status": "completed",
+                                    "exitCode": 0,
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["head_sha"], "head-b")
+        self.assertNotIn("ci_status", snapshot)
+        self.assertNotIn("failing_jobs", snapshot)
+        self.assertNotIn("pending_jobs", snapshot)
+
+    def test_ignores_non_gh_command_output_with_pr_url(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": "echo https://github.com/cberner/hitch/pull/169",
+                            "aggregatedOutput": (
+                                "https://github.com/cberner/hitch/pull/169\n"
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_ignores_echoed_gh_pr_command_text(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": "echo gh pr view 4 --repo cberner/hitch",
+                            "aggregatedOutput": (
+                                "gh pr view 4 --repo cberner/hitch\n"
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_short_circuited_gh_branch_does_not_seed_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "printf '{\"state\":\"OPEN\"}' || "
+                                "gh pr view 4 --repo cberner/hitch --json state"
+                            ),
+                            "aggregatedOutput": '{"state":"OPEN"}',
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_successful_and_gh_chain_recovers_pr_url(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "git push && gh pr create --repo cberner/hitch"
+                            ),
+                            "aggregatedOutput": (
+                                "https://github.com/cberner/hitch/pull/4\n"
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertEqual(snapshot["pr_number"], 4)
+        self.assertEqual(snapshot["source_tool"], "gh_pr_create")
+
+    def test_successful_and_gh_chain_recovers_pr_url_with_stderr_redirect(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "git push && gh pr create --repo cberner/hitch 2>&1"
+                            ),
+                            "aggregatedOutput": (
+                                "https://github.com/cberner/hitch/pull/4\n"
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertEqual(snapshot["pr_number"], 4)
+        self.assertEqual(snapshot["source_tool"], "gh_pr_create")
+
+    def test_noop_and_handler_keeps_gh_output_trusted(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view 4 --repo cberner/hitch --json state "
+                                "&& true"
+                            ),
+                            "aggregatedOutput": json.dumps({"state": "OPEN"}),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertEqual(snapshot["pr_number"], 4)
+        self.assertEqual(snapshot["state"], "open")
+
+    def test_skipped_and_gh_branch_does_not_seed_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "false && gh pr view 4 --repo cberner/hitch "
+                                "--json number,url ; "
+                                "echo https://github.com/cberner/hitch/pull/4"
+                            ),
+                            "aggregatedOutput": (
+                                "https://github.com/cberner/hitch/pull/4\n"
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_command_action_fragment_does_not_bypass_shell_controls(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "false && gh pr view 4 --repo cberner/hitch "
+                                "--json number,url ; "
+                                "echo https://github.com/cberner/hitch/pull/4"
+                            ),
+                            "commandActions": [
+                                {
+                                    "command": (
+                                        "gh pr view 4 --repo cberner/hitch "
+                                        "--json number,url"
+                                    )
+                                }
+                            ],
+                            "aggregatedOutput": (
+                                "https://github.com/cberner/hitch/pull/4\n"
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_conflicting_shell_output_does_not_override_gh_target(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view 4 --repo cberner/hitch --json state ; "
+                                "echo https://github.com/cberner/hitch/pull/5"
+                            ),
+                            "aggregatedOutput": (
+                                '{"state":"OPEN"}\n'
+                                "https://github.com/cberner/hitch/pull/5\n"
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_later_shell_output_does_not_validate_gh_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view 999 --repo cberner/hitch "
+                                "--json number,url ; "
+                                "echo https://github.com/cberner/hitch/pull/999"
+                            ),
+                            "aggregatedOutput": (
+                                "https://github.com/cberner/hitch/pull/999\n"
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_piped_gh_output_does_not_seed_pr_url(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view --repo cberner/hitch --json body "
+                                "| jq -r .body"
+                            ),
+                            "aggregatedOutput": (
+                                "See https://github.com/cberner/hitch/pull/5\n"
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_masked_gh_output_does_not_trust_argument_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view 999 --repo cberner/hitch "
+                                "--json number | true"
+                            ),
+                            "aggregatedOutput": "",
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_empty_gh_json_output_does_not_trust_argument_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view 999 --repo cberner/hitch "
+                                "--json number || echo '{}'"
+                            ),
+                            "aggregatedOutput": "{}",
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_fallback_state_json_does_not_trust_argument_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view 999 --repo cberner/hitch "
+                                "--json state || echo '{\"state\":\"OPEN\"}'"
+                            ),
+                            "aggregatedOutput": '{"state":"OPEN"}',
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_fallback_identity_json_does_not_seed_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view 999 --repo cberner/hitch "
+                                "--json number,url || "
+                                "echo '{\"number\":999,"
+                                "\"url\":\"https://github.com/cberner/hitch/pull/999\"}'"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                {
+                                    "number": 999,
+                                    "url": (
+                                        "https://github.com/"
+                                        "cberner/hitch/pull/999"
+                                    ),
+                                }
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_fallback_pr_url_does_not_seed_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view 999 --repo cberner/hitch "
+                                "--json number,url || "
+                                "echo https://github.com/cberner/hitch/pull/999"
+                            ),
+                            "aggregatedOutput": (
+                                "https://github.com/cberner/hitch/pull/999\n"
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_non_output_error_handler_allows_argument_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr view 4 --repo cberner/hitch "
+                                "--json state,isDraft || exit 1"
+                            ),
+                            "aggregatedOutput": json.dumps(
+                                {"state": "OPEN", "isDraft": False}
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertEqual(snapshot["pr_number"], 4)
+        self.assertEqual(snapshot["state"], "open")
+        self.assertFalse(snapshot["draft"])
+
+    def test_variable_repo_selector_does_not_seed_handoff_without_url(self) -> None:
+        commands = (
+            "GH_REPO=$GITHUB_REPOSITORY gh pr view 4 --json number,state",
+            "gh pr view 4 --repo $repo --json number,state",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                with tempfile.TemporaryDirectory() as raw:
+                    path = Path(raw) / "events.jsonl"
+                    path.write_text(
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "commandExecution",
+                                    "command": command,
+                                    "aggregatedOutput": json.dumps(
+                                        {"number": 4, "state": "OPEN"}
+                                    ),
+                                    "status": "completed",
+                                    "exitCode": 0,
+                                },
+                            },
+                            recorded_at=10,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+
+                    snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                        [path],
+                        thread_id="thread-1",
+                    )
+
+                self.assertIsNone(snapshot)
+
+    def test_gh_pr_list_limited_output_does_not_replace_existing_handoff(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                "\n".join(
+                    [
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "mcpToolCall",
+                                    "server": "codex_apps",
+                                    "tool": "github_create_pull_request",
+                                    "result": {
+                                        "structuredContent": {
+                                            "url": (
+                                                "https://github.com/cberner/"
+                                                "hitch/pull/4"
+                                            ),
+                                            "number": 4,
+                                            "state": "open",
+                                        }
+                                    },
+                                },
+                            },
+                            recorded_at=10,
+                        ),
+                        _event(
+                            "item/completed",
+                            {
+                                "threadId": "thread-1",
+                                "item": {
+                                    "type": "commandExecution",
+                                    "command": (
+                                        "gh pr list --repo cberner/hitch "
+                                        "--limit 1 --json number,url,state"
+                                    ),
+                                    "aggregatedOutput": json.dumps(
+                                        [
+                                            {
+                                                "number": 5,
+                                                "state": "OPEN",
+                                                "url": (
+                                                    "https://github.com/"
+                                                    "cberner/hitch/pull/5"
+                                                ),
+                                            },
+                                        ]
+                                    ),
+                                    "status": "completed",
+                                    "exitCode": 0,
+                                },
+                            },
+                            recorded_at=20,
+                        ),
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["url"], "https://github.com/cberner/hitch/pull/4")
+        self.assertEqual(snapshot["pr_number"], 4)
+        self.assertEqual(snapshot["source_tool"], "create_pull_request")
+
+    def test_gh_pr_create_value_options_do_not_become_pr_number(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": (
+                                "gh pr create --repo cberner/hitch --web "
+                                "--project 123 --reviewer 456 "
+                                "--milestone 789 --recover 321 "
+                                "-p 654 -r 987 -m 111 -a 222 -l 333"
+                            ),
+                            "aggregatedOutput": "",
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_gh_pr_create_web_branch_url_is_not_pr_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": "gh pr create --repo cberner/hitch --web",
+                            "aggregatedOutput": (
+                                "https://github.com/cberner/hitch/pull/123-fix\n"
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_gh_pr_create_web_slash_branch_url_is_not_pr_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": "gh pr create --repo cberner/hitch --web",
+                            "aggregatedOutput": (
+                                "https://github.com/cberner/hitch/pull/123/fix\n"
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNone(snapshot)
+
+    def test_gh_pr_new_alias_recovers_created_pr(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.jsonl"
+            path.write_text(
+                _event(
+                    "item/completed",
+                    {
+                        "threadId": "thread-1",
+                        "item": {
+                            "type": "commandExecution",
+                            "command": "gh pr new --repo cberner/hitch",
+                            "aggregatedOutput": (
+                                "https://github.com/cberner/hitch/pull/4\n"
+                            ),
+                            "status": "completed",
+                            "exitCode": 0,
+                        },
+                    },
+                    recorded_at=10,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+                [path],
+                thread_id="thread-1",
+            )
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["repository_full_name"], "cberner/hitch")
+        self.assertEqual(snapshot["pr_number"], 4)
+        self.assertEqual(snapshot["source_tool"], "gh_pr_create")
+
     def test_latest_pr_identity_replaces_stale_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "events.jsonl"

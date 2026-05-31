@@ -4721,16 +4721,16 @@ def _merge_pr_handoff_dicts(
                 "latest_commit_sha": canonical_head_sha,
             }
     for key, value in update.items():
-        # ``None`` and ``""`` are "absent" for every key except
-        # ``review_signal``, which uses ``""`` as the explicit reviews-clear
-        # sentinel (see ``codex_events._copy_review_fields``). Empty
-        # list/dict updates are "observed and found none" overwrites.
-        # Reaction-derived ``thumbs_up`` is held back from the clear since
-        # the reviews tool does not speak for it.
+        # ``None`` and ``""`` are "absent" for every key except explicit
+        # gate clears. Empty list/dict updates are "observed and found none"
+        # overwrites. Reaction-derived ``thumbs_up`` is held back from the
+        # review clear since the reviews tool does not speak for it.
         if value is None:
             continue
         if value == "":
-            if key == "review_signal" and merged.get(key) != "thumbs_up":
+            if key == "mergeable" or (
+                key == "review_signal" and merged.get(key) != "thumbs_up"
+            ):
                 merged.pop(key, None)
             continue
         merged[key] = value
@@ -4816,9 +4816,9 @@ def _compact_pr_handoff(value: Any) -> dict[str, Any]:
             stripped = raw.strip()
             if stripped:
                 compact[key] = stripped
-            elif key == "review_signal":
-                # ``""`` is the explicit reviews-clear sentinel; preserve
-                # it so ``_merge_pr_handoff_dicts`` can drop a stale verdict.
+            elif key in {"mergeable", "review_signal"}:
+                # ``""`` is an explicit gate-clear sentinel; preserve it so
+                # ``_merge_pr_handoff_dicts`` can drop stale gate observations.
                 compact[key] = ""
         elif key in _PR_HANDOFF_LIST_FIELDS and isinstance(raw, list):
             compact[key] = _compact_pr_list(raw)

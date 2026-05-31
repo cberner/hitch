@@ -4412,6 +4412,21 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertNotIn("mergeable", merged)
         self.assertNotIn("ci_status", merged)
 
+    def test_pr_handoff_mergeable_clear_drops_stale_conflict(self) -> None:
+        merged = system_agents._merge_pr_handoff_dicts(
+            {
+                "pr_number": 169,
+                "mergeable": False,
+            },
+            {
+                "pr_number": 169,
+                "mergeable": "",
+            },
+        )
+
+        self.assertEqual(merged["pr_number"], 169)
+        self.assertNotIn("mergeable", merged)
+
     def test_pr_handoff_head_change_clears_workflow_gate_state(self) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
