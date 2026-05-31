@@ -4843,10 +4843,17 @@ class AutonomousGoalWorkflowTests(TestCase):
             SessionMetadata.objects.filter(thread_id="candidate-thread").exists()
         )
 
+    @patch(
+        "hitch.main.system_agents.default_branch_commit_hash",
+        return_value="a" * 40,
+    )
     @patch("hitch.main.system_agents.create_worktree_for_session")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_workflow_starts_candidate_thread_in_worktree_when_requested(
-        self, mock_spawn: MagicMock, mock_worktree: MagicMock
+        self,
+        mock_spawn: MagicMock,
+        mock_worktree: MagicMock,
+        _mock_default_sha: MagicMock,
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         autonomous_goal = AutonomousGoal.objects.create(
@@ -4866,7 +4873,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             use_worktrees=True,
         )
 
-        mock_worktree.assert_called_once_with("/repo")
+        mock_worktree.assert_called_once_with("/repo", base_ref="a" * 40)
         self.assertEqual(workflow.cwd, "/repo")
         self.assertTrue(workflow.state["use_worktrees"])
         self.assertEqual(workflow.state["session_cwd"], "/repo-worktree")
@@ -4885,12 +4892,17 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(run.input["cwd"], "/repo-worktree")
 
     @patch("hitch.main.system_agents.cleanup_worktree")
+    @patch(
+        "hitch.main.system_agents.default_branch_commit_hash",
+        return_value="a" * 40,
+    )
     @patch("hitch.main.system_agents.create_worktree_for_session")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_workflow_cleans_up_candidate_worktree_when_spawn_fails(
         self,
         mock_spawn: MagicMock,
         mock_worktree: MagicMock,
+        _mock_default_sha: MagicMock,
         mock_cleanup: MagicMock,
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -4913,7 +4925,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
 
     @patch(
-        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        "hitch.main.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -4944,10 +4956,60 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertTrue(workflow.state["auto_proposal"])
         self.assertTrue(workflow.state["use_worktrees"])
         self.assertEqual(workflow.state["session_cwd"], "/repo-worktree")
-        self.mock_create_worktree.assert_called_with("/repo")
+        self.mock_create_worktree.assert_called_with("/repo", base_ref="a" * 40)
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.system_agents.default_branch_checkout_commit_hash")
+    @patch(
+        "hitch.main.system_agents.default_branch_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch(
+        "hitch.main.system_agents.commit_hash_for_ref",
+        return_value="b" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_with_auto_merge_uses_target_branch_snapshot(
+        self,
+        mock_spawn: MagicMock,
+        mock_ref_sha: MagicMock,
+        mock_default_sha: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Keep release tests current",
+            goal="Find useful test improvements for release.",
+            auto_proposal_enabled=True,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            auto_qa_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="release",
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 1)
+        workflow = SystemWorkflow.objects.get()
+        self.assertEqual(workflow.state["default_branch_sha"], "b" * 40)
+        mock_ref_sha.assert_called_once_with("/repo", "refs/heads/release")
+        mock_default_sha.assert_not_called()
+        self.mock_create_worktree.assert_called_with(
+            "/repo",
+            base_ref="b" * 40,
+            disable_hooks=True,
+        )
+        self.assertEqual(
+            workflow.main_thread_id,
+            system_agents._autonomous_goal_main_thread_id(autonomous_goal.pk),
+        )
+        mock_spawn.assert_called_once()
+
+    @patch("hitch.main.system_agents.default_branch_commit_hash")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_rechecks_enablement_after_lock(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
@@ -5003,7 +5065,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             [first.pk, second.pk],
         )
 
-    @patch("hitch.main.system_agents.default_branch_checkout_commit_hash")
+    @patch("hitch.main.system_agents.default_branch_commit_hash")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_pauses_when_usage_quota_is_low(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
@@ -5025,7 +5087,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        "hitch.main.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -5070,7 +5132,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
 
     @patch(
-        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        "hitch.main.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -5120,7 +5182,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(SystemWorkflow.objects.count(), 2)
 
     @patch(
-        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        "hitch.main.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -5156,7 +5218,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
 
     @patch(
-        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        "hitch.main.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -5201,7 +5263,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        "hitch.main.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -5248,7 +5310,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        "hitch.main.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -5296,7 +5358,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        "hitch.main.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -5356,7 +5418,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        "hitch.main.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -5391,7 +5453,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        "hitch.main.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -5425,11 +5487,11 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
 
     @patch(
-        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        "hitch.main.system_agents.default_branch_commit_hash",
         return_value=None,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_auto_proposal_waits_for_checkout_at_default_branch(
+    def test_auto_proposal_waits_when_base_branch_is_unavailable(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -5447,7 +5509,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_default_sha.assert_called_once_with("/repo")
 
     @patch(
-        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        "hitch.main.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch(
@@ -5499,7 +5561,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
 
     @patch(
-        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        "hitch.main.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch(
@@ -5559,7 +5621,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_reconcile_dead.assert_called_once_with()
         self.assertEqual(mock_spawn.call_count, 2)
 
-    @patch("hitch.main.system_agents.default_branch_checkout_commit_hash")
+    @patch("hitch.main.system_agents.default_branch_commit_hash")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_waits_for_default_branch_change_after_no_proposal(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
@@ -5591,7 +5653,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(started, 1)
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.system_agents.default_branch_checkout_commit_hash")
+    @patch("hitch.main.system_agents.default_branch_commit_hash")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_auto_no_proposal_records_and_suppresses_until_branch_changes(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
@@ -5985,7 +6047,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(autonomous_goal.auto_proposal_last_no_proposal_sha, "a" * 40)
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.system_agents.default_branch_checkout_commit_hash")
+    @patch("hitch.main.system_agents.default_branch_commit_hash")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_no_proposal_records_workflow_start_sha_snapshot(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
@@ -6028,7 +6090,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_default_sha.assert_called_once_with("/repo")
 
     @patch(
-        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        "hitch.main.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -6066,7 +6128,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_default_sha.assert_not_called()
 
     @patch(
-        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        "hitch.main.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -6497,7 +6559,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(proposal.outcome_metadata["auto_merge_branch"], "release")
 
     @patch(
-        "hitch.main.system_agents.default_branch_checkout_commit_hash",
+        "hitch.main.system_agents.default_branch_commit_hash",
         return_value=None,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")

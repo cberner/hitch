@@ -7,6 +7,7 @@ from django.test import TestCase
 
 from hitch.main import repos
 from hitch.main.repos import (
+    commit_hash_for_ref,
     default_branch_checkout_commit_hash,
     default_branch_commit_hash,
     discover_repos,
@@ -182,7 +183,7 @@ class DiscoverReposTests(TestCase):
             self.assertEqual(default_branch_commit_hash(repo), stable_sha)
             self.assertEqual(default_branch_checkout_commit_hash(repo), stable_sha)
 
-    def test_default_branch_commit_hash_does_not_guess_named_branch_with_custom_local(
+    def test_default_branch_commit_hash_uses_named_branch_with_custom_local(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
@@ -197,10 +198,51 @@ class DiscoverReposTests(TestCase):
             _git(repo, "checkout", "-b", "main")
             (repo / "README.md").write_text("main\n")
             _git(repo, "commit", "-am", "main")
+            main_sha = _git(repo, "rev-parse", "HEAD")
             _git(repo, "checkout", "stable")
 
-            self.assertIsNone(default_branch_commit_hash(repo))
+            self.assertEqual(default_branch_commit_hash(repo), main_sha)
             self.assertIsNone(default_branch_checkout_commit_hash(repo))
+
+    def test_default_branch_commit_hash_uses_named_branch_with_feature_checkout(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            repo = Path(raw_root) / "repo"
+            repo.mkdir()
+            _git(repo, "init", "--initial-branch=master")
+            _git(repo, "config", "user.email", "dev@example.com")
+            _git(repo, "config", "user.name", "Dev")
+            (repo / "README.md").write_text("master\n")
+            _git(repo, "add", "README.md")
+            _git(repo, "commit", "-m", "master")
+            master_sha = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "checkout", "-b", "feature")
+            (repo / "README.md").write_text("feature\n")
+            _git(repo, "commit", "-am", "feature")
+
+            self.assertEqual(default_branch_commit_hash(repo), master_sha)
+            self.assertIsNone(default_branch_checkout_commit_hash(repo))
+
+    def test_commit_hash_for_ref_returns_ref_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            repo = Path(raw_root) / "repo"
+            repo.mkdir()
+            _git(repo, "init", "--initial-branch=master")
+            _git(repo, "config", "user.email", "dev@example.com")
+            _git(repo, "config", "user.name", "Dev")
+            (repo / "README.md").write_text("master\n")
+            _git(repo, "add", "README.md")
+            _git(repo, "commit", "-m", "master")
+            _git(repo, "checkout", "-b", "release")
+            (repo / "README.md").write_text("release\n")
+            _git(repo, "commit", "-am", "release")
+            release_sha = _git(repo, "rev-parse", "HEAD")
+
+            self.assertEqual(
+                commit_hash_for_ref(repo, "refs/heads/release"), release_sha
+            )
+            self.assertIsNone(commit_hash_for_ref(repo, "refs/heads/missing"))
 
     def test_default_branch_checkout_rejects_ambiguous_local_named_branches(
         self,
