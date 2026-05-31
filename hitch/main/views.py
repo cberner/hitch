@@ -3311,19 +3311,6 @@ def _render_session_detail(
         and active_system_workflow.kind == SystemWorkflow.KIND_PR_QA
         else latest_pr_workflow
     )
-    # Prefer the PR Hitch opened itself (persisted on metadata or carried in the
-    # PR-QA workflow handoff) over the Codex GitHub-MCP rollout parse, which is
-    # now only a fallback for PRs a coding agent opened on its own. Use the
-    # PR-QA workflow specifically -- an unrelated active workflow (demo/spec)
-    # carries no PR handoff and would otherwise hide a known PR link.
-    pr_url = (
-        _hitch_pr_url(metadata, stage_pr_workflow)
-        or (
-            rollout_data.latest_pr_url
-            if rollout_data is not None
-            else _pr_url_for_thread(thread)
-        )
-    )
     stage_context: dict[str, str] | None = None
     if not read_only:
         pr_observation = (
@@ -3358,6 +3345,19 @@ def _render_session_detail(
         ):
             _update_cached_stage(session_id, stage, stage_cache_mtime_ns)
         stage_context = stage.as_context()
+    # Prefer the PR Hitch opened itself (persisted on metadata or carried in the
+    # PR-QA workflow handoff) over the Codex GitHub-MCP rollout parse, which is
+    # now only a fallback for PRs a coding agent opened on its own. ``stage_pr_workflow``
+    # has been lifecycle-filtered above, so a PR-QA workflow superseded by later
+    # main-thread work no longer surfaces a stale ``View PR`` link via its handoff.
+    pr_url = (
+        _hitch_pr_url(metadata, stage_pr_workflow)
+        or (
+            rollout_data.latest_pr_url
+            if rollout_data is not None
+            else _pr_url_for_thread(thread)
+        )
+    )
     show_active_worker_transcript = _show_active_worker_transcript(active_instance)
     active_demo_worker = (
         active_instance is not None and active_instance.agent_kind == demo.DEMO_AGENT_KIND

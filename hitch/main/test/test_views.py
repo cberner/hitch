@@ -1000,6 +1000,10 @@ class SessionDetailFastPathTests(TestCase):
             '<span class="stage-badge" data-tone="active">Implementation</span>',
         )
         self.assertNotContains(response, "Done: Closed")
+        # The PR-QA workflow was superseded by the later main-thread turn, so
+        # its handoff PR must not surface a stale View PR link.
+        self.assertNotContains(response, ">View PR<")
+        self.assertNotContains(response, pr_url)
         metadata.refresh_from_db()
         self.assertEqual(metadata.derived_stage, "implementation")
         mock_codex.assert_not_called()
