@@ -69,7 +69,7 @@ _MAX_REVIEW_THREAD_PAGES = 20
 # Accept any host (github.com or a GitHub Enterprise host) so PR identity is
 # parsed for enterprise PRs too; ``gh`` itself targets the configured host.
 _GITHUB_PR_URL_RE = re.compile(
-    r"https://[^/]+/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([0-9]+)"
+    r"https://([^/]+)/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([0-9]+)"
 )
 _SUCCESS_CONCLUSIONS = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
 _PR_TEXT_MAX_CHARS = 500
@@ -125,16 +125,41 @@ _PROTECTED_BRANCH_NAMES = frozenset({"master", "main"})
 
 
 def _default_branch(cwd: str) -> str:
-    result = _run(
+    # Best-effort resolution: prefer the remote's recorded HEAD, then a
+    # configured remote-show HEAD, then the local init.defaultBranch. The
+    # protected-name backstop in push_branch still covers master/main when none
+    # of these resolve.
+    head = _run(
         ["git", "rev-parse", "--abbrev-ref", "origin/HEAD"],
         cwd=cwd,
         timeout=_GIT_TIMEOUT_SECONDS,
         check=False,
     )
-    if result.returncode != 0:
-        return ""
-    ref = result.stdout.strip()
-    return ref.split("/", 1)[1] if "/" in ref else ref
+    if head.returncode == 0:
+        ref = head.stdout.strip()
+        resolved = ref.split("/", 1)[1] if "/" in ref else ref
+        if resolved:
+            return resolved
+    symbolic = _run(
+        ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        cwd=cwd,
+        timeout=_GIT_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if symbolic.returncode == 0:
+        ref = symbolic.stdout.strip()
+        resolved = ref.split("/", 1)[1] if "/" in ref else ref
+        if resolved:
+            return resolved
+    configured = _run(
+        ["git", "config", "--get", "init.defaultBranch"],
+        cwd=cwd,
+        timeout=_GIT_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if configured.returncode == 0:
+        return configured.stdout.strip()
+    return ""
 
 
 def push_branch(cwd: str, branch: str) -> None:
@@ -168,7 +193,6 @@ def mark_ready(cwd: str, *, pr_number: int | None = None, branch: str | None = N
     if ref:
         argv.append(ref)
     _run(argv, cwd=cwd, timeout=_GH_TIMEOUT_SECONDS)
-
 
 
 def open_or_update_pr(
@@ -271,6 +295,7 @@ def fetch_pr_snapshot(
         cwd,
         repo_full_name=snapshot.get("repository_full_name"),
         pr_number=snapshot.get("pr_number"),
+        host=_host_from_url(snapshot.get("url")),
     )
     # ``None`` means the thread fetch failed/was unobservable; leave the thread
     # fields unset so the review gate stays pending rather than treating the PR
@@ -278,6 +303,21 @@ def fetch_pr_snapshot(
     if threads is not None:
         _apply_review_threads(snapshot, threads)
     return snapshot
+
+
+def _host_from_url(url: Any) -> str:
+    """Return the PR URL's host, or ``""`` for github.com (the gh default).
+
+    Used to route ``gh api graphql`` to a GitHub Enterprise host; the default
+    github.com needs no ``--hostname`` so it returns empty.
+    """
+    if not isinstance(url, str):
+        return ""
+    match = _GITHUB_PR_URL_RE.search(url)
+    if match is None:
+        return ""
+    host = match.group(1)
+    return "" if host == "github.com" else host
 
 
 def _fetch_review_threads(
@@ -352,7 +392,7 @@ def _snapshot_from_pr_view(data: dict[str, Any]) -> dict[str, Any]:
         snapshot["url"] = url
         match = _GITHUB_PR_URL_RE.search(url)
         if match is not None:
-            owner, repo, number = match.groups()
+            _host, owner, repo, number = match.groups()
             snapshot["repository_full_name"] = f"{owner}/{repo}"
             snapshot["pr_number"] = int(number)
     number = data.get("number")
@@ -476,12 +516,13 @@ def _apply_review_threads(snapshot: dict[str, Any], threads: list[Any]) -> None:
     # unresolved count so the review gate's "approved and unresolved_thread_count
     # == 0" pass condition can be satisfied.
     snapshot["review_thread_count"] = len(threads)
+    # An outdated thread is still unresolved: branch protection with required
+    # conversation resolution keeps blocking the merge until it is explicitly
+    # resolved, so only ``isResolved`` clears it -- not ``isOutdated``.
     unresolved = [
         thread
         for thread in threads
-        if isinstance(thread, dict)
-        and thread.get("isResolved") is not True
-        and thread.get("isOutdated") is not True
+        if isinstance(thread, dict) and thread.get("isResolved") is not True
     ]
     snapshot["unresolved_thread_count"] = len(unresolved)
     snapshot["unresolved_threads"] = _compact_threads(unresolved)

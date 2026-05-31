@@ -173,6 +173,47 @@ class GithubPrHelperTests(SimpleTestCase):
         self.assertEqual(github_pr._host_from_url("https://github.com/o/r/pull/1"), "")
 
     @patch("hitch.main.github_pr.subprocess.run")
+    def test_outdated_unresolved_thread_still_counts(
+        self, mock_run: MagicMock
+    ) -> None:
+        # An outdated-but-unresolved thread still blocks merge under required
+        # conversation resolution, so it must be counted as unresolved.
+        threads_json = json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [
+                                    {
+                                        "id": "t1",
+                                        "isResolved": False,
+                                        "isOutdated": True,
+                                        "path": "a.py",
+                                        "line": 3,
+                                    }
+                                ],
+                                "pageInfo": {"hasNextPage": False, "endCursor": None},
+                            }
+                        }
+                    }
+                }
+            }
+        )
+
+        def fake_run(argv: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if argv[:3] == ["gh", "api", "graphql"]:
+                return _completed(argv, stdout=threads_json)
+            return _completed(argv, stdout=json.dumps(_PR_VIEW_JSON))
+
+        mock_run.side_effect = fake_run
+
+        snapshot = github_pr.fetch_pr_snapshot("/repo", pr_number=42)
+
+        assert snapshot is not None
+        self.assertEqual(snapshot["unresolved_thread_count"], 1)
+
+    @patch("hitch.main.github_pr.subprocess.run")
     def test_fetch_pr_snapshot_maps_review_ci_and_threads(
         self, mock_run: MagicMock
     ) -> None:
