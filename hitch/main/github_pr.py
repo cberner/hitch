@@ -488,7 +488,10 @@ def _copy_review_body_comments(snapshot: dict[str, Any], data: dict[str, Any]) -
     reviews = data.get("reviews")
     reviews = reviews if isinstance(reviews, list) else []
     bodies: list[dict[str, Any]] = []
-    for review in reviews:
+    # ``gh`` returns reviews oldest-first; walk newest-first so the most recent
+    # requested-change body wins the _PR_DETAIL_LIMIT slice instead of being
+    # crowded out by older COMMENTED/CHANGES_REQUESTED reviews.
+    for review in reversed(reviews):
         if not isinstance(review, dict):
             continue
         state = _str(review.get("state")).upper()
@@ -504,6 +507,8 @@ def _copy_review_body_comments(snapshot: dict[str, Any], data: dict[str, Any]) -
         if url:
             item["url"] = url[:_PR_TEXT_MAX_CHARS]
         bodies.append(item)
+        if len(bodies) >= _PR_DETAIL_LIMIT:
+            break
     if not bodies:
         return
     existing = snapshot.get("latest_comments")
