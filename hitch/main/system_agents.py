@@ -38,10 +38,11 @@ from hitch.main.models import (
     SystemWorkflow,
     UserInputRequest,
 )
-from hitch.main.repos import default_branch_checkout_commit_hash
+from hitch.main.repos import commit_hash_for_ref, default_branch_commit_hash
 from hitch.main.worktrees import (
     ManagedWorktree,
     WorktreeCleanupError,
+    WorktreeCreationError,
     cleanup_worktree,
     create_worktree_for_session,
 )
@@ -937,7 +938,7 @@ def _autonomous_goal_auto_proposal_start_sha(
     if _autonomous_goal_running_workflow_exists(autonomous_goal):
         return None
 
-    current_sha = default_branch_checkout_commit_hash(autonomous_goal.project.repo_path)
+    current_sha = _autonomous_goal_auto_proposal_base_sha(autonomous_goal)
     if not current_sha:
         return None
     last_no_proposal_sha = autonomous_goal.auto_proposal_last_no_proposal_sha.strip()
@@ -946,6 +947,24 @@ def _autonomous_goal_auto_proposal_start_sha(
     if current_sha == last_no_proposal_sha:
         return None
     return current_sha
+
+
+def _autonomous_goal_auto_proposal_base_sha(
+    autonomous_goal: AutonomousGoal,
+) -> str | None:
+    auto_merge_ref = _autonomous_goal_auto_merge_base_ref(autonomous_goal)
+    if auto_merge_ref:
+        return commit_hash_for_ref(autonomous_goal.project.repo_path, auto_merge_ref)
+    return default_branch_commit_hash(autonomous_goal.project.repo_path)
+
+
+def _autonomous_goal_auto_merge_base_ref(
+    autonomous_goal: AutonomousGoal,
+) -> str:
+    auto_merge_branch = _autonomous_goal_auto_merge_branch_for_implementation(
+        autonomous_goal
+    )
+    return f"refs/heads/{auto_merge_branch}" if auto_merge_branch else ""
 
 
 def _autonomous_goal_pending_proposal_exists(autonomous_goal: AutonomousGoal) -> bool:
@@ -1059,7 +1078,7 @@ def _create_autonomous_goal_workflow_record(
     }
     if auto_proposal:
         default_branch_sha = default_branch_sha or (
-            default_branch_checkout_commit_hash(autonomous_goal.project.repo_path)
+            _autonomous_goal_auto_proposal_base_sha(autonomous_goal)
             or _AUTO_PROPOSAL_UNKNOWN_DEFAULT_BRANCH_SHA
         )
         state["default_branch_sha"] = default_branch_sha
@@ -2733,17 +2752,25 @@ def _prepare_autonomous_goal_candidate_cwd(
     if not _state_bool(workflow, _AUTONOMOUS_GOAL_USE_WORKTREES_STATE_KEY):
         return workflow.cwd, None
 
-    auto_merge_branch = _autonomous_goal_auto_merge_branch_for_implementation(
-        autonomous_goal
+    auto_merge_ref = _autonomous_goal_auto_merge_worktree_base_ref(
+        workflow, autonomous_goal
     )
-    if auto_merge_branch:
+    if auto_merge_ref:
         managed_worktree = create_worktree_for_session(
             autonomous_goal.project.repo_path,
-            base_ref=f"refs/heads/{auto_merge_branch}",
+            base_ref=auto_merge_ref,
             disable_hooks=True,
         )
     else:
-        managed_worktree = create_worktree_for_session(autonomous_goal.project.repo_path)
+        base_ref = _autonomous_goal_default_worktree_base_ref(
+            workflow, autonomous_goal
+        )
+        if not base_ref:
+            raise WorktreeCreationError("project default branch is unavailable")
+        managed_worktree = create_worktree_for_session(
+            autonomous_goal.project.repo_path,
+            base_ref=base_ref,
+        )
     session_cwd = str(managed_worktree.path)
     workflow.state = {
         **workflow.state,
@@ -2755,6 +2782,31 @@ def _prepare_autonomous_goal_candidate_cwd(
         _cleanup_new_autonomous_goal_worktree(managed_worktree)
         raise
     return session_cwd, managed_worktree
+
+
+def _autonomous_goal_default_worktree_base_ref(
+    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
+) -> str:
+    start_sha = _autonomous_goal_recorded_base_sha(workflow)
+    if start_sha:
+        return start_sha
+    return default_branch_commit_hash(autonomous_goal.project.repo_path) or ""
+
+
+def _autonomous_goal_auto_merge_worktree_base_ref(
+    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
+) -> str:
+    auto_merge_ref = _autonomous_goal_auto_merge_base_ref(autonomous_goal)
+    if not auto_merge_ref:
+        return ""
+    return _autonomous_goal_recorded_base_sha(workflow) or auto_merge_ref
+
+
+def _autonomous_goal_recorded_base_sha(workflow: SystemWorkflow) -> str:
+    start_sha = _state_string(workflow, "default_branch_sha")
+    if start_sha and start_sha != _AUTO_PROPOSAL_UNKNOWN_DEFAULT_BRANCH_SHA:
+        return start_sha
+    return ""
 
 
 def _autonomous_goal_session_cwd(workflow: SystemWorkflow) -> str:

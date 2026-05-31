@@ -67,6 +67,14 @@ def default_branch_commit_hash(cwd: str | Path) -> str | None:
     return _commit_hash_for_ref(repo, ref)
 
 
+def commit_hash_for_ref(cwd: str | Path, ref: str) -> str | None:
+    """Return the commit hash for ``ref`` in the repository containing ``cwd``."""
+    repo = _repo_root(Path(cwd).expanduser())
+    if repo is None:
+        return None
+    return _commit_hash_for_ref(repo, ref)
+
+
 def default_branch_checkout_commit_hash(cwd: str | Path) -> str | None:
     """Return the default branch SHA only when the checkout has that clean tree."""
     repo = _repo_root(Path(cwd).expanduser())
@@ -133,11 +141,6 @@ def _default_branch_ref(repo: Path) -> str | None:
     local_refs = _local_branch_refs(repo)
     if len(local_refs) == 1:
         return local_refs[0]
-    has_custom_local_branch = any(
-        _branch_name_from_ref(ref) not in _DEFAULT_BRANCH_NAMES for ref in local_refs
-    )
-    if has_custom_local_branch:
-        return None
     named_refs = _named_default_branch_refs(repo)
     if len(named_refs) == 1:
         return next(iter(named_refs.values()))
