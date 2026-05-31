@@ -7154,10 +7154,11 @@ def open_session_pr(request: HttpRequest, session_id: str) -> HttpResponse:
         return redirect("session", session_id=session_id)
     pr_url = snapshot.get("url") if isinstance(snapshot, dict) else ""
     if isinstance(pr_url, str) and pr_url:
-        SessionMetadata.objects.update_or_create(
-            thread_id=session_id,
-            defaults={"pr_url": pr_url, "cwd": cwd},
-        )
+        # Targeted update on the existing row: ``update_or_create`` would
+        # recreate a row stripped of every other field if the metadata were
+        # concurrently deleted, and there is nothing else to create here -- the
+        # row is guaranteed to exist (its ``cwd`` was read above).
+        SessionMetadata.objects.filter(thread_id=session_id).update(pr_url=pr_url)
     return redirect("session", session_id=session_id)
 
 

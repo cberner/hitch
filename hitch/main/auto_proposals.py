@@ -27,9 +27,12 @@ def start_auto_proposal_scheduler() -> bool:
     """Start the in-process background scheduler when enabled.
 
     The scheduler also drives Hitch's PR monitoring, so it is decoupled from the
-    auto-proposal opt-out: the thread starts under ``runserver`` regardless of
-    ``HITCH_AUTO_PROPOSAL_SCHEDULER`` (which now only gates auto-proposal
-    workflow creation within the tick).
+    auto-proposal opt-out: under ``runserver`` (the autoreloader's worker
+    process, i.e. ``RUN_MAIN=true`` or ``--noreload``) the thread starts even
+    when ``HITCH_AUTO_PROPOSAL_SCHEDULER`` is off, and that env var then only
+    gates auto-proposal workflow creation within the tick. A non-``runserver``
+    deployment must opt in with ``HITCH_AUTO_PROPOSAL_SCHEDULER=1`` to get the
+    thread (and thus PR monitoring) at all.
     """
     global _scheduler_started
     if not _scheduler_thread_enabled():
