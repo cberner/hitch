@@ -2369,7 +2369,11 @@ def _pr_monitor_parsed_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]
     return {
         "status": "terminal" if _pr_handoff_is_terminal(compact) else "blocked",
         "summary": _pr_snapshot_summary(compact),
-        "feedback": _pr_comments_feedback(compact),
+        # Build comment feedback from the raw snapshot: ``_compact_pr_handoff``
+        # sanitizes ``latest_comments`` through ``_PR_SAFE_LIST_ITEM_FIELDS``,
+        # which drops ``body`` -- so the compacted copy would lose the actual
+        # requested-change text the follow-up agent needs.
+        "feedback": _pr_comments_feedback(snapshot),
         "pr": compact,
         "blockers": [],
     }

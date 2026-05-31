@@ -3304,23 +3304,25 @@ def _render_session_detail(
         metadata_by_thread[session_id] = metadata
     session_project = _project_for_thread(thread, metadata_by_thread, projects)
     latest_pr_workflow = _latest_pr_workflow_for_thread(session_id)
-    # Prefer the PR Hitch opened itself (persisted on metadata or carried in the
-    # PR-QA workflow handoff) over the Codex GitHub-MCP rollout parse, which is
-    # now only a fallback for PRs a coding agent opened on its own.
-    pr_url = (
-        _hitch_pr_url(metadata, active_system_workflow or latest_pr_workflow)
-        or (
-            rollout_data.latest_pr_url
-            if rollout_data is not None
-            else _pr_url_for_thread(thread)
-        )
-    )
     stage_workflow = active_system_workflow or latest_pr_workflow
     stage_pr_workflow = (
         active_system_workflow
         if active_system_workflow is not None
         and active_system_workflow.kind == SystemWorkflow.KIND_PR_QA
         else latest_pr_workflow
+    )
+    # Prefer the PR Hitch opened itself (persisted on metadata or carried in the
+    # PR-QA workflow handoff) over the Codex GitHub-MCP rollout parse, which is
+    # now only a fallback for PRs a coding agent opened on its own. Use the
+    # PR-QA workflow specifically -- an unrelated active workflow (demo/spec)
+    # carries no PR handoff and would otherwise hide a known PR link.
+    pr_url = (
+        _hitch_pr_url(metadata, stage_pr_workflow)
+        or (
+            rollout_data.latest_pr_url
+            if rollout_data is not None
+            else _pr_url_for_thread(thread)
+        )
     )
     stage_context: dict[str, str] | None = None
     if not read_only:
@@ -7137,6 +7139,13 @@ def open_session_pr(request: HttpRequest, session_id: str) -> HttpResponse:
     cwd = metadata.cwd if metadata is not None and metadata.cwd else ""
     if not cwd:
         return HttpResponseBadRequest("session has no working directory")
+    # Opening a PR pushes (and force-with-leases) the worktree branch, so refuse
+    # while a worker/workflow is still editing or committing in that worktree --
+    # otherwise Hitch could publish a partial state or race the worker's git ops.
+    if system_agents.active_workflow_for_thread(session_id) is not None:
+        return HttpResponseBadRequest("a workflow is running for this session")
+    if codex_pool.latest_active_for_thread(session_id) is not None:
+        return HttpResponseBadRequest("Codex is already working for this session")
     try:
         branch = github_pr.current_branch(cwd)
         snapshot = github_pr.open_or_update_pr(cwd, branch=branch)

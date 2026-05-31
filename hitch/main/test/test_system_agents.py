@@ -2989,6 +2989,26 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
         mock_push.assert_called_once_with("/repo", "feature")
 
+    def test_pr_monitor_feedback_preserves_comment_body(self) -> None:
+        # The raw snapshot carries review/comment bodies; _compact_pr_handoff
+        # strips ``body`` from latest_comments, so feedback must be built from
+        # the raw snapshot to keep the actionable requested-change text.
+        snapshot = {
+            "pr_number": 169,
+            "review_signal": "changes_requested",
+            "latest_comments": [
+                {"body": "[review changes_requested] please rename foo to bar"}
+            ],
+        }
+
+        parsed = system_agents._pr_monitor_parsed_from_snapshot(snapshot)
+
+        self.assertIn("please rename foo to bar", parsed["feedback"])
+        # The compacted pr payload drops the body-only comment (untrusted-list
+        # sanitize keeps only safe identifier fields), confirming feedback could
+        # not have come from the compacted copy.
+        self.assertEqual(parsed["pr"].get("latest_comments", []), [])
+
     @patch("hitch.main.system_agents.github_pr.fetch_pr_snapshot")
     def test_monitor_ready_completes_workflow(self, mock_fetch: MagicMock) -> None:
         workflow = SystemWorkflow.objects.create(

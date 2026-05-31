@@ -658,6 +658,23 @@ class SessionViewTests(TestCase):
 
         self.assertEqual(response.status_code, 400)
 
+    @patch("hitch.main.views.github_pr.open_or_update_pr")
+    @patch("hitch.main.views.codex_pool.latest_active_for_thread")
+    def test_open_session_pr_action_rejects_active_worker(
+        self, mock_active: MagicMock, mock_open_pr: MagicMock
+    ) -> None:
+        # Pushing the branch while a worker is still editing the worktree could
+        # publish a partial state or race git ops, so the action is refused.
+        SessionMetadata.objects.create(thread_id="thread-1", cwd="/tmp/wt")
+        mock_active.return_value = SimpleNamespace(agent_kind="")
+
+        response = self.client.post(
+            reverse("open_session_pr", kwargs={"session_id": "thread-1"})
+        )
+
+        self.assertEqual(response.status_code, 400)
+        mock_open_pr.assert_not_called()
+
     @patch(
         "hitch.main.views.github_pr.current_branch",
         side_effect=github_pr.GithubCliError("no branch"),
