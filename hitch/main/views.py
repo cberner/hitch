@@ -3068,11 +3068,49 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
             latest_workflow is not None
             and latest_workflow.status == SystemWorkflow.STATUS_RUNNING
         )
+        goal.run_blocked = (  # type: ignore[attr-defined]
+            latest_workflow is not None
+            and latest_workflow.status == SystemWorkflow.STATUS_BLOCKED
+        )
+        goal.run_status_title = _autonomous_goal_run_status_title(  # type: ignore[attr-defined]
+            latest_workflow
+        )
+        goal.run_status_detail = _autonomous_goal_run_status_detail(  # type: ignore[attr-defined]
+            latest_workflow
+        )
         goal.run_log_url = (  # type: ignore[attr-defined]
-            log_urls_by_workflow_id.get(latest_workflow.pk)
+            log_urls_by_workflow_id.get(latest_workflow.pk) or ""
             if latest_workflow is not None
             else ""
         )
+
+
+def _autonomous_goal_run_status_title(workflow: SystemWorkflow | None) -> str:
+    if workflow is None:
+        return ""
+    if workflow.status == SystemWorkflow.STATUS_RUNNING:
+        return "Autonomous goal is running"
+    if workflow.status == SystemWorkflow.STATUS_BLOCKED:
+        return "Autonomous goal is blocked"
+    return ""
+
+
+def _autonomous_goal_run_status_detail(workflow: SystemWorkflow | None) -> str:
+    if workflow is None:
+        return ""
+    if workflow.status == SystemWorkflow.STATUS_RUNNING:
+        return "This autonomous goal run is still working."
+    if workflow.status == SystemWorkflow.STATUS_BLOCKED:
+        return (
+            _workflow_state_string(workflow, "error")
+            or "This autonomous goal run is blocked. Open the run log for details."
+        )
+    return ""
+
+
+def _workflow_state_string(workflow: SystemWorkflow, key: str) -> str:
+    value = workflow.state.get(key)
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _attach_proposed_session_display_state(

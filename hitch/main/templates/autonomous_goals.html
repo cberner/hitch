@@ -343,6 +343,38 @@
             color: var(--text-muted);
             font-size: 0.86rem;
         }
+        .run-status {
+            appearance: none;
+            border: 1px solid var(--border-strong);
+            border-radius: 999px;
+            background: var(--surface-2);
+            color: var(--text);
+            font: inherit;
+            font-size: 0.8rem;
+            font-weight: 600;
+            line-height: 1.2;
+            padding: 0.18rem 0.55rem;
+            cursor: pointer;
+        }
+        .run-status:hover,
+        .run-status:focus {
+            outline: none;
+            border-color: var(--accent);
+            box-shadow: 0 0 0 3px var(--accent-soft);
+        }
+        .run-status[data-state="running"] {
+            border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+            color: var(--accent);
+        }
+        .run-status[data-state="blocked"] {
+            border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+            color: var(--danger);
+        }
+        .run-status-detail {
+            margin: 0;
+            color: var(--text-muted);
+            white-space: pre-wrap;
+        }
         .file-list {
             display: flex;
             flex-wrap: wrap;
@@ -497,7 +529,26 @@
                         {% endif %}
                         {% endif %}
                         {% if goal.run_running %}
-                        <span class="meta">Running</span>
+                        <button
+                            type="button"
+                            class="run-status"
+                            data-state="running"
+                            data-run-status-open
+                            data-run-status-title="{{ goal.run_status_title }}"
+                            data-run-status-detail="{{ goal.run_status_detail }}"
+                            data-run-status-log-url="{{ goal.run_log_url }}"
+                        >Running</button>
+                        {% endif %}
+                        {% if goal.run_blocked %}
+                        <button
+                            type="button"
+                            class="run-status"
+                            data-state="blocked"
+                            data-run-status-open
+                            data-run-status-title="{{ goal.run_status_title }}"
+                            data-run-status-detail="{{ goal.run_status_detail }}"
+                            data-run-status-log-url="{{ goal.run_log_url }}"
+                        >Blocked</button>
                         {% endif %}
                     </div>
                 </li>
@@ -524,6 +575,18 @@
             <div class="actions">
                 <button type="button" class="button secondary" data-create-autonomous-goal-cancel>Cancel</button>
                 <button type="submit" class="button">Create autonomous goal</button>
+            </div>
+        </form>
+    </dialog>
+    {% endif %}
+    {% if current_project and autonomous_goals %}
+    <dialog class="new-session" data-run-status-dialog aria-labelledby="run-status-dialog-title">
+        <form method="dialog">
+            <h2 id="run-status-dialog-title" data-run-status-dialog-title>Autonomous goal run</h2>
+            <p class="run-status-detail" data-run-status-dialog-detail></p>
+            <div class="actions">
+                <a class="button secondary" href="" data-run-status-dialog-log hidden>View log</a>
+                <button type="button" class="button" data-run-status-dialog-close>Close</button>
             </div>
         </form>
     </dialog>
@@ -622,6 +685,11 @@
             const createGoalOpen = document.querySelector("[data-create-autonomous-goal-open]");
             const createGoalTitle = createGoalDialog && createGoalDialog.querySelector("[data-create-autonomous-goal-title]");
             const createGoalCancel = createGoalDialog && createGoalDialog.querySelector("[data-create-autonomous-goal-cancel]");
+            const runStatusDialog = document.querySelector("[data-run-status-dialog]");
+            const runStatusTitle = runStatusDialog && runStatusDialog.querySelector("[data-run-status-dialog-title]");
+            const runStatusDetail = runStatusDialog && runStatusDialog.querySelector("[data-run-status-dialog-detail]");
+            const runStatusLog = runStatusDialog && runStatusDialog.querySelector("[data-run-status-dialog-log]");
+            const runStatusClose = runStatusDialog && runStatusDialog.querySelector("[data-run-status-dialog-close]");
             const pageMenu = document.querySelector("[data-page-menu]");
             {% include "_context_menu_script.html" %}
             function selectedAutoQaSupported(autonomySelect) {
@@ -647,6 +715,21 @@
                 });
             }
             if (createGoalCancel) createGoalCancel.addEventListener("click", () => hideDialog(createGoalDialog));
+            for (const button of document.querySelectorAll("[data-run-status-open]")) {
+                button.addEventListener("click", () => {
+                    if (!runStatusDialog) return;
+                    if (runStatusTitle) runStatusTitle.textContent = button.dataset.runStatusTitle || "Autonomous goal run";
+                    if (runStatusDetail) runStatusDetail.textContent = button.dataset.runStatusDetail || "No details are available.";
+                    const logUrl = button.dataset.runStatusLogUrl || "";
+                    if (runStatusLog) {
+                        runStatusLog.hidden = !logUrl;
+                        runStatusLog.href = logUrl;
+                    }
+                    showDialog(runStatusDialog);
+                    if (runStatusClose) runStatusClose.focus();
+                });
+            }
+            if (runStatusClose) runStatusClose.addEventListener("click", () => hideDialog(runStatusDialog));
             function syncAutoMergeControls(form) {
                 if (!form) return;
                 const autoQa = form.querySelector("[data-autonomous-goal-auto-qa]");

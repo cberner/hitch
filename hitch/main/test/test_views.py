@@ -12988,6 +12988,102 @@ class AutonomousGoalViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
+    def test_page_shows_tappable_run_status_indicators(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        blocked_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve raptorq",
+            goal="Investigate raptorq failures.",
+        )
+        running_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        blocked_no_log_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve docs",
+            goal="Investigate documentation failures.",
+        )
+        blocked_workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(blocked_goal.pk),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_BLOCKED,
+            step=system_agents.STEP_BLOCKED,
+            state={
+                "autonomous_goal_id": blocked_goal.pk,
+                "error": "raptorq decoder exhausted repair symbols",
+            },
+        )
+        blocked_instance = CodexInstance.objects.create(
+            pid=0,
+            thread_id="blocked-agent-thread",
+            cwd="/repo",
+            prompt="run autonomous goal",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_FAILED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=blocked_workflow.pk,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=blocked_workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id=blocked_instance.thread_id,
+            instance=blocked_instance,
+            status=SystemAgentRun.STATUS_FAILED,
+        )
+        SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(running_goal.pk),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={"autonomous_goal_id": running_goal.pk},
+        )
+        SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                blocked_no_log_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_BLOCKED,
+            step=system_agents.STEP_BLOCKED,
+            state={
+                "autonomous_goal_id": blocked_no_log_goal.pk,
+                "error": "blocked before the run log was created",
+            },
+        )
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-run-status-dialog')
+        self.assertContains(response, 'data-state="blocked"')
+        self.assertContains(
+            response, 'data-run-status-title="Autonomous goal is blocked"'
+        )
+        self.assertContains(response, "raptorq decoder exhausted repair symbols")
+        self.assertContains(
+            response,
+            f'data-run-status-log-url="{reverse("autonomous_goal_run_log", args=[blocked_workflow.pk])}"',
+        )
+        self.assertContains(response, 'data-state="running"')
+        self.assertContains(
+            response, 'data-run-status-title="Autonomous goal is running"'
+        )
+        self.assertContains(response, "This autonomous goal run is still working.")
+        self.assertContains(response, "blocked before the run log was created")
+        self.assertContains(response, 'data-run-status-log-url=""', count=2)
+        self.assertNotContains(response, 'data-run-status-log-url="None"')
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
     def test_edit_form_sync_does_not_mutate_auto_qa_choice(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
