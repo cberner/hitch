@@ -4671,11 +4671,39 @@ class AutoProposalQuotaPauseTests(TestCase):
             response_model=GetAccountRateLimitsResponse,
         )
 
+    @patch("hitch.main.system_agents.timezone.now")
+    @patch("hitch.main.system_agents._auto_proposals_paused_by_usage_quota")
+    def test_quota_throttle_caches_verdict_within_ttl(
+        self, mock_quota: MagicMock, mock_now: MagicMock
+    ) -> None:
+        system_agents._reset_auto_proposal_quota_cache()
+        self.addCleanup(system_agents._reset_auto_proposal_quota_cache)
+        start = datetime(2026, 1, 1, tzinfo=UTC)
+        mock_quota.return_value = True
+
+        mock_now.return_value = start
+        self.assertTrue(system_agents._auto_proposals_paused_by_usage_quota_throttled())
+
+        # A second call one minute later reuses the cached verdict without
+        # re-querying, even though the underlying check would now say False.
+        mock_quota.return_value = False
+        mock_now.return_value = start + timedelta(minutes=1)
+        self.assertTrue(system_agents._auto_proposals_paused_by_usage_quota_throttled())
+        mock_quota.assert_called_once()
+
+        # Past the TTL the remote check runs again and the verdict refreshes.
+        mock_now.return_value = start + timedelta(minutes=6)
+        self.assertFalse(
+            system_agents._auto_proposals_paused_by_usage_quota_throttled()
+        )
+        self.assertEqual(mock_quota.call_count, 2)
+
 
 class AutonomousGoalWorkflowTests(TestCase):
     @override
     def setUp(self) -> None:
         super().setUp()
+        system_agents._reset_auto_proposal_quota_cache()
         self.quota_patcher = patch(
             "hitch.main.system_agents._auto_proposals_paused_by_usage_quota",
             return_value=False,

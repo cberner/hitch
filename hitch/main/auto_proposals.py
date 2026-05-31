@@ -14,7 +14,7 @@ from hitch.main import codex_pool, system_agents
 
 logger = logging.getLogger(__name__)
 
-_AUTO_PROPOSAL_SCHEDULER_INTERVAL_SECONDS = 5 * 60
+_AUTO_PROPOSAL_SCHEDULER_INTERVAL_SECONDS = 60
 _SCHEDULER_ENV = "HITCH_AUTO_PROPOSAL_SCHEDULER"
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})

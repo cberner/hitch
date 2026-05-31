@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -113,6 +114,14 @@ STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED = "spec_critic_implementation_spawned"
 SPEC_CRITIC_CLARIFICATION_METHOD = "hitch/spec_critic/clarification"
 
 _AUTO_PROPOSAL_UNKNOWN_DEFAULT_BRANCH_SHA = "__unknown__"
+# The scheduler ticks once a minute, but the account rate-limit query that
+# backs the quota pause is a remote round-trip to the Codex backend. Cache its
+# verdict so the network call fires at most once per this interval regardless
+# of tick cadence.
+_AUTO_PROPOSAL_QUOTA_CACHE_TTL = timedelta(minutes=5)
+_quota_cache_lock = threading.Lock()
+_quota_cache_paused = False
+_quota_cache_checked_at: datetime | None = None
 _AUTONOMOUS_GOAL_USE_WORKTREES_STATE_KEY = "use_worktrees"
 _AUTONOMOUS_GOAL_SESSION_CWD_STATE_KEY = "session_cwd"
 _QA_DESIGN_SYNTHESIS_STATE_KEY = "qa_design_synthesis_gate"
@@ -782,7 +791,7 @@ def maybe_start_auto_proposal_workflows(*, project: Project | None = None) -> in
     )
     if project is not None:
         goals = goals.filter(project=project)
-    if goals.exists() and _auto_proposals_paused_by_usage_quota():
+    if goals.exists() and _auto_proposals_paused_by_usage_quota_throttled():
         return 0
 
     started = 0
@@ -804,6 +813,32 @@ def maybe_start_auto_proposal_workflows(*, project: Project | None = None) -> in
                 autonomous_goal_id,
             )
     return started
+
+
+def _reset_auto_proposal_quota_cache() -> None:
+    """Clear the throttled quota verdict. Used by tests to isolate the
+    module-level cache between cases."""
+    global _quota_cache_paused, _quota_cache_checked_at
+    with _quota_cache_lock:
+        _quota_cache_paused = False
+        _quota_cache_checked_at = None
+
+
+def _auto_proposals_paused_by_usage_quota_throttled() -> bool:
+    """Return the quota pause verdict, refreshing the remote check at most once
+    per ``_AUTO_PROPOSAL_QUOTA_CACHE_TTL`` so the minute-cadence scheduler does
+    not poll the Codex rate-limit endpoint every tick."""
+    global _quota_cache_paused, _quota_cache_checked_at
+    with _quota_cache_lock:
+        now = timezone.now()
+        if (
+            _quota_cache_checked_at is not None
+            and now - _quota_cache_checked_at < _AUTO_PROPOSAL_QUOTA_CACHE_TTL
+        ):
+            return _quota_cache_paused
+        _quota_cache_paused = _auto_proposals_paused_by_usage_quota()
+        _quota_cache_checked_at = now
+        return _quota_cache_paused
 
 
 def _auto_proposals_paused_by_usage_quota() -> bool:
