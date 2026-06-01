@@ -2795,7 +2795,24 @@ class SpecCriticWorkflowTests(TestCase):
             workflow_id=workflow.pk,
             agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
         )
+        open_pr = {
+            "url": "https://github.com/cberner/hitch/pull/169",
+            "number": 169,
+            "state": "OPEN",
+            "isDraft": False,
+            "title": "Existing PR",
+            "baseRefName": "master",
+            "headRefName": "feature",
+            "headRefOid": "oldsha",
+            "mergeable": "MERGEABLE",
+            "mergeCommit": None,
+            "createdAt": "2026-06-01T00:00:00Z",
+            "updatedAt": "2026-06-01T00:01:00Z",
+            "closedAt": None,
+            "mergedAt": None,
+        }
         mock_run.side_effect = [
+            SimpleNamespace(returncode=0, stdout=json.dumps(open_pr), stderr=""),
             SimpleNamespace(returncode=0, stdout="feature\n", stderr=""),
             SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
             SimpleNamespace(returncode=0, stdout="", stderr=""),
@@ -2828,6 +2845,14 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(
             commands,
             [
+                [
+                    "gh",
+                    "pr",
+                    "view",
+                    "https://github.com/cberner/hitch/pull/169",
+                    "--json",
+                    ",".join(system_agents._GH_PR_VIEW_FIELDS),
+                ],
                 ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
                 [
                     "git",
@@ -3341,7 +3366,24 @@ class SpecCriticWorkflowTests(TestCase):
             workflow_id=workflow.pk,
             agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
         )
+        open_pr = {
+            "url": "https://github.com/cberner/hitch/pull/169",
+            "number": 169,
+            "state": "OPEN",
+            "isDraft": False,
+            "title": "Existing PR",
+            "baseRefName": "master",
+            "headRefName": "feature",
+            "headRefOid": "oldsha",
+            "mergeable": "MERGEABLE",
+            "mergeCommit": None,
+            "createdAt": "2026-06-01T00:00:00Z",
+            "updatedAt": "2026-06-01T00:01:00Z",
+            "closedAt": None,
+            "mergedAt": None,
+        }
         mock_run.side_effect = [
+            SimpleNamespace(returncode=0, stdout=json.dumps(open_pr), stderr=""),
             SimpleNamespace(returncode=0, stdout="feature\n", stderr=""),
             SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
             SimpleNamespace(returncode=0, stdout="", stderr=""),
@@ -3354,8 +3396,198 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
         commands = [call.args[0] for call in mock_run.call_args_list]
         self.assertEqual(
-            commands[2],
+            commands[0][:4],
+            ["gh", "pr", "view", "https://github.com/cberner/hitch/pull/169"],
+        )
+        self.assertEqual(
+            commands[3],
             ["git", "push", "-u", "origin", "HEAD:refs/heads/feature"],
+        )
+        mock_spawn.assert_called_once()
+
+    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_pr_prompt_completion_force_pushes_existing_handoff_without_snapshot(
+        self, mock_spawn: MagicMock, mock_run: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={
+                "next_user_message_index": 5,
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": "https://github.com/cberner/hitch/pull/169",
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 169,
+                    "head": "feature",
+                    "head_sha": "oldsha",
+                },
+            },
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+            workflow_id=workflow.pk,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="monitor-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        )
+        open_pr = {
+            "url": "https://github.com/cberner/hitch/pull/169",
+            "number": 169,
+            "state": "OPEN",
+            "isDraft": False,
+            "title": "Existing PR",
+            "baseRefName": "master",
+            "headRefName": "feature",
+            "headRefOid": "oldsha",
+            "mergeable": "MERGEABLE",
+            "mergeCommit": None,
+            "createdAt": "2026-06-01T00:00:00Z",
+            "updatedAt": "2026-06-01T00:01:00Z",
+            "closedAt": None,
+            "mergedAt": None,
+        }
+        mock_run.side_effect = [
+            SimpleNamespace(returncode=0, stdout=json.dumps(open_pr), stderr=""),
+            SimpleNamespace(returncode=0, stdout="feature\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
+            SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="! [rejected] HEAD -> feature (non-fast-forward)",
+            ),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+        ]
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        self.assertEqual(
+            commands[3],
+            ["git", "push", "-u", "origin", "HEAD:refs/heads/feature"],
+        )
+        self.assertEqual(
+            commands[4],
+            [
+                "git",
+                "push",
+                "--force-with-lease=refs/heads/feature:oldsha",
+                "-u",
+                "origin",
+                "HEAD:refs/heads/feature",
+            ],
+        )
+        mock_spawn.assert_called_once()
+
+    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_pr_prompt_completion_force_pushes_authoritative_worker_snapshot(
+        self, mock_spawn: MagicMock, mock_run: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={"next_user_message_index": 5},
+        )
+        events_path = _raw_events_file(
+            self,
+            [
+                _pr_tool_event(
+                    thread_id="main-thread",
+                    tool="github_get_pr_info",
+                    arguments={
+                        "repository_full_name": "cberner/hitch",
+                        "pr_number": 169,
+                    },
+                    structured_content={
+                        "url": "https://github.com/cberner/hitch/pull/169",
+                        "repository_full_name": "cberner/hitch",
+                        "pr_number": 169,
+                        "state": "open",
+                        "merged": False,
+                        "head": "feature",
+                        "head_sha": "oldsha",
+                    },
+                )
+            ],
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+            workflow_id=workflow.pk,
+            events_path=events_path,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="monitor-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        )
+        open_pr = {
+            "url": "https://github.com/cberner/hitch/pull/169",
+            "number": 169,
+            "state": "OPEN",
+            "isDraft": False,
+            "title": "Existing PR",
+            "baseRefName": "master",
+            "headRefName": "feature",
+            "headRefOid": "oldsha",
+            "mergeable": "MERGEABLE",
+            "mergeCommit": None,
+            "createdAt": "2026-06-01T00:00:00Z",
+            "updatedAt": "2026-06-01T00:01:00Z",
+            "closedAt": None,
+            "mergedAt": None,
+        }
+        mock_run.side_effect = [
+            SimpleNamespace(returncode=0, stdout=json.dumps(open_pr), stderr=""),
+            SimpleNamespace(returncode=0, stdout="feature\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
+            SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="! [rejected] HEAD -> feature (non-fast-forward)",
+            ),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+        ]
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        self.assertEqual(
+            commands[0][:4],
+            ["gh", "pr", "view", "https://github.com/cberner/hitch/pull/169"],
+        )
+        self.assertEqual(
+            commands[3],
+            ["git", "push", "-u", "origin", "HEAD:refs/heads/feature"],
+        )
+        self.assertEqual(
+            commands[4],
+            [
+                "git",
+                "push",
+                "--force-with-lease=refs/heads/feature:oldsha",
+                "-u",
+                "origin",
+                "HEAD:refs/heads/feature",
+            ],
         )
         mock_spawn.assert_called_once()
 
