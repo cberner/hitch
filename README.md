@@ -54,6 +54,8 @@ Prerequisites:
 - a `codex` binary on PATH; the version must match the `openai-codex` SDK
   pinned in `pyproject.toml` (see `.github/workflows/ci.yml` for the exact
   npm version CI installs)
+- the [`gh`](https://cli.github.com) CLI on PATH and authenticated; the auto-PR
+  workflow uses it to open the pull request once the work agent finishes
 
 What the recipe does:
 

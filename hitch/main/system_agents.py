@@ -19,7 +19,7 @@ from django.utils.dateparse import parse_datetime
 from openai_codex import AppServerError, Codex
 from openai_codex.generated.v2_all import GetAccountRateLimitsResponse, ThreadSource
 
-from hitch.main import codex_events, codex_pool, demo, rollout, session_index
+from hitch.main import codex_events, codex_pool, demo, open_pr, rollout, session_index
 from hitch.main.diffs import build_worktree_diff_text
 from hitch.main.local_merges import (
     LocalBranchMergeError,
@@ -70,13 +70,15 @@ AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_AGENT_PROMPT_
 AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE
 SPEC_CRITIC_DISPLAY_AUTHOR = "Spec Critic"
 PR_SLASH_DISPLAY_PROMPT = (
-    "Rebase on master, clean it up, and then open a PR"
+    "Rebase on master and clean it up"
 )
 QA_SLASH_DISPLAY_PROMPT = (
     "Run the QA agent on the current diff and fix anything it finds"
 )
 PR_SLASH_PROMPT = (
-    "Polish it, get it ready, and open or update the PR."
+    "Polish it and get it ready: rebase on master and clean up the commits. Do "
+    "not push the branch, and do not open or update the pull request yourself — "
+    "Hitch pushes the branch and opens the PR for you once this turn is done."
 )
 SYSTEM_AGENT_APPROVAL_MODE = "auto_review"
 # Auto-review workflows (auto-QA and auto-PR) start without an explicit
@@ -2049,27 +2051,14 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
     if instance.status != CodexInstance.STATUS_COMPLETED:
         _block_workflow(workflow, f"PR prompt worker failed: {instance.error}")
         return
-    snapshot = codex_events.latest_pr_snapshot_for_instance(instance)
-    if snapshot is None:
-        if _pr_handoff_from_workflow(workflow):
-            workflow.step = STEP_PR_MONITORING
-            workflow.save(update_fields=["step", "state", "updated_at"])
-            try:
-                _spawn_pr_followup_monitor_run(workflow)
-            except Exception as exc:
-                _block_workflow(
-                    workflow, f"failed to start PR follow-up monitor: {exc!r}"
-                )
-            return
-        _block_workflow(
-            workflow,
-            (
-                "PR prompt worker completed, but Hitch could not identify the PR "
-                "to monitor."
-            ),
-        )
+    # The work agent only prepares and pushes the branch; Hitch owns opening the
+    # PR so the agent never needs the create-PR tool.
+    try:
+        opened = open_pr.open_pull_request(workflow.cwd)
+    except open_pr.OpenPrError as exc:
+        _block_workflow(workflow, f"Hitch could not open the PR: {exc}")
         return
-    _merge_pr_handoff(workflow, snapshot)
+    _merge_pr_handoff(workflow, opened.as_handoff())
     if _pr_handoff_is_terminal(_pr_handoff_from_workflow(workflow)):
         workflow.status = SystemWorkflow.STATUS_COMPLETED
         workflow.step = STEP_PR_CLOSED

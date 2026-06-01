@@ -96,9 +96,29 @@ _SHOW_NO_PROJECT_SESSIONS_COOKIE = "hitch_show_no_project_sessions"
 _CODING_AGENT_COOKIE = "hitch_coding_agent"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 _PR_PROMPT = (
-    "Rebase on master, clean it up, and then open a PR"
+    "Rebase on master and clean it up"
 )
 _QA_PROMPT = "Run the QA agent on the current diff and fix anything it finds"
+
+
+class PrPromptAliasTests(TestCase):
+    def test_views_recognizes_historical_pr_prompts(self) -> None:
+        # Prompts persisted by earlier Hitch versions must still classify as PR
+        # prompts when a session is read from the live Codex thread.
+        for prompt in (
+            "Polish it, get it ready, and open or update the PR.",
+            "Rebase on master, clean it up, and then open a PR",
+            "Rebase on master, clean it up, and push the branch",
+        ):
+            self.assertIn(prompt, views._PR_PROMPT_ALIASES)
+
+    def test_views_and_rollout_pr_aliases_stay_in_sync(self) -> None:
+        # ``/pr`` is a rollout-only sentinel; otherwise the recognized prompts
+        # must match so fast-path and live-thread rendering agree.
+        self.assertEqual(
+            views._PR_PROMPT_ALIASES,
+            rollout_module._PR_PROMPT_ALIASES - {"/pr"},
+        )
 
 
 class _FailingUploadWriter:
@@ -399,6 +419,73 @@ class SessionDetailFastPathTests(TestCase):
         self.assertContains(response, f'data-ts="{now.timestamp()}"')
         self.assertNotContains(response, "Jan. 5, 2025")
         mock_codex.assert_not_called()
+
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_session_detail_surfaces_pr_url_from_workflow_handoff(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        # Hitch-opened auto-PRs leave no create-PR tool output in the rollout, so
+        # the PR link must come from the workflow handoff instead.
+        pr_url = "https://github.com/cberner/hitch/pull/321"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Do the work"},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Done"}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 6, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="handoff",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Handoff session",
+            codex_preview="Do the work",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+        CodexInstance.objects.create(
+            pid=1,
+            thread_id="handoff",
+            cwd="/repo",
+            prompt="done",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+        SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="handoff",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": pr_url,
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 321,
+                    "state": "open",
+                }
+            },
+        )
+
+        _setup_codex(mock_codex)
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "handoff"}))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, f'href="{pr_url}"')
 
     @patch("hitch.main.views._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")

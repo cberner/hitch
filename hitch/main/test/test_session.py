@@ -3591,7 +3591,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "data-slash-qa")
         self.assertContains(
             response,
-            "Rebase on master, clean it up, and then open a PR",
+            "Rebase on master and clean it up",
         )
         self.assertContains(
             response,

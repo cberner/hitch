@@ -75,6 +75,35 @@ def commit_hash_for_ref(cwd: str | Path, ref: str) -> str | None:
     return _commit_hash_for_ref(repo, ref)
 
 
+def default_branch_name(cwd: str | Path) -> str | None:
+    """Return the repository's default branch name (e.g. ``main``), if known."""
+    repo = _repo_root(Path(cwd).expanduser())
+    if repo is None:
+        return None
+    ref = _default_branch_ref(repo)
+    if ref is None:
+        return None
+    return _branch_name_from_ref(ref) or None
+
+
+def symbolic_default_branch_name(cwd: str | Path) -> str | None:
+    """Return the default branch from ``origin/HEAD``, or None if unset.
+
+    Unlike :func:`default_branch_name`, this never falls back to the
+    single-local-branch or single-named-branch heuristics, which can return the
+    current feature branch in a single-branch checkout. Callers that must not
+    misidentify a feature branch as the default (e.g. a "don't push the default
+    branch" guard) should use this authoritative lookup.
+    """
+    repo = _repo_root(Path(cwd).expanduser())
+    if repo is None:
+        return None
+    ref = _explicit_default_branch_ref(repo)
+    if ref is None:
+        return None
+    return _branch_name_from_ref(ref) or None
+
+
 def default_branch_checkout_commit_hash(cwd: str | Path) -> str | None:
     """Return the default branch SHA only when the checkout has that clean tree."""
     repo = _repo_root(Path(cwd).expanduser())

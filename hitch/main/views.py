@@ -549,12 +549,26 @@ _LEGACY_PR_SLASH_FINAL_PROMPT = (
     "Stop and report back if any single polling iteration has no results after "
     "30 minutes."
 )
+# Prompts persisted by earlier Hitch versions. Retained so pre-upgrade /pr
+# turns read from the live Codex thread (not just the rollout fast path) still
+# classify as PR prompts; keep in sync with rollout._PR_PROMPT_ALIASES.
+_HISTORICAL_PR_SLASH_PROMPTS = (
+    "Rebase on master, clean it up, and push the branch",
+    (
+        "Polish it and get it ready: rebase on master, clean up the commits, "
+        "and push the branch. Do not open or update the pull request "
+        "yourself — Hitch opens the PR for you once this turn is done."
+    ),
+    "Rebase on master, clean it up, and then open a PR",
+    "Polish it, get it ready, and open or update the PR.",
+)
 _PR_PROMPT_ALIASES = frozenset(
     {
         _PR_SLASH_PROMPT,
         _PR_SLASH_FINAL_PROMPT,
         _LEGACY_PR_SLASH_PROMPT,
         _LEGACY_PR_SLASH_FINAL_PROMPT,
+        *_HISTORICAL_PR_SLASH_PROMPTS,
     }
 )
 _QA_SLASH_COMMAND = "/qa"
@@ -3416,6 +3430,17 @@ def _render_session_detail(
         stage_pr_workflow = _workflow_after_main_lifecycle(
             stage_pr_workflow, pr_observation, main_updated_at=main_updated_at
         )
+        if not pr_url:
+            # Hitch-opened auto-PRs leave no create-PR tool output in the
+            # rollout, so fall back to the workflow handoff to keep the
+            # "Open PR" link populated. Read the handoff only after the
+            # lifecycle filter has dropped workflows superseded by newer
+            # main-thread activity, so a stale PR is not resurrected here.
+            handoff_url = system_agents.pr_handoff_for_workflow(
+                stage_pr_workflow
+            ).get("url")
+            if isinstance(handoff_url, str) and handoff_url:
+                pr_url = handoff_url
         stage = session_stage.derive_stage(
             entries=entries,
             active_instance=active_instance,

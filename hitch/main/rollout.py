@@ -48,9 +48,25 @@ _GITHUB_PR_TOOL_RE = re.compile(
 _GITHUB_PR_URL_RE = re.compile(
     r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[0-9]+"
 )
+# Must stay in sync with system_agents.PR_SLASH_DISPLAY_PROMPT / PR_SLASH_PROMPT.
+# Duplicated here (rather than imported) because system_agents imports rollout.
+# Legacy variants are retained so historical rollouts still classify correctly.
 _PR_PROMPT_ALIASES = frozenset(
     {
         "/pr",
+        "Rebase on master and clean it up",
+        (
+            "Polish it and get it ready: rebase on master and clean up the "
+            "commits. Do not push the branch, and do not open or update the "
+            "pull request yourself — Hitch pushes the branch and opens the PR "
+            "for you once this turn is done."
+        ),
+        "Rebase on master, clean it up, and push the branch",
+        (
+            "Polish it and get it ready: rebase on master, clean up the commits, "
+            "and push the branch. Do not open or update the pull request "
+            "yourself — Hitch opens the PR for you once this turn is done."
+        ),
         "Rebase on master, clean it up, and then open a PR",
         "Polish it, get it ready, and open or update the PR.",
         (

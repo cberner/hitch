@@ -13,6 +13,7 @@ from hitch.main.repos import (
     discover_repos,
     git_common_dir,
     same_repo_or_worktree,
+    symbolic_default_branch_name,
 )
 
 
@@ -128,6 +129,47 @@ class DiscoverReposTests(TestCase):
             self.assertIsNone(default_branch_checkout_commit_hash(repo))
             _git(repo, "checkout", "main")
             self.assertEqual(default_branch_checkout_commit_hash(repo), main_sha)
+
+    def test_symbolic_default_branch_name_uses_origin_head(self) -> None:
+        with tempfile.TemporaryDirectory() as raw_root:
+            repo = Path(raw_root) / "repo"
+            repo.mkdir()
+            _git(repo, "init", "--initial-branch=master")
+            _git(repo, "config", "user.email", "dev@example.com")
+            _git(repo, "config", "user.name", "Dev")
+            (repo / "README.md").write_text("master\n")
+            _git(repo, "add", "README.md")
+            _git(repo, "commit", "-m", "master")
+            _git(repo, "checkout", "-b", "main")
+            (repo / "README.md").write_text("main\n")
+            _git(repo, "commit", "-am", "main")
+            main_sha = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "update-ref", "refs/remotes/origin/main", main_sha)
+            _git(
+                repo,
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            )
+
+            self.assertEqual(symbolic_default_branch_name(repo), "main")
+
+    def test_symbolic_default_branch_name_none_without_origin_head(self) -> None:
+        # A single-branch feature checkout must not be reported as the default,
+        # even though default_branch_commit_hash's heuristic would resolve it.
+        with tempfile.TemporaryDirectory() as raw_root:
+            repo = Path(raw_root) / "repo"
+            repo.mkdir()
+            _git(repo, "init", "--initial-branch=feature")
+            _git(repo, "config", "user.email", "dev@example.com")
+            _git(repo, "config", "user.name", "Dev")
+            (repo / "README.md").write_text("feature\n")
+            _git(repo, "add", "README.md")
+            _git(repo, "commit", "-m", "feature")
+            feature_sha = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "update-ref", "refs/remotes/origin/master", feature_sha)
+
+            self.assertIsNone(symbolic_default_branch_name(repo))
 
     def test_default_branch_commit_hash_falls_back_to_local_main(self) -> None:
         with tempfile.TemporaryDirectory() as raw_root:
