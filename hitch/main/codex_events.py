@@ -5,10 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 from hitch.main.models import CodexInstance
 
@@ -49,6 +49,7 @@ _FAILURE_CONCLUSIONS = frozenset(
 )
 _PR_TEXT_MAX_CHARS = 500
 _PR_DETAIL_LIMIT = 5
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True)
@@ -149,29 +150,13 @@ def _latest_goal_event_from_event_paths(
     time.
     """
     current: _GoalEvent | None = None
-    fallback_order = 0
-    for raw_path in paths:
-        if not raw_path:
-            continue
-        path = Path(raw_path)
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                for raw in fh:
-                    fallback_order += 1
-                    event = _goal_event_from_line(
-                        raw,
-                        thread_id=thread_id,
-                        fallback_order=fallback_order,
-                    )
-                    if event is None:
-                        continue
-                    if current is None or event.order > current.order:
-                        current = event
-        except FileNotFoundError:
-            continue
-        except (OSError, UnicodeDecodeError) as exc:
-            logger.warning("failed to read Codex events %s: %s", path, exc)
-            continue
+    for event in _parsed_events_from_paths(
+        paths,
+        thread_id=thread_id,
+        parser=_goal_event_from_event,
+    ):
+        if current is None or event.order > current.order:
+            current = event
     return current
 
 
@@ -190,29 +175,13 @@ def latest_task_plan_from_event_paths(
 ) -> TaskPlanSnapshot | None:
     """Return the final ``turn/plan/updated`` state after applying event logs."""
     current: _TaskPlanEvent | None = None
-    fallback_order = 0
-    for raw_path in paths:
-        if not raw_path:
-            continue
-        path = Path(raw_path)
-        try:
-            with path.open("r", encoding="utf-8") as fh:
-                for raw in fh:
-                    fallback_order += 1
-                    event = _task_plan_event_from_line(
-                        raw,
-                        thread_id=thread_id,
-                        fallback_order=fallback_order,
-                    )
-                    if event is None:
-                        continue
-                    if current is None or event.order > current.order:
-                        current = event
-        except FileNotFoundError:
-            continue
-        except (OSError, UnicodeDecodeError) as exc:
-            logger.warning("failed to read Codex events %s: %s", path, exc)
-            continue
+    for event in _parsed_events_from_paths(
+        paths,
+        thread_id=thread_id,
+        parser=_task_plan_event_from_event,
+    ):
+        if current is None or event.order > current.order:
+            current = event
     return current.snapshot if current is not None else None
 
 
@@ -235,7 +204,25 @@ def latest_pr_snapshot_from_event_paths(
     the latest structured results lets Hitch continue follow-up from durable state
     instead of asking the next agent to rediscover which PR/branch it was handling.
     """
-    updates: list[_PrSnapshotUpdate] = []
+    updates = list(
+        _parsed_events_from_paths(
+            paths,
+            thread_id=thread_id,
+            parser=_pr_snapshot_update_from_event,
+        )
+    )
+    if not updates:
+        return None
+
+    return _pr_snapshot_from_updates(sorted(updates, key=lambda item: item.order))
+
+
+def _parsed_events_from_paths(
+    paths: Iterable[str | Path],
+    *,
+    thread_id: str,
+    parser: Callable[[dict[str, Any], str, int], _T | None],
+) -> Iterator[_T]:
     fallback_order = 0
     for raw_path in paths:
         if not raw_path:
@@ -245,22 +232,17 @@ def latest_pr_snapshot_from_event_paths(
             with path.open("r", encoding="utf-8") as fh:
                 for raw in fh:
                     fallback_order += 1
-                    update = _pr_snapshot_update_from_line(
-                        raw,
-                        thread_id=thread_id,
-                        fallback_order=fallback_order,
-                    )
-                    if update is not None:
-                        updates.append(update)
+                    parsed = _event_from_line(raw)
+                    if parsed is None:
+                        continue
+                    event = parser(parsed, thread_id, fallback_order)
+                    if event is not None:
+                        yield event
         except FileNotFoundError:
             continue
         except (OSError, UnicodeDecodeError) as exc:
             logger.warning("failed to read Codex events %s: %s", path, exc)
             continue
-    if not updates:
-        return None
-
-    return _pr_snapshot_from_updates(sorted(updates, key=lambda item: item.order))
 
 
 def pr_snapshot_from_completed_mcp_items(
@@ -359,27 +341,18 @@ def pr_observation_result_from_turns(
     )
 
 
-def _goal_event_from_line(
-    raw: str, *, thread_id: str, fallback_order: int
-) -> _GoalEvent | None:
-    raw = raw.strip()
-    if not raw:
+def _event_from_line(raw: str) -> dict[str, Any] | None:
+    if not (raw := raw.strip()):
         return None
     try:
         event = json.loads(raw)
     except json.JSONDecodeError:
         return None
-    if not isinstance(event, dict):
-        return None
-    return _goal_event_from_event(
-        event,
-        thread_id=thread_id,
-        fallback_order=fallback_order,
-    )
+    return event if isinstance(event, dict) else None
 
 
 def _goal_event_from_event(
-    event: dict[str, Any], *, thread_id: str, fallback_order: int
+    event: dict[str, Any], thread_id: str, fallback_order: int
 ) -> _GoalEvent | None:
     method = event.get("method")
     if method not in GOAL_METHODS:
@@ -414,27 +387,8 @@ def _goal_tokens_used(goal: dict[str, Any]) -> int | None:
     return None
 
 
-def _task_plan_event_from_line(
-    raw: str, *, thread_id: str, fallback_order: int
-) -> _TaskPlanEvent | None:
-    raw = raw.strip()
-    if not raw:
-        return None
-    try:
-        event = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(event, dict):
-        return None
-    return _task_plan_event_from_event(
-        event,
-        thread_id=thread_id,
-        fallback_order=fallback_order,
-    )
-
-
 def _task_plan_event_from_event(
-    event: dict[str, Any], *, thread_id: str, fallback_order: int
+    event: dict[str, Any], thread_id: str, fallback_order: int
 ) -> _TaskPlanEvent | None:
     if event.get("method") != TASK_PLAN_UPDATED_METHOD:
         return None
@@ -501,27 +455,8 @@ def _normalize_task_plan_status(status: Any) -> str:
     return "pending"
 
 
-def _pr_snapshot_update_from_line(
-    raw: str, *, thread_id: str, fallback_order: int
-) -> _PrSnapshotUpdate | None:
-    raw = raw.strip()
-    if not raw:
-        return None
-    try:
-        event = json.loads(raw)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(event, dict):
-        return None
-    return _pr_snapshot_update_from_event(
-        event,
-        thread_id=thread_id,
-        fallback_order=fallback_order,
-    )
-
-
 def _pr_snapshot_update_from_event(
-    event: dict[str, Any], *, thread_id: str, fallback_order: int
+    event: dict[str, Any], thread_id: str, fallback_order: int
 ) -> _PrSnapshotUpdate | None:
     if event.get("method") != ITEM_COMPLETED_METHOD:
         return None
