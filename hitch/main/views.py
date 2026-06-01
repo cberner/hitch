@@ -630,6 +630,9 @@ def _settings_context(
 ) -> dict[str, Any]:
     projects = list(Project.objects.all())
     current_project = _selected_project_for_settings(current_settings, projects)
+    project_visibility = _session_project_visibility_for_settings(
+        current_settings, projects
+    )
     # Each model advertises which reasoning efforts it accepts. The dialog
     # must only offer the efforts the *selected* model supports — otherwise a
     # user can pick an effort the model rejects and ``update_settings`` bounces
@@ -701,23 +704,23 @@ def _settings_context(
         "project_auto_pr_follow_global": Project.AUTO_PR_FOLLOW_GLOBAL,
         "project_auto_pr_on": Project.AUTO_PR_ON,
         "project_auto_pr_off": Project.AUTO_PR_OFF,
-        "inbox_count": _proposed_session_inbox_count(current_project),
+        "inbox_count": _proposed_session_inbox_count(project_visibility),
     }
 
 
 def _proposed_session_inbox_queryset(
-    current_project: Project | None,
+    project_visibility: SessionProjectVisibility,
 ) -> QuerySet[ProposedSession]:
     inbox = ProposedSession.objects.filter(
         outcome_status=ProposedSession.OUTCOME_UNSET,
     )
-    if current_project is not None:
-        inbox = inbox.filter(project=current_project)
-    return inbox
+    return _filter_proposed_sessions_by_project_visibility(inbox, project_visibility)
 
 
-def _proposed_session_inbox_count(current_project: Project | None) -> int:
-    return _proposed_session_inbox_queryset(current_project).count()
+def _proposed_session_inbox_count(
+    project_visibility: SessionProjectVisibility,
+) -> int:
+    return _proposed_session_inbox_queryset(project_visibility).count()
 
 
 def _new_session_form_context(
@@ -2774,8 +2777,11 @@ def inbox(request: HttpRequest) -> HttpResponse:
     cookie_updates = resolved_settings.cookie_updates
     projects = list(Project.objects.all())
     current_project = _selected_project_for_settings(current_settings, projects)
+    inbox_project_visibility = _session_project_visibility_for_settings(
+        current_settings, projects
+    )
     proposed_sessions = list(
-        _proposed_session_inbox_queryset(current_project)
+        _proposed_session_inbox_queryset(inbox_project_visibility)
         .select_related(
             "project",
             "autonomous_goal",
@@ -2794,10 +2800,16 @@ def inbox(request: HttpRequest) -> HttpResponse:
             "login_url": reverse("login"),
             "register_url": reverse("register"),
             "current_project": current_project,
+            "inbox_project_label": _project_visibility_label(
+                inbox_project_visibility, projects
+            ),
             "proposed_sessions": proposed_sessions,
-            "show_inbox_project_names": current_project is None,
+            "show_inbox_project_names": _project_visibility_shows_project_names(
+                inbox_project_visibility
+            ),
             "proposed_session_rejected_status": ProposedSession.OUTCOME_REJECTED,
             "proposed_session_dismissed_status": ProposedSession.OUTCOME_DISMISSED,
+            **_session_project_visibility_context(inbox_project_visibility, projects),
             **settings_context,
         },
     )
@@ -5542,6 +5554,19 @@ def _filter_session_metadata_by_project_visibility(
     return rows.filter(project_filter)
 
 
+def _filter_proposed_sessions_by_project_visibility(
+    rows: QuerySet[ProposedSession], visibility: SessionProjectVisibility
+) -> QuerySet[ProposedSession]:
+    if visibility.project_ids is None:
+        if visibility.include_no_project:
+            return rows
+        return rows.exclude(project__isnull=True)
+    project_filter = Q(project_id__in=visibility.project_ids)
+    if visibility.include_no_project:
+        project_filter |= Q(project__isnull=True)
+    return rows.filter(project_filter)
+
+
 def _session_project_visibility_context(
     visibility: SessionProjectVisibility, projects: list[Project]
 ) -> dict[str, Any]:
@@ -5574,6 +5599,33 @@ def _session_list_title(
         if project is not None:
             return f"{project.name} sessions"
     return "Codex sessions"
+
+
+def _project_visibility_label(
+    visibility: SessionProjectVisibility, projects: list[Project]
+) -> str:
+    if visibility.project_ids is None:
+        return "All projects"
+    if len(visibility.project_ids) == 1 and not visibility.include_no_project:
+        project_id = next(iter(visibility.project_ids))
+        project = next(
+            (project for project in projects if project.pk == project_id), None
+        )
+        if project is not None:
+            return project.name
+    if visibility.project_ids:
+        return "Visible projects"
+    if visibility.include_no_project:
+        return "No repo"
+    return "No projects"
+
+
+def _project_visibility_shows_project_names(
+    visibility: SessionProjectVisibility,
+) -> bool:
+    if visibility.project_ids is None:
+        return True
+    return visibility.include_no_project or len(visibility.project_ids) != 1
 
 
 def _metadata_by_thread_id(threads: list[Any]) -> dict[str, SessionMetadata]:

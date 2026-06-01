@@ -324,6 +324,11 @@
             width: auto;
             accent-color: var(--accent);
         }
+        .visible-projects-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.2rem;
+        }
         .actions {
             display: flex;
             justify-content: flex-end;
@@ -361,11 +366,13 @@
             <div class="page-header">
                 <div>
                     <h2 id="inbox-title">Inbox</h2>
-                    {% if current_project %}
-                    <p class="project-name">{{ current_project.name }}</p>
-                    {% else %}
-                    <p class="project-name">All projects</p>
-                    {% endif %}
+                    <p class="project-name">{{ inbox_project_label }}</p>
+                </div>
+                <div class="proposal-menu" data-context-menu>
+                    <button type="button" class="proposal-menu-toggle" aria-label="Inbox actions" aria-haspopup="menu" aria-expanded="false" data-context-menu-open>...</button>
+                    <div class="proposal-menu-panel" role="menu" data-context-menu-panel hidden>
+                        <button type="button" role="menuitem" data-visible-projects-open>Visible projects</button>
+                    </div>
                 </div>
             </div>
             {% if proposed_sessions %}
@@ -402,8 +409,12 @@
                         {% endif %}
                     </div>
                     <p class="meta">
-                        {% if show_inbox_project_names and proposed_session.project %}
+                        {% if show_inbox_project_names %}
+                        {% if proposed_session.project %}
                         {{ proposed_session.project.name }} -
+                        {% else %}
+                        No repo -
+                        {% endif %}
                         {% endif %}
                         {% if proposed_session.inbox_kind == "notice" %}
                             {% if proposed_session.autonomous_goal %}
@@ -468,6 +479,29 @@
         </section>
     </main>
 
+    <dialog class="new-session" data-visible-projects-dialog aria-labelledby="visible-projects-title">
+        <form method="post" action="{{ visible_session_projects_url }}">
+            {% csrf_token %}
+            <input type="hidden" name="next" value="{{ request.path }}">
+            <h2 id="visible-projects-title">Visible projects</h2>
+            <div class="visible-projects-list">
+                {% for project in visible_session_projects %}
+                <label class="checkbox-label">
+                    <span>{{ project.name }}</span>
+                    <input type="checkbox" name="visible_project" value="{{ project.id }}" {% if project.visible %}checked{% endif %}>
+                </label>
+                {% endfor %}
+                <label class="checkbox-label">
+                    <span>No repo</span>
+                    <input type="checkbox" name="show_no_project_sessions" value="true" {% if visible_session_no_project %}checked{% endif %}>
+                </label>
+            </div>
+            <div class="actions">
+                <button type="submit" class="button">Save</button>
+                <button type="button" class="button secondary" data-visible-projects-cancel>Cancel</button>
+            </div>
+        </form>
+    </dialog>
     <dialog class="new-session" data-reject-session-dialog aria-labelledby="reject-session-title">
         <form method="post" data-reject-session-form>
             {% csrf_token %}
@@ -522,6 +556,23 @@
             const rejectTitle = rejectDialog && rejectDialog.querySelector("[data-reject-session-title]");
             const rejectReason = rejectDialog && rejectDialog.querySelector("textarea[name='reason']");
             const rejectCancel = rejectDialog && rejectDialog.querySelector("[data-reject-session-cancel]");
+            const visibleProjectsOpen = document.querySelector("[data-visible-projects-open]");
+            const visibleProjectsDialog = document.querySelector("[data-visible-projects-dialog]");
+            const visibleProjectsCancel = document.querySelector("[data-visible-projects-cancel]");
+            if (visibleProjectsOpen && visibleProjectsDialog) {
+                visibleProjectsOpen.addEventListener("click", () => {
+                    closeContextMenus(null);
+                    showDialog(visibleProjectsDialog);
+                    const firstToggle = visibleProjectsDialog.querySelector("input[type='checkbox']");
+                    if (firstToggle) firstToggle.focus();
+                });
+            }
+            if (visibleProjectsCancel && visibleProjectsDialog) {
+                visibleProjectsCancel.addEventListener("click", () => {
+                    hideDialog(visibleProjectsDialog);
+                    if (visibleProjectsOpen) visibleProjectsOpen.focus();
+                });
+            }
             for (const button of document.querySelectorAll("[data-proposed-session-do]")) {
                 button.addEventListener("click", () => {
                     if (!doForm) return;

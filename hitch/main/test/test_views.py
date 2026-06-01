@@ -14014,6 +14014,13 @@ class AutonomousGoalViewTests(TestCase):
             'class="primary-nav-badge" aria-label="1 inbox message">1</span>',
             nav_html,
         )
+        self.assertContains(response, 'data-visible-projects-open')
+        self.assertContains(response, "Visible projects")
+        self.assertContains(
+            response,
+            '<dialog class="new-session" data-visible-projects-dialog',
+            html=False,
+        )
         self.assertContains(response, "Add parser coverage")
         self.assertContains(response, "This adds focused parser coverage.")
         self.assertContains(response, "hitch/main/rollout.py")
@@ -14054,6 +14061,59 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, "Judge log")
         self.assertContains(response, 'name="proposed_session"')
         self.assertNotContains(response, "Other proposal")
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_inbox_visible_projects_filter_messages(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other_project = Project.objects.create(name="Other", repo_path="/other")
+        _setup_codex(mock_codex)
+        ProposedSession.objects.create(
+            project=project,
+            title="Matching proposal",
+            summary="Should not render.",
+        )
+        ProposedSession.objects.create(
+            project=other_project,
+            title="Other proposal",
+            summary="Should render.",
+        )
+        ProposedSession.objects.create(
+            title="No repo notice",
+            inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
+            summary="No project attached.",
+        )
+
+        response = self.client.post(
+            reverse("update_visible_session_projects"),
+            data={
+                "visible_project": [str(other_project.pk)],
+                "show_no_project_sessions": "true",
+                "next": reverse("inbox"),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], reverse("inbox"))
+        self.assertEqual(
+            _cookie_value(response, _VISIBLE_SESSION_PROJECTS_COOKIE),
+            f"[{other_project.pk}]",
+        )
+        self.assertEqual(
+            _cookie_value(response, _SHOW_NO_PROJECT_SESSIONS_COOKIE),
+            "true",
+        )
+
+        response = self.client.get(reverse("inbox"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Visible projects")
+        self.assertContains(response, "Other proposal")
+        self.assertContains(response, "No repo notice")
+        self.assertContains(response, "No repo -")
+        self.assertNotContains(response, "Matching proposal")
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
