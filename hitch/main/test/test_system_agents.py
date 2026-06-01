@@ -3686,7 +3686,7 @@ class SpecCriticWorkflowTests(TestCase):
     def test_pr_monitor_observation_honors_review_decision_over_stale_review(
         self,
     ) -> None:
-        pr: dict[str, object] = {}
+        pr: dict[str, Any] = {}
 
         system_agents._copy_gh_review_fields(
             pr,
@@ -3697,6 +3697,85 @@ class SpecCriticWorkflowTests(TestCase):
         )
 
         self.assertEqual(pr["review_signal"], "commented")
+
+    def test_pr_monitor_reactions_do_not_override_required_review(
+        self,
+    ) -> None:
+        pr: dict[str, Any] = {"review_signal": "commented"}
+
+        system_agents._copy_gh_reaction_fields(
+            pr,
+            {
+                "reviewDecision": "REVIEW_REQUIRED",
+                "reactionGroups": [
+                    {"content": "THUMBS_UP", "users": {"totalCount": 1}}
+                ],
+            },
+        )
+
+        self.assertEqual(pr["review_signal"], "commented")
+        self.assertEqual(pr["reaction_count"], 1)
+
+    def test_pr_monitor_reaction_observation_clears_stale_thumbs_up(
+        self,
+    ) -> None:
+        pr: dict[str, Any] = {"review_signal": "thumbs_up"}
+
+        system_agents._copy_gh_reaction_fields(
+            pr,
+            {
+                "reactionGroups": [{"content": "HEART", "users": {"totalCount": 1}}],
+            },
+        )
+
+        self.assertEqual(pr["review_signal"], "")
+        self.assertEqual(pr["reaction_count"], 1)
+        merged = system_agents._merge_pr_handoff_dicts(
+            {
+                "url": "https://github.com/cberner/hitch/pull/181",
+                "pr_number": 181,
+                "head_sha": "abc123",
+                "review_signal": "thumbs_up",
+            },
+            {
+                "url": "https://github.com/cberner/hitch/pull/181",
+                "pr_number": 181,
+                "head_sha": "abc123",
+                "review_signal": "",
+                "reaction_count": 1,
+            },
+        )
+        self.assertNotIn("review_signal", merged)
+        self.assertEqual(merged["reaction_count"], 1)
+
+    def test_pr_monitor_counts_unresolved_outdated_review_threads(
+        self,
+    ) -> None:
+        pr: dict[str, Any] = {}
+        threads = [
+            {
+                "id": "thread-1",
+                "isResolved": False,
+                "isOutdated": True,
+                "path": "app.py",
+                "line": 42,
+                "comments": {
+                    "nodes": [
+                        {
+                            "body": "This outdated conversation still blocks merge.",
+                            "url": "https://github.com/cberner/hitch/pull/181#discussion_r1",
+                        }
+                    ]
+                },
+            }
+        ]
+
+        system_agents._copy_gh_review_thread_fields(pr, threads)
+
+        self.assertEqual(pr["unresolved_thread_count"], 1)
+        self.assertEqual(pr["unresolved_threads"][0]["path"], "app.py")
+        feedback = system_agents._gh_review_thread_feedback(threads)
+        self.assertIn("outdated conversation", feedback)
 
     @patch("hitch.main.system_agents.subprocess.run")
     def test_pr_monitor_observation_fetches_github_state_with_gh(
