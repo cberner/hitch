@@ -72,13 +72,14 @@ AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_AGENT_PROMPT_
 AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE
 SPEC_CRITIC_DISPLAY_AUTHOR = "Spec Critic"
 PR_SLASH_DISPLAY_PROMPT = (
-    "Rebase on master, clean it up, and then open a PR"
+    "Rebase on the default branch, clean it up, and then open a PR"
 )
 QA_SLASH_DISPLAY_PROMPT = (
     "Run the QA agent on the current diff and fix anything it finds"
 )
 PR_SLASH_PROMPT = (
-    "Polish it, get it ready, and commit the final changes. "
+    "Rebase on the default branch, polish it, get it ready, "
+    "and commit the final changes. "
     "Do not push the branch or open a PR; Hitch will push and open it "
     "after this turn completes."
 )
@@ -2162,7 +2163,15 @@ def _pr_prompt_worker_snapshot_is_authoritative(
 
 
 def _open_or_find_pr_with_gh_cli(workflow: SystemWorkflow) -> dict[str, Any]:
-    _push_current_branch_with_git_cli(workflow)
+    active_pr_handoff = _pr_handoff_from_workflow(workflow)
+    if _pr_handoff_is_terminal(active_pr_handoff):
+        active_pr_handoff = {}
+    active_pr_handoff = _fresh_active_pr_handoff_before_push(
+        workflow, active_pr_handoff
+    )
+    _push_current_branch_with_git_cli(
+        workflow, active_pr_handoff=active_pr_handoff or None
+    )
     existing = _gh_pr_view(workflow, source_tool="gh_pr_view")
     if existing is not None and not _pr_handoff_is_terminal(existing):
         return existing
@@ -2182,6 +2191,23 @@ def _open_or_find_pr_with_gh_cli(workflow: SystemWorkflow) -> dict[str, Any]:
     return _merge_pr_handoff_dicts(created_handoff, viewed)
 
 
+def _fresh_active_pr_handoff_before_push(
+    workflow: SystemWorkflow, stored_handoff: dict[str, Any]
+) -> dict[str, Any]:
+    selector = _string_from_any(stored_handoff.get("url"))
+    try:
+        existing = _gh_pr_view(
+            workflow, selector=selector or None, source_tool="gh_pr_view"
+        )
+    except _GhPrOpenError:
+        if selector:
+            return {}
+        raise
+    if existing is not None and not _pr_handoff_is_terminal(existing):
+        return existing
+    return {}
+
+
 def _view_created_pr_for_enrichment(
     workflow: SystemWorkflow, url: str
 ) -> dict[str, Any] | None:
@@ -2192,15 +2218,66 @@ def _view_created_pr_for_enrichment(
         return None
 
 
-def _push_current_branch_with_git_cli(workflow: SystemWorkflow) -> None:
+def _push_current_branch_with_git_cli(
+    workflow: SystemWorkflow,
+    *,
+    active_pr_handoff: dict[str, Any] | None = None,
+) -> None:
     branch = _current_git_branch(workflow)
     _ensure_not_default_git_branch(workflow, branch)
     refspec = f"HEAD:refs/heads/{branch}"
-    pushed = _run_git_cli(workflow, ["push", "-u", "origin", refspec])
-    if pushed.returncode != 0:
-        raise _GhPrOpenError(
-            f"`git push -u origin {refspec}` failed: {_gh_error(pushed)}"
+    push_args = ["push", "-u", "origin", refspec]
+    pushed = _run_git_cli(workflow, push_args)
+    if pushed.returncode == 0:
+        return
+    expected_head_sha = _force_push_expected_head_sha(
+        branch, pushed, active_pr_handoff=active_pr_handoff
+    )
+    if expected_head_sha:
+        lease = f"--force-with-lease=refs/heads/{branch}:{expected_head_sha}"
+        force_push_args = ["push", lease, "-u", "origin", refspec]
+        force_pushed = _run_git_cli(
+            workflow,
+            force_push_args,
         )
+        if force_pushed.returncode == 0:
+            return
+        raise _GhPrOpenError(
+            f"`git {' '.join(force_push_args)}` failed after "
+            f"`git {' '.join(push_args)}` was rejected: {_gh_error(force_pushed)}"
+        )
+    raise _GhPrOpenError(
+        f"`git {' '.join(push_args)}` failed: {_gh_error(pushed)}"
+    )
+
+
+def _force_push_expected_head_sha(
+    branch: str,
+    failed_push: subprocess.CompletedProcess[str],
+    *,
+    active_pr_handoff: dict[str, Any] | None = None,
+) -> str:
+    if not _git_push_rejected_non_fast_forward(failed_push):
+        return ""
+    handoff = _compact_pr_handoff(active_pr_handoff)
+    if _pr_handoff_is_terminal(handoff):
+        return ""
+    if _string_from_any(handoff.get("head")) != branch:
+        return ""
+    return _string_from_any(handoff.get("head_sha"))
+
+
+def _git_push_rejected_non_fast_forward(
+    result: subprocess.CompletedProcess[str],
+) -> bool:
+    detail = f"{result.stderr}\n{result.stdout}".lower()
+    rejection_markers = (
+        "non-fast-forward",
+        "fetch first",
+        "tip of your current branch is behind",
+        "updates were rejected because the tip",
+    )
+    return any(marker in detail for marker in rejection_markers)
 
 
 def _current_git_branch(workflow: SystemWorkflow) -> str:
