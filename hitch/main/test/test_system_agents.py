@@ -2997,6 +2997,112 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(handoff["source_tool"], "gh_pr_create")
         mock_spawn.assert_called_once()
 
+    @patch("hitch.main.system_agents.codex_events.latest_pr_snapshot_for_instance")
+    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_pr_prompt_completion_ignores_terminal_worker_snapshot(
+        self,
+        mock_spawn: MagicMock,
+        mock_run: MagicMock,
+        mock_latest_pr_snapshot: MagicMock,
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={"next_user_message_index": 5},
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+            workflow_id=workflow.pk,
+        )
+        mock_latest_pr_snapshot.return_value = {
+            "url": "https://github.com/cberner/hitch/pull/70",
+            "repository_full_name": "cberner/hitch",
+            "pr_number": 70,
+            "state": "closed",
+            "source_tool": "fetch_pr",
+        }
+        mock_run.side_effect = [
+            SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "url": "https://github.com/cberner/hitch/pull/70",
+                        "number": 70,
+                        "state": "CLOSED",
+                        "isDraft": False,
+                        "title": "Old PR",
+                        "baseRefName": "master",
+                        "headRefName": "feature",
+                        "headRefOid": "oldhead",
+                        "mergeable": "UNKNOWN",
+                        "mergeCommit": None,
+                        "createdAt": "2026-05-01T00:00:00Z",
+                        "updatedAt": "2026-05-01T00:01:00Z",
+                        "closedAt": "2026-05-01T00:02:00Z",
+                        "mergedAt": None,
+                    }
+                ),
+                stderr="",
+            ),
+            SimpleNamespace(
+                returncode=0,
+                stdout="https://github.com/cberner/hitch/pull/174\n",
+                stderr="",
+            ),
+            SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "url": "https://github.com/cberner/hitch/pull/174",
+                        "number": 174,
+                        "state": "OPEN",
+                        "isDraft": False,
+                        "title": "New PR",
+                        "baseRefName": "master",
+                        "headRefName": "feature",
+                        "headRefOid": "newhead",
+                        "mergeable": "MERGEABLE",
+                        "mergeCommit": None,
+                        "createdAt": "2026-06-01T00:00:00Z",
+                        "updatedAt": "2026-06-01T00:01:00Z",
+                        "closedAt": None,
+                        "mergedAt": None,
+                    }
+                ),
+                stderr="",
+            ),
+        ]
+        mock_spawn.return_value = _instance(
+            thread_id="monitor-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        self.assertEqual(commands[0][:3], ["gh", "pr", "view"])
+        self.assertEqual(commands[1], ["gh", "pr", "create", "--fill"])
+        self.assertEqual(
+            commands[2][:4],
+            ["gh", "pr", "view", "https://github.com/cberner/hitch/pull/174"],
+        )
+        handoff = workflow.state[system_agents._PR_HANDOFF_STATE_KEY]
+        self.assertEqual(handoff["url"], "https://github.com/cberner/hitch/pull/174")
+        self.assertEqual(handoff["pr_number"], 174)
+        self.assertEqual(handoff["state"], "open")
+        self.assertEqual(handoff["source_tool"], "gh_pr_create")
+        mock_spawn.assert_called_once()
+
     @patch("hitch.main.system_agents.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_keeps_created_pr_when_view_fails(
