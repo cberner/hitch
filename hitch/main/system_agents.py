@@ -2085,7 +2085,7 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
     if not _pr_prompt_worker_snapshot_is_authoritative(worker_snapshot):
         if worker_snapshot is None and _pr_handoff_from_workflow(workflow):
             try:
-                _push_current_branch_with_git_cli(workflow)
+                _push_current_branch_for_pr_workflow(workflow)
             except _GhPrOpenError as exc:
                 _block_workflow(
                     workflow,
@@ -2135,7 +2135,7 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
         return
     if not hitch_handoff_snapshot:
         try:
-            _push_current_branch_with_git_cli(workflow)
+            _push_current_branch_for_pr_workflow(workflow)
         except _GhPrOpenError as exc:
             _block_workflow(
                 workflow,
@@ -2163,15 +2163,7 @@ def _pr_prompt_worker_snapshot_is_authoritative(
 
 
 def _open_or_find_pr_with_gh_cli(workflow: SystemWorkflow) -> dict[str, Any]:
-    active_pr_handoff = _pr_handoff_from_workflow(workflow)
-    if _pr_handoff_is_terminal(active_pr_handoff):
-        active_pr_handoff = {}
-    active_pr_handoff = _fresh_active_pr_handoff_before_push(
-        workflow, active_pr_handoff
-    )
-    _push_current_branch_with_git_cli(
-        workflow, active_pr_handoff=active_pr_handoff or None
-    )
+    _push_current_branch_for_pr_workflow(workflow)
     existing = _gh_pr_view(workflow, source_tool="gh_pr_view")
     if existing is not None and not _pr_handoff_is_terminal(existing):
         return existing
@@ -2189,6 +2181,20 @@ def _open_or_find_pr_with_gh_cli(workflow: SystemWorkflow) -> dict[str, Any]:
     if viewed is None:
         return created_handoff
     return _merge_pr_handoff_dicts(created_handoff, viewed)
+
+
+def _push_current_branch_for_pr_workflow(workflow: SystemWorkflow) -> None:
+    # Workflow pushes must refresh PR state here before the lower-level git push
+    # can consider a force-with-lease recovery.
+    stored_handoff = _pr_handoff_from_workflow(workflow)
+    if _pr_handoff_is_terminal(stored_handoff):
+        stored_handoff = {}
+    active_pr_handoff = _fresh_active_pr_handoff_before_push(
+        workflow, stored_handoff
+    )
+    _push_current_branch_with_git_cli(
+        workflow, active_pr_handoff=active_pr_handoff or None
+    )
 
 
 def _fresh_active_pr_handoff_before_push(
