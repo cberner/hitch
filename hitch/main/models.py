@@ -171,6 +171,7 @@ class ProposedSession(models.Model):
     INBOX_KIND_NOTICE = "notice"
 
     OUTCOME_UNSET = ""
+    OUTCOME_STARTING = "starting"
     OUTCOME_ACCEPTED = "accepted"
     OUTCOME_REJECTED = "rejected"
     OUTCOME_DISMISSED = "dismissed"
@@ -182,6 +183,7 @@ class ProposedSession(models.Model):
 
     OUTCOME_CHOICES: ClassVar[tuple[tuple[str, str], ...]] = (
         (OUTCOME_UNSET, "Not set"),
+        (OUTCOME_STARTING, "Starting"),
         (OUTCOME_ACCEPTED, "Accepted"),
         (OUTCOME_REJECTED, "Rejected"),
         (OUTCOME_DISMISSED, "Dismissed"),

@@ -3040,9 +3040,11 @@ def update_proposed_session_outcome(
     outcome_status = request.POST.get("outcome_status", "")
     # OUTCOME_UNSET is the inbox's pending state, not a decision the endpoint can
     # apply; accepting it as a target would let a request re-open a resolved item.
+    # OUTCOME_STARTING is an internal claim state while Hitch starts a candidate
+    # continuation; users cannot submit it from the inbox.
     valid_statuses = {
         choice[0] for choice in ProposedSession.OUTCOME_CHOICES
-    } - {ProposedSession.OUTCOME_UNSET}
+    } - {ProposedSession.OUTCOME_UNSET, ProposedSession.OUTCOME_STARTING}
     if outcome_status not in valid_statuses:
         return HttpResponseBadRequest("outcome status is invalid")
     outcome_notes = request.POST.get(
@@ -8721,7 +8723,56 @@ def _next_user_message_index_for_candidate_thread(
     return max(int(latest_index) + 1, 0)
 
 
-def _adopt_candidate_proposal_session(
+def _claim_candidate_proposal_start(
+    proposed_session: ProposedSession,
+    candidate_session: SessionMetadata,
+) -> bool:
+    """Privately claim a candidate proposal before starting side effects."""
+    outcome_metadata = _proposal_outcome_metadata(
+        proposed_session,
+        {
+            "candidate_start_claimed_by": "user",
+            "candidate_start_session_id": candidate_session.pk,
+            "candidate_start_thread_id": candidate_session.thread_id,
+        },
+    )
+    applied = ProposedSession.objects.filter(
+        pk=proposed_session.pk,
+        outcome_status=ProposedSession.OUTCOME_UNSET,
+    ).update(
+        outcome_status=ProposedSession.OUTCOME_STARTING,
+        outcome_metadata=outcome_metadata,
+        updated_at=timezone.now(),
+    )
+    if not applied:
+        return False
+    proposed_session.outcome_status = ProposedSession.OUTCOME_STARTING
+    proposed_session.outcome_metadata = outcome_metadata
+    return True
+
+
+def _rollback_candidate_proposal_start_claim(
+    proposed_session: ProposedSession,
+    outcome_metadata: dict[str, object],
+) -> None:
+    applied = ProposedSession.objects.filter(
+        pk=proposed_session.pk,
+        outcome_status=ProposedSession.OUTCOME_STARTING,
+    ).update(
+        outcome_status=ProposedSession.OUTCOME_UNSET,
+        accepted_session=None,
+        outcome_metadata=outcome_metadata,
+        updated_at=timezone.now(),
+    )
+    if not applied:
+        return
+    proposed_session.outcome_status = ProposedSession.OUTCOME_UNSET
+    proposed_session.accepted_session = None
+    proposed_session.accepted_session_id = None
+    proposed_session.outcome_metadata = outcome_metadata
+
+
+def _publish_candidate_proposal_adoption(
     *,
     request: HttpRequest,
     proposed_session: ProposedSession,
@@ -8732,7 +8783,7 @@ def _adopt_candidate_proposal_session(
     cookie_updates: dict[str, str],
     auto_pr_enabled: bool,
     auto_qa_enabled: bool,
-) -> tuple[SessionMetadata | None, HttpResponse]:
+) -> HttpResponse:
     candidate_cwd = candidate_session.cwd
     auto_merge_to_local_branch, auto_merge_branch = (
         _auto_merge_to_local_branch_for_proposal(
@@ -8745,28 +8796,48 @@ def _adopt_candidate_proposal_session(
         if target.project_cleared
         else candidate_session.project or target.project
     )
-    # Win the accept transition before adopting the candidate. If a concurrent
-    # inbox reject/dismiss resolved the proposal first, it may have already
-    # cleaned up this candidate's worktree, so we must not unhide it as a visible
-    # working session -- bail back to the inbox and leave the candidate hidden.
-    if not _accept_proposed_session_for_session(proposed_session, candidate_session):
-        response = redirect("inbox")
-        _apply_cookie_updates(response, cookie_updates)
-        return None, response
+    outcome_metadata = _proposal_outcome_metadata(
+        proposed_session,
+        {
+            "accepted_by": "user",
+            "accepted_session_id": candidate_session.pk,
+            "accepted_thread_id": candidate_session.thread_id,
+            "candidate_start_claimed_by": None,
+            "candidate_start_session_id": None,
+            "candidate_start_thread_id": None,
+        },
+    )
+    with transaction.atomic():
+        applied = ProposedSession.objects.filter(
+            pk=proposed_session.pk,
+            outcome_status=ProposedSession.OUTCOME_STARTING,
+        ).update(
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            accepted_session=candidate_session,
+            outcome_metadata=outcome_metadata,
+            updated_at=timezone.now(),
+        )
+        if not applied:
+            raise RuntimeError("candidate proposal start claim was lost")
+        SessionMetadata.objects.filter(pk=candidate_session.pk).update(
+            cwd=candidate_cwd,
+            project=session_project,
+            project_cleared=target.project_cleared,
+            auto_pr_enabled=auto_pr_enabled,
+            auto_qa_enabled=auto_qa_enabled,
+            auto_merge_to_local_branch=auto_merge_to_local_branch,
+            auto_merge_branch=auto_merge_branch,
+            is_hidden_system_session=False,
+        )
+    proposed_session.outcome_status = ProposedSession.OUTCOME_ACCEPTED
+    proposed_session.accepted_session = candidate_session
+    proposed_session.accepted_session_id = candidate_session.pk
+    proposed_session.outcome_metadata = outcome_metadata
+    candidate_session.refresh_from_db()
     _rename_codex_thread_from_proposal(
         proposed_session=proposed_session,
         session_metadata=candidate_session,
         settings=settings,
-    )
-    SessionMetadata.objects.filter(pk=candidate_session.pk).update(
-        cwd=candidate_cwd,
-        project=session_project,
-        project_cleared=target.project_cleared,
-        auto_pr_enabled=auto_pr_enabled,
-        auto_qa_enabled=auto_qa_enabled,
-        auto_merge_to_local_branch=auto_merge_to_local_branch,
-        auto_merge_branch=auto_merge_branch,
-        is_hidden_system_session=False,
     )
     candidate_session.refresh_from_db()
     remembered_values = settings._replace(last_selected_repo=cwd)
@@ -8778,56 +8849,7 @@ def _adopt_candidate_proposal_session(
         cookie_updates = {**cookie_updates, _LAST_SELECTED_REPO_COOKIE: cwd}
     response = redirect("session", session_id=candidate_session.thread_id)
     _apply_cookie_updates(response, cookie_updates)
-    return candidate_session, response
-
-
-def _candidate_session_restore_values(
-    candidate_session: SessionMetadata,
-) -> dict[str, Any]:
-    return {
-        "cwd": candidate_session.cwd,
-        "project_id": candidate_session.project_id,
-        "project_cleared": candidate_session.project_cleared,
-        "auto_pr_enabled": candidate_session.auto_pr_enabled,
-        "auto_qa_enabled": candidate_session.auto_qa_enabled,
-        "auto_merge_to_local_branch": candidate_session.auto_merge_to_local_branch,
-        "auto_merge_branch": candidate_session.auto_merge_branch,
-        "codex_name": candidate_session.codex_name,
-        "codex_display_title": candidate_session.codex_display_title,
-        "codex_last_synced_at": candidate_session.codex_last_synced_at,
-        "is_hidden_system_session": candidate_session.is_hidden_system_session,
-    }
-
-
-def _rollback_candidate_proposal_adoption(
-    *,
-    proposed_session: ProposedSession,
-    candidate_session: SessionMetadata,
-    outcome_metadata: dict[str, object],
-    candidate_values: dict[str, Any],
-) -> None:
-    with transaction.atomic():
-        rolled_back = ProposedSession.objects.filter(
-            pk=proposed_session.pk,
-            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
-            accepted_session=candidate_session,
-        ).update(
-            outcome_status=ProposedSession.OUTCOME_UNSET,
-            accepted_session=None,
-            outcome_metadata=outcome_metadata,
-            updated_at=timezone.now(),
-        )
-        if not rolled_back:
-            return
-        SessionMetadata.objects.filter(pk=candidate_session.pk).update(
-            **candidate_values
-        )
-    proposed_session.outcome_status = ProposedSession.OUTCOME_UNSET
-    proposed_session.accepted_session = None
-    proposed_session.accepted_session_id = None
-    proposed_session.outcome_metadata = outcome_metadata
-    for field, value in candidate_values.items():
-        setattr(candidate_session, field, value)
+    return response
 
 
 def _start_candidate_proposal_session(
@@ -8870,22 +8892,6 @@ def _start_candidate_proposal_session(
             _cleanup_saved_input_images(input_image_paths)
             return HttpResponseBadRequest(str(exc))
     proposal_outcome_metadata = dict(_proposal_metadata(proposed_session))
-    candidate_restore_values = _candidate_session_restore_values(candidate_session)
-    adopted_candidate, accepted_response = _adopt_candidate_proposal_session(
-        request=request,
-        proposed_session=proposed_session,
-        candidate_session=candidate_session,
-        cwd=cwd,
-        target=target,
-        settings=settings,
-        cookie_updates=cookie_updates,
-        auto_pr_enabled=auto_pr_enabled,
-        auto_qa_enabled=auto_qa_enabled,
-    )
-    if adopted_candidate is None:
-        _cleanup_saved_input_images(input_image_paths)
-        return accepted_response
-    candidate_session = adopted_candidate
     spec_critic_should_run = system_agents.spec_critic_should_run(prompt)
     prompt = _candidate_proposal_continuation_prompt(prompt)
     base_instructions = _base_instructions_for_settings(spawn_settings)
@@ -8897,121 +8903,142 @@ def _start_candidate_proposal_session(
             auto_qa_enabled=auto_qa_enabled,
         )
     )
-    if qa_workflow_activation:
-        workflow_kwargs: dict[str, Any] = {
-            "main_thread_id": candidate_session.thread_id,
-            "cwd": candidate_cwd,
-            "sandbox_policy": settings.sandbox_policy or None,
-            "approval_mode": settings.approval_mode,
-            "model": settings.model or None,
-            "reasoning_effort": settings.reasoning_effort or None,
-            "developer_instructions": developer_instructions or None,
-            "enable_memories": settings.enable_memories,
-            "initial_user_message_index": _next_user_message_index_for_candidate_thread(
-                candidate_session.thread_id, settings
-            ),
-        }
-        if web_search_mode:
-            workflow_kwargs["web_search_mode"] = web_search_mode
-        if base_instructions:
-            workflow_kwargs["base_instructions"] = base_instructions
-        if settings.qa_panel_enabled:
-            workflow_kwargs["qa_panel_enabled"] = True
-        if qa_activation:
-            workflow_kwargs["open_pr_on_lgtm"] = False
-        if auto_merge_branch:
-            workflow_kwargs["auto_merge_branch"] = auto_merge_branch
-        system_agents.start_pr_qa_workflow(**workflow_kwargs)
-        return accepted_response
-
-    spawn_kwargs: dict[str, Any] = {
-        "thread_id": candidate_session.thread_id,
-        "cwd": candidate_cwd,
-        "prompt": prompt,
-        "developer_instructions": developer_instructions or None,
-        "model": settings.model or None,
-        "reasoning_effort": settings.reasoning_effort or None,
-        "sandbox_policy": settings.sandbox_policy or None,
-        "approval_mode": settings.approval_mode,
-    }
-    if input_image_paths:
-        spawn_kwargs["input_image_paths"] = input_image_paths
-    if web_search_mode:
-        spawn_kwargs["web_search_mode"] = web_search_mode
-    if base_instructions:
-        spawn_kwargs["base_instructions"] = base_instructions
-    if settings.enable_memories:
-        spawn_kwargs["enable_memories"] = True
-    if plan_mode:
-        spawn_kwargs["plan_mode"] = True
-    if auto_pr_enabled:
-        spawn_kwargs["auto_pr_enabled"] = True
-    if auto_qa_enabled:
-        spawn_kwargs["auto_qa_enabled"] = True
-    if auto_pr_enabled or auto_qa_enabled:
-        spawn_kwargs["stored_model"] = settings.model or None
-        spawn_kwargs["stored_reasoning_effort"] = settings.reasoning_effort or None
-        spawn_kwargs["user_message_index"] = _next_user_message_index_for_candidate_thread(
-            candidate_session.thread_id, settings
-        )
-        if settings.qa_panel_enabled:
-            spawn_kwargs["qa_panel_enabled"] = True
-        if auto_merge_to_local_branch:
-            spawn_kwargs["auto_merge_to_local_branch"] = True
-            spawn_kwargs["auto_merge_branch"] = auto_merge_branch
-    if (
-        settings.spec_critic_enabled
-        and not input_image_paths
-        and not plan_mode
-        and spec_critic_should_run
-    ):
-        spec_workflow_kwargs: dict[str, Any] = {
-            "main_thread_id": candidate_session.thread_id,
-            "cwd": candidate_cwd,
-            "prompt": prompt,
-            "sandbox_policy": settings.sandbox_policy or None,
-            "approval_mode": settings.approval_mode,
-            "model": settings.model or None,
-            "reasoning_effort": settings.reasoning_effort or None,
-            "developer_instructions": developer_instructions or None,
-            "enable_memories": settings.enable_memories,
-            "initial_user_message_index": _next_user_message_index_for_candidate_thread(
-                candidate_session.thread_id, settings
-            ),
-            "auto_pr_enabled": auto_pr_enabled,
-            "auto_qa_enabled": auto_qa_enabled,
-        }
-        if base_instructions:
-            spec_workflow_kwargs["base_instructions"] = base_instructions
-        if web_search_mode:
-            spec_workflow_kwargs["web_search_mode"] = web_search_mode
-        if auto_merge_to_local_branch:
-            spec_workflow_kwargs["auto_merge_to_local_branch"] = True
-            spec_workflow_kwargs["auto_merge_branch"] = auto_merge_branch
-        if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
-            spec_workflow_kwargs["qa_panel_enabled"] = True
-        system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
-        return accepted_response
-
+    if not _claim_candidate_proposal_start(proposed_session, candidate_session):
+        _cleanup_saved_input_images(input_image_paths)
+        response = redirect("inbox")
+        _apply_cookie_updates(response, cookie_updates)
+        return response
     input_images_owned = False
     try:
-        codex_pool.spawn_turn(**spawn_kwargs)
-        input_images_owned = True
+        if qa_workflow_activation:
+            workflow_kwargs: dict[str, Any] = {
+                "main_thread_id": candidate_session.thread_id,
+                "cwd": candidate_cwd,
+                "sandbox_policy": settings.sandbox_policy or None,
+                "approval_mode": settings.approval_mode,
+                "model": settings.model or None,
+                "reasoning_effort": settings.reasoning_effort or None,
+                "developer_instructions": developer_instructions or None,
+                "enable_memories": settings.enable_memories,
+                "initial_user_message_index": (
+                    _next_user_message_index_for_candidate_thread(
+                        candidate_session.thread_id, settings
+                    )
+                ),
+            }
+            if web_search_mode:
+                workflow_kwargs["web_search_mode"] = web_search_mode
+            if base_instructions:
+                workflow_kwargs["base_instructions"] = base_instructions
+            if settings.qa_panel_enabled:
+                workflow_kwargs["qa_panel_enabled"] = True
+            if qa_activation:
+                workflow_kwargs["open_pr_on_lgtm"] = False
+            if auto_merge_branch:
+                workflow_kwargs["auto_merge_branch"] = auto_merge_branch
+            system_agents.start_pr_qa_workflow(**workflow_kwargs)
+        else:
+            spawn_kwargs: dict[str, Any] = {
+                "thread_id": candidate_session.thread_id,
+                "cwd": candidate_cwd,
+                "prompt": prompt,
+                "developer_instructions": developer_instructions or None,
+                "model": settings.model or None,
+                "reasoning_effort": settings.reasoning_effort or None,
+                "sandbox_policy": settings.sandbox_policy or None,
+                "approval_mode": settings.approval_mode,
+            }
+            if input_image_paths:
+                spawn_kwargs["input_image_paths"] = input_image_paths
+            if web_search_mode:
+                spawn_kwargs["web_search_mode"] = web_search_mode
+            if base_instructions:
+                spawn_kwargs["base_instructions"] = base_instructions
+            if settings.enable_memories:
+                spawn_kwargs["enable_memories"] = True
+            if plan_mode:
+                spawn_kwargs["plan_mode"] = True
+            if auto_pr_enabled:
+                spawn_kwargs["auto_pr_enabled"] = True
+            if auto_qa_enabled:
+                spawn_kwargs["auto_qa_enabled"] = True
+            if auto_pr_enabled or auto_qa_enabled:
+                spawn_kwargs["stored_model"] = settings.model or None
+                spawn_kwargs["stored_reasoning_effort"] = (
+                    settings.reasoning_effort or None
+                )
+                spawn_kwargs["user_message_index"] = (
+                    _next_user_message_index_for_candidate_thread(
+                        candidate_session.thread_id, settings
+                    )
+                )
+                if settings.qa_panel_enabled:
+                    spawn_kwargs["qa_panel_enabled"] = True
+                if auto_merge_to_local_branch:
+                    spawn_kwargs["auto_merge_to_local_branch"] = True
+                    spawn_kwargs["auto_merge_branch"] = auto_merge_branch
+            if (
+                settings.spec_critic_enabled
+                and not input_image_paths
+                and not plan_mode
+                and spec_critic_should_run
+            ):
+                spec_workflow_kwargs: dict[str, Any] = {
+                    "main_thread_id": candidate_session.thread_id,
+                    "cwd": candidate_cwd,
+                    "prompt": prompt,
+                    "sandbox_policy": settings.sandbox_policy or None,
+                    "approval_mode": settings.approval_mode,
+                    "model": settings.model or None,
+                    "reasoning_effort": settings.reasoning_effort or None,
+                    "developer_instructions": developer_instructions or None,
+                    "enable_memories": settings.enable_memories,
+                    "initial_user_message_index": (
+                        _next_user_message_index_for_candidate_thread(
+                            candidate_session.thread_id, settings
+                        )
+                    ),
+                    "auto_pr_enabled": auto_pr_enabled,
+                    "auto_qa_enabled": auto_qa_enabled,
+                }
+                if base_instructions:
+                    spec_workflow_kwargs["base_instructions"] = base_instructions
+                if web_search_mode:
+                    spec_workflow_kwargs["web_search_mode"] = web_search_mode
+                if auto_merge_to_local_branch:
+                    spec_workflow_kwargs["auto_merge_to_local_branch"] = True
+                    spec_workflow_kwargs["auto_merge_branch"] = auto_merge_branch
+                if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
+                    spec_workflow_kwargs["qa_panel_enabled"] = True
+                system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
+            else:
+                codex_pool.spawn_turn(**spawn_kwargs)
+                input_images_owned = True
     except codex_pool.InputAttachmentLimitExceededError as exc:
         _cleanup_saved_input_images(input_image_paths)
-        _rollback_candidate_proposal_adoption(
-            proposed_session=proposed_session,
-            candidate_session=candidate_session,
-            outcome_metadata=proposal_outcome_metadata,
-            candidate_values=candidate_restore_values,
+        _rollback_candidate_proposal_start_claim(
+            proposed_session, proposal_outcome_metadata
         )
         return HttpResponseBadRequest(str(exc))
     except Exception:
         if not input_images_owned:
             _cleanup_saved_input_images(input_image_paths)
+        _rollback_candidate_proposal_start_claim(
+            proposed_session, proposal_outcome_metadata
+        )
         raise
 
-    return accepted_response
+    return _publish_candidate_proposal_adoption(
+        request=request,
+        proposed_session=proposed_session,
+        candidate_session=candidate_session,
+        cwd=cwd,
+        target=target,
+        settings=settings,
+        cookie_updates=cookie_updates,
+        auto_pr_enabled=auto_pr_enabled,
+        auto_qa_enabled=auto_qa_enabled,
+    )
 
 
 def _candidate_proposal_continuation_prompt(prompt: str) -> str:

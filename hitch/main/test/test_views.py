@@ -8282,7 +8282,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_turn")
-    def test_candidate_accept_late_attachment_race_rolls_back_adoption(
+    def test_candidate_accept_late_attachment_race_rolls_back_claim(
         self,
         mock_turn: MagicMock,
         mock_codex: MagicMock,
@@ -8353,6 +8353,182 @@ class NewSessionViewTests(TestCase):
         self.assertTrue(candidate.is_hidden_system_session)
         self.assertEqual(candidate.codex_name, "Candidate draft")
         self.assertEqual(candidate.codex_display_title, "Candidate draft")
+
+    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    def test_candidate_accept_turn_start_failure_rolls_back_claim(
+        self,
+        mock_turn: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_managed_worktrees: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
+        codex = _setup_codex(mock_codex, models=[])
+        mock_turn.side_effect = RuntimeError("worker launch failed")
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+            codex_name="Candidate draft",
+            codex_display_title="Candidate draft",
+            is_hidden_system_session=True,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            title="Add parser coverage",
+            outcome_metadata={"kept": True},
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "worker launch failed"):
+            self.client.post(
+                reverse("new_session"),
+                data={
+                    "prompt": "Go ahead and implement this proposed session.",
+                    "cwd": self.REPO,
+                    "proposed_session": str(proposal.pk),
+                },
+            )
+
+        mock_turn.assert_called_once()
+        codex._client.thread_set_name.assert_not_called()
+        proposal.refresh_from_db()
+        candidate.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertIsNone(proposal.accepted_session)
+        self.assertEqual(proposal.outcome_metadata, {"kept": True})
+        self.assertTrue(candidate.is_hidden_system_session)
+        self.assertEqual(candidate.codex_name, "Candidate draft")
+        self.assertEqual(candidate.codex_display_title, "Candidate draft")
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    def test_candidate_accept_workflow_start_failure_rolls_back_claim(
+        self,
+        mock_turn: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_managed_worktrees: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
+        codex = _setup_codex(mock_codex, models=[])
+        codex._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(turns=[])
+        )
+        mock_start_workflow.side_effect = RuntimeError("workflow start failed")
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+            is_hidden_system_session=True,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            title="Add parser coverage",
+            outcome_metadata={"kept": True},
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "workflow start failed"):
+            self.client.post(
+                reverse("new_session"),
+                data={
+                    "prompt": "/qa",
+                    "cwd": self.REPO,
+                    "proposed_session": str(proposal.pk),
+                },
+            )
+
+        mock_start_workflow.assert_called_once()
+        mock_turn.assert_not_called()
+        codex._client.thread_set_name.assert_not_called()
+        proposal.refresh_from_db()
+        candidate.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertIsNone(proposal.accepted_session)
+        self.assertEqual(proposal.outcome_metadata, {"kept": True})
+        self.assertTrue(candidate.is_hidden_system_session)
+
+    @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
+    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    def test_candidate_accept_spec_critic_start_failure_rolls_back_claim(
+        self,
+        mock_turn: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_managed_worktrees: MagicMock,
+        mock_start_spec_critic: MagicMock,
+    ) -> None:
+        _seed_cookies(self.client, **{_SPEC_CRITIC_COOKIE: "true"})
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
+        codex = _setup_codex(mock_codex, models=[])
+        codex._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(turns=[])
+        )
+        mock_start_spec_critic.side_effect = RuntimeError("spec start failed")
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+            is_hidden_system_session=True,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            title="Add parser coverage",
+            outcome_metadata={"kept": True},
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "spec start failed"):
+            self.client.post(
+                reverse("new_session"),
+                data={
+                    "prompt": "Go ahead and implement this proposed session.",
+                    "cwd": self.REPO,
+                    "proposed_session": str(proposal.pk),
+                },
+            )
+
+        mock_start_spec_critic.assert_called_once()
+        mock_turn.assert_not_called()
+        codex._client.thread_set_name.assert_not_called()
+        proposal.refresh_from_db()
+        candidate.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertIsNone(proposal.accepted_session)
+        self.assertEqual(proposal.outcome_metadata, {"kept": True})
+        self.assertTrue(candidate.is_hidden_system_session)
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.discover_managed_worktrees")
