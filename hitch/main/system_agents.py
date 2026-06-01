@@ -78,8 +78,9 @@ QA_SLASH_DISPLAY_PROMPT = (
     "Run the QA agent on the current diff and fix anything it finds"
 )
 PR_SLASH_PROMPT = (
-    "Polish it, get it ready, commit the final changes, and push the branch. "
-    "Do not open a PR; Hitch will open it after this turn completes."
+    "Polish it, get it ready, and commit the final changes. "
+    "Do not push the branch or open a PR; Hitch will push and open it "
+    "after this turn completes."
 )
 SYSTEM_AGENT_APPROVAL_MODE = "auto_review"
 # Auto-review workflows (auto-QA and auto-PR) start without an explicit
@@ -2082,6 +2083,17 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
     hitch_handoff_snapshot = False
     if not _pr_prompt_worker_snapshot_is_authoritative(worker_snapshot):
         if worker_snapshot is None and _pr_handoff_from_workflow(workflow):
+            try:
+                _push_current_branch_with_git_cli(workflow)
+            except _GhPrOpenError as exc:
+                _block_workflow(
+                    workflow,
+                    (
+                        "PR prompt worker completed, but Hitch could not push "
+                        f"the branch with git: {exc}"
+                    ),
+                )
+                return
             workflow.step = STEP_PR_MONITORING
             workflow.save(update_fields=["step", "state", "updated_at"])
             try:
@@ -2120,6 +2132,18 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
         workflow.step = STEP_PR_CLOSED
         workflow.save(update_fields=["status", "step", "state", "updated_at"])
         return
+    if not hitch_handoff_snapshot:
+        try:
+            _push_current_branch_with_git_cli(workflow)
+        except _GhPrOpenError as exc:
+            _block_workflow(
+                workflow,
+                (
+                    "PR prompt worker completed, but Hitch could not push "
+                    f"the branch with git: {exc}"
+                ),
+            )
+            return
     workflow.step = STEP_PR_MONITORING
     workflow.save(update_fields=["step", "state", "updated_at"])
     try:
@@ -2131,12 +2155,14 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
 def _pr_prompt_worker_snapshot_is_authoritative(
     snapshot: dict[str, Any] | None,
 ) -> bool:
-    # Hitch owns PR creation after the cleanup/push turn; terminal worker
-    # observations are often stale branch PRs and must not close the new workflow.
+    # Hitch owns branch pushing and PR creation after the cleanup turn; terminal
+    # worker observations are often stale branch PRs and must not close the new
+    # workflow.
     return snapshot is not None and not _pr_handoff_is_terminal(snapshot)
 
 
 def _open_or_find_pr_with_gh_cli(workflow: SystemWorkflow) -> dict[str, Any]:
+    _push_current_branch_with_git_cli(workflow)
     existing = _gh_pr_view(workflow, source_tool="gh_pr_view")
     if existing is not None and not _pr_handoff_is_terminal(existing):
         return existing
@@ -2164,6 +2190,56 @@ def _view_created_pr_for_enrichment(
         return _gh_pr_view(workflow, selector=url, source_tool="gh_pr_create")
     except _GhPrOpenError:
         return None
+
+
+def _push_current_branch_with_git_cli(workflow: SystemWorkflow) -> None:
+    branch = _current_git_branch(workflow)
+    _ensure_not_default_git_branch(workflow, branch)
+    refspec = f"HEAD:refs/heads/{branch}"
+    pushed = _run_git_cli(workflow, ["push", "-u", "origin", refspec])
+    if pushed.returncode != 0:
+        raise _GhPrOpenError(
+            f"`git push -u origin {refspec}` failed: {_gh_error(pushed)}"
+        )
+
+
+def _current_git_branch(workflow: SystemWorkflow) -> str:
+    result = _run_git_cli(workflow, ["symbolic-ref", "--quiet", "--short", "HEAD"])
+    if result.returncode != 0:
+        raise _GhPrOpenError(
+            f"`git symbolic-ref --short HEAD` failed: {_gh_error(result)}"
+        )
+    branch = result.stdout.strip()
+    if not branch:
+        raise _GhPrOpenError("current checkout is detached; cannot push a PR branch")
+    return branch
+
+
+def _ensure_not_default_git_branch(workflow: SystemWorkflow, branch: str) -> None:
+    default_branch = _origin_default_git_branch(workflow)
+    if default_branch:
+        if branch == default_branch:
+            raise _GhPrOpenError(f"refusing to push default branch {branch!r}")
+        return
+    if branch in {"main", "master", "trunk", "develop"}:
+        raise _GhPrOpenError(f"refusing to push likely default branch {branch!r}")
+
+
+def _origin_default_git_branch(workflow: SystemWorkflow) -> str:
+    result = _run_git_cli(
+        workflow, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]
+    )
+    if result.returncode != 0:
+        return ""
+    remote_ref = result.stdout.strip()
+    if not remote_ref:
+        return ""
+    prefix = "origin/"
+    return (
+        remote_ref.removeprefix(prefix)
+        if remote_ref.startswith(prefix)
+        else remote_ref
+    )
 
 
 def _gh_pr_view(
@@ -2198,6 +2274,25 @@ def _run_gh_cli(
             command,
             cwd=workflow.cwd,
             env=env,
+            capture_output=True,
+            text=True,
+            timeout=_GH_PR_CREATE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise _GhPrOpenError(f"`{' '.join(command)}` timed out") from exc
+    except OSError as exc:
+        raise _GhPrOpenError(f"`{' '.join(command)}` could not run: {exc}") from exc
+
+
+def _run_git_cli(
+    workflow: SystemWorkflow, args: list[str]
+) -> subprocess.CompletedProcess[str]:
+    command = ["git", *args]
+    try:
+        return subprocess.run(
+            command,
+            cwd=workflow.cwd,
             capture_output=True,
             text=True,
             timeout=_GH_PR_CREATE_TIMEOUT_SECONDS,
@@ -2646,6 +2741,19 @@ def _handle_pr_feedback_finished(
     snapshot = codex_events.latest_pr_snapshot_for_instance(instance)
     if snapshot is not None:
         _merge_pr_handoff(workflow, snapshot)
+    try:
+        snapshot = _open_or_find_pr_with_gh_cli(workflow)
+    except _GhPrOpenError as exc:
+        _block_workflow(
+            workflow,
+            (
+                "PR follow-up worker completed, but Hitch could not push "
+                f"or open the current branch PR: {exc}"
+            ),
+        )
+        return
+    _merge_pr_handoff(workflow, snapshot)
+    _mark_hitch_pr_handoff(workflow, snapshot)
     workflow.step = STEP_PR_MONITORING
     workflow.save(update_fields=["step", "state", "updated_at"])
     try:
@@ -3616,7 +3724,7 @@ def _qa_prompt(cwd: str, diff_text: str) -> str:
     return (
         "You are Hitch's QA agent for a PR workflow.\n\n"
         "Thoroughly review the current code diff before the PR agent runs its final "
-        "cleanup/push pass.\n\n"
+        "cleanup/commit pass.\n\n"
         f"{_CODEX_REVIEW_GUIDANCE}\n"
         "Also do your own manual QA: if there is an interactive interface related "
         "to the diff, manually test it out and include concrete failures or gaps in "
@@ -3691,12 +3799,13 @@ def _pr_followup_feedback_prompt(workflow: SystemWorkflow, feedback: str) -> str
     return (
         "Hitch PR monitor found follow-up work on the active PR.\n\n"
         "Before changing code, re-check this PR and branch state. If the PR is "
-        "merged, closed, or its head branch is missing, do not keep pushing to "
-        "that stale branch; create a fresh branch from current master and open a "
-        "follow-up PR that addresses the feedback instead. If the PR is still "
-        "open, address the blockers on that PR, push fixes, reply to review "
+        "merged, closed, or its head branch is missing, do not keep working on "
+        "that stale branch; create a fresh branch from current master and commit "
+        "the follow-up fix there instead. If the PR is still "
+        "open, address the blockers on that PR, commit fixes, reply to review "
         "comments, and resolve threads as appropriate. Keep the diff focused; "
-        "Hitch will run the PR monitor again after this turn.\n\n"
+        "do not push the branch or open a PR. Hitch will push it, open or find "
+        "the current-branch PR, and run the PR monitor again after this turn.\n\n"
         "Persisted PR handoff:\n"
         f"{_format_pr_handoff(handoff)}\n\n"
         "Monitor feedback:\n\n"
