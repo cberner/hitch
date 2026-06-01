@@ -50,6 +50,8 @@ _AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLES = (
 class RefreshResult(NamedTuple):
     synced: int
     failed: bool
+    active_next_cursor: str = ""
+    archived_next_cursor: str = ""
 
 
 class _SourceRefreshResult(NamedTuple):
@@ -84,6 +86,15 @@ def is_complete(*, archived: bool) -> bool:
     )
 
 
+def has_pending_pages(*, archived: bool) -> bool:
+    source = _source_name(archived=archived)
+    return bool(
+        SessionIndexSyncState.objects.filter(source=source).values_list(
+            "next_cursor", flat=True
+        ).first()
+    )
+
+
 def has_indexed_sessions() -> bool:
     return SessionMetadata.objects.exclude(codex_updated_at__isnull=True).exists()
 
@@ -99,6 +110,8 @@ def refresh_from_codex(
 ) -> RefreshResult:
     synced = 0
     failed = False
+    active_next_cursor = ""
+    archived_next_cursor = ""
     sources = []
     if include_active:
         sources.append(False)
@@ -124,10 +137,19 @@ def refresh_from_codex(
                     archived=archived,
                     seen_thread_ids=source_result.seen_thread_ids,
                 )
+            if archived:
+                archived_next_cursor = source_result.next_cursor
+            else:
+                active_next_cursor = source_result.next_cursor
         except AppServerError:
             failed = True
             logger.warning("failed to refresh %s session index", "archived" if archived else "active")
-    return RefreshResult(synced=synced, failed=failed)
+    return RefreshResult(
+        synced=synced,
+        failed=failed,
+        active_next_cursor=active_next_cursor,
+        archived_next_cursor=archived_next_cursor,
+    )
 
 
 def mark_synced(*, archived: bool, complete: bool, next_cursor: str = "") -> None:
@@ -138,7 +160,7 @@ def mark_synced(*, archived: bool, complete: bool, next_cursor: str = "") -> Non
         defaults={
             "last_synced_at": timezone.now(),
             "is_complete": previous_complete or complete,
-            "next_cursor": "" if previous_complete or complete else next_cursor,
+            "next_cursor": "" if complete else next_cursor,
         },
     )
 

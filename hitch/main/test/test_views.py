@@ -2891,7 +2891,7 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_stale_complete_session_index_schedules_background_refresh(
+    def test_stale_complete_session_index_tries_capped_refresh_before_cache(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         now = datetime.now(UTC)
@@ -2917,13 +2917,228 @@ class IndexViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Cached session")
-        mock_codex.assert_not_called()
-        client.thread_list.assert_not_called()
+        mock_codex.assert_called_once()
+        client.thread_list.assert_called_once()
+        start_index_refresh.assert_not_called()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_stale_complete_session_index_survives_codex_start_failure(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        now = datetime.now(UTC)
+        mock_codex.side_effect = AppServerError("codex unavailable")
+        mock_discover.return_value = []
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now - timedelta(minutes=5),
+            is_complete=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="cached",
+            cwd="/repo",
+            codex_display_title="Cached session",
+            codex_name="Cached session",
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Cached session")
+        mock_codex.assert_called_once()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_stale_complete_capped_refresh_uses_codex_cursor_page(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        now = datetime.now(UTC)
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now - timedelta(minutes=5),
+            is_complete=True,
+        )
+        for index in range(51):
+            SessionMetadata.objects.create(
+                thread_id=f"cached-{index}",
+                cwd="/repo",
+                codex_display_title=f"Cached {index}",
+                codex_name=f"Cached {index}",
+                codex_created_at=datetime.fromtimestamp(1000 - index, UTC),
+                codex_updated_at=datetime.fromtimestamp(1000 - index, UTC),
+                codex_last_synced_at=now,
+            )
+        first_page = [
+            _session(f"fresh-{index}", name=f"Fresh {index}", updated_at=2000 - index)
+            for index in range(50)
+        ]
+        client = _setup_codex(mock_codex)
+        client.thread_list.return_value = SimpleNamespace(
+            data=first_page,
+            next_cursor="page-2",
+        )
+        client.thread_list.side_effect = None
+        mock_discover.return_value = []
+
+        with (
+            patch(
+                "hitch.main.views._start_usage_session_index_refresh_thread"
+            ) as start_index_refresh,
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            response = self.client.get(reverse("index"))
+        load_more_url = self._load_more_url(response)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Fresh 0")
+        self.assertNotContains(response, "Cached 0")
+        self.assertIn("cursor=page-2", load_more_url)
+        self.assertNotIn("cursor=idx%3A", load_more_url)
+        self.assertEqual(client.thread_list.call_count, 2)
+        state = SessionIndexSyncState.objects.get(
+            source=SessionIndexSyncState.SOURCE_ACTIVE
+        )
+        self.assertTrue(state.is_complete)
+        self.assertEqual(state.next_cursor, "page-2")
         start_index_refresh.assert_called_once_with(
             enable_memories=False,
             include_active=True,
             include_archived=False,
         )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_stale_complete_capped_refresh_keeps_usage_totals_available(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        now = datetime.now(UTC)
+        rollout_path = _make_rollout(
+            self,
+            [
+                _token_count_line(
+                    input_tokens=400,
+                    cached_input_tokens=50,
+                    output_tokens=600,
+                    total_tokens=1_000,
+                )
+            ],
+        )
+        metadata = _seed_usage_metadata("usage-thread", path=rollout_path)
+        SessionMetadata.objects.filter(pk=metadata.pk).update(
+            usage_last_checked_at=now
+        )
+        SessionIndexSyncState.objects.filter(
+            source=SessionIndexSyncState.SOURCE_ACTIVE
+        ).update(last_synced_at=now - timedelta(minutes=5))
+        _cache_token_usage(
+            "usage-thread",
+            input_tokens=400,
+            cached_input_tokens=50,
+            output_tokens=600,
+            total_tokens=1_000,
+            path=rollout_path,
+        )
+        first_page = [
+            _session(f"fresh-{index}", name=f"Fresh {index}", updated_at=2000 - index)
+            for index in range(50)
+        ]
+        client = _setup_codex(mock_codex)
+        client.thread_list.return_value = SimpleNamespace(
+            data=first_page,
+            next_cursor="page-2",
+        )
+        client.thread_list.side_effect = None
+        mock_discover.return_value = []
+
+        index_response = self.client.get(reverse("index"))
+
+        self.assertEqual(index_response.status_code, 200)
+        self.assertContains(index_response, "Fresh 0")
+        state = SessionIndexSyncState.objects.get(
+            source=SessionIndexSyncState.SOURCE_ACTIVE
+        )
+        self.assertTrue(state.is_complete)
+        self.assertEqual(state.next_cursor, "page-2")
+
+        with (
+            patch("hitch.main.views._rate_limits_for_usage_context", return_value=None),
+            patch(
+                "hitch.main.views._start_usage_session_index_refresh_thread"
+            ) as start_index_refresh,
+            patch("hitch.main.views._start_usage_token_refresh_thread"),
+            patch("hitch.main.views._start_models_refresh_thread"),
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            usage_response = self.client.get(reverse("usage"))
+
+        self.assertEqual(usage_response.status_code, 200)
+        self.assertNotContains(usage_response, "All sessions usage unavailable.")
+        lifetime_usage = cast(dict[str, Any], usage_response.context["lifetime_usage"])
+        self.assertEqual(lifetime_usage["total"]["input"], "350")
+        self.assertEqual(lifetime_usage["total"]["output"], "600")
+        self.assertEqual(lifetime_usage["total"]["cached"], "50")
+        start_index_refresh.assert_called_once_with(
+            enable_memories=False,
+            include_active=True,
+            include_archived=False,
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_stale_complete_capped_refresh_keeps_index_page_when_live_fetch_fails(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        now = datetime.now(UTC)
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now - timedelta(minutes=5),
+            is_complete=True,
+        )
+        for index in range(51):
+            SessionMetadata.objects.create(
+                thread_id=f"cached-{index}",
+                cwd="/repo",
+                codex_display_title=f"Cached {index}",
+                codex_name=f"Cached {index}",
+                codex_created_at=datetime.fromtimestamp(1000 - index, UTC),
+                codex_updated_at=datetime.fromtimestamp(1000 - index, UTC),
+                codex_last_synced_at=now,
+            )
+        first_page = [
+            _session(f"fresh-{index}", name=f"Fresh {index}", updated_at=2000 - index)
+            for index in range(50)
+        ]
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = [
+            SimpleNamespace(data=first_page, next_cursor="page-2"),
+            AppServerError("live fetch unavailable"),
+        ]
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("index"))
+        load_more_url = self._load_more_url(response)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Fresh 0")
+        self.assertIn("cursor=idx%3A", load_more_url)
+        self.assertNotIn("cursor=page-2", load_more_url)
+        self.assertEqual(client.thread_list.call_count, 2)
+        state = SessionIndexSyncState.objects.get(
+            source=SessionIndexSyncState.SOURCE_ACTIVE
+        )
+        self.assertTrue(state.is_complete)
+        self.assertEqual(state.next_cursor, "page-2")
+
+        load_more_response = self.client.get(load_more_url)
+
+        self.assertEqual(load_more_response.status_code, 200)
+        self.assertContains(load_more_response, "Cached 0")
+        self.assertNotContains(load_more_response, "Fresh 0")
+        mock_codex.assert_called_once()
+        self.assertEqual(client.thread_list.call_count, 2)
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
