@@ -2330,6 +2330,7 @@ def _push_current_branch_with_git_cli(
             f"`git {' '.join(force_push_args)}` failed after "
             f"`git {' '.join(push_args)}` was rejected: {_gh_error(force_pushed)}"
         )
+
     raise _GhPrOpenError(
         f"`git {' '.join(push_args)}` failed: {_gh_error(pushed)}"
     )
@@ -2362,6 +2363,7 @@ def _git_push_rejected_non_fast_forward(
         "updates were rejected because the tip",
     )
     return any(marker in detail for marker in rejection_markers)
+
 
 
 def _current_git_branch(workflow: SystemWorkflow) -> str:
@@ -3407,14 +3409,14 @@ def _handle_pr_followup_monitor_finished(
         monitor_status = (
             "terminal" if _pr_handoff_is_terminal(monitor_pr) else "blocked"
         )
+    gh_feedback = _string_from_any(gh_observation.get("feedback"))
+    gh_blockers = _string_list(gh_observation.get("blockers"))
     parsed = {
         **parsed,
         "status": monitor_status,
         "pr": monitor_pr,
-        "feedback": parsed["feedback"]
-        or _string_from_any(gh_observation.get("feedback")),
-        "blockers": parsed["blockers"]
-        or _string_list(gh_observation.get("blockers")),
+        "feedback": gh_feedback or parsed["feedback"],
+        "blockers": gh_blockers or parsed["blockers"],
     }
     if monitor_pr:
         _merge_pr_handoff(workflow, monitor_pr)

@@ -3069,6 +3069,96 @@ class SpecCriticWorkflowTests(TestCase):
         )
         mock_surface.assert_called_once()
 
+    @patch("hitch.main.system_agents.subprocess.run")
+    def test_pr_branch_push_force_with_lease_after_non_fast_forward_rejection(
+        self, mock_run: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_FEEDBACK_RUNNING,
+            state={
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": "https://github.com/cberner/hitch/pull/180",
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 180,
+                    "state": "open",
+                    "head": "feature",
+                },
+            },
+        )
+        mock_run.side_effect = [
+            SimpleNamespace(returncode=0, stdout="feature\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
+            SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="! [rejected] HEAD -> feature (non-fast-forward)",
+            ),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+        ]
+
+        system_agents._push_current_branch_with_git_cli(workflow)
+
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        self.assertEqual(
+            commands[2],
+            ["git", "push", "-u", "origin", "HEAD:refs/heads/feature"],
+        )
+        self.assertEqual(
+            commands[3],
+            [
+                "git",
+                "push",
+                "-u",
+                "--force-with-lease",
+                "origin",
+                "HEAD:refs/heads/feature",
+            ],
+        )
+
+    @patch("hitch.main.system_agents.subprocess.run")
+    def test_pr_branch_push_does_not_force_when_active_pr_head_differs(
+        self, mock_run: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_FEEDBACK_RUNNING,
+            state={
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": "https://github.com/cberner/hitch/pull/181",
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 181,
+                    "state": "open",
+                    "head": "old-feature",
+                },
+            },
+        )
+        mock_run.side_effect = [
+            SimpleNamespace(returncode=0, stdout="feature\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
+            SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="! [rejected] HEAD -> feature (non-fast-forward)",
+            ),
+        ]
+
+        with self.assertRaises(system_agents._GhPrOpenError):
+            system_agents._push_current_branch_with_git_cli(workflow)
+
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        self.assertEqual(len(commands), 3)
+        self.assertEqual(
+            commands[2],
+            ["git", "push", "-u", "origin", "HEAD:refs/heads/feature"],
+        )
+
     @patch(
         "hitch.main.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation({"pr_number": 173}),
@@ -4307,6 +4397,80 @@ class SpecCriticWorkflowTests(TestCase):
             self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
             self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
             mock_observe.assert_called_once_with(workflow)
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
+    def test_monitor_uses_refreshed_gh_feedback_for_followup(
+        self, mock_observe: MagicMock, mock_spawn: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as cwd:
+            workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="main-thread",
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_RUNNING,
+                step=system_agents.STEP_PR_MONITORING,
+                state={
+                    system_agents._PR_HANDOFF_STATE_KEY: {
+                        "url": "https://github.com/cberner/hitch/pull/169",
+                        "repository_full_name": "cberner/hitch",
+                        "pr_number": 169,
+                    },
+                },
+            )
+            events_path = _events_file(
+                self,
+                {
+                    "status": "blocked",
+                    "summary": "Old monitor summary.",
+                    "feedback": "stale monitor feedback",
+                    "pr": {
+                        "pr_number": 169,
+                        "mergeable": True,
+                        "draft": False,
+                        "review_signal": "approved",
+                        "unresolved_thread_count": 0,
+                        "ci_status": "success",
+                    },
+                    "blockers": [],
+                },
+            )
+            instance = _instance(
+                thread_id="monitor-thread",
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                workflow_id=workflow.pk,
+                events_path=events_path,
+                agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            )
+            SystemAgentRun.objects.create(
+                workflow=workflow,
+                agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+                thread_id="monitor-thread",
+                instance=instance,
+                input={"gh_observation": _gh_monitor_observation()},
+            )
+            mock_observe.return_value = _gh_monitor_observation(
+                {
+                    "mergeable": True,
+                    "draft": False,
+                    "review_signal": "changes_requested",
+                    "unresolved_thread_count": 0,
+                    "ci_status": "success",
+                },
+                feedback="fresh requested changes body",
+                blockers=["A reviewer requested changes."],
+            )
+
+            system_agents.on_codex_instance_finished(instance)
+
+            workflow.refresh_from_db()
+            self.assertEqual(workflow.step, system_agents.STEP_PR_FEEDBACK_RUNNING)
+            monitor = workflow.state[system_agents._PR_MONITOR_STATE_KEY]
+            self.assertEqual(monitor["feedback"], "fresh requested changes body")
+            self.assertEqual(monitor["blockers"], ["A reviewer requested changes."])
+            prompt = mock_spawn.call_args.kwargs["prompt"]
+            self.assertIn("fresh requested changes body", prompt)
+            self.assertNotIn("stale monitor feedback", prompt)
 
     @patch(
         "hitch.main.system_agents._pr_monitor_observation_from_gh",
