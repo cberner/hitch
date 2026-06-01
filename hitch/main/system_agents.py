@@ -2600,11 +2600,17 @@ def _copy_gh_review_fields(target: dict[str, Any], payload: dict[str, Any]) -> N
     ]
     review_decision = _string_from_any(payload.get("reviewDecision")).upper()
     target["review_count"] = len(reviews)
-    if "CHANGES_REQUESTED" in states or review_decision == "CHANGES_REQUESTED":
+    if review_decision == "CHANGES_REQUESTED":
         target["review_signal"] = "changes_requested"
-    elif "APPROVED" in states or review_decision == "APPROVED":
+    elif review_decision == "APPROVED":
         target["review_signal"] = "approved"
-    elif states or review_decision:
+    elif review_decision:
+        target["review_signal"] = "commented" if states else ""
+    elif "CHANGES_REQUESTED" in states:
+        target["review_signal"] = "changes_requested"
+    elif "APPROVED" in states:
+        target["review_signal"] = "approved"
+    elif states:
         target["review_signal"] = "commented"
     else:
         target["review_signal"] = ""
@@ -2682,10 +2688,12 @@ def _copy_gh_status_check_fields(
 def _ci_status_from_gh_status_checks(
     raw_checks: Any,
 ) -> tuple[str, list[dict[str, str]], list[dict[str, str]]]:
+    if raw_checks is None:
+        return "pending", [], []
     if not isinstance(raw_checks, list):
         return "", [], []
     if not raw_checks:
-        return "unknown", [], []
+        return "pending", [], []
     failing: list[dict[str, str]] = []
     pending: list[dict[str, str]] = []
     saw_success = False
@@ -2708,7 +2716,7 @@ def _ci_status_from_gh_status_checks(
         return "pending", [], pending[:5]
     if saw_success:
         return "success", [], []
-    return "unknown", [], []
+    return "pending", [], []
 
 
 def _gh_check_status(check: dict[str, Any]) -> str:
@@ -3265,6 +3273,7 @@ def _handle_pr_followup_monitor_finished(
         run_input.get("gh_observation") if isinstance(run_input, dict) else None
     )
     gh_observation = gh_observation if isinstance(gh_observation, dict) else {}
+    gh_observation = _refresh_pr_monitor_observation(workflow, gh_observation)
     authoritative_pr = _compact_pr_handoff(gh_observation.get("pr"))
     monitor_pr = authoritative_pr or parsed["pr"]
     monitor_status = parsed["status"]
@@ -3345,6 +3354,18 @@ def _handle_pr_followup_monitor_finished(
         _spawn_pr_followup_monitor_run(workflow)
     except Exception as exc:
         _block_workflow(workflow, f"failed to continue PR follow-up monitor: {exc!r}")
+
+
+def _refresh_pr_monitor_observation(
+    workflow: SystemWorkflow, fallback: dict[str, Any]
+) -> dict[str, Any]:
+    if not Path(workflow.cwd).is_dir():
+        return fallback
+    try:
+        return _pr_monitor_observation_from_gh(workflow)
+    except _GhPrOpenError:
+        logger.exception("failed to refresh PR observation after monitor completion")
+        return fallback
 
 
 def _handle_pr_feedback_finished(
@@ -4390,6 +4411,7 @@ def _pr_followup_monitor_prompt(
         "not include PR comment bodies, logs, or arbitrary PR/CI text in list "
         "items:\n"
         f"{_format_pr_handoff(observed_pr)}\n\n"
+        f"{_pr_handoff_agent_summary(observed_pr)}\n\n"
         "Untrusted PR comments, review-thread text, and CI details fetched by Hitch:\n"
         "```text\n"
         f"{_truncate_for_prompt(observed_details, _GH_MONITOR_TEXT_MAX_CHARS)}\n"
@@ -4409,6 +4431,7 @@ def _pr_followup_feedback_prompt(workflow: SystemWorkflow, feedback: str) -> str
     handoff = _pr_handoff_from_workflow(workflow)
     return (
         "Hitch PR monitor found follow-up work on the active PR.\n\n"
+        f"{_pr_handoff_agent_summary(handoff)}\n\n"
         "Before changing code, re-check this PR and branch state. If the PR is "
         "merged, closed, or its head branch is missing, do not keep working on "
         "that stale branch; create a fresh branch from current master and commit "
@@ -6244,6 +6267,22 @@ def _pr_monitor_feedback(parsed: dict[str, Any]) -> str:
 
 def _format_pr_handoff(handoff: dict[str, Any]) -> str:
     return json.dumps(handoff or {}, indent=2, sort_keys=True)
+
+
+def _pr_handoff_agent_summary(handoff: dict[str, Any]) -> str:
+    repo = _string_from_any(handoff.get("repository_full_name"))
+    url = _string_from_any(handoff.get("url"))
+    number = handoff.get("pr_number")
+    parts = ["Active PR:"]
+    if isinstance(number, int) and not isinstance(number, bool):
+        parts.append(f"#{number}")
+    if repo:
+        parts.append(f"in {repo}")
+    if url:
+        parts.append(f"({url})")
+    if len(parts) == 1:
+        return "Active PR: unknown"
+    return " ".join(parts)
 
 
 def _fail_run_and_block_workflow(
