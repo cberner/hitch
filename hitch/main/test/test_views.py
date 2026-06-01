@@ -1746,6 +1746,165 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    def test_cached_session_list_shows_pr_number_in_cached_pr_badge(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        pr_url = "https://github.com/cberner/hitch/pull/94"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_fetch_pr",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps({"url": pr_url, "state": "open"}),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Open."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="cached-pr",
+            cwd="/repo",
+            codex_display_title="Cached PR",
+            codex_preview="Open a PR",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+            derived_stage="pr",
+            derived_stage_source_mtime_ns=rollout_path.stat().st_mtime_ns,
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Cached PR")
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">PR #94</span>',
+        )
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cached_session_list_omits_stale_pr_number_for_new_workflow(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_fetch_pr",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps(
+                            {
+                                "url": "https://github.com/cberner/hitch/pull/94",
+                                "state": "open",
+                            }
+                        ),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Open."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="new-pr-workflow",
+            cwd="/repo",
+            codex_display_title="New PR workflow",
+            codex_preview="Open a PR",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+        )
+        SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="new-pr-workflow",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={},
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "New PR workflow")
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">PR</span>',
+        )
+        self.assertNotContains(response, "PR #94")
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
     def test_cached_session_list_ignores_locked_stage_cache_update(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -2270,7 +2429,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Newer main PR")
         self.assertContains(
             response,
-            '<span class="stage-badge" data-tone="active">PR</span>',
+            '<span class="stage-badge" data-tone="active">PR #94</span>',
         )
         self.assertNotContains(response, "Done: Closed")
         mock_codex.assert_not_called()
@@ -2360,7 +2519,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Newer main PR state")
         self.assertContains(
             response,
-            '<span class="stage-badge" data-tone="active">PR</span>',
+            '<span class="stage-badge" data-tone="active">PR #94</span>',
         )
         self.assertNotContains(response, "Done: Closed")
         mock_codex.assert_not_called()
@@ -2509,7 +2668,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Server-created PR")
         self.assertContains(
             response,
-            '<span class="stage-badge" data-tone="active">PR</span>',
+            '<span class="stage-badge" data-tone="active">PR #100</span>',
         )
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()

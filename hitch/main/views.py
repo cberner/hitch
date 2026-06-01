@@ -2384,7 +2384,13 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         active_instance = active_instances_by_thread_id.get(session_id)
         cached_stage = _cached_stage_for_session_row(session, rollout_state)
         if active_instance is None and workflow is None and cached_stage is not None:
-            session["stage"] = cached_stage.as_context()
+            pr_snapshot = None
+            if cached_stage.key == session_stage.PR.key:
+                rollout_path = rollout_state.path if rollout_state is not None else None
+                pr_snapshot = _pr_snapshot_for_rollout_path(rollout_path)
+            session["stage"] = _session_list_stage_context(
+                cached_stage, pr_snapshot=pr_snapshot
+            )
             continue
         rollout_path = rollout_state.path if rollout_state is not None else None
         entries, pr_observation = _session_stage_data_for_rollout_path(rollout_path)
@@ -2395,14 +2401,22 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             pr_observation,
             main_updated_at=session.get("stage_main_updated_at"),
         )
+        workflow_pr_snapshot = system_agents.pr_handoff_for_workflow(stage_workflow)
         stage = session_stage.derive_stage(
             entries=entries,
             active_instance=active_instance,
             workflow=stage_workflow,
             pr_snapshot=pr_observation.snapshot,
-            workflow_pr_snapshot=system_agents.pr_handoff_for_workflow(stage_workflow),
+            workflow_pr_snapshot=workflow_pr_snapshot,
         )
-        session["stage"] = stage.as_context()
+        session["stage"] = _session_list_stage_context(
+            stage,
+            pr_snapshot=_session_list_pr_snapshot_for_stage(
+                stage_workflow=stage_workflow,
+                log_pr_snapshot=pr_observation.snapshot,
+                workflow_pr_snapshot=workflow_pr_snapshot,
+            ),
+        )
         # The stage cache is keyed only on the rollout file's mtime, so it may
         # only hold stages that are a pure function of the rollout. A stage that
         # an active worker or a PR/QA workflow forced (e.g. Implementation while
@@ -2416,6 +2430,47 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
                 stage,
                 rollout_state.mtime_ns if rollout_state is not None else 0,
             )
+
+
+def _session_list_pr_snapshot_for_stage(
+    *,
+    stage_workflow: SystemWorkflow | None,
+    log_pr_snapshot: Mapping[str, Any] | None,
+    workflow_pr_snapshot: Mapping[str, Any] | None,
+) -> Mapping[str, Any] | None:
+    if (
+        stage_workflow is not None
+        and _pr_snapshot_identity(workflow_pr_snapshot) is None
+    ):
+        return workflow_pr_snapshot
+    return session_stage.merge_pr_snapshots(
+        log_pr_snapshot=log_pr_snapshot,
+        workflow_pr_snapshot=workflow_pr_snapshot,
+    )
+
+
+def _session_list_stage_context(
+    stage: session_stage.SessionStage,
+    *,
+    pr_snapshot: Mapping[str, Any] | None = None,
+) -> dict[str, str]:
+    context = stage.as_context()
+    if stage.key != session_stage.PR.key:
+        return context
+    pr_number = _pr_number_from_snapshot(pr_snapshot)
+    if pr_number is not None:
+        context["label"] = f"{stage.label} #{pr_number}"
+    return context
+
+
+def _pr_number_from_snapshot(snapshot: Mapping[str, Any] | None) -> int | None:
+    if not snapshot:
+        return None
+    number = snapshot.get("pr_number")
+    if isinstance(number, int) and not isinstance(number, bool) and number > 0:
+        return number
+    identity = _pr_snapshot_identity(snapshot)
+    return identity[1] if identity is not None else None
 
 
 def _latest_pr_workflows_by_thread_id(
