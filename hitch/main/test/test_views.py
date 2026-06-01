@@ -96,7 +96,7 @@ _SHOW_NO_PROJECT_SESSIONS_COOKIE = "hitch_show_no_project_sessions"
 _CODING_AGENT_COOKIE = "hitch_coding_agent"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 _PR_PROMPT = (
-    "Rebase on master, clean it up, and then open a PR"
+    "Rebase on the default branch, clean it up, and then open a PR"
 )
 _QA_PROMPT = "Run the QA agent on the current diff and fix anything it finds"
 

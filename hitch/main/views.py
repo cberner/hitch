@@ -535,6 +535,27 @@ _VALID_PLAN_ACTIONS = frozenset({"", _PLAN_ACTION_APPROVE, _PLAN_ACTION_REVISE})
 _PR_SLASH_COMMAND = "/pr"
 _PR_SLASH_PROMPT = system_agents.PR_SLASH_DISPLAY_PROMPT
 _PR_SLASH_FINAL_PROMPT = system_agents.PR_SLASH_PROMPT
+_PREVIOUS_DEFAULT_BRANCH_PR_SLASH_DISPLAY_PROMPT = (
+    "Rebase on the repository's default branch, clean it up, and then open a PR"
+)
+_PREVIOUS_DEFAULT_BRANCH_PR_SLASH_FINAL_PROMPT = (
+    "Rebase on the repository's default branch, polish it, get it ready, "
+    "and commit the final changes. Do not push the branch or open a PR; "
+    "Hitch will push and open it after this turn completes."
+)
+_PREVIOUS_PR_SLASH_DISPLAY_PROMPT = (
+    "Rebase on master, clean it up, and then open a PR"
+)
+_PREVIOUS_REBASE_MASTER_PR_SLASH_FINAL_PROMPT = (
+    "Rebase on master, polish it, get it ready, and commit the final changes. "
+    "Do not push the branch or open a PR; Hitch will push and open it "
+    "after this turn completes."
+)
+_PREVIOUS_HITCH_OWNED_PR_SLASH_FINAL_PROMPT = (
+    "Polish it, get it ready, and commit the final changes. "
+    "Do not push the branch or open a PR; Hitch will push and open it "
+    "after this turn completes."
+)
 _PREVIOUS_HITCH_PR_SLASH_FINAL_PROMPT = (
     "Polish it, get it ready, commit the final changes, and push the branch. "
     "Do not open a PR; Hitch will open it after this turn completes."
@@ -560,6 +581,11 @@ _PR_PROMPT_ALIASES = frozenset(
     {
         _PR_SLASH_PROMPT,
         _PR_SLASH_FINAL_PROMPT,
+        _PREVIOUS_DEFAULT_BRANCH_PR_SLASH_DISPLAY_PROMPT,
+        _PREVIOUS_DEFAULT_BRANCH_PR_SLASH_FINAL_PROMPT,
+        _PREVIOUS_PR_SLASH_DISPLAY_PROMPT,
+        _PREVIOUS_REBASE_MASTER_PR_SLASH_FINAL_PROMPT,
+        _PREVIOUS_HITCH_OWNED_PR_SLASH_FINAL_PROMPT,
         _PREVIOUS_HITCH_PR_SLASH_FINAL_PROMPT,
         _PREVIOUS_PR_SLASH_FINAL_PROMPT,
         _LEGACY_PR_SLASH_PROMPT,
