@@ -883,21 +883,63 @@ def _session_list_page(
         )
     request_uses_index_cursor = _request_uses_index_cursor(request)
     refresh_active = (
-        not request_uses_index_cursor and session_index.should_refresh(archived=False)
+        not request_uses_index_cursor
+        and (
+            session_index.should_refresh(archived=False)
+            or session_index.has_pending_pages(archived=False)
+        )
     )
     refresh_archived = (
         not request_uses_index_cursor
         and current_settings.show_archived_sessions
-        and session_index.should_refresh(archived=True)
+        and (
+            session_index.should_refresh(archived=True)
+            or session_index.has_pending_pages(archived=True)
+        )
     )
     if refresh_active or refresh_archived:
-        session_index.refresh_from_codex(
+        refresh_result = session_index.refresh_from_codex(
             codex,
             projects=projects,
             include_active=refresh_active,
             include_archived=refresh_archived,
             max_pages=1,
         )
+        capped_refresh_has_more = bool(
+            refresh_result.active_next_cursor
+            or (required_archived and refresh_result.archived_next_cursor)
+        )
+        if capped_refresh_has_more:
+            _schedule_session_index_refresh(
+                enable_memories=current_settings.enable_memories,
+                include_active=bool(refresh_result.active_next_cursor),
+                include_archived=bool(
+                    required_archived and refresh_result.archived_next_cursor
+                ),
+            )
+            # Coverage remains the availability contract; a capped freshness
+            # probe that sees more pages only hands this response to live
+            # cursor pagination when Codex is healthy.
+            try:
+                return _session_list_page_from_codex(
+                    codex,
+                    request,
+                    current_settings=current_settings,
+                    projects=projects,
+                    current_project=current_project,
+                    project_visibility=project_visibility,
+                    hidden_thread_ids=hidden_thread_ids,
+                    system_thread_ids=system_thread_ids,
+                    runs_by_thread_id=runs_by_thread_id,
+                    instances_by_thread_id=instances_by_thread_id,
+                    system_only=system_only,
+                    accepted_visible_thread_ids=accepted_visible_thread_ids,
+                )
+            except AppServerError:
+                logger.warning(
+                    "failed to fetch live session page after capped refresh; "
+                    "rendering cached sessions"
+                )
     return _session_list_page_from_index(
         request,
         current_project=current_project,
@@ -1051,6 +1093,7 @@ def _session_list_page_from_warm_index(
     current_project: Project | None,
     project_visibility: SessionProjectVisibility | None,
     system_only: bool,
+    allow_refresh_needed: bool = False,
 ) -> SessionListPage | None:
     required_archived = current_settings.show_archived_sessions
     if _request_uses_codex_cursor(request) or not _session_index_sources_complete(
@@ -1067,18 +1110,22 @@ def _session_list_page_from_warm_index(
     )
     request_uses_index_cursor = _request_uses_index_cursor(request)
     refresh_active = (
-        not request_uses_index_cursor and session_index.should_refresh(archived=False)
+        not request_uses_index_cursor
+        and (
+            session_index.should_refresh(archived=False)
+            or session_index.has_pending_pages(archived=False)
+        )
     )
     refresh_archived = (
         not request_uses_index_cursor
         and required_archived
-        and session_index.should_refresh(archived=True)
+        and (
+            session_index.should_refresh(archived=True)
+            or session_index.has_pending_pages(archived=True)
+        )
     )
-    _schedule_session_index_refresh(
-        enable_memories=current_settings.enable_memories,
-        include_active=refresh_active,
-        include_archived=refresh_archived,
-    )
+    if (refresh_active or refresh_archived) and not allow_refresh_needed:
+        return None
     if system_only:
         return _system_session_list_page_from_index(
             request,
@@ -2467,6 +2514,45 @@ def _non_negative_int(value: str) -> int:
     return max(parsed, 0)
 
 
+def _session_list_page_from_codex_or_warm_index(
+    request: HttpRequest,
+    *,
+    current_settings: SettingsValues,
+    projects: list[Project],
+    current_project: Project | None,
+    project_visibility: SessionProjectVisibility | None,
+    system_only: bool,
+) -> SessionListPage:
+    config = codex_pool.app_server_config(
+        enable_memories=current_settings.enable_memories
+    )
+    try:
+        with Codex(config=config) as codex:
+            return _session_list_page(
+                codex,
+                request,
+                current_settings=current_settings,
+                projects=projects,
+                current_project=current_project,
+                project_visibility=project_visibility,
+                system_only=system_only,
+            )
+    except AppServerError:
+        fallback = _session_list_page_from_warm_index(
+            request,
+            current_settings=current_settings,
+            projects=projects,
+            current_project=current_project,
+            project_visibility=project_visibility,
+            system_only=system_only,
+            allow_refresh_needed=True,
+        )
+        if fallback is None:
+            raise
+        logger.warning("failed to open live session list; rendering cached sessions")
+        return fallback
+
+
 def index(request: HttpRequest) -> HttpResponse:
     # Sweep workers whose pid is gone: a Popen that crashed before a worker
     # could record its terminal status (or a row stuck in ``starting``)
@@ -2489,19 +2575,14 @@ def index(request: HttpRequest) -> HttpResponse:
         system_only=False,
     )
     if session_page is None:
-        config = codex_pool.app_server_config(
-            enable_memories=current_settings.enable_memories
+        session_page = _session_list_page_from_codex_or_warm_index(
+            request,
+            current_settings=current_settings,
+            projects=projects,
+            current_project=current_project,
+            project_visibility=session_project_visibility,
+            system_only=False,
         )
-        with Codex(config=config) as codex:
-            session_page = _session_list_page(
-                codex,
-                request,
-                current_settings=current_settings,
-                projects=projects,
-                current_project=current_project,
-                project_visibility=session_project_visibility,
-                system_only=False,
-            )
     _attach_session_stage_context(session_page.sessions)
     settings_context = _settings_context(current_settings, models_data)
     response = render(
@@ -2548,19 +2629,14 @@ def system_sessions(request: HttpRequest) -> HttpResponse:
         system_only=True,
     )
     if session_page is None:
-        config = codex_pool.app_server_config(
-            enable_memories=current_settings.enable_memories
+        session_page = _session_list_page_from_codex_or_warm_index(
+            request,
+            current_settings=current_settings,
+            projects=projects,
+            current_project=current_project,
+            project_visibility=None,
+            system_only=True,
         )
-        with Codex(config=config) as codex:
-            session_page = _session_list_page(
-                codex,
-                request,
-                current_settings=current_settings,
-                projects=projects,
-                current_project=current_project,
-                project_visibility=None,
-                system_only=True,
-            )
     settings_context = _settings_context(current_settings, models_data)
     response = render(
         request,
@@ -4563,13 +4639,12 @@ def _metadata_rows_for_usage() -> list[SessionMetadata]:
 
 def _usage_session_index_state() -> UsageSessionIndexState:
     # Source coverage is the availability contract: complete-but-empty is valid
-    # zero usage, while any partial source would undercount "All sessions".
+    # zero usage. Pending cursors still need a full refresh, but they do not
+    # make the previously complete coverage unavailable.
     active_complete = session_index.is_complete(archived=False)
     archived_complete = session_index.is_complete(archived=True)
-    refresh_active = not active_complete or session_index.should_refresh(archived=False)
-    refresh_archived = not archived_complete or session_index.should_refresh(
-        archived=True
-    )
+    refresh_active = _usage_session_index_refresh_needed(archived=False)
+    refresh_archived = _usage_session_index_refresh_needed(archived=True)
     return UsageSessionIndexState(
         active_complete=active_complete,
         archived_complete=archived_complete,
@@ -4612,8 +4687,10 @@ def _schedule_session_index_refresh(
 
 
 def _usage_session_index_refresh_needed(*, archived: bool) -> bool:
-    return not session_index.is_complete(archived=archived) or session_index.should_refresh(
-        archived=archived
+    return (
+        not session_index.is_complete(archived=archived)
+        or session_index.has_pending_pages(archived=archived)
+        or session_index.should_refresh(archived=archived)
     )
 
 
