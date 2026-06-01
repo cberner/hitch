@@ -15513,6 +15513,62 @@ class AutonomousGoalViewTests(TestCase):
         mock_cleanup.assert_called_once_with("/repo-worktree")
 
     @patch("hitch.main.views.cleanup_managed_worktree_path")
+    def test_reject_reconciles_stale_candidate_start_claim(
+        self, mock_cleanup: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+            is_hidden_system_session=True,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            title="Add parser coverage",
+            candidate_session=candidate,
+            outcome_status=ProposedSession.OUTCOME_STARTING,
+            outcome_metadata={
+                "kept": True,
+                "candidate_start_claimed_by": "user",
+                "candidate_start_session_id": candidate.pk,
+                "candidate_start_thread_id": candidate.thread_id,
+            },
+        )
+        stale_updated_at = (
+            timezone.now()
+            - views._PROPOSED_SESSION_START_CLAIM_TTL
+            - timedelta(seconds=1)
+        )
+        ProposedSession.objects.filter(pk=proposal.pk).update(
+            updated_at=stale_updated_at
+        )
+
+        response = self.client.post(
+            reverse("update_proposed_session_outcome", args=[proposal.pk]),
+            {
+                "outcome_status": ProposedSession.OUTCOME_REJECTED,
+                "reason": "Not useful enough.",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        proposal.refresh_from_db()
+        candidate.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_REJECTED)
+        self.assertEqual(proposal.outcome_notes, "Not useful enough.")
+        self.assertIsNone(proposal.accepted_session)
+        self.assertEqual(proposal.outcome_metadata, {"kept": True})
+        self.assertTrue(candidate.is_hidden_system_session)
+        mock_cleanup.assert_called_once_with("/repo-worktree")
+
+    @patch("hitch.main.views.cleanup_managed_worktree_path")
     def test_update_outcome_rejects_already_resolved_proposal(
         self, mock_cleanup: MagicMock
     ) -> None:

@@ -109,6 +109,7 @@ _MODELS_REFRESH_IN_FLIGHT: set[bool] = set()
 _MODELS_CACHE_VALUE: dict[bool, list[Any]] = {}
 _MODELS_CACHE_FETCHED_AT: dict[bool, datetime] = {}
 _MODELS_CACHE_TTL = timedelta(minutes=5)
+_PROPOSED_SESSION_START_CLAIM_TTL = timedelta(minutes=15)
 
 
 class SettingsValues(NamedTuple):
@@ -716,6 +717,7 @@ def _settings_context(
 def _proposed_session_inbox_queryset(
     project_visibility: SessionProjectVisibility,
 ) -> QuerySet[ProposedSession]:
+    _reconcile_stale_candidate_proposal_starts()
     inbox = ProposedSession.objects.filter(
         outcome_status=ProposedSession.OUTCOME_UNSET,
     )
@@ -3022,6 +3024,7 @@ def update_proposed_session_outcome(
 ) -> HttpResponse:
     if proposed_session_id < 1 or proposed_session_id > _MAX_BIGAUTOFIELD:
         return HttpResponseBadRequest("proposed session is required")
+    _reconcile_stale_candidate_proposal_starts()
     current_settings = _stored_settings(request)
     project_visibility = _session_project_visibility_for_settings(
         current_settings, list(Project.objects.all())
@@ -7407,6 +7410,7 @@ def _posted_proposed_session_for_new_session(
         return None, "proposed session is required"
     if session_id < 1 or session_id > _MAX_BIGAUTOFIELD:
         return None, "proposed session is required"
+    _reconcile_stale_candidate_proposal_starts()
     proposed_session = (
         ProposedSession.objects.select_related(
             "project", "autonomous_goal__project", "candidate_session"
@@ -7552,6 +7556,53 @@ def _proposal_outcome_metadata(
         else:
             metadata[key] = value
     return metadata
+
+
+def _candidate_start_claim_metadata_updates(
+    *,
+    claimed_by: str | None,
+    candidate_session: SessionMetadata | None,
+) -> dict[str, object]:
+    return {
+        "candidate_start_claimed_by": claimed_by,
+        "candidate_start_session_id": (
+            candidate_session.pk if candidate_session is not None else None
+        ),
+        "candidate_start_thread_id": (
+            candidate_session.thread_id if candidate_session is not None else None
+        ),
+    }
+
+
+def _reconcile_stale_candidate_proposal_starts() -> int:
+    """Recover private start claims that never reached publish or rollback."""
+    cutoff = timezone.now() - _PROPOSED_SESSION_START_CLAIM_TTL
+    stale_proposals = list(
+        ProposedSession.objects.filter(
+            outcome_status=ProposedSession.OUTCOME_STARTING,
+            updated_at__lt=cutoff,
+        ).only("pk", "outcome_metadata")
+    )
+    reconciled = 0
+    for proposed_session in stale_proposals:
+        outcome_metadata = _proposal_outcome_metadata(
+            proposed_session,
+            _candidate_start_claim_metadata_updates(
+                claimed_by=None,
+                candidate_session=None,
+            ),
+        )
+        reconciled += ProposedSession.objects.filter(
+            pk=proposed_session.pk,
+            outcome_status=ProposedSession.OUTCOME_STARTING,
+            updated_at__lt=cutoff,
+        ).update(
+            outcome_status=ProposedSession.OUTCOME_UNSET,
+            accepted_session=None,
+            outcome_metadata=outcome_metadata,
+            updated_at=timezone.now(),
+        )
+    return reconciled
 
 
 def _posted_auto_pr_override(raw: str | None, *, default: bool) -> tuple[bool, str | None]:
@@ -8730,11 +8781,10 @@ def _claim_candidate_proposal_start(
     """Privately claim a candidate proposal before starting side effects."""
     outcome_metadata = _proposal_outcome_metadata(
         proposed_session,
-        {
-            "candidate_start_claimed_by": "user",
-            "candidate_start_session_id": candidate_session.pk,
-            "candidate_start_thread_id": candidate_session.thread_id,
-        },
+        _candidate_start_claim_metadata_updates(
+            claimed_by="user",
+            candidate_session=candidate_session,
+        ),
     )
     applied = ProposedSession.objects.filter(
         pk=proposed_session.pk,
@@ -8802,9 +8852,10 @@ def _publish_candidate_proposal_adoption(
             "accepted_by": "user",
             "accepted_session_id": candidate_session.pk,
             "accepted_thread_id": candidate_session.thread_id,
-            "candidate_start_claimed_by": None,
-            "candidate_start_session_id": None,
-            "candidate_start_thread_id": None,
+            **_candidate_start_claim_metadata_updates(
+                claimed_by=None,
+                candidate_session=None,
+            ),
         },
     )
     with transaction.atomic():
@@ -9281,6 +9332,7 @@ def _proposed_session_for_new_session_page(
         raise Http404("proposed session not found") from exc
     if session_id < 1 or session_id > _MAX_BIGAUTOFIELD:
         raise Http404("proposed session not found")
+    _reconcile_stale_candidate_proposal_starts()
     proposed_session = (
         ProposedSession.objects.select_related(
             "project", "autonomous_goal__project", "candidate_session"

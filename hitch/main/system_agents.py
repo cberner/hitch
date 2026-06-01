@@ -999,7 +999,10 @@ def _autonomous_goal_auto_merge_base_ref(
 def _autonomous_goal_pending_proposal_exists(autonomous_goal: AutonomousGoal) -> bool:
     return autonomous_goal.proposed_sessions.filter(
         inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL,
-        outcome_status=ProposedSession.OUTCOME_UNSET,
+        outcome_status__in=(
+            ProposedSession.OUTCOME_UNSET,
+            ProposedSession.OUTCOME_STARTING,
+        ),
     ).exists()
 
 

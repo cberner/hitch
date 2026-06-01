@@ -5715,6 +5715,12 @@ class AutonomousGoalWorkflowTests(TestCase):
             goal="Find useful test coverage increments.",
             auto_proposal_enabled=True,
         )
+        starting_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve parser",
+            goal="Find useful parser increments.",
+            auto_proposal_enabled=True,
+        )
         notice_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve docs",
@@ -5724,6 +5730,11 @@ class AutonomousGoalWorkflowTests(TestCase):
         ProposedSession.objects.create(
             autonomous_goal=pending_goal,
             title="Add parser coverage",
+        )
+        ProposedSession.objects.create(
+            autonomous_goal=starting_goal,
+            title="Add parser implementation",
+            outcome_status=ProposedSession.OUTCOME_STARTING,
         )
         ProposedSession.objects.create(
             autonomous_goal=notice_goal,
