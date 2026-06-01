@@ -2668,8 +2668,19 @@ def _copy_gh_reaction_fields(target: dict[str, Any], payload: dict[str, Any]) ->
         if content in {"thumbs_up", "+1", "thumbsup"}:
             thumbs_up += count
     target["reaction_count"] = total
-    if thumbs_up > 0 and target.get("review_signal") != "changes_requested":
+    current_signal = _normalize_review_signal(target.get("review_signal"))
+    review_decision = _string_from_any(payload.get("reviewDecision")).upper()
+    review_required = bool(
+        review_decision and review_decision not in {"APPROVED", "CHANGES_REQUESTED"}
+    )
+    if (
+        thumbs_up > 0
+        and current_signal not in {"changes_requested", "approved"}
+        and not review_required
+    ):
         target["review_signal"] = "thumbs_up"
+    elif thumbs_up == 0 and current_signal == "thumbs_up":
+        target["review_signal"] = ""
 
 
 def _reaction_group_count(group: dict[str, Any]) -> int:
@@ -2947,9 +2958,7 @@ def _copy_gh_review_thread_fields(
     target: dict[str, Any], threads: list[dict[str, Any]], *, complete: bool = True
 ) -> None:
     unresolved = [
-        thread
-        for thread in threads
-        if thread.get("isResolved") is not True and thread.get("isOutdated") is not True
+        thread for thread in threads if thread.get("isResolved") is not True
     ]
     target["review_thread_count"] = len(threads)
     if unresolved or complete:
@@ -3060,9 +3069,7 @@ def _gh_comment_feedback(payload: dict[str, Any]) -> str:
 def _gh_review_thread_feedback(threads: list[dict[str, Any]]) -> str:
     items: list[str] = []
     unresolved = [
-        thread
-        for thread in threads
-        if thread.get("isResolved") is not True and thread.get("isOutdated") is not True
+        thread for thread in threads if thread.get("isResolved") is not True
     ]
     for thread in unresolved[:5]:
         parts = []
@@ -5822,12 +5829,14 @@ def _merge_pr_handoff_dicts(
         # ``review_signal``, which uses ``""`` as the explicit reviews-clear
         # sentinel (see ``codex_events._copy_review_fields``). Empty
         # list/dict updates are "observed and found none" overwrites.
-        # Reaction-derived ``thumbs_up`` is held back from the clear since
-        # the reviews tool does not speak for it.
+        # Reaction-derived ``thumbs_up`` is held back from review-only clears,
+        # but a reaction observation may explicitly clear it.
         if value is None:
             continue
         if value == "":
-            if key == "review_signal" and merged.get(key) != "thumbs_up":
+            if key == "review_signal" and (
+                merged.get(key) != "thumbs_up" or "reaction_count" in update
+            ):
                 merged.pop(key, None)
             continue
         merged[key] = value
