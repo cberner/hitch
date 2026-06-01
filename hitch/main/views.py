@@ -525,6 +525,9 @@ _VALID_PLAN_ACTIONS = frozenset({"", _PLAN_ACTION_APPROVE, _PLAN_ACTION_REVISE})
 _PR_SLASH_COMMAND = "/pr"
 _PR_SLASH_PROMPT = system_agents.PR_SLASH_DISPLAY_PROMPT
 _PR_SLASH_FINAL_PROMPT = system_agents.PR_SLASH_PROMPT
+_PREVIOUS_PR_SLASH_FINAL_PROMPT = (
+    "Polish it, get it ready, and open or update the PR."
+)
 _LEGACY_PR_SLASH_PROMPT = (
     "Do a thorough review of the diff. Rebase on master, clean it up, "
     "and then open a PR"
@@ -543,6 +546,7 @@ _PR_PROMPT_ALIASES = frozenset(
     {
         _PR_SLASH_PROMPT,
         _PR_SLASH_FINAL_PROMPT,
+        _PREVIOUS_PR_SLASH_FINAL_PROMPT,
         _LEGACY_PR_SLASH_PROMPT,
         _LEGACY_PR_SLASH_FINAL_PROMPT,
     }
@@ -2302,6 +2306,11 @@ def _workflow_after_main_lifecycle(
     if workflow is None or workflow.status == SystemWorkflow.STATUS_RUNNING:
         return workflow
     if pr_observation.superseded_by_lifecycle:
+        if _workflow_pr_handoff_survives_lifecycle(
+            workflow,
+            main_updated_at=main_updated_at,
+        ):
+            return workflow
         return None
     main_updated_seconds = _updated_at_seconds(main_updated_at)
     workflow_updated_seconds = _updated_at_seconds(workflow.updated_at)
@@ -2315,6 +2324,25 @@ def _workflow_after_main_lifecycle(
     if pr_observation.snapshot is None and main_is_newer:
         return None
     return workflow
+
+
+def _workflow_pr_handoff_survives_lifecycle(
+    workflow: SystemWorkflow,
+    *,
+    main_updated_at: Any,
+) -> bool:
+    handoff = system_agents.pr_handoff_for_workflow(workflow)
+    if _pr_snapshot_identity(handoff) is None:
+        return False
+    if _string_value(handoff.get("source_tool")) not in {"gh_pr_create", "gh_pr_view"}:
+        return False
+    main_updated_seconds = _updated_at_seconds(main_updated_at)
+    workflow_updated_seconds = _updated_at_seconds(workflow.updated_at)
+    return (
+        main_updated_seconds is None
+        or workflow_updated_seconds is None
+        or workflow_updated_seconds >= main_updated_seconds
+    )
 
 
 def _pr_snapshot_identity(snapshot: Mapping[str, Any] | None) -> tuple[str, int] | None:
@@ -3367,12 +3395,15 @@ def _render_session_detail(
         stage_pr_workflow = _workflow_after_main_lifecycle(
             stage_pr_workflow, pr_observation, main_updated_at=main_updated_at
         )
+        workflow_pr_snapshot = system_agents.pr_handoff_for_workflow(stage_pr_workflow)
+        if not pr_url:
+            pr_url = _string_value(workflow_pr_snapshot.get("url")) or None
         stage = session_stage.derive_stage(
             entries=entries,
             active_instance=active_instance,
             workflow=stage_workflow,
             pr_snapshot=pr_observation.snapshot,
-            workflow_pr_snapshot=system_agents.pr_handoff_for_workflow(stage_pr_workflow),
+            workflow_pr_snapshot=workflow_pr_snapshot,
         )
         # Only persist a rollout-derived stage; see _attach_session_stage_context
         # for why active-instance/workflow-forced stages must not enter the
