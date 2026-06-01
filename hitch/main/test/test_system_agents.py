@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -2459,7 +2461,8 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
         prompt = mock_spawn.call_args.kwargs["prompt"]
         self.assertEqual(prompt, system_agents.PR_SLASH_PROMPT)
-        self.assertEqual(prompt, "Polish it, get it ready, and open or update the PR.")
+        self.assertIn("commit and push the branch", prompt)
+        self.assertIn("do not open or update a PR", prompt)
         self.assertEqual(mock_spawn.call_args.kwargs["model"], "gpt-5.4")
         self.assertEqual(mock_spawn.call_args.kwargs["reasoning_effort"], "high")
         self.assertEqual(
@@ -2749,8 +2752,9 @@ class SpecCriticWorkflowTests(TestCase):
         )
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.system_agents.create_pull_request_with_gh")
     def test_pr_prompt_completion_stores_handoff_and_starts_monitor(
-        self, mock_spawn: MagicMock
+        self, mock_create_pr: MagicMock, mock_spawn: MagicMock
     ) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -2760,30 +2764,20 @@ class SpecCriticWorkflowTests(TestCase):
             step=system_agents.STEP_PR_PROMPT_RUNNING,
             state={"next_user_message_index": 5, "web_search_mode": "live"},
         )
-        events_path = _raw_events_file(
-            self,
-            [
-                _pr_tool_event(
-                    thread_id="main-thread",
-                    tool="github_create_pull_request",
-                    arguments={"repository_full_name": "cberner/hitch"},
-                    structured_content={
-                        "url": "https://github.com/cberner/hitch/pull/169",
-                        "number": 169,
-                        "state": "open",
-                        "merged": False,
-                        "mergeable": True,
-                        "head": "feature",
-                        "head_sha": "abc123",
-                    },
-                )
-            ],
-        )
+        mock_create_pr.return_value = {
+            "url": "https://github.com/cberner/hitch/pull/169",
+            "repository_full_name": "cberner/hitch",
+            "pr_number": 169,
+            "state": "open",
+            "merged": False,
+            "mergeable": True,
+            "head": "feature",
+            "head_sha": "abc123",
+        }
         instance = _instance(
             thread_id="main-thread",
             purpose=CodexInstance.PURPOSE_USER,
             workflow_id=workflow.pk,
-            events_path=events_path,
         )
         mock_spawn.return_value = _instance(
             thread_id="monitor-thread",
@@ -2794,6 +2788,7 @@ class SpecCriticWorkflowTests(TestCase):
 
         system_agents.on_codex_instance_finished(instance)
 
+        mock_create_pr.assert_called_once_with("/repo")
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
@@ -2818,9 +2813,11 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     @patch("hitch.main.system_agents._surface_workflow_failure")
-    def test_pr_prompt_completion_without_handoff_blocks_workflow(
-        self, mock_surface: MagicMock, mock_spawn: MagicMock
+    @patch("hitch.main.system_agents.create_pull_request_with_gh")
+    def test_pr_prompt_completion_blocks_when_gh_create_fails(
+        self, mock_create_pr: MagicMock, mock_surface: MagicMock, mock_spawn: MagicMock
     ) -> None:
+        mock_create_pr.side_effect = system_agents.GhPrCreateError("not pushed")
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
             main_thread_id="main-thread",
@@ -2837,9 +2834,11 @@ class SpecCriticWorkflowTests(TestCase):
 
         system_agents.on_codex_instance_finished(instance)
 
+        mock_create_pr.assert_called_once_with("/repo")
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
         self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        self.assertEqual(workflow.state["error"], "failed to create PR with gh: not pushed")
         self.assertNotIn(system_agents._PR_HANDOFF_STATE_KEY, workflow.state)
         mock_spawn.assert_not_called()
         mock_surface.assert_called_once()
@@ -2881,6 +2880,247 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
         mock_spawn.assert_called_once()
+
+    @patch("hitch.main.system_agents.subprocess.run")
+    def test_create_pull_request_with_gh_returns_handoff(
+        self, mock_run: MagicMock
+    ) -> None:
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(
+                ["git", "branch", "--show-current"],
+                0,
+                stdout="feature\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "pr", "list"],
+                0,
+                stdout="[]",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "pr", "create"],
+                0,
+                stdout="https://github.com/cberner/hitch/pull/169\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "pr", "view"],
+                0,
+                stdout=json.dumps(
+                    {
+                        "url": "https://github.com/cberner/hitch/pull/169",
+                        "number": 169,
+                        "state": "OPEN",
+                        "merged": False,
+                        "mergeable": "MERGEABLE",
+                        "isDraft": False,
+                        "title": "Add auto PR support",
+                        "baseRefName": "master",
+                        "baseRefOid": "base123",
+                        "headRefName": "feature",
+                        "headRefOid": "head123",
+                        "createdAt": "2026-06-01T00:00:00Z",
+                        "updatedAt": "2026-06-01T00:01:00Z",
+                        "closedAt": "",
+                        "mergedAt": "",
+                        "mergeCommit": None,
+                    }
+                ),
+                stderr="",
+            ),
+        ]
+
+        handoff = system_agents.create_pull_request_with_gh("/repo")
+
+        self.assertEqual(handoff["url"], "https://github.com/cberner/hitch/pull/169")
+        self.assertEqual(handoff["repository_full_name"], "cberner/hitch")
+        self.assertEqual(handoff["pr_number"], 169)
+        self.assertEqual(handoff["head"], "feature")
+        self.assertEqual(handoff["head_sha"], "head123")
+        self.assertEqual(handoff["latest_commit_sha"], "head123")
+        self.assertEqual(handoff["base"], "master")
+        self.assertTrue(handoff["mergeable"])
+        self.assertFalse(handoff["draft"])
+        list_call = mock_run.call_args_list[1].args[0]
+        self.assertEqual(
+            list_call[:8],
+            ["gh", "pr", "list", "--head", "feature", "--state", "open", "--limit"],
+        )
+        requested_fields = list_call[-1].split(",")
+        self.assertNotIn("merged", requested_fields)
+        self.assertNotIn("baseRefOid", requested_fields)
+        self.assertIn("mergedAt", requested_fields)
+        self.assertIn("headRefOid", requested_fields)
+        create_call = mock_run.call_args_list[2].args[0]
+        self.assertEqual(
+            create_call, ["gh", "pr", "create", "--fill", "--head", "feature"]
+        )
+        view_call = mock_run.call_args_list[3].args[0]
+        self.assertEqual(view_call[-1], list_call[-1])
+        env = mock_run.call_args_list[2].kwargs["env"]
+        self.assertEqual(env["GH_PROMPT_DISABLED"], "1")
+        self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
+
+    @patch.dict(os.environ, {"GH_TOKEN": "secret"}, clear=False)
+    @patch("hitch.main.system_agents.subprocess.run")
+    def test_create_pull_request_with_gh_preserves_auth_env(
+        self, mock_run: MagicMock
+    ) -> None:
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(
+                ["git", "branch", "--show-current"],
+                0,
+                stdout="feature\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "pr", "list"],
+                0,
+                stdout="[]",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "pr", "create"],
+                0,
+                stdout="https://github.com/cberner/hitch/pull/169\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "pr", "view"],
+                0,
+                stdout="{}",
+                stderr="",
+            ),
+        ]
+
+        system_agents.create_pull_request_with_gh("/repo")
+
+        env = mock_run.call_args_list[1].kwargs["env"]
+        self.assertEqual(env["GH_TOKEN"], "secret")
+        self.assertEqual(env["GH_PROMPT_DISABLED"], "1")
+
+    @patch("hitch.main.system_agents.subprocess.run")
+    def test_create_pull_request_with_gh_reuses_existing_branch_pr(
+        self, mock_run: MagicMock
+    ) -> None:
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(
+                ["git", "branch", "--show-current"],
+                0,
+                stdout="feature\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "pr", "list"],
+                0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "url": "https://github.com/cberner/hitch/pull/170",
+                            "number": 170,
+                            "state": "OPEN",
+                            "headRefName": "feature",
+                            "headRefOid": "head170",
+                        }
+                    ]
+                ),
+                stderr="",
+            ),
+        ]
+
+        handoff = system_agents.create_pull_request_with_gh("/repo")
+
+        self.assertEqual(handoff["url"], "https://github.com/cberner/hitch/pull/170")
+        self.assertEqual(handoff["pr_number"], 170)
+        self.assertEqual(handoff["head_sha"], "head170")
+        self.assertFalse(handoff["merged"])
+        self.assertEqual(mock_run.call_count, 2)
+
+    def test_gh_pr_handoff_derives_merged_from_supported_fields(self) -> None:
+        handoff = system_agents._pr_handoff_from_gh_view(
+            json.dumps(
+                {
+                    "url": "https://github.com/cberner/hitch/pull/171",
+                    "number": 171,
+                    "state": "MERGED",
+                    "mergedAt": "2026-06-01T00:00:00Z",
+                }
+            )
+        )
+
+        self.assertTrue(handoff["merged"])
+        self.assertEqual(handoff["merged_at"], "2026-06-01T00:00:00Z")
+
+    def test_gh_pr_handoff_maps_mergeable_enum_strings(self) -> None:
+        cases = [
+            ("MERGEABLE", True),
+            ("CONFLICTING", False),
+            ("UNKNOWN", None),
+        ]
+        for raw, expected in cases:
+            with self.subTest(raw=raw):
+                handoff = system_agents._pr_handoff_from_gh_view(
+                    json.dumps(
+                        {
+                            "url": "https://github.com/cberner/hitch/pull/172",
+                            "number": 172,
+                            "state": "OPEN",
+                            "mergeable": raw,
+                        }
+                    )
+                )
+
+                if expected is None:
+                    self.assertNotIn("mergeable", handoff)
+                else:
+                    self.assertEqual(handoff["mergeable"], expected)
+
+    @patch("hitch.main.system_agents.subprocess.run")
+    def test_create_pull_request_with_gh_blocks_detached_head(
+        self, mock_run: MagicMock
+    ) -> None:
+        mock_run.return_value = subprocess.CompletedProcess(
+            ["git", "branch", "--show-current"],
+            0,
+            stdout="\n",
+            stderr="",
+        )
+
+        with self.assertRaisesRegex(system_agents.GhPrCreateError, "detached"):
+            system_agents.create_pull_request_with_gh("/repo")
+
+        mock_run.assert_called_once()
+
+    @patch("hitch.main.system_agents.subprocess.run")
+    def test_create_pull_request_with_gh_requires_created_url(
+        self, mock_run: MagicMock
+    ) -> None:
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(
+                ["git", "branch", "--show-current"],
+                0,
+                stdout="feature\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "pr", "list"],
+                0,
+                stdout="[]",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "pr", "create"],
+                0,
+                stdout="Created pull request\n",
+                stderr="",
+            ),
+        ]
+
+        with self.assertRaisesRegex(system_agents.GhPrCreateError, "URL"):
+            system_agents.create_pull_request_with_gh("/repo")
+
+        self.assertEqual(mock_run.call_count, 3)
 
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
     def test_monitor_blocker_spawns_pr_feedback_with_stale_branch_guard(
@@ -3680,7 +3920,7 @@ class SpecCriticWorkflowTests(TestCase):
             (
                 system_agents.STEP_PR_PROMPT_RUNNING,
                 CodexInstance.PURPOSE_USER,
-                "PR prompt worker failed: current failed",
+                "PR prep worker failed: current failed",
                 {
                     system_agents._PR_HANDOFF_STATE_KEY: {
                         "url": "https://github.com/cberner/hitch/pull/169",

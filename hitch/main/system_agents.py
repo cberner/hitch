@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+import subprocess
 import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from os import environ
 from pathlib import Path
 from typing import Any
 
@@ -76,7 +78,8 @@ QA_SLASH_DISPLAY_PROMPT = (
     "Run the QA agent on the current diff and fix anything it finds"
 )
 PR_SLASH_PROMPT = (
-    "Polish it, get it ready, and open or update the PR."
+    "Polish it, get it ready, commit and push the branch, but do not open or "
+    "update a PR. Hitch will open the PR after this turn completes."
 )
 SYSTEM_AGENT_APPROVAL_MODE = "auto_review"
 # Auto-review workflows (auto-QA and auto-PR) start without an explicit
@@ -147,6 +150,27 @@ _CI_PASSING_STATUSES = frozenset(
 )
 _AUTO_PROPOSAL_QUOTA_THRESHOLD_FRACTION = 0.5
 _SECONDS_PER_MINUTE = 60
+_GH_TIMEOUT_SECONDS = 60
+_GH_PR_URL_RE = re.compile(r"https?://[^\s]+/[^\s/]+/[^\s/]+/pull/\d+")
+_GH_PR_IDENTITY_RE = re.compile(
+    r"https?://[^/\s]+/(?P<owner>[^/\s]+)/(?P<repo>[^/\s]+)/pull/(?P<number>\d+)"
+)
+_GH_PR_JSON_FIELDS = (
+    "url",
+    "number",
+    "state",
+    "mergeable",
+    "isDraft",
+    "title",
+    "baseRefName",
+    "headRefName",
+    "headRefOid",
+    "createdAt",
+    "updatedAt",
+    "closedAt",
+    "mergedAt",
+    "mergeCommit",
+)
 _CI_PENDING_STATUSES = frozenset(
     {
         "completed",
@@ -2015,6 +2039,208 @@ def _local_branch_merge_result_dict(
     }
 
 
+class GhPrCreateError(Exception):
+    """Raised when Hitch cannot create or inspect a PR with the gh CLI."""
+
+
+def create_pull_request_with_gh(cwd: str) -> dict[str, Any]:
+    branch = _current_git_branch(cwd)
+    existing = _existing_pull_request_for_branch(cwd, branch)
+    if existing:
+        return existing
+    try:
+        create = _run_gh(
+            cwd,
+            ["pr", "create", "--fill", "--head", branch],
+        )
+    except GhPrCreateError:
+        existing = _existing_pull_request_for_branch(cwd, branch)
+        if existing:
+            return existing
+        raise
+    url = _pr_url_from_text(create.stdout)
+    if not url:
+        raise GhPrCreateError("gh pr create did not return a pull request URL")
+    handoff = _pr_handoff_from_gh_url(url)
+    try:
+        view = _run_gh(
+            cwd,
+            [
+                "pr",
+                "view",
+                url,
+                "--json",
+                _gh_pr_json_fields(),
+            ],
+        )
+    except GhPrCreateError:
+        return handoff
+    return {**handoff, **_pr_handoff_from_gh_view(view.stdout)}
+
+
+def _existing_pull_request_for_branch(cwd: str, branch: str) -> dict[str, Any]:
+    result = _run_gh(
+        cwd,
+        [
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "open",
+            "--limit",
+            "1",
+            "--json",
+            _gh_pr_json_fields(),
+        ],
+    )
+    return _pr_handoff_from_gh_list(result.stdout)
+
+
+def _current_git_branch(cwd: str) -> str:
+    result = _run_command(["git", "branch", "--show-current"], cwd)
+    branch = result.stdout.strip()
+    if not branch:
+        raise GhPrCreateError("current git checkout is detached; cannot open a PR")
+    return branch
+
+
+def _run_gh(cwd: str, args: list[str]) -> subprocess.CompletedProcess[str]:
+    return _run_command(["gh", *args], cwd)
+
+
+def _run_command(command: list[str], cwd: str) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            command,
+            cwd=Path(cwd),
+            capture_output=True,
+            check=False,
+            env=_gh_env(),
+            text=True,
+            timeout=_GH_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise GhPrCreateError(str(exc)) from exc
+    if result.returncode != 0:
+        output = result.stderr.strip() or result.stdout.strip()
+        raise GhPrCreateError(
+            output or f"{' '.join(command)} failed with status {result.returncode}"
+        )
+    return result
+
+
+def _gh_env() -> dict[str, str]:
+    return {
+        **dict(environ),
+        "GH_PROMPT_DISABLED": "1",
+        "GIT_TERMINAL_PROMPT": "0",
+        "LANG": environ.get("LANG", "C.UTF-8"),
+        "LC_ALL": environ.get("LC_ALL", "C.UTF-8"),
+    }
+
+
+def _pr_url_from_text(text: str) -> str:
+    matches = _GH_PR_URL_RE.findall(text)
+    return matches[-1] if matches else ""
+
+
+def _pr_handoff_from_gh_url(url: str) -> dict[str, Any]:
+    handoff: dict[str, Any] = {"url": url}
+    match = _GH_PR_IDENTITY_RE.search(url)
+    if match is None:
+        return handoff
+    handoff["repository_full_name"] = f"{match.group('owner')}/{match.group('repo')}"
+    handoff["pr_number"] = int(match.group("number"))
+    return handoff
+
+
+def _pr_handoff_from_gh_view(raw: str) -> dict[str, Any]:
+    return _pr_handoff_from_gh_json(raw, expected_list=False)
+
+
+def _pr_handoff_from_gh_list(raw: str) -> dict[str, Any]:
+    return _pr_handoff_from_gh_json(raw, expected_list=True)
+
+
+def _pr_handoff_from_gh_json(raw: str, *, expected_list: bool) -> dict[str, Any]:
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise GhPrCreateError("gh returned invalid PR JSON") from exc
+    if expected_list:
+        if not isinstance(data, list):
+            raise GhPrCreateError("gh pr list did not return a JSON array")
+        if not data:
+            return {}
+        data = data[0]
+    if not isinstance(data, dict):
+        raise GhPrCreateError("gh did not return a PR JSON object")
+
+    handoff: dict[str, Any] = {}
+    field_map = {
+        "url": "url",
+        "state": "state",
+        "title": "title",
+        "baseRefName": "base",
+        "headRefName": "head",
+        "headRefOid": "head_sha",
+        "createdAt": "created_at",
+        "updatedAt": "updated_at",
+        "closedAt": "closed_at",
+        "mergedAt": "merged_at",
+    }
+    for source, target in field_map.items():
+        value = data.get(source)
+        if isinstance(value, str) and value.strip():
+            handoff[target] = value.strip()
+    number = data.get("number")
+    if isinstance(number, int) and not isinstance(number, bool):
+        handoff["pr_number"] = number
+    for source, target in (
+        ("merged", "merged"),
+        ("isDraft", "draft"),
+    ):
+        value = data.get(source)
+        if isinstance(value, bool):
+            handoff[target] = value
+    mergeable = _gh_mergeable_to_bool(data.get("mergeable"))
+    if mergeable is not None:
+        handoff["mergeable"] = mergeable
+    state = handoff.get("state")
+    merged_at = handoff.get("merged_at")
+    handoff["merged"] = state == "MERGED" or isinstance(merged_at, str)
+    merge_commit = data.get("mergeCommit")
+    if isinstance(merge_commit, dict):
+        oid = merge_commit.get("oid")
+        if isinstance(oid, str) and oid.strip():
+            handoff["merge_commit_sha"] = oid.strip()
+    url = handoff.get("url")
+    if isinstance(url, str):
+        handoff = {**_pr_handoff_from_gh_url(url), **handoff}
+    head_sha = handoff.get("head_sha")
+    if isinstance(head_sha, str):
+        handoff["latest_commit_sha"] = head_sha
+    return handoff
+
+
+def _gh_pr_json_fields() -> str:
+    return ",".join(_GH_PR_JSON_FIELDS)
+
+
+def _gh_mergeable_to_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().upper()
+    if normalized == "MERGEABLE":
+        return True
+    if normalized == "CONFLICTING":
+        return False
+    return None
+
+
 def _handle_workflow_user_turn_finished(instance: CodexInstance) -> None:
     workflow = _workflow_for_instance(instance)
     if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
@@ -2047,27 +2273,22 @@ def _handle_user_steering_finished(
 
 def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow) -> None:
     if instance.status != CodexInstance.STATUS_COMPLETED:
-        _block_workflow(workflow, f"PR prompt worker failed: {instance.error}")
+        _block_workflow(workflow, f"PR prep worker failed: {instance.error}")
         return
     snapshot = codex_events.latest_pr_snapshot_for_instance(instance)
-    if snapshot is None:
-        if _pr_handoff_from_workflow(workflow):
-            workflow.step = STEP_PR_MONITORING
-            workflow.save(update_fields=["step", "state", "updated_at"])
-            try:
-                _spawn_pr_followup_monitor_run(workflow)
-            except Exception as exc:
-                _block_workflow(
-                    workflow, f"failed to start PR follow-up monitor: {exc!r}"
-                )
+    if snapshot is None and not _pr_handoff_from_workflow(workflow):
+        try:
+            snapshot = create_pull_request_with_gh(workflow.cwd)
+        except GhPrCreateError as exc:
+            _block_workflow(workflow, f"failed to create PR with gh: {exc}")
             return
-        _block_workflow(
-            workflow,
-            (
-                "PR prompt worker completed, but Hitch could not identify the PR "
-                "to monitor."
-            ),
-        )
+    if snapshot is None:
+        workflow.step = STEP_PR_MONITORING
+        workflow.save(update_fields=["step", "state", "updated_at"])
+        try:
+            _spawn_pr_followup_monitor_run(workflow)
+        except Exception as exc:
+            _block_workflow(workflow, f"failed to start PR follow-up monitor: {exc!r}")
         return
     _merge_pr_handoff(workflow, snapshot)
     if _pr_handoff_is_terminal(_pr_handoff_from_workflow(workflow)):

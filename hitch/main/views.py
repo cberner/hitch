@@ -3367,6 +3367,8 @@ def _render_session_detail(
         stage_pr_workflow = _workflow_after_main_lifecycle(
             stage_pr_workflow, pr_observation, main_updated_at=main_updated_at
         )
+        if not pr_url:
+            pr_url = system_agents.pr_handoff_for_workflow(stage_pr_workflow).get("url")
         stage = session_stage.derive_stage(
             entries=entries,
             active_instance=active_instance,
