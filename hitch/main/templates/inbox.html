@@ -491,7 +491,7 @@
             <input type="hidden" name="proposed_session" data-do-session-id>
             <input type="hidden" name="auto_pr" data-do-session-auto-pr>
             <input type="hidden" name="auto_qa" data-do-session-auto-qa>
-            <h2 id="do-session-title">Continue proposed session</h2>
+            <h2 id="do-session-title" tabindex="-1" autofocus>Continue proposed session</h2>
             <p class="meta" data-do-session-title></p>
             <label>
                 Message
@@ -510,6 +510,7 @@
             const doDialog = document.querySelector("[data-do-session-dialog]");
             const doForm = doDialog && doDialog.querySelector("[data-do-session-form]");
             const doTitle = doDialog && doDialog.querySelector("[data-do-session-title]");
+            const doHeading = doDialog && doDialog.querySelector("#do-session-title");
             const doPrompt = doDialog && doDialog.querySelector("[data-do-session-prompt]");
             const doProject = doDialog && doDialog.querySelector("[data-do-session-project]");
             const doId = doDialog && doDialog.querySelector("[data-do-session-id]");
@@ -537,7 +538,7 @@
                         doAutoQa.disabled = !button.dataset.proposedSessionAutoQa;
                     }
                     showDialog(doDialog);
-                    if (doPrompt) doPrompt.focus();
+                    if (doHeading) doHeading.focus();
                 });
             }
             if (doCancel) doCancel.addEventListener("click", () => hideDialog(doDialog));

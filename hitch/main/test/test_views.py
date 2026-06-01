@@ -13173,6 +13173,13 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, 'data-proposed-session-do')
         self.assertContains(response, f'data-proposed-session-id="{proposal.pk}"')
         self.assertContains(response, f'data-proposed-session-project="{project.pk}"')
+        start_modal_title = (
+            '<h2 id="do-session-title" tabindex="-1" autofocus>'
+            "Continue proposed session</h2>"
+        )
+        self.assertContains(response, start_modal_title)
+        self.assertContains(response, "if (doHeading) doHeading.focus();")
+        self.assertNotContains(response, "doPrompt.focus()")
         self.assertContains(response, 'data-proposed-session-auto-pr="true"')
         self.assertContains(response, 'data-proposed-session-auto-qa="false"')
         self.assertContains(
