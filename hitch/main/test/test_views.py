@@ -1278,8 +1278,13 @@ class SessionDetailFastPathTests(TestCase):
                     "repository_full_name": "cberner/hitch",
                     "pr_number": 100,
                     "state": "open",
-                    "source_tool": "gh_pr_create",
-                }
+                    "source_tool": "fetch_pr",
+                },
+                "hitch_pr_handoff": {
+                    "url": pr_url,
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 100,
+                },
             },
         )
         SystemWorkflow.objects.filter(pk=workflow.pk).update(
@@ -2434,8 +2439,13 @@ class IndexViewTests(TestCase):
                     "repository_full_name": "cberner/hitch",
                     "pr_number": 100,
                     "state": "open",
-                    "source_tool": "gh_pr_create",
-                }
+                    "source_tool": "fetch_pr",
+                },
+                "hitch_pr_handoff": {
+                    "url": pr_url,
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 100,
+                },
             },
         )
         SystemWorkflow.objects.filter(pk=workflow.pk).update(

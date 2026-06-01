@@ -2332,9 +2332,11 @@ def _workflow_pr_handoff_survives_lifecycle(
     main_updated_at: Any,
 ) -> bool:
     handoff = system_agents.pr_handoff_for_workflow(workflow)
-    if _pr_snapshot_identity(handoff) is None:
+    handoff_identity = _pr_snapshot_identity(handoff)
+    if handoff_identity is None:
         return False
-    if _string_value(handoff.get("source_tool")) not in {"gh_pr_create", "gh_pr_view"}:
+    hitch_handoff = system_agents.hitch_pr_handoff_for_workflow(workflow)
+    if _pr_snapshot_identity(hitch_handoff) != handoff_identity:
         return False
     main_updated_seconds = _updated_at_seconds(main_updated_at)
     workflow_updated_seconds = _updated_at_seconds(workflow.updated_at)
