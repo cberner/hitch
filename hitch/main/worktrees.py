@@ -117,6 +117,18 @@ def discover_managed_worktrees() -> list[Path]:
     return sorted(roots.values())
 
 
+def is_managed_worktree_path(cwd: str | Path) -> bool:
+    """Return whether ``cwd`` points at a Hitch-managed worktree root."""
+    path = Path(cwd).expanduser()
+    if not _is_managed_worktree_path(path):
+        return False
+    try:
+        _managed_branch_for_path(path)
+    except WorktreeCleanupError:
+        return False
+    return True
+
+
 def _child_dirs(path: Path) -> Iterator[Path]:
     try:
         for child in path.iterdir():

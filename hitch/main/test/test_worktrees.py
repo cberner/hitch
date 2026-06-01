@@ -15,6 +15,7 @@ from hitch.main.worktrees import (
     cleanup_worktree,
     create_worktree_for_session,
     discover_managed_worktrees,
+    is_managed_worktree_path,
 )
 
 
@@ -71,6 +72,8 @@ class ManagedWorktreeTests(SimpleTestCase):
                 self.assertTrue((worktree / ".git").exists())
                 self.assertEqual(worktree.parent.parent, managed)
                 self.assertEqual(discover_managed_worktrees(), [worktree])
+                self.assertTrue(is_managed_worktree_path(worktree))
+                self.assertFalse(is_managed_worktree_path(repo))
                 self.assertEqual(managed_worktree.source_repo, repo)
 
             self.assertEqual(_git(repo, "branch", "--show-current"), "master")
