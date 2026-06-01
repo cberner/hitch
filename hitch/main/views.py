@@ -126,7 +126,14 @@ class SettingsValues(NamedTuple):
     show_archived_sessions: bool
     last_selected_repo: str
     selected_project_id: int | None
+    visible_session_project_ids: tuple[int, ...] | None
+    show_no_project_sessions: bool
     enable_memories: bool
+
+
+class SessionProjectVisibility(NamedTuple):
+    project_ids: frozenset[int] | None
+    include_no_project: bool
 
 
 @dataclass(frozen=True)
@@ -355,6 +362,8 @@ _WEB_SEARCH_COOKIE = "hitch_web_search_mode"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
 _SELECTED_PROJECT_COOKIE = "hitch_selected_project_id"
+_VISIBLE_SESSION_PROJECTS_COOKIE = "hitch_visible_session_project_ids"
+_SHOW_NO_PROJECT_SESSIONS_COOKIE = "hitch_show_no_project_sessions"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 _BARE_REPO_PROJECT_VALUE = "__bare_repo__"
 
@@ -821,6 +830,7 @@ def _session_list_page(
     current_settings: SettingsValues,
     projects: list[Project],
     current_project: Project | None,
+    project_visibility: SessionProjectVisibility | None,
     system_only: bool,
 ) -> SessionListPage:
     accepted_visible_thread_ids = system_agents.accepted_visible_system_thread_ids()
@@ -862,6 +872,7 @@ def _session_list_page(
             current_settings=current_settings,
             projects=projects,
             current_project=current_project,
+            project_visibility=project_visibility,
             hidden_thread_ids=hidden_thread_ids,
             system_thread_ids=system_thread_ids,
             runs_by_thread_id=runs_by_thread_id,
@@ -889,6 +900,7 @@ def _session_list_page(
     return _session_list_page_from_index(
         request,
         current_project=current_project,
+        project_visibility=project_visibility,
         show_archived=current_settings.show_archived_sessions,
         hidden_thread_ids=hidden_thread_ids,
         system_thread_ids=system_thread_ids,
@@ -933,6 +945,7 @@ def _session_list_page_from_codex(
     current_settings: SettingsValues,
     projects: list[Project],
     current_project: Project | None,
+    project_visibility: SessionProjectVisibility | None,
     hidden_thread_ids: set[str],
     system_thread_ids: set[str],
     runs_by_thread_id: dict[str, SystemAgentRun],
@@ -947,6 +960,7 @@ def _session_list_page_from_codex(
             request,
             projects=projects,
             current_project=current_project,
+            project_visibility=project_visibility,
             hidden_thread_ids=hidden_thread_ids,
             system_thread_ids=system_thread_ids,
             runs_by_thread_id=runs_by_thread_id,
@@ -962,6 +976,7 @@ def _session_list_page_from_codex(
             request,
             projects=projects,
             current_project=current_project,
+            project_visibility=project_visibility,
             hidden_thread_ids=hidden_thread_ids,
             system_thread_ids=system_thread_ids,
             runs_by_thread_id=runs_by_thread_id,
@@ -975,6 +990,7 @@ def _session_list_page_from_codex(
         request,
         projects=projects,
         current_project=current_project,
+        project_visibility=project_visibility,
         hidden_thread_ids=hidden_thread_ids,
         system_thread_ids=system_thread_ids,
         runs_by_thread_id=runs_by_thread_id,
@@ -991,6 +1007,7 @@ def _session_list_page_from_codex(
             request,
             projects=projects,
             current_project=current_project,
+            project_visibility=project_visibility,
             hidden_thread_ids=hidden_thread_ids,
             system_thread_ids=system_thread_ids,
             runs_by_thread_id=runs_by_thread_id,
@@ -1031,6 +1048,7 @@ def _session_list_page_from_warm_index(
     current_settings: SettingsValues,
     projects: list[Project],
     current_project: Project | None,
+    project_visibility: SessionProjectVisibility | None,
     system_only: bool,
 ) -> SessionListPage | None:
     required_archived = current_settings.show_archived_sessions
@@ -1072,6 +1090,7 @@ def _session_list_page_from_warm_index(
     return _session_list_page_from_index(
         request,
         current_project=current_project,
+        project_visibility=project_visibility,
         show_archived=current_settings.show_archived_sessions,
         hidden_thread_ids=hidden_thread_ids,
         system_thread_ids=system_thread_ids,
@@ -1279,6 +1298,7 @@ def _session_list_page_from_index(
     request: HttpRequest,
     *,
     current_project: Project | None,
+    project_visibility: SessionProjectVisibility | None,
     show_archived: bool,
     hidden_thread_ids: set[str],
     system_thread_ids: set[str],
@@ -1300,7 +1320,9 @@ def _session_list_page_from_index(
     hidden_thread_ids.update(indexed_system_thread_ids)
     if system_only:
         system_thread_ids.update(indexed_system_thread_ids)
-    if current_project is not None:
+    if project_visibility is not None:
+        rows = _filter_session_metadata_by_project_visibility(rows, project_visibility)
+    elif current_project is not None:
         rows = rows.filter(project=current_project)
     if not show_archived:
         rows = rows.filter(codex_archived=False)
@@ -1495,6 +1517,7 @@ def _materialized_session_list_page_from_codex(
     *,
     projects: list[Project],
     current_project: Project | None,
+    project_visibility: SessionProjectVisibility | None,
     hidden_thread_ids: set[str],
     system_thread_ids: set[str],
     runs_by_thread_id: dict[str, SystemAgentRun],
@@ -1528,6 +1551,7 @@ def _materialized_session_list_page_from_codex(
                 thread,
                 projects=projects,
                 current_project=current_project,
+                project_visibility=project_visibility,
                 metadata_by_thread=metadata_by_thread,
                 qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
                 hidden_thread_ids=hidden_thread_ids,
@@ -1563,6 +1587,7 @@ def _merged_session_list_page_from_codex(
     *,
     projects: list[Project],
     current_project: Project | None,
+    project_visibility: SessionProjectVisibility | None,
     hidden_thread_ids: set[str],
     system_thread_ids: set[str],
     runs_by_thread_id: dict[str, SystemAgentRun],
@@ -1592,6 +1617,7 @@ def _merged_session_list_page_from_codex(
                 codex,
                 projects=projects,
                 current_project=current_project,
+                project_visibility=project_visibility,
                 hidden_thread_ids=hidden_thread_ids,
                 system_thread_ids=system_thread_ids,
                 runs_by_thread_id=runs_by_thread_id,
@@ -1621,6 +1647,7 @@ def _merged_session_list_page_from_codex(
             request,
             projects=projects,
             current_project=current_project,
+            project_visibility=project_visibility,
             hidden_thread_ids=hidden_thread_ids,
             system_thread_ids=system_thread_ids,
             runs_by_thread_id=runs_by_thread_id,
@@ -1662,6 +1689,7 @@ def _peek_source_session(
     *,
     projects: list[Project],
     current_project: Project | None,
+    project_visibility: SessionProjectVisibility | None,
     hidden_thread_ids: set[str],
     system_thread_ids: set[str],
     runs_by_thread_id: dict[str, SystemAgentRun],
@@ -1726,6 +1754,7 @@ def _peek_source_session(
                 thread,
                 projects=projects,
                 current_project=current_project,
+                project_visibility=project_visibility,
                 metadata_by_thread=metadata_by_thread,
                 qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
                 hidden_thread_ids=hidden_thread_ids,
@@ -1769,6 +1798,7 @@ def _visible_session_page_from_codex(
     *,
     projects: list[Project],
     current_project: Project | None,
+    project_visibility: SessionProjectVisibility | None,
     hidden_thread_ids: set[str],
     system_thread_ids: set[str],
     runs_by_thread_id: dict[str, SystemAgentRun],
@@ -1834,6 +1864,7 @@ def _visible_session_page_from_codex(
                 thread,
                 projects=projects,
                 current_project=current_project,
+                project_visibility=project_visibility,
                 metadata_by_thread=metadata_by_thread,
                 qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
                 hidden_thread_ids=hidden_thread_ids,
@@ -2065,6 +2096,7 @@ def _session_row_for_thread(
     *,
     projects: list[Project],
     current_project: Project | None,
+    project_visibility: SessionProjectVisibility | None,
     metadata_by_thread: dict[str, SessionMetadata],
     qa_updated_at_by_main_thread: Mapping[str, Any],
     hidden_thread_ids: set[str],
@@ -2085,7 +2117,10 @@ def _session_row_for_thread(
     session_project = _project_for_thread_cached(
         thread, metadata_by_thread, projects, project_cache
     )
-    if current_project is not None and session_project != current_project:
+    if project_visibility is not None:
+        if not _session_project_is_visible(session_project, project_visibility):
+            return None
+    elif current_project is not None and session_project != current_project:
         return None
     row = {
         "id": thread_id,
@@ -2441,11 +2476,15 @@ def index(request: HttpRequest) -> HttpResponse:
     cookie_updates = resolved_settings.cookie_updates
     projects = list(Project.objects.all())
     current_project = _selected_project_for_settings(current_settings, projects)
+    session_project_visibility = _session_project_visibility_for_settings(
+        current_settings, projects
+    )
     session_page = _session_list_page_from_warm_index(
         request,
         current_settings=current_settings,
         projects=projects,
         current_project=current_project,
+        project_visibility=session_project_visibility,
         system_only=False,
     )
     if session_page is None:
@@ -2459,6 +2498,7 @@ def index(request: HttpRequest) -> HttpResponse:
                 current_settings=current_settings,
                 projects=projects,
                 current_project=current_project,
+                project_visibility=session_project_visibility,
                 system_only=False,
             )
     _attach_session_stage_context(session_page.sessions)
@@ -2475,9 +2515,15 @@ def index(request: HttpRequest) -> HttpResponse:
             "register_url": reverse("register"),
             "current_show_archived_sessions": current_settings.show_archived_sessions,
             "current_project": current_project,
+            "session_list_title": _session_list_title(
+                session_project_visibility, projects
+            ),
             "name_max_len": _NAME_MAX_LEN,
             "show_new_session_controls": True,
             **settings_context,
+            **_session_project_visibility_context(
+                session_project_visibility, projects
+            ),
         },
     )
     _apply_cookie_updates(response, cookie_updates)
@@ -2497,6 +2543,7 @@ def system_sessions(request: HttpRequest) -> HttpResponse:
         current_settings=current_settings,
         projects=projects,
         current_project=current_project,
+        project_visibility=None,
         system_only=True,
     )
     if session_page is None:
@@ -2510,6 +2557,7 @@ def system_sessions(request: HttpRequest) -> HttpResponse:
                 current_settings=current_settings,
                 projects=projects,
                 current_project=current_project,
+                project_visibility=None,
                 system_only=True,
             )
     settings_context = _settings_context(current_settings, models_data)
@@ -5317,6 +5365,100 @@ def _active_project_from_request(request: HttpRequest) -> Project | None:
     return _selected_project_for_settings(_stored_settings(request))
 
 
+def _session_project_visibility_for_settings(
+    settings: SettingsValues, projects: list[Project]
+) -> SessionProjectVisibility:
+    project_ids = {project.pk for project in projects}
+    if settings.visible_session_project_ids is None:
+        if (
+            settings.selected_project_id is not None
+            and settings.selected_project_id in project_ids
+        ):
+            return SessionProjectVisibility(
+                project_ids=frozenset({settings.selected_project_id}),
+                include_no_project=False,
+            )
+        return SessionProjectVisibility(project_ids=None, include_no_project=True)
+    return SessionProjectVisibility(
+        project_ids=frozenset(
+            project_id
+            for project_id in settings.visible_session_project_ids
+            if project_id in project_ids
+        ),
+        include_no_project=settings.show_no_project_sessions,
+    )
+
+
+def _settings_with_visible_selected_project(
+    values: SettingsValues, project: Project | None, *, cookie_required: bool
+) -> SettingsValues:
+    if project is None or values.visible_session_project_ids is None:
+        return values
+    if project.pk in values.visible_session_project_ids:
+        return values
+    visible_project_ids = (*values.visible_session_project_ids, project.pk)
+    if cookie_required and not _visible_session_project_ids_cookie_fits(
+        visible_project_ids
+    ):
+        return values._replace(visible_session_project_ids=None)
+    return values._replace(visible_session_project_ids=visible_project_ids)
+
+
+def _session_project_is_visible(
+    project: Project | None, visibility: SessionProjectVisibility
+) -> bool:
+    if project is None:
+        return visibility.include_no_project
+    return visibility.project_ids is None or project.pk in visibility.project_ids
+
+
+def _filter_session_metadata_by_project_visibility(
+    rows: QuerySet[SessionMetadata], visibility: SessionProjectVisibility
+) -> QuerySet[SessionMetadata]:
+    if visibility.project_ids is None:
+        if visibility.include_no_project:
+            return rows
+        return rows.exclude(project__isnull=True)
+    project_filter = Q(project_id__in=visibility.project_ids)
+    if visibility.include_no_project:
+        project_filter |= Q(project__isnull=True)
+    return rows.filter(project_filter)
+
+
+def _session_project_visibility_context(
+    visibility: SessionProjectVisibility, projects: list[Project]
+) -> dict[str, Any]:
+    return {
+        "visible_session_projects_url": reverse("update_visible_session_projects"),
+        "visible_session_projects": [
+            {
+                "id": project.pk,
+                "name": project.name,
+                "visible": (
+                    visibility.project_ids is None or project.pk in visibility.project_ids
+                ),
+            }
+            for project in projects
+        ],
+        "visible_session_no_project": visibility.include_no_project,
+    }
+
+
+def _session_list_title(
+    visibility: SessionProjectVisibility, projects: list[Project]
+) -> str:
+    if visibility.project_ids is None:
+        return "Codex sessions"
+    if len(visibility.project_ids) == 1 and not visibility.include_no_project:
+        project_id = next(iter(visibility.project_ids))
+        project = next(
+            (project for project in projects if project.pk == project_id), None
+        )
+        if project is not None:
+            return f"{project.name} sessions"
+    return "Codex sessions"
+
+
 def _metadata_by_thread_id(threads: list[Any]) -> dict[str, SessionMetadata]:
     thread_ids = [
         thread.id
@@ -6056,6 +6198,10 @@ def _stored_settings(request: HttpRequest) -> SettingsValues:
         show_archived_sessions=_read_cookie(request, _SHOW_ARCHIVED_COOKIE) == "true",
         last_selected_repo=_read_cookie(request, _LAST_SELECTED_REPO_COOKIE),
         selected_project_id=_read_selected_project_cookie(request),
+        visible_session_project_ids=_read_visible_session_project_ids_cookie(request),
+        show_no_project_sessions=(
+            _read_cookie(request, _SHOW_NO_PROJECT_SESSIONS_COOKIE) != "false"
+        ),
         enable_memories=_read_cookie(request, _ENABLE_MEMORIES_COOKIE) == "true",
     )
 
@@ -6082,6 +6228,10 @@ def _settings_values_for_user(settings: UserSettings) -> SettingsValues:
         show_archived_sessions=settings.show_archived_sessions,
         last_selected_repo=settings.last_selected_repo,
         selected_project_id=settings.selected_project_id,
+        visible_session_project_ids=_valid_visible_session_project_ids(
+            settings.visible_session_project_ids
+        ),
+        show_no_project_sessions=settings.show_no_project_sessions,
         enable_memories=settings.enable_memories,
     )
 
@@ -6089,6 +6239,11 @@ def _settings_values_for_user(settings: UserSettings) -> SettingsValues:
 def _save_user_settings(user: Any, values: SettingsValues) -> UserSettings:
     settings = _settings_for_user(user)
     updates: list[str] = []
+    visible_session_project_ids = (
+        list(values.visible_session_project_ids)
+        if values.visible_session_project_ids is not None
+        else None
+    )
     for field, value in (
         ("model", values.model),
         ("reasoning_effort", values.reasoning_effort),
@@ -6105,6 +6260,8 @@ def _save_user_settings(user: Any, values: SettingsValues) -> UserSettings:
         ("show_archived_sessions", values.show_archived_sessions),
         ("last_selected_repo", values.last_selected_repo),
         ("selected_project_id", values.selected_project_id),
+        ("visible_session_project_ids", visible_session_project_ids),
+        ("show_no_project_sessions", values.show_no_project_sessions),
         ("enable_memories", values.enable_memories),
     ):
         if getattr(settings, field) != value:
@@ -6136,6 +6293,12 @@ def _settings_cookie_updates(values: SettingsValues) -> dict[str, str]:
         _SELECTED_PROJECT_COOKIE: (
             str(values.selected_project_id) if values.selected_project_id is not None else ""
         ),
+        _VISIBLE_SESSION_PROJECTS_COOKIE: _encode_visible_session_project_ids_cookie(
+            values.visible_session_project_ids
+        ),
+        _SHOW_NO_PROJECT_SESSIONS_COOKIE: (
+            "true" if values.show_no_project_sessions else "false"
+        ),
         _ENABLE_MEMORIES_COOKIE: "true" if values.enable_memories else "false",
     }
 
@@ -6152,8 +6315,10 @@ def _import_cookie_settings_to_user(request: HttpRequest, user: Any) -> UserSett
     return settings
 
 
-def _valid_cookie_setting_updates(request: HttpRequest) -> dict[str, str | bool | int | None]:
-    updates: dict[str, str | bool | int | None] = {}
+def _valid_cookie_setting_updates(
+    request: HttpRequest,
+) -> dict[str, str | bool | int | list[int] | None]:
+    updates: dict[str, str | bool | int | list[int] | None] = {}
     model = _read_signed_cookie_if_present(request, _MODEL_COOKIE)
     if model is not None and len(model) <= _MODEL_MAX_LEN:
         updates["model"] = model
@@ -6214,6 +6379,21 @@ def _valid_cookie_setting_updates(request: HttpRequest) -> dict[str, str | bool 
     selected_project_raw = _read_signed_cookie_if_present(request, _SELECTED_PROJECT_COOKIE)
     if selected_project_raw is not None:
         updates["selected_project_id"] = _valid_selected_project_id(selected_project_raw)
+    visible_projects_raw = _read_signed_cookie_if_present(
+        request, _VISIBLE_SESSION_PROJECTS_COOKIE
+    )
+    if visible_projects_raw is not None:
+        visible_project_ids = _valid_visible_session_project_ids(
+            _decode_visible_session_project_ids_cookie(visible_projects_raw)
+        )
+        updates["visible_session_project_ids"] = (
+            list(visible_project_ids) if visible_project_ids is not None else None
+        )
+    show_no_project = _read_signed_cookie_if_present(
+        request, _SHOW_NO_PROJECT_SESSIONS_COOKIE
+    )
+    if show_no_project in {"true", "false"}:
+        updates["show_no_project_sessions"] = show_no_project == "true"
     enable_memories = _read_signed_cookie_if_present(request, _ENABLE_MEMORIES_COOKIE)
     if enable_memories in {"true", "false"}:
         updates["enable_memories"] = enable_memories == "true"
@@ -6234,6 +6414,49 @@ def _read_selected_project_cookie(request: HttpRequest) -> int | None:
     return _valid_selected_project_id(
         _read_signed_cookie_if_present(request, _SELECTED_PROJECT_COOKIE)
     )
+
+
+def _read_visible_session_project_ids_cookie(
+    request: HttpRequest,
+) -> tuple[int, ...] | None:
+    raw = _read_signed_cookie_if_present(request, _VISIBLE_SESSION_PROJECTS_COOKIE)
+    if raw is None:
+        return None
+    return _valid_visible_session_project_ids(
+        _decode_visible_session_project_ids_cookie(raw)
+    )
+
+
+def _encode_visible_session_project_ids_cookie(values: tuple[int, ...] | None) -> str:
+    if values is None:
+        return ""
+    return json.dumps(list(values), separators=(",", ":"))
+
+
+def _decode_visible_session_project_ids_cookie(value: str) -> object:
+    if not value:
+        return None
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return None
+
+
+def _valid_visible_session_project_ids(value: object) -> tuple[int, ...] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        return None
+    project_ids: list[int] = []
+    seen: set[int] = set()
+    for item in value:
+        if isinstance(item, bool) or not isinstance(item, int):
+            continue
+        if item < 1 or item > _MAX_BIGAUTOFIELD or item in seen:
+            continue
+        seen.add(item)
+        project_ids.append(item)
+    return tuple(project_ids)
 
 
 def _valid_selected_project_id(raw: str | None) -> int | None:
@@ -6299,6 +6522,13 @@ def _signed_cookie_fits(name: str, value: str) -> bool:
 def _extra_system_prompt_cookie_fits(value: str) -> bool:
     return _signed_cookie_fits(
         _EXTRA_SYSTEM_PROMPT_COOKIE, _encode_extra_system_prompt_cookie(value)
+    )
+
+
+def _visible_session_project_ids_cookie_fits(values: tuple[int, ...]) -> bool:
+    return _signed_cookie_fits(
+        _VISIBLE_SESSION_PROJECTS_COOKIE,
+        _encode_visible_session_project_ids_cookie(values),
     )
 
 
@@ -6609,6 +6839,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     if selected_project_error is not None:
         return HttpResponseBadRequest(selected_project_error)
     enable_memories = request.POST.get("enable_memories", "").strip()
+    user = _authenticated_user(request)
     if len(model) > _MODEL_MAX_LEN:
         return HttpResponseBadRequest("model id is too long")
     if len(extra_system_prompt) > _EXTRA_SYSTEM_PROMPT_MAX_LEN:
@@ -6619,9 +6850,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     # that means the setting is lost — reject it up front. Authenticated users
     # persist to the DB (the cookie is just a best-effort mirror), so a value
     # too big for the cookie still saves correctly; don't block them on it.
-    if _authenticated_user(request) is None and not _extra_system_prompt_cookie_fits(
-        extra_system_prompt
-    ):
+    if user is None and not _extra_system_prompt_cookie_fits(extra_system_prompt):
         return HttpResponseBadRequest("extra system prompt is too long")
     valid_efforts = {e.value for e in ReasoningEffort}
     if effort and effort not in valid_efforts:
@@ -6701,9 +6930,13 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         ),
         last_selected_repo=stored.last_selected_repo,
         selected_project_id=selected_project.pk if selected_project is not None else None,
+        visible_session_project_ids=stored.visible_session_project_ids,
+        show_no_project_sessions=stored.show_no_project_sessions,
         enable_memories=enable_memories == "true",
     )
-    user = _authenticated_user(request)
+    values = _settings_with_visible_selected_project(
+        values, selected_project, cookie_required=user is None
+    )
     if user is not None:
         _save_user_settings(user, values)
     response = redirect(_safe_next_url(request) or "index")
@@ -6722,6 +6955,42 @@ def update_archived_session_visibility(request: HttpRequest) -> HttpResponse:
     if user is not None:
         _save_user_settings(user, values)
     response = redirect("index")
+    _apply_cookie_updates(response, _settings_cookie_updates(values))
+    return response
+
+
+@require_http_methods(["POST"])
+def update_visible_session_projects(request: HttpRequest) -> HttpResponse:
+    projects = list(Project.objects.all())
+    valid_project_ids = {project.pk for project in projects}
+    posted_project_ids: set[int] = set()
+    for raw_project_id in request.POST.getlist("visible_project"):
+        try:
+            project_id = int(raw_project_id)
+        except ValueError:
+            return HttpResponseBadRequest("invalid visible project")
+        if project_id not in valid_project_ids:
+            return HttpResponseBadRequest("invalid visible project")
+        posted_project_ids.add(project_id)
+    show_no_project = request.POST.get("show_no_project_sessions", "").strip()
+    if show_no_project not in {"", "true"}:
+        return HttpResponseBadRequest("invalid no repo visibility")
+    visible_project_ids = tuple(
+        project.pk for project in projects if project.pk in posted_project_ids
+    )
+    user = _authenticated_user(request)
+    if user is None and not _visible_session_project_ids_cookie_fits(
+        visible_project_ids
+    ):
+        return HttpResponseBadRequest("visible project selection is too large")
+    stored = _stored_settings(request)
+    values = stored._replace(
+        visible_session_project_ids=visible_project_ids,
+        show_no_project_sessions=show_no_project == "true",
+    )
+    if user is not None:
+        _save_user_settings(user, values)
+    response = redirect(_safe_next_url(request) or "index")
     _apply_cookie_updates(response, _settings_cookie_updates(values))
     return response
 
@@ -6765,6 +7034,9 @@ def new_project(request: HttpRequest) -> HttpResponse:
     stored = _stored_settings(request)
     values = stored._replace(selected_project_id=project.pk, last_selected_repo=repo_path)
     user = _authenticated_user(request)
+    values = _settings_with_visible_selected_project(
+        values, project, cookie_required=user is None
+    )
     if user is not None:
         _save_user_settings(user, values)
     response = redirect("index")

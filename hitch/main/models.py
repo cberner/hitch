@@ -787,6 +787,8 @@ class UserSettings(models.Model):
         on_delete=models.SET_NULL,
         related_name="selected_by_settings",
     )
+    visible_session_project_ids = models.JSONField(null=True, blank=True, default=None)
+    show_no_project_sessions = models.BooleanField(default=True)
     enable_memories = models.BooleanField(default=False)
     updated_at = models.DateTimeField(auto_now=True)
 

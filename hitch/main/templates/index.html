@@ -125,6 +125,29 @@
         html.js .session-list-menu-fallback {
             display: none;
         }
+        .session-list-menu-fallback-form {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.45rem;
+            margin: 0;
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            white-space: nowrap;
+        }
+        .session-list-menu-fallback-check {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+        }
+        .session-list-menu-fallback-check input {
+            width: 1rem;
+            height: 1rem;
+            accent-color: var(--accent);
+        }
+        .session-list-menu-fallback-submit {
+            min-height: 2rem;
+            padding: 0.3rem 0.55rem;
+        }
         .session-list-menu-toggle {
             font: inherit;
             display: inline-flex;
@@ -160,9 +183,14 @@
             box-shadow: var(--shadow-lg);
         }
         .session-list-menu-panel[hidden] { display: none; }
-        .session-list-menu-panel a {
+        .session-list-menu-panel a,
+        .session-list-menu-panel button,
+        .session-list-menu-check {
             width: 100%;
-            display: block;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
             font: inherit;
             font-size: 0.9rem;
             text-align: left;
@@ -175,12 +203,32 @@
             cursor: pointer;
         }
         .session-list-menu-panel a:hover,
-        .session-list-menu-panel a:focus {
+        .session-list-menu-panel a:focus,
+        .session-list-menu-panel button:hover,
+        .session-list-menu-panel button:focus,
+        .session-list-menu-check:hover,
+        .session-list-menu-check:focus-within {
             outline: none;
             background: var(--surface-2);
             text-decoration: none;
         }
+        .session-list-menu-form {
+            margin: 0;
+        }
+        .session-list-menu-check input {
+            width: 1rem;
+            height: 1rem;
+            accent-color: var(--accent);
+            flex: 0 0 auto;
+        }
+        .session-list-menu-submit {
+            margin-top: 0.25rem;
+        }
+        html.js .session-list-menu-submit {
+            display: none;
+        }
         {% include "_primary_nav_styles.html" %}
+        {% include "_dialog_styles.html" %}
         .brand {
             font-size: 1rem;
             font-weight: 700;
@@ -231,36 +279,10 @@
             color: var(--text-muted);
             font-size: 0.9rem;
         }
-        .archived-visibility-form {
-            margin: 0;
-            flex: 0 0 auto;
-        }
-        .archived-visibility-toggle {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.45rem;
-            color: var(--text-muted);
-            font-size: 0.82rem;
-            cursor: pointer;
-            user-select: none;
-            white-space: nowrap;
-        }
-        .archived-visibility-toggle input {
-            width: 1rem;
-            height: 1rem;
-            accent-color: var(--accent);
-        }
-        .archived-visibility-submit {
-            margin-left: 0.4rem;
-            font: inherit;
-            color: var(--accent);
-            background: transparent;
-            border: none;
-            padding: 0;
-            cursor: pointer;
-        }
-        html.js .archived-visibility-submit {
-            display: none;
+        .visible-projects-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.2rem;
         }
         .session-list {
             list-style: none;
@@ -656,9 +678,6 @@
             .project-banner .button {
                 justify-content: center;
             }
-            .archived-visibility-toggle {
-                font-size: 0.78rem;
-            }
         }
     </style>
     <script>document.documentElement.classList.add("js");</script>
@@ -684,6 +703,16 @@
                 <a class="session-list-menu-fallback" href="{% url 'index' %}">Sessions</a>
                 {% else %}
                 <a class="session-list-menu-fallback" href="{% url 'system_sessions' %}">System sessions</a>
+                <noscript>
+                    <form class="session-list-menu-fallback-form" method="post" action="{{ archived_visibility_url }}" data-archived-visibility-fallback>
+                        {% csrf_token %}
+                        <label class="session-list-menu-fallback-check">
+                            <span>Show archived</span>
+                            <input type="checkbox" name="show_archived_sessions" value="true" {% if current_show_archived_sessions %}checked{% endif %}>
+                        </label>
+                        <button type="submit" class="button secondary session-list-menu-fallback-submit">Apply</button>
+                    </form>
+                </noscript>
                 {% endif %}
                 <div class="session-list-menu" data-session-list-menu>
                     <button type="button" class="session-list-menu-toggle" aria-label="Page actions" aria-haspopup="menu" aria-expanded="false" data-session-list-menu-open>...</button>
@@ -692,6 +721,15 @@
                         <a href="{% url 'index' %}" role="menuitem">Sessions</a>
                         {% else %}
                         <a href="{% url 'system_sessions' %}" role="menuitem">System sessions</a>
+                        <form class="session-list-menu-form" method="post" action="{{ archived_visibility_url }}" role="none" data-archived-visibility-form>
+                            {% csrf_token %}
+                            <label class="session-list-menu-check" role="menuitemcheckbox" aria-checked="{% if current_show_archived_sessions %}true{% else %}false{% endif %}">
+                                <span>Show archived</span>
+                                <input type="checkbox" name="show_archived_sessions" value="true" {% if current_show_archived_sessions %}checked{% endif %} data-archived-visibility-toggle>
+                            </label>
+                            <button type="submit" class="session-list-menu-submit" data-archived-visibility-submit>Apply</button>
+                        </form>
+                        <button type="button" role="menuitem" data-visible-projects-open>Visible projects</button>
                         {% endif %}
                     </div>
                 </div>
@@ -706,17 +744,7 @@
         </div>
         {% endif %}
         <div class="session-list-header">
-            <p class="section-label">{% if system_session_list %}System sessions{% elif current_project %}{{ current_project.name }} sessions{% else %}Codex sessions{% endif %}</p>
-            {% if not system_session_list %}
-            <form class="archived-visibility-form" method="post" action="{{ archived_visibility_url }}" data-archived-visibility-form>
-                {% csrf_token %}
-                <label class="archived-visibility-toggle">
-                    <input type="checkbox" name="show_archived_sessions" value="true" {% if current_show_archived_sessions %}checked{% endif %} data-archived-visibility-toggle>
-                    <span>Show archived</span>
-                </label>
-                <button type="submit" class="archived-visibility-submit" data-archived-visibility-submit>Apply</button>
-            </form>
-            {% endif %}
+            <p class="section-label">{% if system_session_list %}System sessions{% else %}{{ session_list_title }}{% endif %}</p>
         </div>
         {% if sessions %}
         <ul class="session-list">
@@ -782,6 +810,30 @@
         <span data-archive-toast-text>Session archived</span>
         <button type="button" class="button secondary" data-archive-undo>Undo</button>
     </div>
+
+    <dialog class="new-session" data-visible-projects-dialog aria-labelledby="visible-projects-title">
+        <form method="post" action="{{ visible_session_projects_url }}">
+            {% csrf_token %}
+            <input type="hidden" name="next" value="{{ request.path }}">
+            <h2 id="visible-projects-title">Visible projects</h2>
+            <div class="visible-projects-list">
+                {% for project in visible_session_projects %}
+                <label class="checkbox-label">
+                    <span>{{ project.name }}</span>
+                    <input type="checkbox" name="visible_project" value="{{ project.id }}" {% if project.visible %}checked{% endif %}>
+                </label>
+                {% endfor %}
+                <label class="checkbox-label">
+                    <span>No repo</span>
+                    <input type="checkbox" name="show_no_project_sessions" value="true" {% if visible_session_no_project %}checked{% endif %}>
+                </label>
+            </div>
+            <div class="actions">
+                <button type="submit" class="button">Save</button>
+                <button type="button" class="button secondary" data-visible-projects-cancel>Cancel</button>
+            </div>
+        </form>
+    </dialog>
     {% endif %}
 
     {% if show_new_session_controls %}
@@ -834,6 +886,9 @@
             const sessionListMenu = document.querySelector("[data-session-list-menu]");
             const sessionListMenuButton = sessionListMenu && sessionListMenu.querySelector("[data-session-list-menu-open]");
             const sessionListMenuPanel = sessionListMenu && sessionListMenu.querySelector("[data-session-list-menu-panel]");
+            const visibleProjectsOpen = document.querySelector("[data-visible-projects-open]");
+            const visibleProjectsDialog = document.querySelector("[data-visible-projects-dialog]");
+            const visibleProjectsCancel = document.querySelector("[data-visible-projects-cancel]");
 
             function closeSessionListMenu(focusButton) {
                 if (!sessionListMenuButton || !sessionListMenuPanel) return;
@@ -1154,12 +1209,32 @@
             }
 
             {% include "_primary_nav_script.html" %}
+            {% include "_dialog_script.html" %}
+
+            if (visibleProjectsOpen && visibleProjectsDialog) {
+                visibleProjectsOpen.addEventListener("click", () => {
+                    closeSessionListMenu(false);
+                    showDialog(visibleProjectsDialog);
+                    const firstToggle = visibleProjectsDialog.querySelector("input[type='checkbox']");
+                    if (firstToggle) firstToggle.focus();
+                });
+            }
+            if (visibleProjectsCancel && visibleProjectsDialog) {
+                visibleProjectsCancel.addEventListener("click", () => {
+                    hideDialog(visibleProjectsDialog);
+                    if (visibleProjectsOpen) visibleProjectsOpen.focus();
+                });
+            }
 
             const archivedVisibilityForm = document.querySelector("[data-archived-visibility-form]");
             const archivedVisibilityToggle = document.querySelector("[data-archived-visibility-toggle]");
             const archivedVisibilitySubmit = document.querySelector("[data-archived-visibility-submit]");
             if (archivedVisibilityForm && archivedVisibilityToggle && archivedVisibilitySubmit) {
                 archivedVisibilityToggle.addEventListener("change", () => {
+                    const label = archivedVisibilityToggle.closest("[role='menuitemcheckbox']");
+                    if (label) {
+                        label.setAttribute("aria-checked", archivedVisibilityToggle.checked ? "true" : "false");
+                    }
                     requestSubmit(archivedVisibilityForm, archivedVisibilitySubmit);
                 });
             }

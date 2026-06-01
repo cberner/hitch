@@ -51,6 +51,11 @@ urlpatterns = [
         hitch.main.views.update_archived_session_visibility,
         name="update_archived_session_visibility",
     ),
+    path(
+        "settings/visible-session-projects/",
+        hitch.main.views.update_visible_session_projects,
+        name="update_visible_session_projects",
+    ),
     path("projects/new/", hitch.main.views.new_project, name="new_project"),
     path("projects/edit/", hitch.main.views.edit_project, name="edit_project"),
     path("system-sessions/", hitch.main.views.system_sessions, name="system_sessions"),

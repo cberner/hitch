@@ -90,6 +90,8 @@ _SPEC_CRITIC_COOKIE = "hitch_spec_critic"
 _WEB_SEARCH_COOKIE = "hitch_web_search_mode"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
 _SELECTED_PROJECT_COOKIE = "hitch_selected_project_id"
+_VISIBLE_SESSION_PROJECTS_COOKIE = "hitch_visible_session_project_ids"
+_SHOW_NO_PROJECT_SESSIONS_COOKIE = "hitch_show_no_project_sessions"
 _CODING_AGENT_COOKIE = "hitch_coding_agent"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 _PR_PROMPT = (
@@ -4263,10 +4265,19 @@ class IndexViewTests(TestCase):
         self.assertContains(response, 'data-session-archived="false"')
         self.assertContains(response, 'aria-label="Session actions"')
         self.assertContains(response, 'data-session-rename-open')
+        self.assertContains(response, 'data-archived-visibility-form')
+        self.assertContains(response, 'data-visible-projects-open')
+        self.assertContains(response, "Visible projects")
+        self.assertContains(
+            response,
+            '<dialog class="new-session" data-visible-projects-dialog',
+            html=False,
+        )
         self.assertContains(response, 'name="name" value="Newer session" maxlength="200"')
         self.assertContains(response, 'name="next" value="index"')
         self.assertContains(response, 'data-session-archive-label>Archive</button>')
         self.assertContains(response, "data-archive-undo")
+        self.assertContains(response, "data-archived-visibility-fallback")
         self.assertLess(body.index("Newer session"), body.index("Middle session"))
         self.assertLess(body.index("Middle session"), body.index("Older session"))
 
@@ -4410,7 +4421,9 @@ class IndexViewTests(TestCase):
         ]
         _setup_codex(mock_codex, threads=sessions)
         mock_discover.return_value = [Path("/repo"), Path("/other")]
-        SessionMetadata.objects.create(thread_id="matching", cwd="/repo", project=project)
+        SessionMetadata.objects.create(
+            thread_id="matching", cwd="/repo", project=project
+        )
         SessionMetadata.objects.create(thread_id="other", cwd="/other", project=other)
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
 
@@ -4420,6 +4433,96 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Matching")
         self.assertContains(response, "Hitch sessions")
         self.assertNotContains(response, "Other session")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_visible_projects_filter_sessions(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other = Project.objects.create(name="Other", repo_path="/other")
+        sessions = [
+            _session("matching", name="Matching", cwd="/repo"),
+            _session("other", name="Other session", cwd="/other"),
+            _session("no-project", name="No repo session", cwd="/elsewhere"),
+        ]
+        _setup_codex(mock_codex, threads=sessions)
+        mock_discover.return_value = [Path("/repo"), Path("/other")]
+        SessionMetadata.objects.create(
+            thread_id="matching", cwd="/repo", project=project
+        )
+        SessionMetadata.objects.create(thread_id="other", cwd="/other", project=other)
+        SessionMetadata.objects.create(thread_id="no-project", cwd="/elsewhere")
+
+        response = self.client.post(
+            reverse("update_visible_session_projects"),
+            data={
+                "visible_project": [str(other.pk)],
+                "show_no_project_sessions": "true",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            _cookie_value(response, _VISIBLE_SESSION_PROJECTS_COOKIE),
+            f"[{other.pk}]",
+        )
+        self.assertEqual(
+            _cookie_value(response, _SHOW_NO_PROJECT_SESSIONS_COOKIE),
+            "true",
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Other session")
+        self.assertContains(response, "No repo session")
+        self.assertNotContains(response, "Matching")
+
+    @patch(
+        "hitch.main.views._visible_session_project_ids_cookie_fits",
+        return_value=False,
+    )
+    def test_visible_projects_rejects_oversized_guest_cookie(
+        self, mock_cookie_fits: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+
+        response = self.client.post(
+            reverse("update_visible_session_projects"),
+            data={"visible_project": [str(project.pk)]},
+        )
+
+        self.assertContains(
+            response,
+            "visible project selection is too large",
+            status_code=400,
+        )
+        mock_cookie_fits.assert_called_once_with((project.pk,))
+        self.assertNotIn(_VISIBLE_SESSION_PROJECTS_COOKIE, response.cookies)
+
+    def test_settings_selected_project_stays_visible_with_explicit_filter(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other = Project.objects.create(name="Other", repo_path="/other")
+        _seed_cookies(
+            self.client,
+            **{_VISIBLE_SESSION_PROJECTS_COOKIE: f"[{other.pk}]"},
+        )
+
+        response = self.client.post(
+            reverse("update_settings"),
+            data={"selected_project": str(project.pk)},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            _cookie_value(response, _SELECTED_PROJECT_COOKIE),
+            str(project.pk),
+        )
+        self.assertEqual(
+            _cookie_value(response, _VISIBLE_SESSION_PROJECTS_COOKIE),
+            f"[{other.pk},{project.pk}]",
+        )
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -6381,6 +6484,11 @@ class ProjectViewTests(TestCase):
     def test_creates_project_selects_it_and_associates_existing_sessions(
         self, mock_discover: MagicMock, mock_codex: MagicMock
     ) -> None:
+        other = Project.objects.create(name="Other", repo_path="/other")
+        _seed_cookies(
+            self.client,
+            **{_VISIBLE_SESSION_PROJECTS_COOKIE: f"[{other.pk}]"},
+        )
         mock_discover.return_value = [Path("/repo")]
         _setup_codex(
             mock_codex,
@@ -6396,10 +6504,14 @@ class ProjectViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
-        project = Project.objects.get()
+        project = Project.objects.get(repo_path="/repo")
         self.assertEqual(project.name, "Hitch")
         self.assertEqual(project.repo_path, "/repo")
         self.assertEqual(_cookie_value(response, "hitch_selected_project_id"), str(project.pk))
+        self.assertEqual(
+            _cookie_value(response, _VISIBLE_SESSION_PROJECTS_COOKIE),
+            f"[{other.pk},{project.pk}]",
+        )
         self.assertEqual(SessionMetadata.objects.get(thread_id="match").project, project)
         self.assertFalse(SessionMetadata.objects.filter(thread_id="miss").exists())
 
