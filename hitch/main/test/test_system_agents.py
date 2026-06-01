@@ -3016,10 +3016,6 @@ class SpecCriticWorkflowTests(TestCase):
         )
         mock_spawn.assert_called_once()
 
-    @patch(
-        "hitch.main.system_agents._pr_monitor_observation_from_gh",
-        return_value=_gh_monitor_observation({"pr_number": 173}),
-    )
     @patch("hitch.main.system_agents.subprocess.run")
     @patch("hitch.main.system_agents._surface_workflow_failure")
     def test_pr_prompt_completion_refuses_to_push_default_branch(
@@ -3073,6 +3069,10 @@ class SpecCriticWorkflowTests(TestCase):
         )
         mock_surface.assert_called_once()
 
+    @patch(
+        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation({"pr_number": 173}),
+    )
     @patch("hitch.main.system_agents.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_ignores_terminal_branch_pr(
@@ -4635,10 +4635,16 @@ class SpecCriticWorkflowTests(TestCase):
             ],
         )
 
+    @patch(
+        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation(
+            {"pr_number": 174, "head": "followup", "head_sha": "followupsha"}
+        ),
+    )
     @patch("hitch.main.system_agents.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_feedback_completion_opens_followup_pr_for_stale_handoff(
-        self, mock_spawn: MagicMock, mock_run: MagicMock
+        self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
     ) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
