@@ -8781,6 +8781,55 @@ def _adopt_candidate_proposal_session(
     return candidate_session, response
 
 
+def _candidate_session_restore_values(
+    candidate_session: SessionMetadata,
+) -> dict[str, Any]:
+    return {
+        "cwd": candidate_session.cwd,
+        "project_id": candidate_session.project_id,
+        "project_cleared": candidate_session.project_cleared,
+        "auto_pr_enabled": candidate_session.auto_pr_enabled,
+        "auto_qa_enabled": candidate_session.auto_qa_enabled,
+        "auto_merge_to_local_branch": candidate_session.auto_merge_to_local_branch,
+        "auto_merge_branch": candidate_session.auto_merge_branch,
+        "codex_name": candidate_session.codex_name,
+        "codex_display_title": candidate_session.codex_display_title,
+        "codex_last_synced_at": candidate_session.codex_last_synced_at,
+        "is_hidden_system_session": candidate_session.is_hidden_system_session,
+    }
+
+
+def _rollback_candidate_proposal_adoption(
+    *,
+    proposed_session: ProposedSession,
+    candidate_session: SessionMetadata,
+    outcome_metadata: dict[str, object],
+    candidate_values: dict[str, Any],
+) -> None:
+    with transaction.atomic():
+        rolled_back = ProposedSession.objects.filter(
+            pk=proposed_session.pk,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            accepted_session=candidate_session,
+        ).update(
+            outcome_status=ProposedSession.OUTCOME_UNSET,
+            accepted_session=None,
+            outcome_metadata=outcome_metadata,
+            updated_at=timezone.now(),
+        )
+        if not rolled_back:
+            return
+        SessionMetadata.objects.filter(pk=candidate_session.pk).update(
+            **candidate_values
+        )
+    proposed_session.outcome_status = ProposedSession.OUTCOME_UNSET
+    proposed_session.accepted_session = None
+    proposed_session.accepted_session_id = None
+    proposed_session.outcome_metadata = outcome_metadata
+    for field, value in candidate_values.items():
+        setattr(candidate_session, field, value)
+
+
 def _start_candidate_proposal_session(
     *,
     request: HttpRequest,
@@ -8812,6 +8861,16 @@ def _start_candidate_proposal_session(
         input_image_paths, input_image_error = _save_posted_input_images(request)
         if input_image_error is not None:
             return HttpResponseBadRequest(input_image_error)
+    if input_image_paths:
+        try:
+            codex_pool.validate_turn_input_attachments(
+                candidate_session.thread_id, input_image_paths
+            )
+        except codex_pool.InputAttachmentLimitExceededError as exc:
+            _cleanup_saved_input_images(input_image_paths)
+            return HttpResponseBadRequest(str(exc))
+    proposal_outcome_metadata = dict(_proposal_metadata(proposed_session))
+    candidate_restore_values = _candidate_session_restore_values(candidate_session)
     adopted_candidate, accepted_response = _adopt_candidate_proposal_session(
         request=request,
         proposed_session=proposed_session,
@@ -8940,6 +8999,12 @@ def _start_candidate_proposal_session(
         input_images_owned = True
     except codex_pool.InputAttachmentLimitExceededError as exc:
         _cleanup_saved_input_images(input_image_paths)
+        _rollback_candidate_proposal_adoption(
+            proposed_session=proposed_session,
+            candidate_session=candidate_session,
+            outcome_metadata=proposal_outcome_metadata,
+            candidate_values=candidate_restore_values,
+        )
         return HttpResponseBadRequest(str(exc))
     except Exception:
         if not input_images_owned:

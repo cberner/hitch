@@ -8193,6 +8193,167 @@ class NewSessionViewTests(TestCase):
         # have already removed the worktree by the time this stale-tab request runs.
         mock_turn.assert_not_called()
 
+    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    def test_candidate_accept_attachment_cap_keeps_proposal_pending(
+        self,
+        mock_turn: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_managed_worktrees: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
+        codex = _setup_codex(mock_codex, models=[])
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+            codex_name="Candidate draft",
+            codex_display_title="Candidate draft",
+            is_hidden_system_session=True,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            title="Add parser coverage",
+            outcome_metadata={"kept": True},
+        )
+        CodexInstance.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            prompt="Existing screenshot history.",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            pid=123,
+            input_attachment_paths=[
+                f"/tmp/thread-{index}.png"
+                for index in range(codex_pool._MAX_INPUT_ATTACHMENT_PATHS_PER_THREAD)
+            ],
+        )
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            response = self.client.post(
+                reverse("new_session"),
+                data={
+                    "prompt": "Go ahead and implement this proposed session.",
+                    "cwd": self.REPO,
+                    "proposed_session": str(proposal.pk),
+                    "input_images": SimpleUploadedFile(
+                        "screen.png", _PNG_BYTES, content_type="image/png"
+                    ),
+                },
+            )
+
+            self.assertContains(
+                response,
+                "too many image attachments are retained for this session",
+                status_code=400,
+            )
+            attachments = Path(raw) / "attachments"
+            self.assertEqual(
+                [path for path in attachments.rglob("*") if path.is_file()],
+                [],
+            )
+        mock_turn.assert_not_called()
+        codex._client.thread_set_name.assert_not_called()
+        proposal.refresh_from_db()
+        candidate.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertIsNone(proposal.accepted_session)
+        self.assertEqual(proposal.outcome_metadata, {"kept": True})
+        self.assertTrue(candidate.is_hidden_system_session)
+        self.assertEqual(candidate.codex_name, "Candidate draft")
+        self.assertEqual(candidate.codex_display_title, "Candidate draft")
+
+    @patch("hitch.main.views.codex_pool.validate_turn_input_attachments")
+    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    def test_candidate_accept_late_attachment_race_rolls_back_adoption(
+        self,
+        mock_turn: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_managed_worktrees: MagicMock,
+        mock_validate: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
+        _setup_codex(mock_codex, models=[])
+        mock_turn.side_effect = codex_pool.InputAttachmentLimitExceededError(
+            "too many image attachments are retained for this session"
+        )
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+            codex_name="Candidate draft",
+            codex_display_title="Candidate draft",
+            is_hidden_system_session=True,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            title="Add parser coverage",
+            outcome_metadata={"kept": True},
+        )
+
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            response = self.client.post(
+                reverse("new_session"),
+                data={
+                    "prompt": "Go ahead and implement this proposed session.",
+                    "cwd": self.REPO,
+                    "proposed_session": str(proposal.pk),
+                    "input_images": SimpleUploadedFile(
+                        "screen.png", _PNG_BYTES, content_type="image/png"
+                    ),
+                },
+            )
+
+            self.assertContains(
+                response,
+                "too many image attachments are retained for this session",
+                status_code=400,
+            )
+            attachments = Path(raw) / "attachments"
+            self.assertEqual(
+                [path for path in attachments.rglob("*") if path.is_file()],
+                [],
+            )
+        mock_validate.assert_called_once()
+        mock_turn.assert_called_once()
+        proposal.refresh_from_db()
+        candidate.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertIsNone(proposal.accepted_session)
+        self.assertEqual(proposal.outcome_metadata, {"kept": True})
+        self.assertTrue(candidate.is_hidden_system_session)
+        self.assertEqual(candidate.codex_name, "Candidate draft")
+        self.assertEqual(candidate.codex_display_title, "Candidate draft")
+
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.discover_managed_worktrees")
     @patch("hitch.main.views.discover_repos")

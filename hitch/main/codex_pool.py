@@ -1307,6 +1307,20 @@ def _input_attachment_count_for_thread(
     return len(paths)
 
 
+def validate_turn_input_attachments(
+    thread_id: str, input_image_paths: list[str] | None
+) -> None:
+    image_paths = _normalized_input_image_paths(input_image_paths)
+    if (
+        image_paths
+        and _input_attachment_count_for_thread(thread_id) + len(set(image_paths))
+        > _MAX_INPUT_ATTACHMENT_PATHS_PER_THREAD
+    ):
+        raise InputAttachmentLimitExceededError(
+            "too many image attachments are retained for this session"
+        )
+
+
 def _add_input_attachment_paths(
     instance: CodexInstance, input_image_paths: list[str]
 ) -> None:
@@ -1400,15 +1414,7 @@ def _spawn_worker(
     target_dir = events_dir()
     target_dir.mkdir(parents=True, exist_ok=True)
     normalized_input_image_paths = _normalized_input_image_paths(input_image_paths)
-    if (
-        normalized_input_image_paths
-        and _input_attachment_count_for_thread(thread_id)
-        + len(set(normalized_input_image_paths))
-        > _MAX_INPUT_ATTACHMENT_PATHS_PER_THREAD
-    ):
-        raise InputAttachmentLimitExceededError(
-            "too many image attachments are retained for this session"
-        )
+    validate_turn_input_attachments(thread_id, normalized_input_image_paths)
 
     with transaction.atomic():
         instance = CodexInstance.objects.create(
