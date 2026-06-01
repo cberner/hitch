@@ -9,9 +9,10 @@ from unittest.mock import MagicMock, patch
 from django.core.management import call_command
 from django.db import IntegrityError, transaction
 from django.test import TestCase
+from django.utils import timezone
 from openai_codex.generated.v2_all import GetAccountRateLimitsResponse, ThreadSource
 
-from hitch.main import demo, streaming, system_agents
+from hitch.main import demo, proposed_sessions, streaming, system_agents
 from hitch.main.local_merges import (
     AutoMergeReviewPatch,
     LocalBranchMergeError,
@@ -5755,6 +5756,56 @@ class AutonomousGoalWorkflowTests(TestCase):
             workflow.main_thread_id,
             system_agents._autonomous_goal_main_thread_id(notice_goal.pk),
         )
+
+    @patch(
+        "hitch.main.system_agents.default_branch_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_reconciles_stale_start_claim_before_pending_guard(
+        self, mock_spawn: MagicMock, mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+            is_hidden_system_session=True,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            title="Add parser coverage",
+            candidate_session=candidate,
+            outcome_status=ProposedSession.OUTCOME_STARTING,
+            outcome_metadata={
+                "kept": True,
+                "candidate_start_claimed_by": "user",
+                "candidate_start_session_id": candidate.pk,
+                "candidate_start_thread_id": candidate.thread_id,
+            },
+        )
+        ProposedSession.objects.filter(pk=proposal.pk).update(
+            updated_at=(
+                timezone.now()
+                - proposed_sessions.START_CLAIM_TTL
+                - timedelta(seconds=1)
+            )
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 0)
+        mock_default_sha.assert_not_called()
+        mock_spawn.assert_not_called()
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertEqual(proposal.outcome_metadata, {"kept": True})
 
     @patch(
         "hitch.main.system_agents.default_branch_commit_hash",

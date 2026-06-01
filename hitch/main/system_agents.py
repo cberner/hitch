@@ -21,7 +21,16 @@ from django.utils.dateparse import parse_datetime
 from openai_codex import AppServerError, Codex
 from openai_codex.generated.v2_all import GetAccountRateLimitsResponse, ThreadSource
 
-from hitch.main import codex_events, codex_pool, demo, rollout, session_index
+from hitch.main import (
+    codex_events,
+    codex_pool,
+    demo,
+    rollout,
+    session_index,
+)
+from hitch.main import (
+    proposed_sessions as proposed_session_tools,
+)
 from hitch.main.diffs import build_worktree_diff_text
 from hitch.main.local_merges import (
     LocalBranchMergeError,
@@ -997,6 +1006,9 @@ def _autonomous_goal_auto_merge_base_ref(
 
 
 def _autonomous_goal_pending_proposal_exists(autonomous_goal: AutonomousGoal) -> bool:
+    proposed_session_tools.reconcile_stale_candidate_proposal_starts(
+        autonomous_goal=autonomous_goal
+    )
     return autonomous_goal.proposed_sessions.filter(
         inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL,
         outcome_status__in=(

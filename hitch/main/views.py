@@ -62,6 +62,9 @@ from hitch.main import (
     streaming,
     system_agents,
 )
+from hitch.main import (
+    proposed_sessions as proposed_session_tools,
+)
 from hitch.main.diffs import build_worktree_diff
 from hitch.main.formatting import looks_like_markdown, render_markdown
 from hitch.main.local_merges import local_branch_names
@@ -109,7 +112,7 @@ _MODELS_REFRESH_IN_FLIGHT: set[bool] = set()
 _MODELS_CACHE_VALUE: dict[bool, list[Any]] = {}
 _MODELS_CACHE_FETCHED_AT: dict[bool, datetime] = {}
 _MODELS_CACHE_TTL = timedelta(minutes=5)
-_PROPOSED_SESSION_START_CLAIM_TTL = timedelta(minutes=15)
+_PROPOSED_SESSION_START_CLAIM_TTL = proposed_session_tools.START_CLAIM_TTL
 
 
 class SettingsValues(NamedTuple):
@@ -7545,17 +7548,7 @@ def _rename_codex_thread_from_proposal(
 def _proposal_outcome_metadata(
     proposed_session: ProposedSession, updates: dict[str, object]
 ) -> dict[str, object]:
-    metadata = (
-        dict(proposed_session.outcome_metadata)
-        if isinstance(proposed_session.outcome_metadata, dict)
-        else {}
-    )
-    for key, value in updates.items():
-        if value is None:
-            metadata.pop(key, None)
-        else:
-            metadata[key] = value
-    return metadata
+    return proposed_session_tools.proposal_outcome_metadata(proposed_session, updates)
 
 
 def _candidate_start_claim_metadata_updates(
@@ -7563,46 +7556,14 @@ def _candidate_start_claim_metadata_updates(
     claimed_by: str | None,
     candidate_session: SessionMetadata | None,
 ) -> dict[str, object]:
-    return {
-        "candidate_start_claimed_by": claimed_by,
-        "candidate_start_session_id": (
-            candidate_session.pk if candidate_session is not None else None
-        ),
-        "candidate_start_thread_id": (
-            candidate_session.thread_id if candidate_session is not None else None
-        ),
-    }
+    return proposed_session_tools.candidate_start_claim_metadata_updates(
+        claimed_by=claimed_by,
+        candidate_session=candidate_session,
+    )
 
 
 def _reconcile_stale_candidate_proposal_starts() -> int:
-    """Recover private start claims that never reached publish or rollback."""
-    cutoff = timezone.now() - _PROPOSED_SESSION_START_CLAIM_TTL
-    stale_proposals = list(
-        ProposedSession.objects.filter(
-            outcome_status=ProposedSession.OUTCOME_STARTING,
-            updated_at__lt=cutoff,
-        ).only("pk", "outcome_metadata")
-    )
-    reconciled = 0
-    for proposed_session in stale_proposals:
-        outcome_metadata = _proposal_outcome_metadata(
-            proposed_session,
-            _candidate_start_claim_metadata_updates(
-                claimed_by=None,
-                candidate_session=None,
-            ),
-        )
-        reconciled += ProposedSession.objects.filter(
-            pk=proposed_session.pk,
-            outcome_status=ProposedSession.OUTCOME_STARTING,
-            updated_at__lt=cutoff,
-        ).update(
-            outcome_status=ProposedSession.OUTCOME_UNSET,
-            accepted_session=None,
-            outcome_metadata=outcome_metadata,
-            updated_at=timezone.now(),
-        )
-    return reconciled
+    return proposed_session_tools.reconcile_stale_candidate_proposal_starts()
 
 
 def _posted_auto_pr_override(raw: str | None, *, default: bool) -> tuple[bool, str | None]:
@@ -9109,48 +9070,22 @@ def _auto_merge_to_local_branch_for_proposal(
     *,
     auto_qa_enabled: bool,
 ) -> tuple[bool, str]:
-    if not auto_qa_enabled:
-        return False, ""
-    metadata = _proposal_metadata(proposed_session)
-    if "auto_merge_to_local_branch" in metadata or "auto_merge_branch" in metadata:
-        enabled = metadata.get("auto_merge_to_local_branch") is True
-        branch = str(metadata.get("auto_merge_branch") or "").strip()
-        if enabled and branch:
-            return True, branch
-        return False, ""
-    if proposed_session.autonomous_goal is None:
-        return False, ""
-    autonomous_goal = proposed_session.autonomous_goal
-    if not autonomous_goal.auto_merge_to_local_branch:
-        return False, ""
-    branch = autonomous_goal.auto_merge_branch.strip()
-    if not branch:
-        return False, ""
-    return True, branch
+    return proposed_session_tools.auto_merge_to_local_branch_for_proposal(
+        proposed_session,
+        auto_qa_enabled=auto_qa_enabled,
+    )
 
 
 def _auto_review_settings_for_proposed_session(
     proposed_session: ProposedSession,
 ) -> tuple[bool, bool]:
-    metadata = _proposal_metadata(proposed_session)
-    if "auto_pr_enabled" in metadata or "auto_qa_enabled" in metadata:
-        auto_pr_enabled = metadata.get("auto_pr_enabled") is True
-        auto_qa_enabled = metadata.get("auto_qa_enabled") is True and not auto_pr_enabled
-        return auto_pr_enabled, auto_qa_enabled
-    autonomous_goal = proposed_session.autonomous_goal
-    if autonomous_goal is None:
-        return False, False
-    auto_pr_enabled = autonomous_goal.autonomy == AutonomousGoal.AUTONOMY_DRAFT_PR
-    auto_qa_enabled = autonomous_goal.auto_qa_enabled and not auto_pr_enabled
-    return auto_pr_enabled, auto_qa_enabled
+    return proposed_session_tools.auto_review_settings_for_proposed_session(
+        proposed_session
+    )
 
 
 def _proposal_metadata(proposed_session: ProposedSession) -> dict[str, object]:
-    return (
-        proposed_session.outcome_metadata
-        if isinstance(proposed_session.outcome_metadata, dict)
-        else {}
-    )
+    return proposed_session_tools.proposal_metadata(proposed_session)
 
 
 def _parse_instance_id(raw: str) -> tuple[int | None, str | None]:

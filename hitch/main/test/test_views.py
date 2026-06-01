@@ -15569,6 +15569,101 @@ class AutonomousGoalViewTests(TestCase):
         mock_cleanup.assert_called_once_with("/repo-worktree")
 
     @patch("hitch.main.views.cleanup_managed_worktree_path")
+    def test_reject_preserves_launched_stale_candidate_start_claim(
+        self, mock_cleanup: MagicMock
+    ) -> None:
+        for index, launch_kind in enumerate(("turn", "workflow"), start=1):
+            with self.subTest(launch_kind=launch_kind):
+                project = Project.objects.create(
+                    name=f"Hitch {index}",
+                    repo_path=f"/repo-{index}",
+                )
+                _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+                goal = AutonomousGoal.objects.create(
+                    project=project,
+                    title="Improve tests",
+                    goal="Find useful test coverage increments.",
+                    auto_qa_enabled=True,
+                    auto_merge_to_local_branch=True,
+                    auto_merge_branch="release",
+                )
+                candidate = SessionMetadata.objects.create(
+                    thread_id=f"candidate-thread-{index}",
+                    cwd=f"/repo-worktree-{index}",
+                    project=project,
+                    is_hidden_system_session=True,
+                )
+                proposal = ProposedSession.objects.create(
+                    autonomous_goal=goal,
+                    title="Add parser coverage",
+                    candidate_session=candidate,
+                    outcome_status=ProposedSession.OUTCOME_STARTING,
+                    outcome_metadata={
+                        "kept": True,
+                        "candidate_start_claimed_by": "user",
+                        "candidate_start_session_id": candidate.pk,
+                        "candidate_start_thread_id": candidate.thread_id,
+                    },
+                )
+                stale_updated_at = (
+                    timezone.now()
+                    - views._PROPOSED_SESSION_START_CLAIM_TTL
+                    - timedelta(seconds=1)
+                )
+                ProposedSession.objects.filter(pk=proposal.pk).update(
+                    updated_at=stale_updated_at
+                )
+                if launch_kind == "turn":
+                    CodexInstance.objects.create(
+                        thread_id=candidate.thread_id,
+                        cwd=candidate.cwd,
+                        prompt="Continue proposal.",
+                        events_path=f"/tmp/events-{index}.jsonl",
+                        status=CodexInstance.STATUS_RUNNING,
+                        pid=100 + index,
+                    )
+                else:
+                    SystemWorkflow.objects.create(
+                        kind=SystemWorkflow.KIND_PR_QA,
+                        main_thread_id=candidate.thread_id,
+                        cwd=candidate.cwd,
+                        status=SystemWorkflow.STATUS_RUNNING,
+                    )
+
+                response = self.client.post(
+                    reverse("update_proposed_session_outcome", args=[proposal.pk]),
+                    {
+                        "outcome_status": ProposedSession.OUTCOME_REJECTED,
+                        "reason": "Not useful enough.",
+                    },
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(
+                    response.content,
+                    b"proposed session has already been resolved",
+                )
+                proposal.refresh_from_db()
+                candidate.refresh_from_db()
+                self.assertEqual(
+                    proposal.outcome_status,
+                    ProposedSession.OUTCOME_ACCEPTED,
+                )
+                self.assertEqual(proposal.accepted_session, candidate)
+                self.assertEqual(proposal.outcome_metadata["accepted_by"], "user")
+                self.assertNotIn(
+                    "candidate_start_claimed_by",
+                    proposal.outcome_metadata,
+                )
+                self.assertFalse(candidate.is_hidden_system_session)
+                self.assertTrue(candidate.auto_qa_enabled)
+                self.assertTrue(candidate.auto_merge_to_local_branch)
+                self.assertEqual(candidate.auto_merge_branch, "release")
+                self.assertEqual(candidate.codex_name, "Add parser coverage")
+
+        mock_cleanup.assert_not_called()
+
+    @patch("hitch.main.views.cleanup_managed_worktree_path")
     def test_update_outcome_rejects_already_resolved_proposal(
         self, mock_cleanup: MagicMock
     ) -> None:
