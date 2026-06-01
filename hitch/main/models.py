@@ -97,6 +97,9 @@ class AutonomousGoal(models.Model):
         (WEB_SEARCH_LIVE, "Live"),
     )
     AUTO_QA_AUTONOMIES: ClassVar[frozenset[str]] = frozenset({AUTONOMY_DRAFT_PATCH})
+    AUTO_QA_REQUIRED_AUTONOMIES: ClassVar[frozenset[str]] = frozenset(
+        {AUTONOMY_DRAFT_PR}
+    )
 
     project = models.ForeignKey(
         Project,
@@ -149,6 +152,16 @@ class AutonomousGoal(models.Model):
     @classmethod
     def auto_qa_supported_for_autonomy(cls, autonomy: str) -> bool:
         return autonomy in cls.AUTO_QA_AUTONOMIES
+
+    @classmethod
+    def auto_qa_required_for_autonomy(cls, autonomy: str) -> bool:
+        return autonomy in cls.AUTO_QA_REQUIRED_AUTONOMIES
+
+    @property
+    def effective_auto_qa_enabled(self) -> bool:
+        if self.auto_qa_required_for_autonomy(self.autonomy):
+            return True
+        return self.auto_qa_supported_for_autonomy(self.autonomy) and self.auto_qa_enabled
 
 
 class ProposedSession(models.Model):

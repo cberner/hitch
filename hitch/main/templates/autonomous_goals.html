@@ -515,7 +515,7 @@
                     <div class="goal-meta">
                         <span class="meta">Ambition: {{ goal.get_ambition_display }}</span>
                         <span class="meta">Autonomy: {{ goal.get_autonomy_display }}</span>
-                        <span class="meta">Auto-QA: {% if goal.auto_qa_enabled %}On{% else %}Off{% endif %}</span>
+                        <span class="meta">Auto-QA: {% if goal.autonomy in auto_qa_required_autonomies %}Required{% elif goal.effective_auto_qa_enabled %}On{% else %}Off{% endif %}</span>
                         <span class="meta">Auto-proposal: {% if goal.auto_proposal_enabled %}On{% else %}Off{% endif %}</span>
                         <span class="meta">Threshold: {{ goal.get_confidence_threshold_display }}</span>
                         <span class="meta">Web search: {{ goal.get_web_search_mode_display }}</span>
@@ -615,7 +615,7 @@
                 Autonomy
                 <select name="autonomy" required data-edit-autonomous-goal-autonomy data-autonomous-goal-autonomy>
                     {% for value, label in autonomy_choices %}
-                    <option value="{{ value }}" data-auto-qa-supported="{% if value in auto_qa_supported_autonomies %}true{% else %}false{% endif %}">{{ label }}</option>
+                    <option value="{{ value }}" data-auto-qa-supported="{% if value in auto_qa_supported_autonomies %}true{% else %}false{% endif %}" data-auto-qa-required="{% if value in auto_qa_required_autonomies %}true{% else %}false{% endif %}">{{ label }}</option>
                     {% endfor %}
                 </select>
             </label>
@@ -696,13 +696,28 @@
                 const option = autonomySelect && autonomySelect.selectedOptions && autonomySelect.selectedOptions[0];
                 return Boolean(option && option.dataset.autoQaSupported === "true");
             }
+            function selectedAutoQaRequired(autonomySelect) {
+                const option = autonomySelect && autonomySelect.selectedOptions && autonomySelect.selectedOptions[0];
+                return Boolean(option && option.dataset.autoQaRequired === "true");
+            }
             function syncAutonomousGoalAutoQa(form) {
                 if (!form) return;
                 const autonomySelect = form.querySelector("select[name='autonomy']");
                 const autoQa = form.querySelector("[data-autonomous-goal-auto-qa]");
                 if (!autonomySelect || !autoQa) return;
+                const required = selectedAutoQaRequired(autonomySelect);
                 const supported = selectedAutoQaSupported(autonomySelect);
-                autoQa.disabled = !supported;
+                const wasRequired = autoQa.dataset.autoQaRequiredActive === "true";
+                if (required && !wasRequired) {
+                    autoQa.dataset.autoQaUserChecked = autoQa.checked ? "true" : "false";
+                    autoQa.checked = true;
+                } else if (!required && wasRequired && "autoQaUserChecked" in autoQa.dataset) {
+                    autoQa.checked = autoQa.dataset.autoQaUserChecked === "true";
+                } else if (required) {
+                    autoQa.checked = true;
+                }
+                autoQa.dataset.autoQaRequiredActive = required ? "true" : "false";
+                autoQa.disabled = required || !supported;
             }
             function closePageMenu() {
                 if (pageMenu) closeContextMenu(pageMenu, false);
@@ -766,6 +781,8 @@
                     if (editGoalAmbition) editGoalAmbition.value = button.dataset.ambition || "";
                     if (editGoalAutonomy) editGoalAutonomy.value = button.dataset.autonomy || "";
                     if (editGoalAutoQa) {
+                        delete editGoalAutoQa.dataset.autoQaRequiredActive;
+                        delete editGoalAutoQa.dataset.autoQaUserChecked;
                         editGoalAutoQa.checked = button.dataset.autoQa === "true";
                     }
                     syncAutonomousGoalAutoQa(editGoalForm);

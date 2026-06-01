@@ -18,7 +18,7 @@
     Autonomy
     <select name="autonomy" required data-autonomous-goal-autonomy>
         {% for value, label in autonomy_choices %}
-        <option value="{{ value }}"{% if value == default_autonomy %} selected{% endif %} data-auto-qa-supported="{% if value in auto_qa_supported_autonomies %}true{% else %}false{% endif %}">{{ label }}</option>
+        <option value="{{ value }}"{% if value == default_autonomy %} selected{% endif %} data-auto-qa-supported="{% if value in auto_qa_supported_autonomies %}true{% else %}false{% endif %}" data-auto-qa-required="{% if value in auto_qa_required_autonomies %}true{% else %}false{% endif %}">{{ label }}</option>
         {% endfor %}
     </select>
 </label>
