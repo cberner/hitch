@@ -4944,6 +4944,66 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Hitch sessions")
         self.assertNotContains(response, "Other session")
 
+    @patch("hitch.main.views.system_agents.hidden_thread_ids")
+    @patch("hitch.main.views.Codex")
+    def test_warm_index_filters_system_sessions_without_hidden_id_scan(
+        self, mock_codex: MagicMock, mock_hidden_thread_ids: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        now = timezone.now()
+        SessionMetadata.objects.create(
+            thread_id="visible",
+            cwd="/repo",
+            project=project,
+            codex_display_title="Visible session",
+            codex_updated_at=now,
+        )
+        SessionMetadata.objects.create(
+            thread_id="hidden-system",
+            cwd="/repo",
+            project=project,
+            codex_display_title="Hidden system session",
+            codex_updated_at=now + timedelta(seconds=1),
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="visible",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="hidden-system",
+            cwd="/repo",
+            prompt="qa",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="hidden-system",
+            instance=instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Visible session")
+        self.assertNotContains(response, "Hidden system session")
+        mock_hidden_thread_ids.assert_not_called()
+        mock_codex.assert_not_called()
+
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_visible_projects_filter_sessions(

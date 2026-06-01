@@ -27,7 +27,7 @@ from django.core.exceptions import SuspiciousOperation
 from django.core.files.uploadedfile import UploadedFile
 from django.core.files.uploadhandler import FileUploadHandler
 from django.db import IntegrityError, OperationalError, close_old_connections, transaction
-from django.db.models import Q, QuerySet
+from django.db.models import Exists, OuterRef, Q, QuerySet
 from django.http import (
     Http404,
     HttpRequest,
@@ -1114,12 +1114,13 @@ def _session_list_page_from_warm_index(
         return None
 
     accepted_visible_thread_ids = system_agents.accepted_visible_system_thread_ids()
-    hidden_thread_ids = system_agents.hidden_thread_ids(
-        accepted_visible_thread_ids=accepted_visible_thread_ids
-    )
-    system_thread_ids = (
-        hidden_thread_ids | _demo_system_thread_ids() if system_only else set()
-    )
+    hidden_thread_ids: set[str] = set()
+    system_thread_ids: set[str] = set()
+    if system_only:
+        hidden_thread_ids = system_agents.hidden_thread_ids(
+            accepted_visible_thread_ids=accepted_visible_thread_ids
+        )
+        system_thread_ids = hidden_thread_ids | _demo_system_thread_ids()
     request_uses_index_cursor = _request_uses_index_cursor(request)
     refresh_active = (
         not request_uses_index_cursor
@@ -1376,13 +1377,13 @@ def _session_list_page_from_index(
     if system_only:
         _ensure_indexed_system_threads(system_thread_ids, projects=projects)
         rows = session_index.indexed_sessions()
-    indexed_system_thread_ids = set(
-        rows.filter(is_hidden_system_session=True)
-        .exclude(thread_id__in=accepted_visible_thread_ids)
-        .values_list("thread_id", flat=True)
-    )
-    hidden_thread_ids.update(indexed_system_thread_ids)
     if system_only:
+        indexed_system_thread_ids = set(
+            rows.filter(is_hidden_system_session=True)
+            .exclude(thread_id__in=accepted_visible_thread_ids)
+            .values_list("thread_id", flat=True)
+        )
+        hidden_thread_ids.update(indexed_system_thread_ids)
         system_thread_ids.update(indexed_system_thread_ids)
     if project_visibility is not None:
         rows = _filter_session_metadata_by_project_visibility(rows, project_visibility)
@@ -1393,13 +1394,19 @@ def _session_list_page_from_index(
     if system_only:
         rows = rows.filter(thread_id__in=system_thread_ids)
     else:
-        rows = rows.exclude(thread_id__in=hidden_thread_ids)
+        rows = _filter_visible_session_metadata_rows(
+            rows,
+            accepted_visible_thread_ids=accepted_visible_thread_ids,
+        )
+        if hidden_thread_ids:
+            rows = rows.exclude(thread_id__in=hidden_thread_ids)
     metadata_rows = list(rows)
     qa_updated_at_by_main_thread = (
         {}
         if system_only
         else _qa_activity_updated_at_by_metadata_thread_id(
-            metadata_rows, hidden_thread_ids
+            metadata_rows,
+            hidden_thread_ids if hidden_thread_ids else None,
         )
     )
     sessions = [
@@ -1441,6 +1448,38 @@ def _session_list_page_from_index(
         archived_next_offset=0,
         archived_next_done=True,
     )
+
+
+def _filter_visible_session_metadata_rows(
+    rows: QuerySet[SessionMetadata],
+    *,
+    accepted_visible_thread_ids: set[str],
+) -> QuerySet[SessionMetadata]:
+    system_run_exists = (
+        SystemAgentRun.objects.filter(thread_id=OuterRef("thread_id"))
+        .exclude(thread_id="")
+        .exclude(agent_kind=demo.DEMO_AGENT_KIND)
+    )
+    system_instance_exists = (
+        CodexInstance.objects.filter(
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            thread_id=OuterRef("thread_id"),
+        )
+        .exclude(thread_id="")
+        .exclude(agent_kind=demo.DEMO_AGENT_KIND)
+    )
+    rows = rows.annotate(
+        _has_system_run=Exists(system_run_exists),
+        _has_system_instance=Exists(system_instance_exists),
+    )
+    visible_filter = (
+        Q(is_hidden_system_session=False)
+        & Q(_has_system_run=False)
+        & Q(_has_system_instance=False)
+    )
+    if accepted_visible_thread_ids:
+        visible_filter |= Q(thread_id__in=accepted_visible_thread_ids)
+    return rows.filter(visible_filter)
 
 
 def _ensure_indexed_system_threads(
@@ -1533,16 +1572,12 @@ def _session_row_for_metadata(
 
 
 def _qa_activity_updated_at_by_metadata_thread_id(
-    metadata_rows: Iterable[SessionMetadata], hidden_thread_ids: set[str]
+    metadata_rows: Iterable[SessionMetadata], hidden_thread_ids: set[str] | None = None
 ) -> dict[str, Any]:
     main_thread_ids = [metadata.thread_id for metadata in metadata_rows]
     if not main_thread_ids:
         return {}
-    hidden_metadata_by_thread_id = {
-        metadata.thread_id: metadata
-        for metadata in SessionMetadata.objects.filter(thread_id__in=hidden_thread_ids)
-    }
-    runs = (
+    runs = list(
         SystemAgentRun.objects.filter(
             workflow__kind=SystemWorkflow.KIND_PR_QA,
             workflow__main_thread_id__in=main_thread_ids,
@@ -1550,6 +1585,13 @@ def _qa_activity_updated_at_by_metadata_thread_id(
         .exclude(thread_id="")
         .select_related("workflow")
     )
+    run_thread_ids = {run.thread_id for run in runs if run.thread_id}
+    if hidden_thread_ids is not None:
+        run_thread_ids &= hidden_thread_ids
+    hidden_metadata_by_thread_id = {
+        metadata.thread_id: metadata
+        for metadata in SessionMetadata.objects.filter(thread_id__in=run_thread_ids)
+    }
     updated_at_by_main_thread: dict[str, Any] = {}
     for run in runs:
         main_thread_id = run.workflow.main_thread_id
