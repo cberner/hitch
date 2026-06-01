@@ -5,6 +5,32 @@ from hitch.main.models import SystemWorkflow
 
 
 class SessionStageTests(SimpleTestCase):
+    def test_pr_qa_workflow_steps_map_to_display_stage(self) -> None:
+        cases = {
+            system_agents.STEP_LOCAL_BRANCH_MERGED: session_stage.DONE_MERGED,
+            system_agents.STEP_QA_RUNNING: session_stage.QA,
+            system_agents.STEP_QA_APPROVED: session_stage.QA,
+            system_agents.STEP_FEEDBACK_RUNNING: session_stage.IMPLEMENTATION,
+            system_agents.STEP_USER_STEERING_RUNNING: session_stage.IMPLEMENTATION,
+            system_agents.STEP_PR_FEEDBACK_RUNNING: session_stage.IMPLEMENTATION,
+            system_agents.STEP_PR_PROMPT_SPAWNED: session_stage.PR,
+            system_agents.STEP_PR_PROMPT_RUNNING: session_stage.PR,
+            system_agents.STEP_PR_MONITORING: session_stage.PR,
+            system_agents.STEP_PR_READY: session_stage.PR,
+            system_agents.STEP_PR_CLOSED: session_stage.PR,
+            system_agents.STEP_BLOCKED: session_stage.BLOCKED,
+        }
+
+        for step, expected_stage in cases.items():
+            with self.subTest(step=step):
+                workflow = SystemWorkflow(
+                    kind=SystemWorkflow.KIND_PR_QA,
+                    status=SystemWorkflow.STATUS_RUNNING,
+                    step=step,
+                )
+
+                self.assertEqual(session_stage.derive_stage(workflow=workflow), expected_stage)
+
     def test_approval_declined_after_plan_stays_plan_stage(self) -> None:
         stage = session_stage.derive_stage(
             entries=[

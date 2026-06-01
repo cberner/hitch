@@ -30,46 +30,27 @@ DONE_MERGED = SessionStage("done_merged", "Done: Merged", "done")
 DONE_CLOSED = SessionStage("done_closed", "Done: Closed", "done")
 _STAGES_BY_KEY = {
     stage.key: stage
-    for stage in (
-        NEW,
-        PLAN,
-        IMPLEMENTATION,
-        QA,
-        PR,
-        BLOCKED,
-        DONE_MERGED,
-        DONE_CLOSED,
-    )
+    for stage in (NEW, PLAN, IMPLEMENTATION, QA, PR, BLOCKED, DONE_MERGED, DONE_CLOSED)
 }
 
-_QA_STEPS = frozenset(
-    {
-        system_agents.STEP_QA_RUNNING,
-        system_agents.STEP_QA_APPROVED,
-    }
-)
-_IMPLEMENTATION_STEPS = frozenset(
-    {
-        system_agents.STEP_FEEDBACK_RUNNING,
-        system_agents.STEP_USER_STEERING_RUNNING,
-        system_agents.STEP_PR_FEEDBACK_RUNNING,
-    }
-)
-_PR_STEPS = frozenset(
-    {
-        system_agents.STEP_PR_PROMPT_SPAWNED,
-        system_agents.STEP_PR_PROMPT_RUNNING,
-        system_agents.STEP_PR_MONITORING,
-        system_agents.STEP_PR_READY,
-        system_agents.STEP_PR_CLOSED,
-    }
-)
-_BLOCKED_WORKFLOW_STATUSES = frozenset(
-    {
-        SystemWorkflow.STATUS_BLOCKED,
-        SystemWorkflow.STATUS_FAILED,
-        SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED,
-    }
+_STAGE_BY_WORKFLOW_STEP = {
+    system_agents.STEP_LOCAL_BRANCH_MERGED: DONE_MERGED,
+    system_agents.STEP_QA_RUNNING: QA,
+    system_agents.STEP_QA_APPROVED: QA,
+    system_agents.STEP_FEEDBACK_RUNNING: IMPLEMENTATION,
+    system_agents.STEP_USER_STEERING_RUNNING: IMPLEMENTATION,
+    system_agents.STEP_PR_FEEDBACK_RUNNING: IMPLEMENTATION,
+    system_agents.STEP_PR_PROMPT_SPAWNED: PR,
+    system_agents.STEP_PR_PROMPT_RUNNING: PR,
+    system_agents.STEP_PR_MONITORING: PR,
+    system_agents.STEP_PR_READY: PR,
+    system_agents.STEP_PR_CLOSED: PR,
+    system_agents.STEP_BLOCKED: BLOCKED,
+}
+_BLOCKED_WORKFLOW_STATUSES = (
+    SystemWorkflow.STATUS_BLOCKED,
+    SystemWorkflow.STATUS_FAILED,
+    SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED,
 )
 
 
@@ -156,17 +137,7 @@ def _workflow_stage(
 
 
 def _stage_for_workflow_step(step: str) -> SessionStage | None:
-    if step == system_agents.STEP_LOCAL_BRANCH_MERGED:
-        return DONE_MERGED
-    if step in _QA_STEPS:
-        return QA
-    if step in _IMPLEMENTATION_STEPS:
-        return IMPLEMENTATION
-    if step in _PR_STEPS:
-        return PR
-    if step == system_agents.STEP_BLOCKED:
-        return BLOCKED
-    return None
+    return _STAGE_BY_WORKFLOW_STEP.get(step)
 
 
 def _select_pr_snapshot(
