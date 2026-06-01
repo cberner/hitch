@@ -2124,7 +2124,7 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
 
 def _open_or_find_pr_with_gh_cli(workflow: SystemWorkflow) -> dict[str, Any]:
     existing = _gh_pr_view(workflow, source_tool="gh_pr_view")
-    if existing is not None:
+    if existing is not None and not _pr_handoff_is_terminal(existing):
         return existing
 
     created = _run_gh_cli(workflow, ["pr", "create", "--fill"])
