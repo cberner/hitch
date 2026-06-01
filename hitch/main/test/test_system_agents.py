@@ -3811,6 +3811,44 @@ class SpecCriticWorkflowTests(TestCase):
                 ),
                 stderr="",
             ),
+            SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "data": {
+                            "repository": {
+                                "pullRequest": {
+                                    "statusCheckRollup": {
+                                        "contexts": {
+                                            "pageInfo": {
+                                                "hasNextPage": False,
+                                                "endCursor": None,
+                                            },
+                                            "nodes": [
+                                                {
+                                                    "__typename": "CheckRun",
+                                                    "name": "lint",
+                                                    "status": "COMPLETED",
+                                                    "conclusion": "FAILURE",
+                                                    "detailsUrl": "https://github.com/cberner/hitch/actions/runs/1",
+                                                },
+                                                {
+                                                    "__typename": "CheckRun",
+                                                    "name": "tests",
+                                                    "status": "IN_PROGRESS",
+                                                    "conclusion": None,
+                                                    "detailsUrl": "https://github.com/cberner/hitch/actions/runs/2",
+                                                },
+                                            ],
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                ),
+                stderr="",
+            ),
         ]
 
         observation = system_agents._pr_monitor_observation_from_gh(workflow)
@@ -3823,6 +3861,9 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("comments", commands[0][-1])
         self.assertIn("statusCheckRollup", commands[0][-1])
         self.assertEqual(commands[1][:3], ["gh", "api", "graphql"])
+        self.assertIn("reviewThreads", commands[1][4])
+        self.assertEqual(commands[2][:3], ["gh", "api", "graphql"])
+        self.assertIn("statusCheckRollup", commands[2][4])
         pr = observation["pr"]
         self.assertEqual(pr["review_signal"], "changes_requested")
         self.assertEqual(pr["unresolved_thread_count"], 1)
@@ -3901,6 +3942,19 @@ class SpecCriticWorkflowTests(TestCase):
                 ),
                 stderr="",
             ),
+            SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "data": {
+                            "repository": {
+                                "pullRequest": {"statusCheckRollup": None}
+                            }
+                        }
+                    }
+                ),
+                stderr="",
+            ),
         ]
 
         observation = system_agents._pr_monitor_observation_from_gh(workflow)
@@ -3909,6 +3963,32 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(pr["ci_status"], "pending")
         self.assertEqual(pr["failing_jobs"], [])
         self.assertEqual(pr["pending_jobs"], [])
+
+    def test_pr_monitor_truncated_status_check_page_remains_pending(self) -> None:
+        pr: dict[str, object] = {}
+
+        system_agents._copy_gh_status_check_fields(
+            pr,
+            [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
+            complete=False,
+        )
+
+        self.assertEqual(pr["ci_status"], "pending")
+        self.assertEqual(pr["failing_jobs"], [])
+        self.assertEqual(pr["pending_jobs"], [])
+
+    def test_pr_monitor_partial_review_thread_scan_keeps_review_pending(self) -> None:
+        pr: dict[str, object] = {
+            "review_signal": "approved",
+            "unresolved_thread_count": 0,
+            "unresolved_threads": [],
+        }
+
+        system_agents._copy_gh_review_thread_fields(pr, [], complete=False)
+        gate = system_agents._review_gate(pr)
+
+        self.assertNotIn("unresolved_thread_count", pr)
+        self.assertEqual(gate["status"], system_agents._PR_GATE_PENDING)
 
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
     def test_monitor_blocker_spawns_pr_feedback_with_stale_branch_guard(

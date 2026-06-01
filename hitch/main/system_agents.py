@@ -283,6 +283,7 @@ _GH_PR_MONITOR_FIELDS = (
 )
 _GH_MONITOR_TEXT_MAX_CHARS = 6000
 _GH_REVIEW_THREAD_PAGE_LIMIT = 5
+_GH_STATUS_CHECK_PAGE_LIMIT = 10
 _GH_REVIEW_THREADS_QUERY = """
 query($owner: String!, $repo: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $repo) {
@@ -310,6 +311,37 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
               line
               path
               url
+            }
+          }
+        }
+      }
+    }
+  }
+}
+""".strip()
+_GH_STATUS_CHECKS_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      statusCheckRollup {
+        contexts(first: 100, after: $after) {
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+          nodes {
+            __typename
+            ... on CheckRun {
+              conclusion
+              detailsUrl
+              name
+              status
+              workflowName
+            }
+            ... on StatusContext {
+              context
+              state
+              targetUrl
             }
           }
         }
@@ -2560,9 +2592,14 @@ def _pr_monitor_observation_from_gh(workflow: SystemWorkflow) -> dict[str, Any]:
     _copy_gh_review_fields(pr, payload)
     _copy_gh_reaction_fields(pr, payload)
     _copy_gh_comment_fields(pr, payload)
-    _copy_gh_status_check_fields(pr, payload)
-    review_threads = _gh_pr_review_threads(workflow, pr)
-    _copy_gh_review_thread_fields(pr, review_threads)
+    review_threads, review_threads_complete = _gh_pr_review_threads(workflow, pr)
+    _copy_gh_review_thread_fields(
+        pr, review_threads, complete=review_threads_complete
+    )
+    status_checks, status_checks_complete = _gh_pr_status_checks(workflow, pr)
+    _copy_gh_status_check_fields(
+        pr, status_checks, complete=status_checks_complete
+    )
 
     compact_pr = _compact_pr_handoff(pr)
     gates = _evaluate_pr_gates(compact_pr)
@@ -2673,11 +2710,13 @@ def _safe_gh_comment_identifier(comment: Any) -> dict[str, Any]:
 
 
 def _copy_gh_status_check_fields(
-    target: dict[str, Any], payload: dict[str, Any]
+    target: dict[str, Any], raw_checks: Any, *, complete: bool = True
 ) -> None:
     status, failing, pending = _ci_status_from_gh_status_checks(
-        payload.get("statusCheckRollup")
+        raw_checks
     )
+    if not complete and status != "failure":
+        status = "pending"
     if not status:
         return
     target["ci_status"] = status
@@ -2761,11 +2800,11 @@ def _compact_gh_check(check: dict[str, Any]) -> dict[str, str]:
 
 def _gh_pr_review_threads(
     workflow: SystemWorkflow, handoff: dict[str, Any]
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], bool]:
     repo = _string_from_any(handoff.get("repository_full_name"))
     number = handoff.get("pr_number")
     if "/" not in repo or not isinstance(number, int) or isinstance(number, bool):
-        return []
+        return [], True
     owner, repo_name = repo.split("/", 1)
     threads: list[dict[str, Any]] = []
     after = ""
@@ -2796,9 +2835,9 @@ def _gh_pr_review_threads(
         page = _review_threads_page(payload)
         threads.extend(page["nodes"])
         if not page["has_next_page"] or not page["end_cursor"]:
-            break
+            return threads, True
         after = page["end_cursor"]
-    return threads
+    return threads, False
 
 
 def _review_threads_page(payload: Any) -> dict[str, Any]:
@@ -2829,8 +2868,83 @@ def _review_threads_page(payload: Any) -> dict[str, Any]:
     }
 
 
+def _gh_pr_status_checks(
+    workflow: SystemWorkflow, handoff: dict[str, Any]
+) -> tuple[Any, bool]:
+    repo = _string_from_any(handoff.get("repository_full_name"))
+    number = handoff.get("pr_number")
+    if "/" not in repo or not isinstance(number, int) or isinstance(number, bool):
+        return None, True
+    owner, repo_name = repo.split("/", 1)
+    checks: list[dict[str, Any]] = []
+    after = ""
+    for _page in range(_GH_STATUS_CHECK_PAGE_LIMIT):
+        args = [
+            "api",
+            "graphql",
+            "-f",
+            f"query={_GH_STATUS_CHECKS_QUERY}",
+            "-F",
+            f"owner={owner}",
+            "-F",
+            f"repo={repo_name}",
+            "-F",
+            f"number={number}",
+        ]
+        if after:
+            args.extend(["-F", f"after={after}"])
+        result = _run_gh_cli(workflow, args)
+        if result.returncode != 0:
+            raise _GhPrOpenError(f"`gh api graphql` failed: {_gh_error(result)}")
+        try:
+            payload = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise _GhPrOpenError(
+                f"`gh api graphql` returned invalid JSON: {exc}"
+            ) from exc
+        page = _status_checks_page(payload)
+        if page["nodes"] is None:
+            return None, True
+        checks.extend(page["nodes"])
+        if not page["has_next_page"] or not page["end_cursor"]:
+            return checks, True
+        after = page["end_cursor"]
+    return checks, False
+
+
+def _status_checks_page(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"nodes": [], "has_next_page": False, "end_cursor": ""}
+    data = payload.get("data")
+    repository = data.get("repository") if isinstance(data, dict) else None
+    pull_request = (
+        repository.get("pullRequest") if isinstance(repository, dict) else None
+    )
+    rollup = (
+        pull_request.get("statusCheckRollup")
+        if isinstance(pull_request, dict)
+        else None
+    )
+    if rollup is None:
+        return {"nodes": None, "has_next_page": False, "end_cursor": ""}
+    contexts = rollup.get("contexts") if isinstance(rollup, dict) else None
+    if not isinstance(contexts, dict):
+        return {"nodes": [], "has_next_page": False, "end_cursor": ""}
+    nodes = contexts.get("nodes")
+    page_info = contexts.get("pageInfo")
+    if not isinstance(nodes, list):
+        nodes = []
+    if not isinstance(page_info, dict):
+        page_info = {}
+    return {
+        "nodes": [node for node in nodes if isinstance(node, dict)],
+        "has_next_page": page_info.get("hasNextPage") is True,
+        "end_cursor": _string_from_any(page_info.get("endCursor")),
+    }
+
+
 def _copy_gh_review_thread_fields(
-    target: dict[str, Any], threads: list[dict[str, Any]]
+    target: dict[str, Any], threads: list[dict[str, Any]], *, complete: bool = True
 ) -> None:
     unresolved = [
         thread
@@ -2838,10 +2952,15 @@ def _copy_gh_review_thread_fields(
         if thread.get("isResolved") is not True and thread.get("isOutdated") is not True
     ]
     target["review_thread_count"] = len(threads)
-    target["unresolved_thread_count"] = len(unresolved)
-    target["unresolved_threads"] = _compact_pr_list(
-        [_safe_gh_review_thread_identifier(thread) for thread in unresolved]
-    )
+    if unresolved or complete:
+        target["unresolved_thread_count"] = len(unresolved)
+        target["unresolved_threads"] = _compact_pr_list(
+            [_safe_gh_review_thread_identifier(thread) for thread in unresolved]
+        )
+        return
+    target.pop("unresolved_thread_count", None)
+    target.pop("unresolved_threads", None)
+
 
 
 def _safe_gh_review_thread_identifier(thread: dict[str, Any]) -> dict[str, Any]:
