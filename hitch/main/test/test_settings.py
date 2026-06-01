@@ -2,7 +2,7 @@ import base64
 import re
 import subprocess
 from types import SimpleNamespace
-from typing import override
+from typing import cast, override
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
@@ -15,6 +15,7 @@ from openai_codex.generated.v2_all import ReasoningEffort
 
 from hitch.main import coding_agents, context_processors, views
 from hitch.main.models import Project, UserSettings
+from hitch.settings import common as common_settings
 
 _MODEL_COOKIE = "hitch_model"
 _EFFORT_COOKIE = "hitch_reasoning_effort"
@@ -36,6 +37,15 @@ _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 # about supported-effort filtering can stay terse; tests that exercise the
 # narrowing logic pass an explicit ``supported_efforts``.
 _ALL_EFFORT_VALUES = [e.value for e in ReasoningEffort]
+
+
+class DatabaseSettingsTests(SimpleTestCase):
+    def test_sqlite_waits_for_brief_writer_contention(self) -> None:
+        database = common_settings.DATABASES["default"]
+        options = cast(dict[str, object], database["OPTIONS"])
+
+        self.assertEqual(options["timeout"], 30)
+        self.assertEqual(options["init_command"], "PRAGMA journal_mode=WAL")
 
 
 class CodingAgentsTests(SimpleTestCase):

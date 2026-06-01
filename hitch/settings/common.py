@@ -75,6 +75,14 @@ DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.sqlite3",
         "NAME": BASE_DIR / "db.sqlite3",
+        "OPTIONS": {
+            # Session pages refresh cached metadata while worker subprocesses
+            # update state rows. WAL keeps readers from blocking writers, and
+            # the busy timeout lets brief write contention settle instead of
+            # surfacing intermittent "database is locked" errors.
+            "init_command": "PRAGMA journal_mode=WAL",
+            "timeout": 30,
+        },
     }
 }
 
