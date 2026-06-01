@@ -2076,9 +2076,10 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
     if instance.status != CodexInstance.STATUS_COMPLETED:
         _block_workflow(workflow, f"PR prompt worker failed: {instance.error}")
         return
-    snapshot = codex_events.latest_pr_snapshot_for_instance(instance)
-    if snapshot is None:
-        if _pr_handoff_from_workflow(workflow):
+    worker_snapshot = codex_events.latest_pr_snapshot_for_instance(instance)
+    snapshot = worker_snapshot
+    if not _pr_prompt_worker_snapshot_is_authoritative(worker_snapshot):
+        if worker_snapshot is None and _pr_handoff_from_workflow(workflow):
             workflow.step = STEP_PR_MONITORING
             workflow.save(update_fields=["step", "state", "updated_at"])
             try:
@@ -2120,6 +2121,14 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
         _spawn_pr_followup_monitor_run(workflow)
     except Exception as exc:
         _block_workflow(workflow, f"failed to start PR follow-up monitor: {exc!r}")
+
+
+def _pr_prompt_worker_snapshot_is_authoritative(
+    snapshot: dict[str, Any] | None,
+) -> bool:
+    # Hitch owns PR creation after the cleanup/push turn; terminal worker
+    # observations are often stale branch PRs and must not close the new workflow.
+    return snapshot is not None and not _pr_handoff_is_terminal(snapshot)
 
 
 def _open_or_find_pr_with_gh_cli(workflow: SystemWorkflow) -> dict[str, Any]:
