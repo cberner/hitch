@@ -535,6 +535,10 @@ _VALID_PLAN_ACTIONS = frozenset({"", _PLAN_ACTION_APPROVE, _PLAN_ACTION_REVISE})
 _PR_SLASH_COMMAND = "/pr"
 _PR_SLASH_PROMPT = system_agents.PR_SLASH_DISPLAY_PROMPT
 _PR_SLASH_FINAL_PROMPT = system_agents.PR_SLASH_PROMPT
+_PREVIOUS_HITCH_PR_SLASH_FINAL_PROMPT = (
+    "Polish it, get it ready, commit the final changes, and push the branch. "
+    "Do not open a PR; Hitch will open it after this turn completes."
+)
 _PREVIOUS_PR_SLASH_FINAL_PROMPT = (
     "Polish it, get it ready, and open or update the PR."
 )
@@ -556,6 +560,7 @@ _PR_PROMPT_ALIASES = frozenset(
     {
         _PR_SLASH_PROMPT,
         _PR_SLASH_FINAL_PROMPT,
+        _PREVIOUS_HITCH_PR_SLASH_FINAL_PROMPT,
         _PREVIOUS_PR_SLASH_FINAL_PROMPT,
         _LEGACY_PR_SLASH_PROMPT,
         _LEGACY_PR_SLASH_FINAL_PROMPT,
