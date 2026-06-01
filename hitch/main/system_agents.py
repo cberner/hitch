@@ -165,6 +165,8 @@ _GH_PR_JSON_FIELDS = (
     "baseRefName",
     "headRefName",
     "headRefOid",
+    "headRepository",
+    "headRepositoryOwner",
     "createdAt",
     "updatedAt",
     "closedAt",
@@ -2045,7 +2047,11 @@ class GhPrCreateError(Exception):
 
 def create_pull_request_with_gh(cwd: str) -> dict[str, Any]:
     branch = _current_git_branch(cwd)
-    existing = _existing_pull_request_for_branch(cwd, branch)
+    local_head_sha = _current_git_head(cwd)
+    repo_full_name = _current_gh_repo_full_name(cwd)
+    existing = _existing_pull_request_for_branch(
+        cwd, branch, repo_full_name, local_head_sha
+    )
     if existing:
         return existing
     try:
@@ -2054,7 +2060,9 @@ def create_pull_request_with_gh(cwd: str) -> dict[str, Any]:
             ["pr", "create", "--fill", "--head", branch],
         )
     except GhPrCreateError:
-        existing = _existing_pull_request_for_branch(cwd, branch)
+        existing = _existing_pull_request_for_branch(
+            cwd, branch, repo_full_name, local_head_sha
+        )
         if existing:
             return existing
         raise
@@ -2073,12 +2081,16 @@ def create_pull_request_with_gh(cwd: str) -> dict[str, Any]:
                 _gh_pr_json_fields(),
             ],
         )
-    except GhPrCreateError:
-        return handoff
-    return {**handoff, **_pr_handoff_from_gh_view(view.stdout)}
+    except GhPrCreateError as exc:
+        raise GhPrCreateError(f"created PR but could not inspect it: {exc}") from exc
+    handoff = {**handoff, **_pr_handoff_from_gh_view(view.stdout)}
+    _ensure_pr_head_matches_local(handoff, local_head_sha)
+    return handoff
 
 
-def _existing_pull_request_for_branch(cwd: str, branch: str) -> dict[str, Any]:
+def _existing_pull_request_for_branch(
+    cwd: str, branch: str, repo_full_name: str, local_head_sha: str
+) -> dict[str, Any]:
     result = _run_gh(
         cwd,
         [
@@ -2089,12 +2101,16 @@ def _existing_pull_request_for_branch(cwd: str, branch: str) -> dict[str, Any]:
             "--state",
             "open",
             "--limit",
-            "1",
+            "20",
             "--json",
             _gh_pr_json_fields(),
         ],
     )
-    return _pr_handoff_from_gh_list(result.stdout)
+    return _pr_handoff_from_matching_gh_list(
+        result.stdout,
+        repo_full_name=repo_full_name,
+        local_head_sha=local_head_sha,
+    )
 
 
 def _current_git_branch(cwd: str) -> str:
@@ -2103,6 +2119,28 @@ def _current_git_branch(cwd: str) -> str:
     if not branch:
         raise GhPrCreateError("current git checkout is detached; cannot open a PR")
     return branch
+
+
+def _current_git_head(cwd: str) -> str:
+    result = _run_command(["git", "rev-parse", "HEAD"], cwd)
+    head = result.stdout.strip()
+    if not head:
+        raise GhPrCreateError("current git HEAD is unavailable; cannot open a PR")
+    return head
+
+
+def _current_gh_repo_full_name(cwd: str) -> str:
+    result = _run_gh(cwd, ["repo", "view", "--json", "nameWithOwner"])
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise GhPrCreateError("gh repo view returned invalid JSON") from exc
+    if not isinstance(data, dict):
+        raise GhPrCreateError("gh repo view did not return a JSON object")
+    repo = data.get("nameWithOwner")
+    if not isinstance(repo, str) or not repo.strip():
+        raise GhPrCreateError("gh repo view did not return repository identity")
+    return repo.strip()
 
 
 def _run_gh(cwd: str, args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -2163,6 +2201,41 @@ def _pr_handoff_from_gh_list(raw: str) -> dict[str, Any]:
     return _pr_handoff_from_gh_json(raw, expected_list=True)
 
 
+def _pr_handoff_from_matching_gh_list(
+    raw: str, *, repo_full_name: str, local_head_sha: str
+) -> dict[str, Any]:
+    data = _gh_pr_list_json(raw)
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        if not _gh_pr_head_belongs_to_repo(item, repo_full_name):
+            continue
+        handoff = _pr_handoff_from_gh_dict(item)
+        _ensure_pr_head_matches_local(handoff, local_head_sha)
+        return handoff
+    return {}
+
+
+def _gh_pr_list_json(raw: str) -> list[Any]:
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise GhPrCreateError("gh returned invalid PR JSON") from exc
+    if not isinstance(data, list):
+        raise GhPrCreateError("gh pr list did not return a JSON array")
+    return data
+
+
+def _gh_pr_head_belongs_to_repo(item: dict[str, Any], repo_full_name: str) -> bool:
+    owner = item.get("headRepositoryOwner")
+    repo = item.get("headRepository")
+    owner_login = owner.get("login") if isinstance(owner, dict) else None
+    repo_name = repo.get("name") if isinstance(repo, dict) else None
+    if not isinstance(owner_login, str) or not isinstance(repo_name, str):
+        return False
+    return f"{owner_login}/{repo_name}".lower() == repo_full_name.lower()
+
+
 def _pr_handoff_from_gh_json(raw: str, *, expected_list: bool) -> dict[str, Any]:
     try:
         data = json.loads(raw)
@@ -2176,7 +2249,10 @@ def _pr_handoff_from_gh_json(raw: str, *, expected_list: bool) -> dict[str, Any]
         data = data[0]
     if not isinstance(data, dict):
         raise GhPrCreateError("gh did not return a PR JSON object")
+    return _pr_handoff_from_gh_dict(data)
 
+
+def _pr_handoff_from_gh_dict(data: dict[str, Any]) -> dict[str, Any]:
     handoff: dict[str, Any] = {}
     field_map = {
         "url": "url",
@@ -2222,6 +2298,17 @@ def _pr_handoff_from_gh_json(raw: str, *, expected_list: bool) -> dict[str, Any]
     if isinstance(head_sha, str):
         handoff["latest_commit_sha"] = head_sha
     return handoff
+
+
+def _ensure_pr_head_matches_local(handoff: dict[str, Any], local_head_sha: str) -> None:
+    head_sha = handoff.get("head_sha")
+    if not isinstance(head_sha, str) or not head_sha:
+        raise GhPrCreateError("gh did not return the PR head SHA")
+    if head_sha != local_head_sha:
+        raise GhPrCreateError(
+            "PR head SHA does not match local HEAD "
+            f"({head_sha} != {local_head_sha})"
+        )
 
 
 def _gh_pr_json_fields() -> str:

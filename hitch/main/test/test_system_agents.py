@@ -2893,6 +2893,18 @@ class SpecCriticWorkflowTests(TestCase):
                 stderr="",
             ),
             subprocess.CompletedProcess(
+                ["git", "rev-parse", "HEAD"],
+                0,
+                stdout="head123\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "repo", "view"],
+                0,
+                stdout=json.dumps({"nameWithOwner": "cberner/hitch"}),
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
                 ["gh", "pr", "list"],
                 0,
                 stdout="[]",
@@ -2942,23 +2954,26 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(handoff["base"], "master")
         self.assertTrue(handoff["mergeable"])
         self.assertFalse(handoff["draft"])
-        list_call = mock_run.call_args_list[1].args[0]
+        list_call = mock_run.call_args_list[3].args[0]
         self.assertEqual(
             list_call[:8],
             ["gh", "pr", "list", "--head", "feature", "--state", "open", "--limit"],
         )
+        self.assertEqual(list_call[8], "20")
         requested_fields = list_call[-1].split(",")
         self.assertNotIn("merged", requested_fields)
         self.assertNotIn("baseRefOid", requested_fields)
         self.assertIn("mergedAt", requested_fields)
         self.assertIn("headRefOid", requested_fields)
-        create_call = mock_run.call_args_list[2].args[0]
+        self.assertIn("headRepository", requested_fields)
+        self.assertIn("headRepositoryOwner", requested_fields)
+        create_call = mock_run.call_args_list[4].args[0]
         self.assertEqual(
             create_call, ["gh", "pr", "create", "--fill", "--head", "feature"]
         )
-        view_call = mock_run.call_args_list[3].args[0]
+        view_call = mock_run.call_args_list[5].args[0]
         self.assertEqual(view_call[-1], list_call[-1])
-        env = mock_run.call_args_list[2].kwargs["env"]
+        env = mock_run.call_args_list[4].kwargs["env"]
         self.assertEqual(env["GH_PROMPT_DISABLED"], "1")
         self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
 
@@ -2972,6 +2987,18 @@ class SpecCriticWorkflowTests(TestCase):
                 ["git", "branch", "--show-current"],
                 0,
                 stdout="feature\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["git", "rev-parse", "HEAD"],
+                0,
+                stdout="head123\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "repo", "view"],
+                0,
+                stdout=json.dumps({"nameWithOwner": "cberner/hitch"}),
                 stderr="",
             ),
             subprocess.CompletedProcess(
@@ -2989,14 +3016,20 @@ class SpecCriticWorkflowTests(TestCase):
             subprocess.CompletedProcess(
                 ["gh", "pr", "view"],
                 0,
-                stdout="{}",
+                stdout=json.dumps(
+                    {
+                        "url": "https://github.com/cberner/hitch/pull/169",
+                        "number": 169,
+                        "headRefOid": "head123",
+                    }
+                ),
                 stderr="",
             ),
         ]
 
         system_agents.create_pull_request_with_gh("/repo")
 
-        env = mock_run.call_args_list[1].kwargs["env"]
+        env = mock_run.call_args_list[3].kwargs["env"]
         self.assertEqual(env["GH_TOKEN"], "secret")
         self.assertEqual(env["GH_PROMPT_DISABLED"], "1")
 
@@ -3012,6 +3045,18 @@ class SpecCriticWorkflowTests(TestCase):
                 stderr="",
             ),
             subprocess.CompletedProcess(
+                ["git", "rev-parse", "HEAD"],
+                0,
+                stdout="head170\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "repo", "view"],
+                0,
+                stdout=json.dumps({"nameWithOwner": "cberner/hitch"}),
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
                 ["gh", "pr", "list"],
                 0,
                 stdout=json.dumps(
@@ -3022,6 +3067,8 @@ class SpecCriticWorkflowTests(TestCase):
                             "state": "OPEN",
                             "headRefName": "feature",
                             "headRefOid": "head170",
+                            "headRepository": {"name": "hitch"},
+                            "headRepositoryOwner": {"login": "cberner"},
                         }
                     ]
                 ),
@@ -3035,7 +3082,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(handoff["pr_number"], 170)
         self.assertEqual(handoff["head_sha"], "head170")
         self.assertFalse(handoff["merged"])
-        self.assertEqual(mock_run.call_count, 2)
+        self.assertEqual(mock_run.call_count, 4)
 
     def test_gh_pr_handoff_derives_merged_from_supported_fields(self) -> None:
         handoff = system_agents._pr_handoff_from_gh_view(
@@ -3077,6 +3124,120 @@ class SpecCriticWorkflowTests(TestCase):
                     self.assertEqual(handoff["mergeable"], expected)
 
     @patch("hitch.main.system_agents.subprocess.run")
+    def test_create_pull_request_with_gh_ignores_other_repo_existing_pr(
+        self, mock_run: MagicMock
+    ) -> None:
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(
+                ["git", "branch", "--show-current"],
+                0,
+                stdout="feature\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["git", "rev-parse", "HEAD"],
+                0,
+                stdout="head-local\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "repo", "view"],
+                0,
+                stdout=json.dumps({"nameWithOwner": "cberner/hitch"}),
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "pr", "list"],
+                0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "url": "https://github.com/cberner/hitch/pull/170",
+                            "number": 170,
+                            "state": "OPEN",
+                            "headRefName": "feature",
+                            "headRefOid": "fork-head",
+                            "headRepository": {"name": "hitch"},
+                            "headRepositoryOwner": {"login": "someone-else"},
+                        }
+                    ]
+                ),
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "pr", "create"],
+                0,
+                stdout="https://github.com/cberner/hitch/pull/171\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "pr", "view"],
+                0,
+                stdout=json.dumps(
+                    {
+                        "url": "https://github.com/cberner/hitch/pull/171",
+                        "number": 171,
+                        "state": "OPEN",
+                        "headRefOid": "head-local",
+                    }
+                ),
+                stderr="",
+            ),
+        ]
+
+        handoff = system_agents.create_pull_request_with_gh("/repo")
+
+        self.assertEqual(handoff["pr_number"], 171)
+
+    @patch("hitch.main.system_agents.subprocess.run")
+    def test_create_pull_request_with_gh_blocks_stale_remote_head(
+        self, mock_run: MagicMock
+    ) -> None:
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(
+                ["git", "branch", "--show-current"],
+                0,
+                stdout="feature\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["git", "rev-parse", "HEAD"],
+                0,
+                stdout="local-head\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "repo", "view"],
+                0,
+                stdout=json.dumps({"nameWithOwner": "cberner/hitch"}),
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "pr", "list"],
+                0,
+                stdout=json.dumps(
+                    [
+                        {
+                            "url": "https://github.com/cberner/hitch/pull/170",
+                            "number": 170,
+                            "state": "OPEN",
+                            "headRefName": "feature",
+                            "headRefOid": "remote-head",
+                            "headRepository": {"name": "hitch"},
+                            "headRepositoryOwner": {"login": "cberner"},
+                        }
+                    ]
+                ),
+                stderr="",
+            ),
+        ]
+
+        with self.assertRaisesRegex(system_agents.GhPrCreateError, "local HEAD"):
+            system_agents.create_pull_request_with_gh("/repo")
+
+        self.assertEqual(mock_run.call_count, 4)
+
+    @patch("hitch.main.system_agents.subprocess.run")
     def test_create_pull_request_with_gh_blocks_detached_head(
         self, mock_run: MagicMock
     ) -> None:
@@ -3104,6 +3265,18 @@ class SpecCriticWorkflowTests(TestCase):
                 stderr="",
             ),
             subprocess.CompletedProcess(
+                ["git", "rev-parse", "HEAD"],
+                0,
+                stdout="head123\n",
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
+                ["gh", "repo", "view"],
+                0,
+                stdout=json.dumps({"nameWithOwner": "cberner/hitch"}),
+                stderr="",
+            ),
+            subprocess.CompletedProcess(
                 ["gh", "pr", "list"],
                 0,
                 stdout="[]",
@@ -3120,7 +3293,7 @@ class SpecCriticWorkflowTests(TestCase):
         with self.assertRaisesRegex(system_agents.GhPrCreateError, "URL"):
             system_agents.create_pull_request_with_gh("/repo")
 
-        self.assertEqual(mock_run.call_count, 3)
+        self.assertEqual(mock_run.call_count, 5)
 
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
     def test_monitor_blocker_spawns_pr_feedback_with_stale_branch_guard(

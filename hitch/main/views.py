@@ -3346,6 +3346,8 @@ def _render_session_detail(
         else _pr_url_for_thread(thread)
     )
     latest_pr_workflow = _latest_pr_workflow_for_thread(session_id)
+    if not pr_url:
+        pr_url = system_agents.pr_handoff_for_workflow(latest_pr_workflow).get("url")
     stage_workflow = active_system_workflow or latest_pr_workflow
     stage_pr_workflow = (
         active_system_workflow
@@ -3367,8 +3369,6 @@ def _render_session_detail(
         stage_pr_workflow = _workflow_after_main_lifecycle(
             stage_pr_workflow, pr_observation, main_updated_at=main_updated_at
         )
-        if not pr_url:
-            pr_url = system_agents.pr_handoff_for_workflow(stage_pr_workflow).get("url")
         stage = session_stage.derive_stage(
             entries=entries,
             active_instance=active_instance,

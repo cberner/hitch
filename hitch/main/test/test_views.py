@@ -999,6 +999,7 @@ class SessionDetailFastPathTests(TestCase):
             response,
             '<span class="stage-badge" data-tone="active">Implementation</span>',
         )
+        self.assertContains(response, f'href="{pr_url}"')
         self.assertNotContains(response, "Done: Closed")
         metadata.refresh_from_db()
         self.assertEqual(metadata.derived_stage, "implementation")
