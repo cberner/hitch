@@ -14087,6 +14087,9 @@ class AutonomousGoalViewTests(TestCase):
         )
         self.assertContains(response, 'data-visible-projects-open')
         self.assertContains(response, "Visible projects")
+        main_start = body.index("<main>")
+        self.assertLess(body.index('aria-label="Inbox actions"'), main_start)
+        self.assertLess(body.index("data-visible-projects-open"), main_start)
         self.assertContains(
             response,
             '<dialog class="new-session" data-visible-projects-dialog',
