@@ -87,6 +87,86 @@
         }
         .topbar-leading { min-width: 0; }
         .topbar-actions { flex: 0 0 auto; }
+        .page-menu,
+        .proposal-menu {
+            position: relative;
+            flex: 0 0 auto;
+        }
+        .page-menu-toggle,
+        .proposal-menu-toggle {
+            font: inherit;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 2.25rem;
+            height: 2.25rem;
+            font-size: 1.1rem;
+            line-height: 1;
+            background: transparent;
+            color: var(--text-muted);
+            border: none;
+            border-radius: 8px;
+            padding: 0;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        .page-menu-toggle:hover,
+        .proposal-menu-toggle:hover,
+        .page-menu-toggle[aria-expanded="true"],
+        .proposal-menu-toggle[aria-expanded="true"] {
+            background: var(--surface-2);
+            color: var(--text);
+        }
+        .page-menu-panel,
+        .proposal-menu-panel {
+            position: absolute;
+            right: 0;
+            top: calc(100% + 0.35rem);
+            z-index: 60;
+            min-width: 10rem;
+            padding: 0.35rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            background: var(--surface);
+            box-shadow: var(--shadow-lg);
+        }
+        .page-menu-panel[hidden],
+        .proposal-menu-panel[hidden] { display: none; }
+        .page-menu-panel form,
+        .proposal-menu-panel form { margin: 0; }
+        .page-menu-panel button,
+        .page-menu-panel a,
+        .proposal-menu-panel button,
+        .proposal-menu-panel a {
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            min-height: 34px;
+            font: inherit;
+            font-size: 0.9rem;
+            text-align: left;
+            text-decoration: none;
+            border: 0;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--text);
+            padding: 0.5rem 0.65rem;
+            cursor: pointer;
+        }
+        .page-menu-panel button:hover,
+        .page-menu-panel button:focus,
+        .page-menu-panel a:hover,
+        .page-menu-panel a:focus,
+        .proposal-menu-panel button:hover,
+        .proposal-menu-panel button:focus,
+        .proposal-menu-panel a:hover,
+        .proposal-menu-panel a:focus {
+            outline: none;
+            background: var(--surface-2);
+        }
+        .page-menu-panel .danger,
+        .proposal-menu-panel .danger { color: var(--danger); }
         .brand {
             font-size: 1rem;
             font-weight: 700;
@@ -192,72 +272,6 @@
             flex-wrap: wrap;
             margin-top: 0.85rem;
         }
-        .proposal-menu {
-            position: relative;
-            flex: 0 0 auto;
-        }
-        .proposal-menu-toggle {
-            font: inherit;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            width: 2.25rem;
-            height: 2.25rem;
-            font-size: 1.1rem;
-            line-height: 1;
-            background: transparent;
-            color: var(--text-muted);
-            border: none;
-            border-radius: 8px;
-            padding: 0;
-            cursor: pointer;
-            font-weight: 500;
-        }
-        .proposal-menu-toggle:hover,
-        .proposal-menu-toggle[aria-expanded="true"] {
-            background: var(--surface-2);
-            color: var(--text);
-        }
-        .proposal-menu-panel {
-            position: absolute;
-            right: 0;
-            top: calc(100% + 0.35rem);
-            z-index: 60;
-            min-width: 10rem;
-            padding: 0.35rem;
-            border: 1px solid var(--border);
-            border-radius: var(--radius-sm);
-            background: var(--surface);
-            box-shadow: var(--shadow-lg);
-        }
-        .proposal-menu-panel[hidden] { display: none; }
-        .proposal-menu-panel form { margin: 0; }
-        .proposal-menu-panel button,
-        .proposal-menu-panel a {
-            width: 100%;
-            display: flex;
-            align-items: center;
-            justify-content: flex-start;
-            min-height: 34px;
-            font: inherit;
-            font-size: 0.9rem;
-            text-align: left;
-            text-decoration: none;
-            border: 0;
-            border-radius: 6px;
-            background: transparent;
-            color: var(--text);
-            padding: 0.5rem 0.65rem;
-            cursor: pointer;
-        }
-        .proposal-menu-panel button:hover,
-        .proposal-menu-panel button:focus,
-        .proposal-menu-panel a:hover,
-        .proposal-menu-panel a:focus {
-            outline: none;
-            background: var(--surface-2);
-        }
-        .proposal-menu-panel .danger { color: var(--danger); }
         .meta {
             color: var(--text-muted);
             font-size: 0.86rem;
@@ -352,12 +366,18 @@
                 {% include "_primary_nav.html" %}
                 <h1 class="brand">HITCH</h1>
             </div>
-            {% if not user.is_authenticated %}
             <div class="topbar-actions">
+                {% if not user.is_authenticated %}
                 <a class="button secondary account-action" href="{{ login_url }}">Log in</a>
                 <a class="button account-action" href="{{ register_url }}">Register</a>
+                {% endif %}
+                <div class="page-menu" data-page-menu data-context-menu>
+                    <button type="button" class="page-menu-toggle" aria-label="Inbox actions" aria-haspopup="menu" aria-expanded="false" data-page-menu-open data-context-menu-open>...</button>
+                    <div class="page-menu-panel" role="menu" data-page-menu-panel data-context-menu-panel hidden>
+                        <button type="button" role="menuitem" data-visible-projects-open>Visible projects</button>
+                    </div>
+                </div>
             </div>
-            {% endif %}
         </div>
     </header>
     <main>
@@ -367,12 +387,6 @@
                 <div>
                     <h2 id="inbox-title">Inbox</h2>
                     <p class="project-name">{{ inbox_project_label }}</p>
-                </div>
-                <div class="proposal-menu" data-context-menu>
-                    <button type="button" class="proposal-menu-toggle" aria-label="Inbox actions" aria-haspopup="menu" aria-expanded="false" data-context-menu-open>...</button>
-                    <div class="proposal-menu-panel" role="menu" data-context-menu-panel hidden>
-                        <button type="button" role="menuitem" data-visible-projects-open>Visible projects</button>
-                    </div>
                 </div>
             </div>
             {% if proposed_sessions %}
