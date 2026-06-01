@@ -8721,7 +8721,7 @@ def _next_user_message_index_for_candidate_thread(
     return max(int(latest_index) + 1, 0)
 
 
-def _finish_candidate_proposal_start(
+def _adopt_candidate_proposal_session(
     *,
     request: HttpRequest,
     proposed_session: ProposedSession,
@@ -8732,7 +8732,7 @@ def _finish_candidate_proposal_start(
     cookie_updates: dict[str, str],
     auto_pr_enabled: bool,
     auto_qa_enabled: bool,
-) -> HttpResponse:
+) -> tuple[SessionMetadata | None, HttpResponse]:
     candidate_cwd = candidate_session.cwd
     auto_merge_to_local_branch, auto_merge_branch = (
         _auto_merge_to_local_branch_for_proposal(
@@ -8752,7 +8752,7 @@ def _finish_candidate_proposal_start(
     if not _accept_proposed_session_for_session(proposed_session, candidate_session):
         response = redirect("inbox")
         _apply_cookie_updates(response, cookie_updates)
-        return response
+        return None, response
     _rename_codex_thread_from_proposal(
         proposed_session=proposed_session,
         session_metadata=candidate_session,
@@ -8778,7 +8778,7 @@ def _finish_candidate_proposal_start(
         cookie_updates = {**cookie_updates, _LAST_SELECTED_REPO_COOKIE: cwd}
     response = redirect("session", session_id=candidate_session.thread_id)
     _apply_cookie_updates(response, cookie_updates)
-    return response
+    return candidate_session, response
 
 
 def _start_candidate_proposal_session(
@@ -8799,7 +8799,7 @@ def _start_candidate_proposal_session(
     auto_qa_enabled: bool,
     web_search_mode: str,
 ) -> HttpResponse:
-    """Start a proposal on its existing candidate thread before accepting it."""
+    """Accept a proposal into its existing candidate thread and continue it."""
     candidate_cwd = candidate_session.cwd
     if not candidate_cwd:
         return HttpResponseBadRequest("candidate session has no cwd")
@@ -8807,6 +8807,26 @@ def _start_candidate_proposal_session(
         return HttpResponseBadRequest(
             "candidate session cwd is not an allowed repository"
         )
+    input_image_paths: list[str] = []
+    if not qa_workflow_activation:
+        input_image_paths, input_image_error = _save_posted_input_images(request)
+        if input_image_error is not None:
+            return HttpResponseBadRequest(input_image_error)
+    adopted_candidate, accepted_response = _adopt_candidate_proposal_session(
+        request=request,
+        proposed_session=proposed_session,
+        candidate_session=candidate_session,
+        cwd=cwd,
+        target=target,
+        settings=settings,
+        cookie_updates=cookie_updates,
+        auto_pr_enabled=auto_pr_enabled,
+        auto_qa_enabled=auto_qa_enabled,
+    )
+    if adopted_candidate is None:
+        _cleanup_saved_input_images(input_image_paths)
+        return accepted_response
+    candidate_session = adopted_candidate
     spec_critic_should_run = system_agents.spec_critic_should_run(prompt)
     prompt = _candidate_proposal_continuation_prompt(prompt)
     base_instructions = _base_instructions_for_settings(spawn_settings)
@@ -8843,24 +8863,8 @@ def _start_candidate_proposal_session(
         if auto_merge_branch:
             workflow_kwargs["auto_merge_branch"] = auto_merge_branch
         system_agents.start_pr_qa_workflow(**workflow_kwargs)
-        # Persist the proposal-derived auto-review configuration so subsequent
-        # turns in this session keep honoring it. Hardcoding ``False`` here would
-        # silently drop a goal's auto-QA/auto-merge settings after the first turn.
-        return _finish_candidate_proposal_start(
-            request=request,
-            proposed_session=proposed_session,
-            candidate_session=candidate_session,
-            cwd=cwd,
-            target=target,
-            settings=settings,
-            cookie_updates=cookie_updates,
-            auto_pr_enabled=auto_pr_enabled,
-            auto_qa_enabled=auto_qa_enabled,
-        )
+        return accepted_response
 
-    input_image_paths, input_image_error = _save_posted_input_images(request)
-    if input_image_error is not None:
-        return HttpResponseBadRequest(input_image_error)
     spawn_kwargs: dict[str, Any] = {
         "thread_id": candidate_session.thread_id,
         "cwd": candidate_cwd,
@@ -8928,17 +8932,7 @@ def _start_candidate_proposal_session(
         if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
             spec_workflow_kwargs["qa_panel_enabled"] = True
         system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
-        return _finish_candidate_proposal_start(
-            request=request,
-            proposed_session=proposed_session,
-            candidate_session=candidate_session,
-            cwd=cwd,
-            target=target,
-            settings=settings,
-            cookie_updates=cookie_updates,
-            auto_pr_enabled=auto_pr_enabled,
-            auto_qa_enabled=auto_qa_enabled,
-        )
+        return accepted_response
 
     input_images_owned = False
     try:
@@ -8952,17 +8946,7 @@ def _start_candidate_proposal_session(
             _cleanup_saved_input_images(input_image_paths)
         raise
 
-    return _finish_candidate_proposal_start(
-        request=request,
-        proposed_session=proposed_session,
-        candidate_session=candidate_session,
-        cwd=cwd,
-        target=target,
-        settings=settings,
-        cookie_updates=cookie_updates,
-        auto_pr_enabled=auto_pr_enabled,
-        auto_qa_enabled=auto_qa_enabled,
-    )
+    return accepted_response
 
 
 def _candidate_proposal_continuation_prompt(prompt: str) -> str:

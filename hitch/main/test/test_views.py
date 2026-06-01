@@ -8189,6 +8189,9 @@ class NewSessionViewTests(TestCase):
         self.assertIsNone(proposal.accepted_session)
         # The losing accept must not have adopted the candidate as a live session.
         self.assertTrue(candidate.is_hidden_system_session)
+        # It must also not start work in the candidate, since the reject path may
+        # have already removed the worktree by the time this stale-tab request runs.
+        mock_turn.assert_not_called()
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.discover_managed_worktrees")
