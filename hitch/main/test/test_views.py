@@ -1235,6 +1235,74 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(metadata.derived_stage, "implementation")
         mock_codex.assert_not_called()
 
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_inactive_session_detail_keeps_server_created_pr_handoff(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        pr_url = "https://github.com/cberner/hitch/pull/100"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Ready."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        metadata = SessionMetadata.objects.create(
+            thread_id="server-created-pr-detail",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Server-created PR detail",
+            codex_preview="Open a PR",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="server-created-pr-detail",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_READY,
+            state={
+                "pr_handoff": {
+                    "url": pr_url,
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 100,
+                    "state": "open",
+                    "source_tool": "gh_pr_create",
+                }
+            },
+        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=now + timedelta(minutes=1)
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "server-created-pr-detail"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, f'href="{pr_url}"')
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">PR</span>',
+        )
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.derived_stage, "")
+        mock_codex.assert_not_called()
+
     @patch("hitch.main.views.Codex")
     def test_session_detail_shows_button_for_plan_request_followup(
         self, mock_codex: MagicMock
@@ -1328,6 +1396,77 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Resumed session")
         client._client.thread_resume.assert_called_once_with("indexed-empty")
+
+    @patch("hitch.main.views.Codex")
+    def test_session_detail_sdk_fallback_recognizes_previous_pr_prompt(
+        self, mock_codex: MagicMock
+    ) -> None:
+        pr_url = "https://github.com/cberner/hitch/pull/172"
+        missing_rollout_path = "/nonexistent/rollout.jsonl"
+        SessionMetadata.objects.create(
+            thread_id="previous-pr-prompt",
+            cwd="/repo",
+            codex_path=missing_rollout_path,
+            codex_updated_at=datetime(2025, 1, 5, tzinfo=UTC),
+        )
+        thread = _session(
+            "previous-pr-prompt",
+            name="Previous PR prompt",
+            path=missing_rollout_path,
+        )
+        thread.turns = [
+            SimpleNamespace(
+                started_at=datetime(2025, 1, 5, tzinfo=UTC),
+                items=[
+                    SimpleNamespace(
+                        root=SimpleNamespace(
+                            type="userMessage",
+                            content=[
+                                SimpleNamespace(
+                                    root=SimpleNamespace(
+                                        type="text",
+                                        text=(
+                                            "Polish it, get it ready, and open or "
+                                            "update the PR."
+                                        ),
+                                    )
+                                )
+                            ],
+                        )
+                    ),
+                    SimpleNamespace(
+                        root=SimpleNamespace(
+                            type="agentMessage",
+                            text="Opened the PR.",
+                            phase="final_answer",
+                        )
+                    ),
+                    SimpleNamespace(
+                        root=SimpleNamespace(
+                            type="mcpToolCall",
+                            server="github",
+                            tool="create_pull_request",
+                            arguments={},
+                            result={"url": pr_url, "state": "open"},
+                            status="completed",
+                        )
+                    ),
+                ],
+            )
+        ]
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.return_value = SimpleNamespace(thread=thread)
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "previous-pr-prompt"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, f'href="{pr_url}"')
+        self.assertContains(
+            response, '<span class="stage-badge" data-tone="active">PR</span>'
+        )
+        client._client.thread_resume.assert_called_once_with("previous-pr-prompt")
 
     @patch("hitch.main.views.Codex")
     def test_session_detail_falls_back_when_metadata_missing(
@@ -2240,6 +2379,80 @@ class IndexViewTests(TestCase):
             '<span class="stage-badge" data-tone="active">Implementation</span>',
         )
         self.assertNotContains(response, "Done: Closed")
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cached_session_list_keeps_server_created_pr_handoff(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        pr_url = "https://github.com/cberner/hitch/pull/100"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Ready."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="server-created-pr-list",
+            cwd="/repo",
+            codex_display_title="Server-created PR",
+            codex_preview="Open a PR",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="server-created-pr-list",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_READY,
+            state={
+                "pr_handoff": {
+                    "url": pr_url,
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 100,
+                    "state": "open",
+                    "source_tool": "gh_pr_create",
+                }
+            },
+        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=now + timedelta(minutes=1)
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Server-created PR")
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">PR</span>',
+        )
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 

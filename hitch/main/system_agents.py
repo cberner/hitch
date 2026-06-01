@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import subprocess
 import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -76,7 +78,8 @@ QA_SLASH_DISPLAY_PROMPT = (
     "Run the QA agent on the current diff and fix anything it finds"
 )
 PR_SLASH_PROMPT = (
-    "Polish it, get it ready, and open or update the PR."
+    "Polish it, get it ready, commit the final changes, and push the branch. "
+    "Do not open a PR; Hitch will open it after this turn completes."
 )
 SYSTEM_AGENT_APPROVAL_MODE = "auto_review"
 # Auto-review workflows (auto-QA and auto-PR) start without an explicit
@@ -249,6 +252,26 @@ _PR_SAFE_LIST_ITEM_FIELDS = (
     "status",
     "conclusion",
 )
+_GH_PR_CREATE_TIMEOUT_SECONDS = 120
+_GH_PR_VIEW_FIELDS = (
+    "url",
+    "number",
+    "state",
+    "isDraft",
+    "title",
+    "baseRefName",
+    "headRefName",
+    "headRefOid",
+    "mergeable",
+    "mergeCommit",
+    "createdAt",
+    "updatedAt",
+    "closedAt",
+    "mergedAt",
+)
+_GITHUB_PR_URL_RE = re.compile(
+    r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([0-9]+)"
+)
 _QA_DESIGN_URL_RE = re.compile(r"\b(?:https?://|www\.)[^\s`<>()\[\]]+", re.IGNORECASE)
 _QA_DESIGN_FILE_RE = re.compile(
     r"(?<![\w.:/-])(?:[\w.-]+/)+[\w.-]+\.[A-Za-z0-9]+(?=$|[^\w/.-])"
@@ -387,6 +410,10 @@ _SPEC_CRITIC_HIGH_IMPACT_RE = re.compile(
     r"\b(?:" + "|".join(_SPEC_CRITIC_HIGH_IMPACT_PATTERNS) + r")\b",
     re.IGNORECASE,
 )
+
+
+class _GhPrOpenError(RuntimeError):
+    pass
 
 
 def _nullable_schema(schema_type: str) -> dict[str, Any]:
@@ -2061,6 +2088,18 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
                     workflow, f"failed to start PR follow-up monitor: {exc!r}"
                 )
             return
+        try:
+            snapshot = _open_or_find_pr_with_gh_cli(workflow)
+        except _GhPrOpenError as exc:
+            _block_workflow(
+                workflow,
+                (
+                    "PR prompt worker completed, but Hitch could not open the PR "
+                    f"with gh: {exc}"
+                ),
+            )
+            return
+    if snapshot is None:
         _block_workflow(
             workflow,
             (
@@ -2081,6 +2120,188 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
         _spawn_pr_followup_monitor_run(workflow)
     except Exception as exc:
         _block_workflow(workflow, f"failed to start PR follow-up monitor: {exc!r}")
+
+
+def _open_or_find_pr_with_gh_cli(workflow: SystemWorkflow) -> dict[str, Any]:
+    existing = _gh_pr_view(workflow, source_tool="gh_pr_view")
+    if existing is not None:
+        return existing
+
+    created = _run_gh_cli(workflow, ["pr", "create", "--fill"])
+    if created.returncode != 0:
+        raise _GhPrOpenError(f"`gh pr create --fill` failed: {_gh_error(created)}")
+
+    url = _github_pr_url_from_text(f"{created.stdout}\n{created.stderr}")
+    if not url:
+        raise _GhPrOpenError("`gh pr create --fill` did not print a PR URL")
+
+    created_handoff = _pr_handoff_from_github_url(url, source_tool="gh_pr_create")
+    viewed = _view_created_pr_for_enrichment(workflow, url)
+    if viewed is None:
+        return created_handoff
+    return _merge_pr_handoff_dicts(created_handoff, viewed)
+
+
+def _view_created_pr_for_enrichment(
+    workflow: SystemWorkflow, url: str
+) -> dict[str, Any] | None:
+    # Once create prints a PR URL, the URL is the durable handoff; view is metadata enrichment only.
+    try:
+        return _gh_pr_view(workflow, selector=url, source_tool="gh_pr_create")
+    except _GhPrOpenError:
+        return None
+
+
+def _gh_pr_view(
+    workflow: SystemWorkflow,
+    *,
+    selector: str | None = None,
+    source_tool: str,
+) -> dict[str, Any] | None:
+    args = ["pr", "view"]
+    if selector:
+        args.append(selector)
+    args.extend(["--json", ",".join(_GH_PR_VIEW_FIELDS)])
+    viewed = _run_gh_cli(workflow, args)
+    if viewed.returncode != 0:
+        if selector:
+            raise _GhPrOpenError(f"`gh pr view` failed: {_gh_error(viewed)}")
+        return None
+    try:
+        payload = json.loads(viewed.stdout)
+    except json.JSONDecodeError as exc:
+        raise _GhPrOpenError(f"`gh pr view` returned invalid JSON: {exc}") from exc
+    return _pr_handoff_from_gh_view(payload, source_tool=source_tool)
+
+
+def _run_gh_cli(
+    workflow: SystemWorkflow, args: list[str]
+) -> subprocess.CompletedProcess[str]:
+    env = {**os.environ, "GH_PROMPT_DISABLED": "1"}
+    command = ["gh", *args]
+    try:
+        return subprocess.run(
+            command,
+            cwd=workflow.cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=_GH_PR_CREATE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise _GhPrOpenError(f"`{' '.join(command)}` timed out") from exc
+    except OSError as exc:
+        raise _GhPrOpenError(f"`{' '.join(command)}` could not run: {exc}") from exc
+
+
+def _gh_error(result: subprocess.CompletedProcess[str]) -> str:
+    detail = (result.stderr or result.stdout or "").strip()
+    if not detail:
+        return f"exit status {result.returncode}"
+    return " ".join(detail.split())[:500]
+
+
+def _string_from_any(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, str) and value.isdecimal():
+        parsed = int(value)
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _pr_handoff_from_gh_view(
+    payload: Any, *, source_tool: str
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise _GhPrOpenError("`gh pr view` returned a non-object payload")
+
+    url = _string_from_any(payload.get("url"))
+    handoff = (
+        _pr_handoff_from_github_url(url, source_tool=source_tool) if url else {}
+    )
+    number = _positive_int(payload.get("number"))
+    if number is not None:
+        handoff["pr_number"] = number
+    state = _string_from_any(payload.get("state")).lower()
+    if state:
+        handoff["state"] = state
+    merged_at = _string_from_any(payload.get("mergedAt"))
+    handoff["merged"] = bool(merged_at) or state == "merged"
+    draft = payload.get("isDraft")
+    if isinstance(draft, bool):
+        handoff["draft"] = draft
+    mergeable = _gh_mergeable_value(payload.get("mergeable"))
+    if mergeable is not None:
+        handoff["mergeable"] = mergeable
+
+    _copy_gh_string(payload, handoff, "title", "title")
+    _copy_gh_string(payload, handoff, "baseRefName", "base")
+    _copy_gh_string(payload, handoff, "headRefName", "head")
+    head_sha = _string_from_any(payload.get("headRefOid"))
+    if head_sha:
+        handoff["head_sha"] = head_sha
+        handoff["latest_commit_sha"] = head_sha
+    _copy_gh_string(payload, handoff, "createdAt", "created_at")
+    _copy_gh_string(payload, handoff, "updatedAt", "updated_at")
+    _copy_gh_string(payload, handoff, "closedAt", "closed_at")
+    if merged_at:
+        handoff["merged_at"] = merged_at
+    merge_commit = payload.get("mergeCommit")
+    if isinstance(merge_commit, dict):
+        merge_commit_sha = _string_from_any(merge_commit.get("oid"))
+        if merge_commit_sha:
+            handoff["merge_commit_sha"] = merge_commit_sha
+    handoff["source_tool"] = source_tool
+    handoff["last_observed_at"] = int(timezone.now().timestamp())
+    return _compact_pr_handoff(handoff)
+
+
+def _copy_gh_string(
+    source: dict[str, Any], target: dict[str, Any], source_key: str, target_key: str
+) -> None:
+    value = _string_from_any(source.get(source_key))
+    if value:
+        target[target_key] = value
+
+
+def _gh_mergeable_value(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"mergeable", "clean", "has_hooks", "unstable"}:
+        return True
+    if normalized in {"conflicting", "dirty", "blocked"}:
+        return False
+    return None
+
+
+def _github_pr_url_from_text(text: str) -> str:
+    match = _GITHUB_PR_URL_RE.search(text)
+    return match.group(0) if match else ""
+
+
+def _pr_handoff_from_github_url(url: str, *, source_tool: str) -> dict[str, Any]:
+    match = _GITHUB_PR_URL_RE.search(url)
+    if match is None:
+        return {"url": url, "source_tool": source_tool}
+    owner, repo, number = match.groups()
+    return {
+        "url": match.group(0),
+        "repository_full_name": f"{owner}/{repo}",
+        "pr_number": int(number),
+        "source_tool": source_tool,
+        "last_observed_at": int(timezone.now().timestamp()),
+    }
 
 
 def _handle_spec_critic_agent_finished(
@@ -3381,7 +3602,7 @@ def _qa_prompt(cwd: str, diff_text: str) -> str:
     return (
         "You are Hitch's QA agent for a PR workflow.\n\n"
         "Thoroughly review the current code diff before the PR agent runs its final "
-        "cleanup/open-PR pass.\n\n"
+        "cleanup/push pass.\n\n"
         f"{_CODEX_REVIEW_GUIDANCE}\n"
         "Also do your own manual QA: if there is an interactive interface related "
         "to the diff, manually test it out and include concrete failures or gaps in "

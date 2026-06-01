@@ -54,6 +54,10 @@ _PR_PROMPT_ALIASES = frozenset(
         "Rebase on master, clean it up, and then open a PR",
         "Polish it, get it ready, and open or update the PR.",
         (
+            "Polish it, get it ready, commit the final changes, and push the branch. "
+            "Do not open a PR; Hitch will open it after this turn completes."
+        ),
+        (
             "Do a thorough review of the diff. Rebase on master, clean it up, "
             "and then open a PR"
         ),
