@@ -110,6 +110,12 @@ class SessionDetailData:
     pr_observation: codex_events.PrObservationResult
 
 
+@dataclass(frozen=True)
+class SessionStageData:
+    entries: tuple[dict[str, Any], ...]
+    pr_observation: codex_events.PrObservationResult
+
+
 def session_detail_data(rollout_path: Path) -> SessionDetailData | None:
     """Return rollout-derived session-detail data from one JSONL load."""
     lines = _load_rollout_lines(rollout_path)
@@ -120,6 +126,17 @@ def session_detail_data(rollout_path: Path) -> SessionDetailData | None:
         latest_token_usage=_latest_token_usage_from_lines(lines),
         latest_collaboration_mode=_latest_collaboration_mode_from_lines(lines),
         latest_pr_url=_latest_pr_url_from_lines(lines),
+        pr_observation=_latest_pr_observation_result_from_lines(lines),
+    )
+
+
+def session_stage_data(rollout_path: Path) -> SessionStageData | None:
+    """Return session-list stage data from one JSONL load."""
+    lines = _load_rollout_lines(rollout_path)
+    if lines is None:
+        return None
+    return SessionStageData(
+        entries=tuple(_entries_from_lines(lines)),
         pr_observation=_latest_pr_observation_result_from_lines(lines),
     )
 

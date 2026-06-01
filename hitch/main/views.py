@@ -1426,30 +1426,29 @@ def _session_list_page_from_index(
         )
         if hidden_thread_ids:
             rows = rows.exclude(thread_id__in=hidden_thread_ids)
-    metadata_rows = list(rows)
-    qa_updated_at_by_main_thread = (
-        {}
-        if system_only
-        else _qa_activity_updated_at_by_metadata_thread_id(
-            metadata_rows,
-            hidden_thread_ids if hidden_thread_ids else None,
-        )
-    )
-    sessions = [
-        session
-        for metadata in metadata_rows
-        if (
-            session := _session_row_for_metadata(
-                metadata,
-                qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
-                runs_by_thread_id=runs_by_thread_id,
-                instances_by_thread_id=instances_by_thread_id,
-                system_only=system_only,
+    if system_only:
+        metadata_rows = list(rows)
+        qa_updated_at_by_main_thread: dict[str, Any] = {}
+        sessions = [
+            session
+            for metadata in metadata_rows
+            if (
+                session := _session_row_for_metadata(
+                    metadata,
+                    qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
+                    runs_by_thread_id=runs_by_thread_id,
+                    instances_by_thread_id=instances_by_thread_id,
+                    system_only=system_only,
+                )
             )
+            is not None
+        ]
+        sessions = _sort_session_rows(sessions)
+    else:
+        sessions, qa_updated_at_by_main_thread = _sorted_visible_index_rows(
+            rows,
+            hidden_thread_ids=hidden_thread_ids if hidden_thread_ids else None,
         )
-        is not None
-    ]
-    sessions = _sort_session_rows(sessions)
     index_cursor = _index_cursor_sort_key(request.GET.get("cursor", ""))
     if index_cursor is not None:
         sessions = [
@@ -1460,8 +1459,31 @@ def _session_list_page_from_index(
         offset = 0
     else:
         offset = _non_negative_int(request.GET.get("offset", ""))
-    page = sessions[offset : offset + _SESSION_PAGE_SIZE]
-    next_offset = offset + len(page)
+    page_sort_rows = sessions[offset : offset + _SESSION_PAGE_SIZE]
+    if system_only:
+        page = page_sort_rows
+    else:
+        page_thread_ids = [str(session["id"]) for session in page_sort_rows]
+        metadata_by_thread_id = {
+            metadata.thread_id: metadata
+            for metadata in rows.filter(thread_id__in=page_thread_ids)
+        }
+        page = [
+            session
+            for thread_id in page_thread_ids
+            if (metadata := metadata_by_thread_id.get(thread_id)) is not None
+            if (
+                session := _session_row_for_metadata(
+                    metadata,
+                    qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
+                    runs_by_thread_id=runs_by_thread_id,
+                    instances_by_thread_id=instances_by_thread_id,
+                    system_only=system_only,
+                )
+            )
+            is not None
+        ]
+    next_offset = offset + len(page_sort_rows)
     done = next_offset >= len(sessions)
     next_cursor = "" if done or not page else _index_cursor_for_session(page[-1])
     return SessionListPage(
@@ -1506,6 +1528,34 @@ def _filter_visible_session_metadata_rows(
     if accepted_visible_thread_ids:
         visible_filter |= Q(thread_id__in=accepted_visible_thread_ids)
     return rows.filter(visible_filter)
+
+
+def _sorted_visible_index_rows(
+    rows: QuerySet[SessionMetadata],
+    *,
+    hidden_thread_ids: set[str] | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    sort_source = list(rows.values("thread_id", "codex_updated_at"))
+    main_thread_ids = [str(row["thread_id"]) for row in sort_source]
+    qa_updated_at_by_main_thread = _qa_activity_updated_at_by_metadata_thread_ids(
+        main_thread_ids,
+        hidden_thread_ids,
+    )
+    return (
+        _sort_session_rows(
+            [
+                {
+                    "id": row["thread_id"],
+                    "updated_at": _latest_updated_at(
+                        row["codex_updated_at"],
+                        qa_updated_at_by_main_thread.get(row["thread_id"]),
+                    ),
+                }
+                for row in sort_source
+            ]
+        ),
+        qa_updated_at_by_main_thread,
+    )
 
 
 def _ensure_indexed_system_threads(
@@ -1600,7 +1650,18 @@ def _session_row_for_metadata(
 def _qa_activity_updated_at_by_metadata_thread_id(
     metadata_rows: Iterable[SessionMetadata], hidden_thread_ids: set[str] | None = None
 ) -> dict[str, Any]:
-    main_thread_ids = [metadata.thread_id for metadata in metadata_rows]
+    return _qa_activity_updated_at_by_metadata_thread_ids(
+        [metadata.thread_id for metadata in metadata_rows],
+        hidden_thread_ids,
+    )
+
+
+def _qa_activity_updated_at_by_metadata_thread_ids(
+    main_thread_ids: Iterable[str], hidden_thread_ids: set[str] | None
+) -> dict[str, Any]:
+    main_thread_ids = [
+        thread_id for thread_id in dict.fromkeys(main_thread_ids) if thread_id
+    ]
     if not main_thread_ids:
         return {}
     runs = list(
@@ -1616,7 +1677,9 @@ def _qa_activity_updated_at_by_metadata_thread_id(
         run_thread_ids &= hidden_thread_ids
     hidden_metadata_by_thread_id = {
         metadata.thread_id: metadata
-        for metadata in SessionMetadata.objects.filter(thread_id__in=run_thread_ids)
+        for metadata in SessionMetadata.objects.filter(
+            thread_id__in=run_thread_ids
+        ).only("thread_id", "codex_updated_at", "codex_last_synced_at")
     }
     updated_at_by_main_thread: dict[str, Any] = {}
     for run in runs:
@@ -2324,10 +2387,9 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             session["stage"] = cached_stage.as_context()
             continue
         rollout_path = rollout_state.path if rollout_state is not None else None
-        entries = _stage_entries_for_rollout_path(rollout_path)
+        entries, pr_observation = _session_stage_data_for_rollout_path(rollout_path)
         if not entries and session.get("has_activity"):
             entries = [{"kind": "user"}]
-        pr_observation = _pr_observation_result_for_rollout_path(rollout_path)
         stage_workflow = _workflow_after_main_lifecycle(
             workflow,
             pr_observation,
@@ -2457,6 +2519,22 @@ def _stage_entries_for_rollout_path(rollout_path: Path | None) -> list[dict[str,
     except Exception:
         logger.exception("failed to parse rollout %s for session stage", rollout_path)
         return []
+
+
+def _session_stage_data_for_rollout_path(
+    rollout_path: Path | None,
+) -> tuple[list[dict[str, Any]], codex_events.PrObservationResult]:
+    empty_pr_observation = codex_events.PrObservationResult(snapshot=None)
+    if rollout_path is None:
+        return [], empty_pr_observation
+    try:
+        stage_data = rollout.session_stage_data(rollout_path)
+    except Exception:
+        logger.exception("failed to parse rollout %s for session stage", rollout_path)
+        return [], empty_pr_observation
+    if stage_data is None:
+        return [], empty_pr_observation
+    return list(stage_data.entries), stage_data.pr_observation
 
 
 def _pr_snapshot_for_rollout_path(rollout_path: Path | None) -> dict[str, Any] | None:

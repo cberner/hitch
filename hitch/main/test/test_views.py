@@ -2717,6 +2717,84 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    def test_cached_session_order_promotes_qa_activity_from_beyond_page_size(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        for index in range(views._SESSION_PAGE_SIZE):
+            updated_at = datetime.fromtimestamp(5000 - index, UTC)
+            SessionMetadata.objects.create(
+                thread_id=f"ordinary-{index}",
+                cwd="/repo",
+                codex_display_title=f"Ordinary {index}",
+                codex_created_at=updated_at,
+                codex_updated_at=updated_at,
+                codex_last_synced_at=now,
+            )
+        SessionMetadata.objects.create(
+            thread_id="main-thread",
+            cwd="/repo",
+            codex_display_title="Main session",
+            codex_created_at=datetime.fromtimestamp(1, UTC),
+            codex_updated_at=datetime.fromtimestamp(1, UTC),
+            codex_last_synced_at=now,
+        )
+        SessionMetadata.objects.create(
+            thread_id="qa-thread",
+            cwd="/repo",
+            codex_display_title="Hidden QA",
+            codex_created_at=datetime.fromtimestamp(1000, UTC),
+            codex_updated_at=datetime.fromtimestamp(1000, UTC),
+            codex_last_synced_at=datetime.fromtimestamp(1000, UTC),
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="qa-thread",
+            cwd="/repo",
+            prompt="qa",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="qa-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+        )
+        run_updated_at = datetime.fromtimestamp(10_000, UTC)
+        SystemAgentRun.objects.filter(pk=run.pk).update(updated_at=run_updated_at)
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(updated_at=run_updated_at)
+
+        response = self.client.get(reverse("index"))
+        sessions_context = cast(list[dict[str, Any]], response.context["sessions"])
+        session_ids = [session["id"] for session in sessions_context]
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(session_ids[0], "main-thread")
+        self.assertIn("ordinary-48", session_ids)
+        self.assertNotIn("ordinary-49", session_ids)
+        self.assertNotContains(response, "Hidden QA")
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
     def test_index_cursor_keeps_later_pages_stable_when_rows_move(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
