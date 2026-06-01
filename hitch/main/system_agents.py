@@ -136,6 +136,7 @@ _QA_DESIGN_SYNTHESIS_RECENT_RUN_LIMIT = 50
 _QA_DESIGN_SYNTHESIS_MATCH_LIMIT = 3
 _QA_DESIGN_FEEDBACK_SUMMARY_CHARS = 360
 _PR_HANDOFF_STATE_KEY = "pr_handoff"
+_PR_HITCH_HANDOFF_STATE_KEY = "hitch_pr_handoff"
 _PR_MONITOR_STATE_KEY = "last_pr_monitor"
 _PR_GATES_STATE_KEY = "pr_gates"
 _PR_PENDING_CHECKS_STATE_KEY = "pr_pending_checks"
@@ -2078,6 +2079,7 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
         return
     worker_snapshot = codex_events.latest_pr_snapshot_for_instance(instance)
     snapshot = worker_snapshot
+    hitch_handoff_snapshot = False
     if not _pr_prompt_worker_snapshot_is_authoritative(worker_snapshot):
         if worker_snapshot is None and _pr_handoff_from_workflow(workflow):
             workflow.step = STEP_PR_MONITORING
@@ -2091,6 +2093,7 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
             return
         try:
             snapshot = _open_or_find_pr_with_gh_cli(workflow)
+            hitch_handoff_snapshot = True
         except _GhPrOpenError as exc:
             _block_workflow(
                 workflow,
@@ -2110,6 +2113,8 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
         )
         return
     _merge_pr_handoff(workflow, snapshot)
+    if hitch_handoff_snapshot:
+        _mark_hitch_pr_handoff(workflow, snapshot)
     if _pr_handoff_is_terminal(_pr_handoff_from_workflow(workflow)):
         workflow.status = SystemWorkflow.STATUS_COMPLETED
         workflow.step = STEP_PR_CLOSED
@@ -5025,6 +5030,31 @@ def pr_handoff_for_workflow(workflow: SystemWorkflow | None) -> dict[str, Any]:
     if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
         return {}
     return _pr_handoff_from_workflow(workflow)
+
+
+def hitch_pr_handoff_for_workflow(workflow: SystemWorkflow | None) -> dict[str, Any]:
+    if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
+        return {}
+    return _hitch_pr_handoff_marker(workflow.state.get(_PR_HITCH_HANDOFF_STATE_KEY))
+
+
+def _mark_hitch_pr_handoff(workflow: SystemWorkflow, handoff: dict[str, Any]) -> None:
+    marker = _hitch_pr_handoff_marker(handoff)
+    if marker:
+        workflow.state = {**workflow.state, _PR_HITCH_HANDOFF_STATE_KEY: marker}
+
+
+def _hitch_pr_handoff_marker(value: Any) -> dict[str, Any]:
+    handoff = _compact_pr_handoff(value)
+    marker: dict[str, Any] = {}
+    for key in ("url", "repository_full_name", "pr_number"):
+        if key in handoff:
+            marker[key] = handoff[key]
+    if "url" in marker or (
+        "repository_full_name" in marker and "pr_number" in marker
+    ):
+        return marker
+    return {}
 
 
 def _compact_pr_handoff(value: Any) -> dict[str, Any]:

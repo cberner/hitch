@@ -2899,6 +2899,14 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(handoff["latest_commit_sha"], "head123")
         self.assertTrue(handoff["mergeable"])
         self.assertEqual(handoff["source_tool"], "gh_pr_create")
+        self.assertEqual(
+            workflow.state[system_agents._PR_HITCH_HANDOFF_STATE_KEY],
+            {
+                "url": "https://github.com/cberner/hitch/pull/170",
+                "repository_full_name": "cberner/hitch",
+                "pr_number": 170,
+            },
+        )
         mock_spawn.assert_called_once()
 
     @patch("hitch.main.system_agents.subprocess.run")
