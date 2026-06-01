@@ -26,7 +26,7 @@ from django.core import signing
 from django.core.exceptions import SuspiciousOperation
 from django.core.files.uploadedfile import UploadedFile
 from django.core.files.uploadhandler import FileUploadHandler
-from django.db import IntegrityError, close_old_connections, transaction
+from django.db import IntegrityError, OperationalError, close_old_connections, transaction
 from django.db.models import Q, QuerySet
 from django.http import (
     Http404,
@@ -1129,7 +1129,11 @@ def _session_list_page_from_warm_index(
         )
     )
     if (refresh_active or refresh_archived) and not allow_refresh_needed:
-        return None
+        _schedule_session_index_refresh(
+            enable_memories=current_settings.enable_memories,
+            include_active=refresh_active,
+            include_archived=refresh_archived,
+        )
     if system_only:
         return _system_session_list_page_from_index(
             request,
@@ -2269,7 +2273,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         # row would still satisfy the read guard and resurrect the stale active
         # badge. Persist only when no such owner contributed to the stage.
         if active_instance is None and workflow is None:
-            _update_cached_stage(
+            _update_cached_stage_best_effort(
                 session_id,
                 stage,
                 rollout_state.mtime_ns if rollout_state is not None else 0,
@@ -2340,6 +2344,22 @@ def _update_cached_stage(
         derived_stage=stage.key,
         derived_stage_source_mtime_ns=source_mtime_ns,
     )
+
+
+def _update_cached_stage_best_effort(
+    session_id: str, stage: session_stage.SessionStage, source_mtime_ns: int
+) -> None:
+    try:
+        _update_cached_stage(session_id, stage, source_mtime_ns)
+    except OperationalError as exc:
+        if not _is_database_locked_error(exc):
+            raise
+        logger.warning("skipping session stage cache update because database is locked")
+
+
+def _is_database_locked_error(exc: BaseException) -> bool:
+    message = " ".join(str(arg) for arg in exc.args).lower()
+    return "database is locked" in message or "database table is locked" in message
 
 
 def _latest_pr_workflow_for_thread(session_id: str) -> SystemWorkflow | None:
