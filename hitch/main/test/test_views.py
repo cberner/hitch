@@ -33,6 +33,7 @@ from django.test import (
 )
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
+from django.utils import timezone
 from openai_codex.errors import AppServerError, InvalidRequestError, MethodNotFoundError
 from openai_codex.generated.v2_all import (
     GetAccountRateLimitsResponse,
@@ -6659,6 +6660,19 @@ class ProjectViewTests(TestCase):
 class NewSessionViewTests(TestCase):
     REPO = "/home/user/proj"
 
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        self._clear_models_cache()
+        self.addCleanup(self._clear_models_cache)
+
+    @staticmethod
+    def _clear_models_cache() -> None:
+        with views._MODELS_REFRESH_LOCK:
+            views._MODELS_CACHE_VALUE = {}
+            views._MODELS_CACHE_FETCHED_AT = {}
+            views._MODELS_REFRESH_IN_FLIGHT = set()
+
     def _assert_new_session_spawn(
         self,
         mock_spawn: MagicMock,
@@ -6712,6 +6726,107 @@ class NewSessionViewTests(TestCase):
             sandbox_policy=None,
             approval_mode="auto_review",
         )
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_post_uses_warm_model_cache(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        views._store_models_cache(
+            enable_memories=False,
+            models_data=[_make_model("gpt-5.4", is_default=True)],
+        )
+        _seed_cookies(self.client, **{_MODEL_COOKIE: "stale-model"})
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "Refactor the login flow", "cwd": self.REPO},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_codex.assert_not_called()
+        self._assert_new_session_spawn(
+            mock_spawn,
+            prompt="Refactor the login flow",
+            model="gpt-5.4",
+            reasoning_effort="medium",
+        )
+        self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5.4")
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_post_refreshes_empty_model_cache(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        views._store_models_cache(enable_memories=False, models_data=[])
+        _setup_codex(mock_codex, models=[_make_model("gpt-5.4", is_default=True)])
+        _seed_cookies(self.client, **{_MODEL_COOKIE: "removed-model"})
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "Refactor the login flow", "cwd": self.REPO},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_codex.assert_called_once()
+        self._assert_new_session_spawn(
+            mock_spawn,
+            prompt="Refactor the login flow",
+            model="gpt-5.4",
+            reasoning_effort="medium",
+        )
+        self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5.4")
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_post_refreshes_expired_model_cache(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        views._store_models_cache(
+            enable_memories=False,
+            models_data=[_make_model("removed-model", is_default=True)],
+        )
+        with views._MODELS_REFRESH_LOCK:
+            views._MODELS_CACHE_FETCHED_AT[False] = (
+                timezone.now()
+                - views._MODELS_CACHE_TTL
+                - timedelta(seconds=1)
+            )
+        _setup_codex(mock_codex, models=[_make_model("gpt-5.4", is_default=True)])
+        _seed_cookies(self.client, **{_MODEL_COOKIE: "removed-model"})
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "Refactor the login flow", "cwd": self.REPO},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_codex.assert_called_once()
+        self._assert_new_session_spawn(
+            mock_spawn,
+            prompt="Refactor the login flow",
+            model="gpt-5.4",
+            reasoning_effort="medium",
+        )
+        self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5.4")
 
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
     @patch("hitch.main.views.codex_pool.create_session_thread", return_value="thread-spec")
@@ -7358,6 +7473,147 @@ class NewSessionViewTests(TestCase):
             "candidate-thread", "Add parser coverage"
         )
         mock_new_session.assert_not_called()
+
+    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    def test_candidate_worktree_uses_local_instance_for_next_user_message_index(
+        self,
+        mock_turn: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_managed_worktrees: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
+        codex = _setup_codex(mock_codex, models=[])
+        codex._client.thread_resume.side_effect = AssertionError(
+            "thread_resume should not be needed"
+        )
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_qa_enabled=True,
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+        )
+        CodexInstance.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            prompt="Find useful test coverage increments.",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            pid=123,
+            user_message_index=0,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            title="Add parser coverage",
+            outcome_metadata={"auto_qa_enabled": True},
+        )
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Go ahead and implement this proposed session.",
+                "cwd": self.REPO,
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(mock_turn.call_args.kwargs["user_message_index"], 1)
+        codex._client.thread_resume.assert_not_called()
+
+    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    def test_candidate_worktree_resumes_thread_when_latest_local_index_failed(
+        self,
+        mock_turn: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_managed_worktrees: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
+        codex = _setup_codex(mock_codex, models=[])
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {
+                        "type": "user_message",
+                        "message": "Find useful test coverage increments.",
+                    },
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Failed retry."},
+                ),
+            ],
+        )
+        codex._client.thread_resume.return_value = SimpleNamespace(
+            thread=_session("candidate-thread", path=str(rollout_path))
+        )
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_qa_enabled=True,
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+        )
+        CodexInstance.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            prompt="Find useful test coverage increments.",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            pid=123,
+            user_message_index=0,
+        )
+        CodexInstance.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            prompt="Failed retry.",
+            events_path="/tmp/events-failed.jsonl",
+            status=CodexInstance.STATUS_FAILED,
+            pid=124,
+            user_message_index=1,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            title="Add parser coverage",
+            outcome_metadata={"auto_qa_enabled": True},
+        )
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Go ahead and implement this proposed session.",
+                "cwd": self.REPO,
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(mock_turn.call_args.kwargs["user_message_index"], 2)
+        codex._client.thread_resume.assert_called_once_with("candidate-thread")
 
     @patch("hitch.main.views._auto_merge_to_local_branch_for_proposal")
     @patch("hitch.main.views.discover_managed_worktrees")
@@ -8131,6 +8387,7 @@ class NewSessionViewTests(TestCase):
 
         for index, (label, cookies, expected) in enumerate(cases):
             with self.subTest(label=label):
+                self._clear_models_cache()
                 client = Client()
                 codex.models.return_value.data = (
                     [_make_model("gpt-5", is_default=True)]
@@ -8544,6 +8801,7 @@ class NewSessionViewTests(TestCase):
             workflow_kwargs,
         ) in enumerate(cases):
             with self.subTest(label=label):
+                self._clear_models_cache()
                 client = Client()
                 codex.models.return_value.data = (
                     []

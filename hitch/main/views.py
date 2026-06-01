@@ -86,6 +86,7 @@ from hitch.main.worktrees import (
     cleanup_worktree,
     create_worktree_for_session,
     discover_managed_worktrees,
+    is_managed_worktree_path,
 )
 
 logger = logging.getLogger(__name__)
@@ -6559,6 +6560,12 @@ def _cached_models_data(*, enable_memories: bool) -> list[Any]:
         return list(_MODELS_CACHE_VALUE.get(enable_memories, []))
 
 
+def _store_models_cache(*, enable_memories: bool, models_data: list[Any]) -> None:
+    with _MODELS_REFRESH_LOCK:
+        _MODELS_CACHE_VALUE[enable_memories] = list(models_data)
+        _MODELS_CACHE_FETCHED_AT[enable_memories] = timezone.now()
+
+
 def _models_cache_has_value(*, enable_memories: bool) -> bool:
     with _MODELS_REFRESH_LOCK:
         return enable_memories in _MODELS_CACHE_FETCHED_AT
@@ -6575,6 +6582,23 @@ def _cached_models_and_settings(request: HttpRequest) -> tuple[list[Any], Resolv
     models_data = _cached_models_data(enable_memories=stored_settings.enable_memories)
     _schedule_models_refresh(enable_memories=stored_settings.enable_memories)
     return models_data, _resolved_settings(request, models_data)
+
+
+def _new_session_post_settings(request: HttpRequest) -> ResolvedSettings:
+    stored_settings = _stored_settings(request)
+    enable_memories = stored_settings.enable_memories
+    if _models_cache_has_value(
+        enable_memories=enable_memories
+    ) and not _models_refresh_needed(enable_memories=enable_memories):
+        models_data = _cached_models_data(enable_memories=enable_memories)
+        if models_data:
+            return _resolved_settings(request, models_data)
+
+    config = codex_pool.app_server_config(enable_memories=enable_memories)
+    with Codex(config=config) as codex:
+        models_data = list(codex.models().data)
+    _store_models_cache(enable_memories=enable_memories, models_data=models_data)
+    return _resolved_settings(request, models_data)
 
 
 def _schedule_models_refresh(*, enable_memories: bool) -> None:
@@ -6627,10 +6651,9 @@ def _refresh_models_cache_best_effort(*, enable_memories: bool) -> None:
         logger.exception("failed to refresh models cache")
     finally:
         close_old_connections()
+        if refreshed:
+            _store_models_cache(enable_memories=enable_memories, models_data=models_data)
         with _MODELS_REFRESH_LOCK:
-            if refreshed:
-                _MODELS_CACHE_VALUE[enable_memories] = models_data
-                _MODELS_CACHE_FETCHED_AT[enable_memories] = timezone.now()
             _MODELS_REFRESH_IN_FLIGHT.discard(enable_memories)
 
 
@@ -7758,7 +7781,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         # just those created via ``new_session``, so the resumed ``cwd`` is not
         # automatically inside the discover_repos() allowlist. Re-validate before
         # spawning so a follow-up cannot run a worker in an unintended directory.
-        if cwd not in _allowed_session_cwds():
+        if not _is_allowed_session_cwd(cwd):
             _cleanup_saved_input_images(input_image_paths)
             return HttpResponseBadRequest("thread cwd is not an allowed repository")
         # Sandbox policy and approval mode are applied per-turn rather than
@@ -8464,6 +8487,12 @@ def _allowed_session_cwds() -> set[str]:
     return {str(p) for p in [*discover_repos(), *discover_managed_worktrees()]}
 
 
+def _is_allowed_session_cwd(cwd: str) -> bool:
+    if is_managed_worktree_path(cwd):
+        return True
+    return cwd in _allowed_session_cwds()
+
+
 def _candidate_thread_user_message_index(
     thread_id: str, settings: SettingsValues
 ) -> int:
@@ -8471,6 +8500,28 @@ def _candidate_thread_user_message_index(
     with Codex(config=config) as codex:
         resumed = codex._client.thread_resume(thread_id)
     return _count_user_entries(list(_entries_for(resumed.thread)))
+
+
+def _next_user_message_index_for_candidate_thread(
+    thread_id: str, settings: SettingsValues
+) -> int:
+    latest_instance = (
+        CodexInstance.objects.filter(
+            thread_id=thread_id,
+            user_message_index__isnull=False,
+        )
+        .order_by("-user_message_index", "-pk")
+        .values("status", "user_message_index")
+        .first()
+    )
+    if latest_instance is None:
+        return _candidate_thread_user_message_index(thread_id, settings)
+    if latest_instance["status"] == CodexInstance.STATUS_FAILED:
+        return _candidate_thread_user_message_index(thread_id, settings)
+    latest_index = latest_instance["user_message_index"]
+    if latest_index is None:
+        return _candidate_thread_user_message_index(thread_id, settings)
+    return max(int(latest_index) + 1, 0)
 
 
 def _finish_candidate_proposal_start(
@@ -8555,7 +8606,7 @@ def _start_candidate_proposal_session(
     candidate_cwd = candidate_session.cwd
     if not candidate_cwd:
         return HttpResponseBadRequest("candidate session has no cwd")
-    if candidate_cwd not in _allowed_session_cwds():
+    if not _is_allowed_session_cwd(candidate_cwd):
         return HttpResponseBadRequest(
             "candidate session cwd is not an allowed repository"
         )
@@ -8580,7 +8631,7 @@ def _start_candidate_proposal_session(
             "reasoning_effort": settings.reasoning_effort or None,
             "developer_instructions": developer_instructions or None,
             "enable_memories": settings.enable_memories,
-            "initial_user_message_index": _candidate_thread_user_message_index(
+            "initial_user_message_index": _next_user_message_index_for_candidate_thread(
                 candidate_session.thread_id, settings
             ),
         }
@@ -8640,7 +8691,7 @@ def _start_candidate_proposal_session(
     if auto_pr_enabled or auto_qa_enabled:
         spawn_kwargs["stored_model"] = settings.model or None
         spawn_kwargs["stored_reasoning_effort"] = settings.reasoning_effort or None
-        spawn_kwargs["user_message_index"] = _candidate_thread_user_message_index(
+        spawn_kwargs["user_message_index"] = _next_user_message_index_for_candidate_thread(
             candidate_session.thread_id, settings
         )
         if settings.qa_panel_enabled:
@@ -8664,7 +8715,7 @@ def _start_candidate_proposal_session(
             "reasoning_effort": settings.reasoning_effort or None,
             "developer_instructions": developer_instructions or None,
             "enable_memories": settings.enable_memories,
-            "initial_user_message_index": _candidate_thread_user_message_index(
+            "initial_user_message_index": _next_user_message_index_for_candidate_thread(
                 candidate_session.thread_id, settings
             ),
             "auto_pr_enabled": auto_pr_enabled,
@@ -9055,13 +9106,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
     # render would have snapped away from; without this, a stale value
     # would ride straight into ``thread_start(model=...)`` and 500 the
     # new-session click.
-    initial_settings = _stored_settings(request)
-    config = codex_pool.app_server_config(
-        enable_memories=initial_settings.enable_memories
-    )
-    with Codex(config=config) as codex:
-        models_data = list(codex.models().data)
-    resolved_settings = _resolved_settings(request, models_data)
+    resolved_settings = _new_session_post_settings(request)
     settings = resolved_settings.values
     spawn_settings = (
         settings._replace(coding_agent=coding_agent_override)
