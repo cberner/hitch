@@ -13070,6 +13070,10 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(
             response, 'value="draft_pr" data-auto-qa-supported="false"'
         )
+        self.assertContains(
+            response,
+            'value="draft_pr" data-auto-qa-supported="false" data-auto-qa-required="true"',
+        )
         self.assertContains(response, "Web search: Live")
         self.assertContains(response, "Auto-proposal: Off")
         self.assertContains(response, "Auto merge: main")
@@ -13196,7 +13200,7 @@ class AutonomousGoalViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
-    def test_edit_form_sync_does_not_mutate_auto_qa_choice(
+    def test_edit_form_sync_preserves_auto_qa_choice_when_required(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -13213,8 +13217,43 @@ class AutonomousGoalViewTests(TestCase):
         response = self.client.get(reverse("autonomous_goals"))
         self.assertEqual(response.status_code, 200)
         body = response.content.decode()
-        self.assertIn("autoQa.disabled = !supported;", body)
-        self.assertNotIn("autoQa.checked =", body)
+        self.assertIn(
+            'autoQa.dataset.autoQaUserChecked = autoQa.checked ? "true" : "false";',
+            body,
+        )
+        self.assertIn(
+            'autoQa.checked = autoQa.dataset.autoQaUserChecked === "true";',
+            body,
+        )
+        self.assertIn("delete editGoalAutoQa.dataset.autoQaUserChecked;", body)
+        self.assertIn("autoQa.disabled = required || !supported;", body)
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_draft_pr_goal_shows_auto_qa_required_on_reopen(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PR,
+            auto_qa_enabled=False,
+        )
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Auto-QA: Required")
+        self.assertContains(response, 'data-autonomy="draft_pr"')
+        self.assertContains(response, 'data-auto-qa="false"')
+        self.assertContains(
+            response,
+            'value="draft_pr" data-auto-qa-supported="false" data-auto-qa-required="true"',
+        )
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")

@@ -2734,6 +2734,9 @@ def autonomous_goals(request: HttpRequest) -> HttpResponse:
             "default_autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
             "default_auto_qa": False,
             "auto_qa_supported_autonomies": tuple(AutonomousGoal.AUTO_QA_AUTONOMIES),
+            "auto_qa_required_autonomies": tuple(
+                AutonomousGoal.AUTO_QA_REQUIRED_AUTONOMIES
+            ),
             "default_auto_proposal": False,
             "confidence_choices": AutonomousGoal.CONFIDENCE_CHOICES,
             "default_confidence": AutonomousGoal.CONFIDENCE_HIGH,
@@ -3021,11 +3024,14 @@ def _validated_autonomous_goal_values(
     valid_autonomies = {value for value, _label in AutonomousGoal.AUTONOMY_CHOICES}
     if autonomy not in valid_autonomies:
         return None, "autonomy is invalid"
+    required_auto_qa = AutonomousGoal.auto_qa_required_for_autonomy(autonomy)
     supported_auto_qa = AutonomousGoal.auto_qa_supported_for_autonomy(autonomy)
     auto_qa_values = [value.strip() for value in request.POST.getlist("auto_qa")]
     if any(value not in {"", "false", "true"} for value in auto_qa_values):
         return None, "auto-QA setting is invalid"
-    if auto_qa_values:
+    if required_auto_qa:
+        auto_qa_enabled = False
+    elif auto_qa_values:
         auto_qa_enabled = auto_qa_values[-1] == "true" and supported_auto_qa
     else:
         auto_qa_enabled = auto_qa_default and supported_auto_qa
