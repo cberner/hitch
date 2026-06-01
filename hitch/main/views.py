@@ -3015,16 +3015,20 @@ def autonomous_goal_run_log(request: HttpRequest, workflow_id: int) -> HttpRespo
 def update_proposed_session_outcome(
     request: HttpRequest, proposed_session_id: int
 ) -> HttpResponse:
-    project = _active_project_from_request(request)
     if proposed_session_id < 1 or proposed_session_id > _MAX_BIGAUTOFIELD:
         return HttpResponseBadRequest("proposed session is required")
-    proposed_session_query = ProposedSession.objects.select_related(
-        "project",
-        "autonomous_goal__project",
-        "candidate_session",
-    ).filter(pk=proposed_session_id)
-    if project is not None:
-        proposed_session_query = proposed_session_query.filter(project=project)
+    current_settings = _stored_settings(request)
+    project_visibility = _session_project_visibility_for_settings(
+        current_settings, list(Project.objects.all())
+    )
+    proposed_session_query = _filter_proposed_sessions_by_project_visibility(
+        ProposedSession.objects.select_related(
+            "project",
+            "autonomous_goal__project",
+            "candidate_session",
+        ).filter(pk=proposed_session_id),
+        project_visibility,
+    )
     proposed_session = proposed_session_query.first()
     if proposed_session is None:
         return HttpResponseBadRequest("proposed session is required")
