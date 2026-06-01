@@ -104,6 +104,37 @@ def _events_file(test: TestCase, payload: dict[str, object]) -> str:
     return events_path
 
 
+def _gh_monitor_observation(
+    pr: dict[str, object] | None = None,
+    *,
+    feedback: str = "",
+    blockers: list[str] | None = None,
+) -> dict[str, object]:
+    observed_pr = {
+        "url": "https://github.com/cberner/hitch/pull/169",
+        "repository_full_name": "cberner/hitch",
+        "pr_number": 169,
+        "state": "open",
+        "merged": False,
+        "mergeable": True,
+        "draft": False,
+        "head": "feature",
+        "head_sha": "abc123",
+        "latest_commit_sha": "abc123",
+        "review_signal": "commented",
+        "unresolved_thread_count": 0,
+        "ci_status": "pending",
+        **(pr or {}),
+    }
+    return {
+        "status": "terminal" if observed_pr.get("merged") else "blocked",
+        "summary": "Hitch observed the PR with gh.",
+        "feedback": feedback,
+        "pr": observed_pr,
+        "blockers": blockers or [],
+    }
+
+
 def _agent_message_events_file(
     test: TestCase, text: str, *, phase: str | None = "final_answer"
 ) -> str:
@@ -2751,10 +2782,14 @@ class SpecCriticWorkflowTests(TestCase):
             "/repo", "main", "diff --git final", "final-base"
         )
 
+    @patch(
+        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation(),
+    )
     @patch("hitch.main.system_agents.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_stores_handoff_and_starts_monitor(
-        self, mock_spawn: MagicMock, mock_run: MagicMock
+        self, mock_spawn: MagicMock, mock_run: MagicMock, mock_observe: MagicMock
     ) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -2837,8 +2872,10 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(kwargs["display_author"], system_agents.PR_MONITOR_DISPLAY_AUTHOR)
         self.assertEqual(kwargs["output_schema"], system_agents._PR_MONITOR_OUTPUT_SCHEMA)
         self.assertIn("Do not edit files", kwargs["prompt"])
+        self.assertIn("framework already fetched", kwargs["prompt"])
         self.assertIn("https://github.com/cberner/hitch/pull/169", kwargs["prompt"])
-        self.assertIn("wait 2 minutes and re-check", kwargs["prompt"])
+        self.assertIn("wait 2 minutes", kwargs["prompt"])
+        mock_observe.assert_called_once_with(workflow)
         run = SystemAgentRun.objects.get(workflow=workflow)
         self.assertEqual(run.thread_id, "monitor-thread")
         commands = [call.args[0] for call in mock_run.call_args_list]
@@ -2864,11 +2901,16 @@ class SpecCriticWorkflowTests(TestCase):
                 ["git", "push", "-u", "origin", "HEAD:refs/heads/feature"],
             ],
         )
+        self.assertIn("gh_observation", run.input)
 
+    @patch(
+        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation({"pr_number": 170}),
+    )
     @patch("hitch.main.system_agents.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_opens_pr_with_gh_cli(
-        self, mock_spawn: MagicMock, mock_run: MagicMock
+        self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
     ) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -2973,6 +3015,10 @@ class SpecCriticWorkflowTests(TestCase):
         )
         mock_spawn.assert_called_once()
 
+    @patch(
+        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation({"pr_number": 173}),
+    )
     @patch("hitch.main.system_agents.subprocess.run")
     @patch("hitch.main.system_agents._surface_workflow_failure")
     def test_pr_prompt_completion_refuses_to_push_default_branch(
@@ -3029,7 +3075,7 @@ class SpecCriticWorkflowTests(TestCase):
     @patch("hitch.main.system_agents.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_ignores_terminal_branch_pr(
-        self, mock_spawn: MagicMock, mock_run: MagicMock
+        self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
     ) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -3131,6 +3177,10 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(handoff["source_tool"], "gh_pr_create")
         mock_spawn.assert_called_once()
 
+    @patch(
+        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation({"pr_number": 174}),
+    )
     @patch("hitch.main.system_agents.codex_events.latest_pr_snapshot_for_instance")
     @patch("hitch.main.system_agents.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -3139,6 +3189,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn: MagicMock,
         mock_run: MagicMock,
         mock_latest_pr_snapshot: MagicMock,
+        _mock_observe: MagicMock,
     ) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -3246,10 +3297,14 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(handoff["source_tool"], "gh_pr_create")
         mock_spawn.assert_called_once()
 
+    @patch(
+        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation({"pr_number": 171}),
+    )
     @patch("hitch.main.system_agents.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_keeps_created_pr_when_view_fails(
-        self, mock_spawn: MagicMock, mock_run: MagicMock
+        self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
     ) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -3335,10 +3390,14 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
         mock_surface.assert_called_once()
 
+    @patch(
+        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation(),
+    )
     @patch("hitch.main.system_agents.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_without_snapshot_monitors_existing_handoff(
-        self, mock_spawn: MagicMock, mock_run: MagicMock
+        self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
     ) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -3591,6 +3650,176 @@ class SpecCriticWorkflowTests(TestCase):
         )
         mock_spawn.assert_called_once()
 
+    def test_pr_monitor_prompt_formats_observation_in_schema_shape(self) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+        )
+        observation = _gh_monitor_observation(
+            {
+                "ci_status": "unknown",
+                "failing_jobs": [{"name": "lint", "conclusion": "failure"}],
+                "pending_jobs": [{"name": "tests"}],
+                "unresolved_threads": [{"path": "app.py", "line": 42}],
+            }
+        )
+
+        prompt = system_agents._pr_followup_monitor_prompt(workflow, {}, observation)
+        formatted = system_agents._pr_handoff_for_monitor_schema(observation["pr"])
+
+        self.assertIsNone(formatted["ci_status"])
+        self.assertEqual(
+            set(formatted["failing_jobs"][0]),
+            set(system_agents._PR_SAFE_LIST_ITEM_FIELDS),
+        )
+        self.assertEqual(formatted["failing_jobs"][0]["name"], "lint")
+        self.assertIsNone(formatted["failing_jobs"][0]["path"])
+        self.assertEqual(formatted["unresolved_threads"][0]["path"], "app.py")
+        self.assertIsNone(formatted["unresolved_threads"][0]["name"])
+        self.assertIn('"ci_status": null', prompt)
+        self.assertIn('"database_id": null', prompt)
+
+    @patch("hitch.main.system_agents.subprocess.run")
+    def test_pr_monitor_observation_fetches_github_state_with_gh(
+        self, mock_run: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": "https://github.com/cberner/hitch/pull/169",
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 169,
+                },
+            },
+        )
+        mock_run.side_effect = [
+            SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "url": "https://github.com/cberner/hitch/pull/169",
+                        "number": 169,
+                        "state": "OPEN",
+                        "isDraft": False,
+                        "title": "Add monitor",
+                        "baseRefName": "master",
+                        "headRefName": "feature",
+                        "headRefOid": "head123",
+                        "mergeable": "MERGEABLE",
+                        "mergeCommit": None,
+                        "createdAt": "2026-06-01T00:00:00Z",
+                        "updatedAt": "2026-06-01T00:01:00Z",
+                        "closedAt": None,
+                        "mergedAt": None,
+                        "comments": [
+                            {
+                                "body": "Please fix the edge case",
+                                "author": {"login": "alice"},
+                                "url": "https://github.com/cberner/hitch/pull/169#issuecomment-1",
+                            }
+                        ],
+                        "latestReviews": [
+                            {
+                                "state": "CHANGES_REQUESTED",
+                                "body": "Needs a regression test",
+                                "author": {"login": "bob"},
+                                "url": "https://github.com/cberner/hitch/pull/169#pullrequestreview-1",
+                            }
+                        ],
+                        "reactionGroups": [
+                            {"content": "THUMBS_UP", "users": {"totalCount": 1}}
+                        ],
+                        "reviewDecision": "CHANGES_REQUESTED",
+                        "reviews": [],
+                        "statusCheckRollup": [
+                            {
+                                "name": "lint",
+                                "status": "COMPLETED",
+                                "conclusion": "FAILURE",
+                                "detailsUrl": "https://github.com/cberner/hitch/actions/runs/1",
+                            },
+                            {
+                                "name": "tests",
+                                "status": "IN_PROGRESS",
+                                "detailsUrl": "https://github.com/cberner/hitch/actions/runs/2",
+                            },
+                        ],
+                    }
+                ),
+                stderr="",
+            ),
+            SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "data": {
+                            "repository": {
+                                "pullRequest": {
+                                    "reviewThreads": {
+                                        "pageInfo": {
+                                            "hasNextPage": False,
+                                            "endCursor": None,
+                                        },
+                                        "nodes": [
+                                            {
+                                                "id": "thread-1",
+                                                "isResolved": False,
+                                                "isOutdated": False,
+                                                "path": "app.py",
+                                                "line": 42,
+                                                "startLine": None,
+                                                "comments": {
+                                                    "nodes": [
+                                                        {
+                                                            "body": "This branch misses the retry",
+                                                            "url": "https://github.com/cberner/hitch/pull/169#discussion_r1",
+                                                            "author": {"login": "carol"},
+                                                        }
+                                                    ]
+                                                },
+                                            }
+                                        ],
+                                    }
+                                }
+                            }
+                        }
+                    }
+                ),
+                stderr="",
+            ),
+        ]
+
+        observation = system_agents._pr_monitor_observation_from_gh(workflow)
+
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        self.assertEqual(
+            commands[0][:4],
+            ["gh", "pr", "view", "https://github.com/cberner/hitch/pull/169"],
+        )
+        self.assertIn("comments", commands[0][-1])
+        self.assertIn("statusCheckRollup", commands[0][-1])
+        self.assertEqual(commands[1][:3], ["gh", "api", "graphql"])
+        pr = observation["pr"]
+        self.assertEqual(pr["review_signal"], "changes_requested")
+        self.assertEqual(pr["unresolved_thread_count"], 1)
+        self.assertEqual(pr["ci_status"], "failure")
+        self.assertEqual(pr["failing_jobs"][0]["name"], "lint")
+        self.assertEqual(pr["pending_jobs"][0]["name"], "tests")
+        feedback = observation["feedback"]
+        self.assertIn("Please fix the edge case", feedback)
+        self.assertIn("Needs a regression test", feedback)
+        self.assertIn("This branch misses the retry", feedback)
+        self.assertIn("name=lint", feedback)
+
+
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
     def test_monitor_blocker_spawns_pr_feedback_with_stale_branch_guard(
         self, mock_spawn: MagicMock
@@ -3677,10 +3906,89 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(progress[1]["label"], "Review")
         self.assertEqual(progress[1]["status"], "blocked")
 
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_monitor_uses_hitch_gh_observation_as_authoritative_pr(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": "https://github.com/cberner/hitch/pull/169",
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 169,
+                    "head_sha": "abc123",
+                },
+            },
+        )
+        events_path = _events_file(
+            self,
+            {
+                "status": "terminal",
+                "summary": "Agent copied stale data.",
+                "feedback": "",
+                "pr": {
+                    "pr_number": 169,
+                    "mergeable": True,
+                    "draft": False,
+                    "review_signal": "approved",
+                    "unresolved_thread_count": 0,
+                    "ci_status": "success",
+                },
+                "blockers": [],
+            },
+        )
+        instance = _instance(
+            thread_id="monitor-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=events_path,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            thread_id="monitor-thread",
+            instance=instance,
+            input={
+                "gh_observation": _gh_monitor_observation(
+                    {
+                        "mergeable": True,
+                        "draft": False,
+                        "review_signal": "approved",
+                        "unresolved_thread_count": 0,
+                        "ci_status": "failure",
+                        "failing_jobs": [{"name": "lint", "conclusion": "failure"}],
+                    },
+                    feedback="lint failed",
+                )
+            },
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        handoff = workflow.state[system_agents._PR_HANDOFF_STATE_KEY]
+        self.assertEqual(handoff["ci_status"], "failure")
+        self.assertEqual(handoff["failing_jobs"][0]["name"], "lint")
+        self.assertEqual(workflow.step, system_agents.STEP_PR_FEEDBACK_RUNNING)
+        self.assertEqual(
+            workflow.state[system_agents._PR_MONITOR_STATE_KEY]["status"], "blocked"
+        )
+        self.assertIn("name=lint", mock_spawn.call_args.kwargs["prompt"])
+
+    @patch(
+        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation({"head_sha": "newsha"}),
+    )
     @patch("hitch.main.system_agents.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_feedback_completion_restarts_monitor_with_updated_handoff(
-        self, mock_spawn: MagicMock, mock_run: MagicMock
+        self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
     ) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -4243,9 +4551,13 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
         self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
 
+    @patch(
+        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation({"ci_status": "pending"}),
+    )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pending_only_gates_do_not_consume_remediation_iteration(
-        self, mock_spawn: MagicMock
+        self, mock_spawn: MagicMock, _mock_observe: MagicMock
     ) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
