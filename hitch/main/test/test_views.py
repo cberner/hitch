@@ -14189,6 +14189,71 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, "No repo -")
         self.assertNotContains(response, "Matching proposal")
 
+    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    def test_reject_proposed_session_uses_visible_project_filter(
+        self, mock_cleanup: MagicMock
+    ) -> None:
+        selected_project = Project.objects.create(name="Hitch", repo_path="/repo")
+        visible_project = Project.objects.create(name="Other", repo_path="/other")
+        _seed_cookies(
+            self.client,
+            **{
+                _SELECTED_PROJECT_COOKIE: str(selected_project.pk),
+                _VISIBLE_SESSION_PROJECTS_COOKIE: f"[{visible_project.pk}]",
+            },
+        )
+        proposal = ProposedSession.objects.create(
+            project=visible_project,
+            title="Add docs coverage",
+        )
+
+        response = self.client.post(
+            reverse("update_proposed_session_outcome", args=[proposal.pk]),
+            {
+                "outcome_status": ProposedSession.OUTCOME_REJECTED,
+                "reason": "Not useful enough.",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], reverse("inbox"))
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_REJECTED)
+        self.assertEqual(proposal.outcome_notes, "Not useful enough.")
+        mock_cleanup.assert_not_called()
+
+    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    def test_update_outcome_rejects_proposal_hidden_by_visible_project_filter(
+        self, mock_cleanup: MagicMock
+    ) -> None:
+        visible_project = Project.objects.create(name="Hitch", repo_path="/repo")
+        hidden_project = Project.objects.create(name="Other", repo_path="/other")
+        _seed_cookies(
+            self.client,
+            **{
+                _SELECTED_PROJECT_COOKIE: str(visible_project.pk),
+                _VISIBLE_SESSION_PROJECTS_COOKIE: f"[{visible_project.pk}]",
+            },
+        )
+        proposal = ProposedSession.objects.create(
+            project=hidden_project,
+            title="Add docs coverage",
+        )
+
+        response = self.client.post(
+            reverse("update_proposed_session_outcome", args=[proposal.pk]),
+            {
+                "outcome_status": ProposedSession.OUTCOME_REJECTED,
+                "reason": "Not useful enough.",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.content, b"proposed session is required")
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        mock_cleanup.assert_not_called()
+
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_new_session_page_prefills_proposed_session(
