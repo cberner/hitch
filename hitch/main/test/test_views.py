@@ -7206,6 +7206,24 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    def test_new_session_page_exposes_worktree_override(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex)
+        mock_discover.return_value = [Path("/home/user/proj")]
+        _seed_cookies(self.client, **{_USE_WORKTREES_COOKIE: "true"})
+
+        response = self.client.get(reverse("new_session"))
+
+        self.assertContains(response, "Use worktree")
+        self.assertContains(response, 'name="use_worktrees" value="false"')
+        self.assertContains(
+            response,
+            'name="use_worktrees" value="true" data-new-session-use-worktree checked',
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
     def test_title_rendering(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
@@ -9401,6 +9419,31 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
+    def test_new_session_rejects_invalid_worktree_override(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        _setup_codex(mock_codex, models=[])
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "do thing",
+                "cwd": self.REPO,
+                "use_worktrees": "maybe",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, "invalid worktree setting", status_code=400)
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
     def test_new_session_plan_mode_matrix(
         self,
         mock_discover: MagicMock,
@@ -9882,6 +9925,73 @@ class NewSessionViewTests(TestCase):
             sandbox_policy=None,
             approval_mode="auto_review",
         )
+
+    @patch("hitch.main.views.create_worktree_for_session")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_worktree_override_precedence_matrix(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+        mock_create_worktree: MagicMock,
+    ) -> None:
+        worktree = Path("/home/user/.hitch/worktrees/proj/20260516120000-abcdef12")
+        mock_create_worktree.return_value = ManagedWorktree(
+            path=worktree,
+            branch="hitch/proj/20260516120000-abcdef12",
+            source_repo=Path(self.REPO),
+        )
+        _setup_codex(mock_codex, models=[])
+        cases: list[tuple[str, dict[str, str], str, str, bool]] = [
+            (
+                "posted override enables global default off",
+                {},
+                "true",
+                str(worktree),
+                True,
+            ),
+            (
+                "posted override disables global setting",
+                {_USE_WORKTREES_COOKIE: "true"},
+                "false",
+                self.REPO,
+                False,
+            ),
+        ]
+
+        for index, (
+            label,
+            cookies,
+            post_use_worktrees,
+            expected_cwd,
+            expected_create,
+        ) in enumerate(cases):
+            with self.subTest(label):
+                client = Client()
+                if cookies:
+                    _seed_cookies(client, **cookies)
+                mock_discover.return_value = [Path(self.REPO)]
+                mock_spawn.return_value = SimpleNamespace(thread_id=f"thread-{index}")
+                mock_spawn.reset_mock()
+                mock_create_worktree.reset_mock()
+
+                response = client.post(
+                    reverse("new_session"),
+                    data={
+                        "prompt": "do thing",
+                        "cwd": self.REPO,
+                        "use_worktrees": post_use_worktrees,
+                    },
+                )
+
+                self.assertEqual(response.status_code, 302)
+                if expected_create:
+                    mock_create_worktree.assert_called_once_with(self.REPO)
+                else:
+                    mock_create_worktree.assert_not_called()
+                self._assert_new_session_spawn(mock_spawn, cwd=expected_cwd)
 
     @patch("hitch.main.views.cleanup_worktree")
     @patch("hitch.main.views.create_worktree_for_session")

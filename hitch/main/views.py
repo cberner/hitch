@@ -809,6 +809,7 @@ def _new_session_form_context(
             if current_new_session_project is not None
             else ""
         ),
+        "current_new_session_use_worktrees": current_settings.use_worktrees,
         "current_new_session_auto_pr": current_new_session_auto_pr,
         "current_new_session_auto_qa": current_new_session_auto_qa,
         "bare_repo_project_value": _BARE_REPO_PROJECT_VALUE,
@@ -7775,6 +7776,19 @@ def _posted_auto_qa_override(raw: str | None, *, default: bool) -> tuple[bool, s
     return False, "invalid auto-QA setting"
 
 
+def _posted_use_worktree_override(
+    raw: str | None, *, default: bool
+) -> tuple[bool, str | None]:
+    if raw is None:
+        return default, None
+    value = raw.strip().lower()
+    if value in {"", "false"}:
+        return False, None
+    if value == "true":
+        return True, None
+    return False, "invalid worktree setting"
+
+
 def _posted_web_search_override(
     raw: str | None, *, default: str
 ) -> tuple[str, str | None]:
@@ -9511,6 +9525,11 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         if coding_agent_override
         else settings
     )
+    use_worktrees, use_worktrees_error = _posted_use_worktree_override(
+        request.POST.get("use_worktrees"), default=settings.use_worktrees
+    )
+    if use_worktrees_error is not None:
+        return HttpResponseBadRequest(use_worktrees_error)
     cookie_updates = resolved_settings.cookie_updates
     source_project = target.project
     source_developer_instructions = _developer_instructions_for_project(
@@ -9658,7 +9677,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         return response
 
     managed_worktree = None
-    if settings.use_worktrees:
+    if use_worktrees:
         try:
             managed_worktree = create_worktree_for_session(cwd)
         except WorktreeCreationError as exc:

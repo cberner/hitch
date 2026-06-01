@@ -454,6 +454,11 @@
                     {% endif %}
                 </div>
                 <label class="checkbox-label">
+                    <span>Use worktree</span>
+                    <input type="hidden" name="use_worktrees" value="false">
+                    <input type="checkbox" name="use_worktrees" value="true" data-new-session-use-worktree {% if current_new_session_use_worktrees %}checked{% endif %}>
+                </label>
+                <label class="checkbox-label">
                     <span>Auto-PR</span>
                     <input type="hidden" name="auto_pr" value="false">
                     <input type="checkbox" name="auto_pr" value="true" data-new-session-auto-pr {% if current_new_session_auto_pr %}checked{% endif %}>
