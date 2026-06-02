@@ -6218,6 +6218,47 @@ def pr_handoff_stage_refresh_due(workflow: SystemWorkflow | None) -> bool:
     return _should_refresh_pr_handoff_for_stage(workflow, handoff, force=False)
 
 
+def refresh_unarchived_session_pr_stages(*, limit: int | None = None) -> int:
+    """Refresh GitHub-backed PR stages for unarchived sessions.
+
+    The session-list view performs this refresh for at most one row per render.
+    The background auto-proposal scheduler uses this helper to let all visible
+    sessions converge even when the list page is not being opened repeatedly.
+    """
+    active_thread_ids = list(
+        SessionMetadata.objects.filter(
+            codex_archived=False,
+            codex_updated_at__isnull=False,
+        ).values_list("thread_id", flat=True)
+    )
+    if not active_thread_ids:
+        return 0
+    workflows = (
+        SystemWorkflow.objects.filter(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id__in=active_thread_ids,
+        )
+        .order_by("main_thread_id", "-updated_at", "-pk")
+    )
+    latest_workflows: list[SystemWorkflow] = []
+    seen_thread_ids: set[str] = set()
+    for workflow in workflows:
+        if workflow.main_thread_id in seen_thread_ids:
+            continue
+        seen_thread_ids.add(workflow.main_thread_id)
+        latest_workflows.append(workflow)
+
+    refreshed = 0
+    for workflow in latest_workflows:
+        if limit is not None and refreshed >= limit:
+            break
+        if not pr_handoff_stage_refresh_due(workflow):
+            continue
+        refreshed_pr_handoff_for_stage(workflow)
+        refreshed += 1
+    return refreshed
+
+
 def refreshed_pr_handoff_for_stage(
     workflow: SystemWorkflow | None, *, force: bool = False
 ) -> dict[str, Any]:
