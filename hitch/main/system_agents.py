@@ -173,6 +173,7 @@ _CI_BLOCKING_STATUSES = frozenset(
         "failed",
         "failure",
         "startup_failure",
+        "stale",
         "timed_out",
     }
 )
@@ -279,7 +280,6 @@ _GH_PR_MONITOR_FIELDS = (
     "reactionGroups",
     "reviewDecision",
     "reviews",
-    "statusCheckRollup",
 )
 _GH_MONITOR_TEXT_MAX_CHARS = 6000
 _GH_REVIEW_THREAD_PAGE_LIMIT = 5
@@ -300,7 +300,7 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
           line
           path
           startLine
-          comments(first: 20) {
+          comments(last: 20) {
             nodes {
               author {
                 login
@@ -336,7 +336,6 @@ query($owner: String!, $repo: String!, $number: Int!, $after: String) {
               detailsUrl
               name
               status
-              workflowName
             }
             ... on StatusContext {
               context
