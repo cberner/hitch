@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast, override
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
 from django.core import signing
 from django.http import HttpResponse
@@ -543,6 +544,51 @@ class SessionViewTests(TestCase):
                 self.assertContains(response, 'name="archived" value="true"')
                 self.assertContains(response, 'role="menuitem">Archive</button>')
                 self.assertNotContains(response, ">Edit</button>")
+
+    @patch("hitch.main.views.Codex")
+    def test_action_menu_includes_debug_chat_link(self, mock_codex: MagicMock) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/tmp/demo")
+        SessionMetadata.objects.create(
+            thread_id="thread-1", cwd="/tmp/demo", project=project
+        )
+        thread = _thread([_turn([_user_message("hi")])], cwd="/tmp/demo")
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, ">Debug chat</a>")
+        debug_url = cast(str, cast(Any, response).context["debug_chat_url"])
+        parsed = urlparse(debug_url)
+        query = parse_qs(parsed.query)
+        self.assertEqual(parsed.path, reverse("new_session"))
+        self.assertEqual(query["project"], [str(project.pk)])
+        self.assertEqual(
+            query["prompt"],
+            [
+                "Debug and fix the user's issue from session UID thread-1.\n\n"
+                "User issue: "
+            ],
+        )
+
+    @patch("hitch.main.views.Codex")
+    def test_action_menu_includes_cwd_for_bare_repo_debug_chat_link(
+        self, mock_codex: MagicMock
+    ) -> None:
+        Project.objects.create(name="Hitch", repo_path="/tmp/demo")
+        SessionMetadata.objects.create(
+            thread_id="thread-1", cwd="/tmp/demo", project_cleared=True
+        )
+        thread = _thread([_turn([_user_message("hi")])], cwd="/tmp/demo")
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        debug_url = cast(str, cast(Any, response).context["debug_chat_url"])
+        query = parse_qs(urlparse(debug_url).query)
+        self.assertNotIn("project", query)
+        self.assertEqual(query["cwd"], ["/tmp/demo"])
 
     @patch("hitch.main.views.Codex")
     def test_renders_move_to_project_menu_and_dialog(self, mock_codex: MagicMock) -> None:

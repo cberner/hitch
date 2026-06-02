@@ -14983,6 +14983,69 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, f'value="{project.pk}" selected')
         self.assertContains(response, f'href="{reverse("inbox")}"')
 
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_new_session_page_prefills_prompt_and_project_from_query(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _setup_codex(mock_codex)
+        prompt = (
+            "Debug and fix the user's issue from session UID thread-1.\n\n"
+            "User issue: "
+        )
+
+        response = self.client.get(
+            reverse("new_session"), {"prompt": prompt, "project": str(project.pk)}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, html.escape(prompt))
+        self.assertContains(response, f'value="{project.pk}" selected')
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/other")])
+    @patch("hitch.main.views.Codex")
+    def test_new_session_page_rejects_unavailable_project_from_query(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _setup_codex(mock_codex)
+
+        response = self.client.get(
+            reverse("new_session"), {"prompt": "debug this", "project": str(project.pk)}
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_new_session_page_prefills_bare_repo_cwd_from_query(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _setup_codex(mock_codex)
+
+        response = self.client.get(
+            reverse("new_session"), {"prompt": "debug this", "cwd": "/repo"}
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "debug this")
+        self.assertContains(response, 'value="__bare_repo__" selected')
+        self.assertContains(response, '<option value="/repo" selected>')
+        self.assertNotContains(response, f'value="{project.pk}" selected')
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/other")])
+    @patch("hitch.main.views.Codex")
+    def test_new_session_page_rejects_unavailable_bare_repo_cwd(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex)
+
+        response = self.client.get(reverse("new_session"), {"cwd": "/repo"})
+
+        self.assertEqual(response.status_code, 404)
+
     @patch("hitch.main.views.discover_repos", return_value=[Path("/other")])
     @patch("hitch.main.views.Codex")
     def test_new_session_page_rejects_proposed_session_for_unavailable_repo(

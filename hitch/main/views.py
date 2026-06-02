@@ -367,6 +367,10 @@ _VISIBLE_SESSION_PROJECTS_COOKIE = "hitch_visible_session_project_ids"
 _SHOW_NO_PROJECT_SESSIONS_COOKIE = "hitch_show_no_project_sessions"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 _BARE_REPO_PROJECT_VALUE = "__bare_repo__"
+_DEBUG_CHAT_PROMPT_TEMPLATE = (
+    "Debug and fix the user's issue from session UID {session_id}.\n\n"
+    "User issue: "
+)
 
 # Roughly one year. Long enough that a user's pick survives across
 # sessions without ever needing a manual revisit; short enough that the
@@ -761,16 +765,19 @@ def _new_session_form_context(
     *,
     initial_prompt: str = "",
     proposed_session: ProposedSession | None = None,
+    prefill_bare_repo_cwd: str = "",
     repos: list[str] | None = None,
 ) -> dict[str, Any]:
     if repos is None:
         repos = [str(p) for p in discover_repos()]
     repo_set = set(repos)
-    saved_repo = (
-        current_settings.last_selected_repo
-        if current_settings.last_selected_repo in repo_set
-        else ""
-    )
+    if prefill_bare_repo_cwd not in repo_set:
+        prefill_bare_repo_cwd = ""
+    saved_repo = ""
+    if prefill_bare_repo_cwd:
+        saved_repo = prefill_bare_repo_cwd
+    elif current_settings.last_selected_repo in repo_set:
+        saved_repo = current_settings.last_selected_repo
     new_session_projects = [
         project for project in projects if project.repo_path in repo_set
     ]
@@ -779,8 +786,12 @@ def _new_session_form_context(
         if proposed_session is not None
         else current_project
     )
-    current_new_session_project = _new_session_project_for_dialog(
-        selected_project, saved_repo, new_session_projects
+    current_new_session_project = (
+        None
+        if prefill_bare_repo_cwd
+        else _new_session_project_for_dialog(
+            selected_project, saved_repo, new_session_projects
+        )
     )
     current_new_session_auto_pr = _effective_auto_pr_enabled(
         current_new_session_project,
@@ -3909,7 +3920,8 @@ def _render_session_detail(
     task_plan = _task_plan_context(
         codex_events.latest_task_plan_for_instance(active_instance)
     )
-    diff_view = build_worktree_diff(_thread_cwd(thread))
+    thread_cwd = _thread_cwd(thread)
+    diff_view = build_worktree_diff(thread_cwd)
     active_session_demo = demo.active_demo_for(session_id)
     session_demo = demo.latest_demo_for(session_id)
     demo_system_session_url = _demo_system_session_url(session_id)
@@ -3934,6 +3946,9 @@ def _render_session_detail(
         workflow_status_text
         if active_system_workflow is not None and active_instance is None
         else ""
+    )
+    debug_chat_url = _debug_chat_new_session_url(
+        session_id, session_project, cwd=thread_cwd
     )
     response = render(
         request,
@@ -4020,6 +4035,7 @@ def _render_session_detail(
             "projects": projects,
             "session_project": session_project,
             "session_project_id": session_project.pk if session_project is not None else "",
+            "debug_chat_url": debug_chat_url,
             **settings_context,
         },
     )
@@ -4035,6 +4051,17 @@ def _thread_resume_missing_or_invalid(exc: InvalidRequestError) -> bool:
             message,
         )
     )
+
+
+def _debug_chat_new_session_url(
+    session_id: str, project: Project | None, *, cwd: str | None
+) -> str:
+    query_params = {"prompt": _DEBUG_CHAT_PROMPT_TEMPLATE.format(session_id=session_id)}
+    if project is not None:
+        query_params["project"] = str(project.pk)
+    elif cwd:
+        query_params["cwd"] = cwd
+    return f"{reverse('new_session')}?{urlencode(query_params)}"
 
 
 @require_http_methods(["GET", "POST"])
@@ -9551,17 +9578,68 @@ def _proposed_session_for_new_session_page(
     return proposed_session
 
 
+def _prefill_project_for_new_session_page(
+    request: HttpRequest, projects: list[Project], *, repo_set: set[str]
+) -> Project | None:
+    raw_project_id = request.GET.get("project")
+    if raw_project_id is None:
+        return None
+    raw_project_id = raw_project_id.strip()
+    if not raw_project_id:
+        return None
+    try:
+        project_id = int(raw_project_id)
+    except ValueError as exc:
+        raise Http404("project not found") from exc
+    project = next(
+        (
+            project
+            for project in projects
+            if project.pk == project_id and project.repo_path in repo_set
+        ),
+        None,
+    )
+    if project is None:
+        raise Http404("project not found")
+    return project
+
+
+def _prefill_bare_repo_cwd_for_new_session_page(
+    request: HttpRequest, *, repo_set: set[str]
+) -> str:
+    cwd = request.GET.get("cwd", "").strip()
+    if not cwd:
+        return ""
+    if cwd not in repo_set:
+        raise Http404("repository not found")
+    return cwd
+
+
 def _render_new_session_page(request: HttpRequest) -> HttpResponse:
     codex_pool.reconcile_dead()
     repos = [str(p) for p in discover_repos()]
+    repo_set = set(repos)
     proposed_session = _proposed_session_for_new_session_page(
-        request, repo_set=set(repos)
+        request, repo_set=repo_set
     )
     models_data, resolved_settings = _cached_models_and_settings(request)
     current_settings = resolved_settings.values
     cookie_updates = resolved_settings.cookie_updates
     projects = list(Project.objects.all())
     current_project = _selected_project_for_settings(current_settings, projects)
+    prefill_bare_repo_cwd = ""
+    if proposed_session is None:
+        prefill_project = _prefill_project_for_new_session_page(
+            request, projects, repo_set=repo_set
+        )
+        if prefill_project is not None:
+            current_project = prefill_project
+        else:
+            prefill_bare_repo_cwd = _prefill_bare_repo_cwd_for_new_session_page(
+                request, repo_set=repo_set
+            )
+            if prefill_bare_repo_cwd:
+                current_project = None
     settings_context = _settings_context(current_settings, models_data)
     new_session_context = _new_session_form_context(
         current_settings,
@@ -9570,9 +9648,10 @@ def _render_new_session_page(request: HttpRequest) -> HttpResponse:
         initial_prompt=(
             _proposed_session_prompt(proposed_session)
             if proposed_session is not None
-            else ""
+            else request.GET.get("prompt", "")
         ),
         proposed_session=proposed_session,
+        prefill_bare_repo_cwd=prefill_bare_repo_cwd,
         repos=repos,
     )
     response = render(
