@@ -13320,6 +13320,53 @@ class SetSessionArchivedViewTests(TestCase):
         ))
         mock_codex.return_value.__enter__.return_value.thread_archive.assert_called_once_with("abc")
 
+    @patch("hitch.main.demo.subprocess.run")
+    @patch("hitch.main.views.Codex")
+    def test_failed_archive_does_not_clean_up_active_demo(
+        self, mock_codex: MagicMock, mock_run: MagicMock
+    ) -> None:
+        mock_codex.return_value.__enter__.return_value.thread_archive.side_effect = (
+            RuntimeError("codex unavailable")
+        )
+        mock_run.side_effect = [
+            SimpleNamespace(
+                stdout=(
+                    '[{"Config":{"Labels":{'
+                    '"io.hitch.managed":"demo",'
+                    '"io.hitch.session":"abc",'
+                    '"io.hitch.demo_token":"token",'
+                    '"io.hitch.container_name":"hitch-demo-abc-abcd"'
+                    "}}}]"
+                ),
+                stderr="",
+                returncode=0,
+            ),
+            SimpleNamespace(stdout="", stderr="", returncode=0),
+            SimpleNamespace(stdout="[]", stderr="", returncode=0),
+        ]
+        SessionDemo.objects.create(
+            thread_id="abc",
+            host="127.0.0.1",
+            port=45678,
+            container_id="container-1",
+            container_name="hitch-demo-abc-abcd",
+            runtime="podman",
+            status=SessionDemo.STATUS_ACTIVE,
+            registration_token="token",
+        )
+
+        with self.assertRaises(RuntimeError):
+            self.client.post(
+                reverse("set_session_archived", kwargs={"session_id": "abc"}),
+                data={"archived": "true"},
+            )
+
+        mock_run.assert_not_called()
+        self.assertEqual(
+            SessionDemo.objects.get(thread_id="abc").status,
+            SessionDemo.STATUS_ACTIVE,
+        )
+
     @patch("hitch.main.views.codex_pool.cleanup_input_images_for_thread")
     @patch("hitch.main.views.Codex")
     def test_archive_keeps_retained_input_images_for_unarchive(
