@@ -5593,6 +5593,74 @@ def _local_session_cwd(session_id: str) -> str:
     return metadata.cwd if metadata is not None else ""
 
 
+def _start_claude_qa_workflow(
+    *,
+    session_id: str,
+    qa_activation: bool,
+    settings: SettingsValues,
+    input_image_paths: list[str],
+) -> HttpResponse:
+    """Start a PR/QA workflow on an existing Claude session (manual /qa or /pr).
+
+    The Claude analog of the Codex follow-up activation: the workflow records the
+    thread's (Claude) backend and spawns its sub-agents and the PR-prompt turn as
+    Claude workers; the PR itself is opened by hitch via ``gh``. cwd and per-turn
+    settings come from local rows since the thread has no Codex rollout to resume.
+    """
+    # ``/qa`` and ``/pr`` carry no image attachments (rejected earlier), so the
+    # saved temp copies are not needed.
+    _cleanup_saved_input_images(input_image_paths)
+    cwd = _local_session_cwd(session_id)
+    if not cwd:
+        return HttpResponseBadRequest("session has no cwd")
+    if not _is_allowed_session_cwd(cwd):
+        return HttpResponseBadRequest("session cwd is not an allowed repository")
+    previous_instance = codex_pool.latest_for_thread(session_id)
+    model = settings.model
+    if model not in claude_options.VALID_CLAUDE_MODELS:
+        prior_model = previous_instance.model if previous_instance is not None else ""
+        model = (
+            prior_model
+            if prior_model in claude_options.VALID_CLAUDE_MODELS
+            else claude_options.DEFAULT_CLAUDE_MODEL
+        )
+    developer_instructions = (
+        previous_instance.developer_instructions
+        if previous_instance is not None
+        else _developer_instructions_for_project(
+            settings, _project_for_cwd(cwd, list(Project.objects.all()))
+        )
+    )
+    auto_merge_to_local_branch, auto_merge_branch = (
+        _auto_merge_to_local_branch_for_session(session_id)
+    )
+    workflow_kwargs: dict[str, Any] = {
+        "main_thread_id": session_id,
+        "cwd": cwd,
+        "sandbox_policy": _effective_sandbox_policy(settings) or None,
+        "approval_mode": _effective_approval_mode(settings),
+        "model": model,
+        "reasoning_effort": settings.reasoning_effort or None,
+        "developer_instructions": developer_instructions or None,
+        "enable_memories": settings.enable_memories,
+        "initial_user_message_index": _claude_user_message_index(session_id),
+    }
+    web_search_mode = _valid_web_search_mode_or_default(settings.web_search_mode)
+    if web_search_mode:
+        workflow_kwargs["web_search_mode"] = web_search_mode
+    base_instructions = _base_instructions_for_settings(settings)
+    if base_instructions:
+        workflow_kwargs["base_instructions"] = base_instructions
+    if settings.qa_panel_enabled:
+        workflow_kwargs["qa_panel_enabled"] = True
+    if qa_activation:
+        workflow_kwargs["open_pr_on_lgtm"] = False
+    if auto_merge_to_local_branch and auto_merge_branch:
+        workflow_kwargs["auto_merge_branch"] = auto_merge_branch
+    system_agents.start_pr_qa_workflow(**workflow_kwargs)
+    return redirect("session", session_id=session_id)
+
+
 def _send_claude_follow_up(
     *,
     session_id: str,
@@ -10258,9 +10326,11 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         # follow-up turns around the app-server entirely.
         if _session_is_claude(session_id):
             if qa_workflow_activation:
-                _cleanup_saved_input_images(input_image_paths)
-                return HttpResponseBadRequest(
-                    "PR/QA workflow is not supported for Claude sessions"
+                return _start_claude_qa_workflow(
+                    session_id=session_id,
+                    qa_activation=qa_activation,
+                    settings=settings,
+                    input_image_paths=input_image_paths,
                 )
             return _send_claude_follow_up(
                 session_id=session_id,
@@ -11338,11 +11408,11 @@ def _start_candidate_proposal_session(
     prompt = _candidate_proposal_continuation_prompt(prompt)
     # The candidate thread's backend is fixed by its history. Normalize the
     # per-turn model to that backend so selecting Claude (or Codex) in settings
-    # can't queue a worker with a model id the CLI will reject, and gate the
-    # Codex-only auto-review (GitHub PR-open) workflow off for a Claude thread. A
-    # Codex thread keeps its own prior model as the fallback so a plan turn
-    # (which requires a concrete model) is not left without one. The Spec Critic
-    # runs on the resolved backend (its sub-agents spawn as Claude workers).
+    # can't queue a worker with a model id the CLI will reject. A Codex thread
+    # keeps its own prior model as the fallback so a plan turn (which requires a
+    # concrete model) is not left without one. Auto-QA/PR and the Spec Critic run
+    # on the resolved backend (their sub-agents spawn as Claude workers, and the
+    # PR is opened by hitch via ``gh``).
     prior_candidate_instance = codex_pool.latest_for_thread(
         candidate_session.thread_id
     )
@@ -11359,17 +11429,6 @@ def _start_candidate_proposal_session(
             prior_candidate_instance.model if prior_candidate_instance else None
         ),
     )
-    if candidate_backend == CodexInstance.BACKEND_CLAUDE:
-        # Auto-PR (GitHub PR-open) and manual PR/QA activation are not wired for
-        # Claude. Reject a /qa or /pr acceptance the same way other Claude
-        # sessions do, rather than silently dropping the activation and running an
-        # ordinary continuation turn. Auto-QA review runs on the local worker
-        # backend, so that (the non-activation path) is preserved.
-        if qa_workflow_activation:
-            return HttpResponseBadRequest(
-                "PR/QA workflow is not supported for Claude sessions"
-            )
-        auto_pr_enabled = False
     base_instructions = _base_instructions_for_settings(spawn_settings)
     project = None if target.project_cleared else candidate_session.project or target.project
     developer_instructions = _developer_instructions_for_project(settings, project)
@@ -11992,11 +12051,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
     claude_start = (
         _effective_provider(_stored_settings(request)) == coding_agents.PROVIDER_CLAUDE
     )
-    # The PR/QA workflow spawns Codex workers, so it cannot run a Claude session.
-    if claude_start and qa_workflow_activation:
-        return HttpResponseBadRequest(
-            "PR/QA workflow is not supported for Claude sessions"
-        )
     if claude_start:
         # The Claude spawn path needs no Codex model catalog, and the
         # provider-aware resolver ignores ``models_data`` for Claude, so skip the
@@ -12105,17 +12159,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         else:
             thread_name = _PR_SLASH_PROMPT if pr_activation else _QA_SLASH_PROMPT
         base_instructions = _base_instructions_for_settings(spawn_settings)
-        create_thread_kwargs: dict[str, Any] = {
-            "cwd": session_cwd,
-            "name": thread_name,
-            "developer_instructions": source_developer_instructions or None,
-            "model": settings.model or None,
-            "enable_memories": settings.enable_memories,
-        }
-        if web_search_mode:
-            create_thread_kwargs["web_search_mode"] = web_search_mode
-        if base_instructions:
-            create_thread_kwargs["base_instructions"] = base_instructions
         proposal_claimed = False
         if proposed_session is not None:
             claim_response = _claim_new_session_proposal_start(
@@ -12126,7 +12169,29 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
                 return claim_response
             proposal_claimed = True
         try:
-            thread_id = codex_pool.create_session_thread(**create_thread_kwargs)
+            if claude_start:
+                # Claude has no app-server thread; mint a local shell (the workflow
+                # then spawns its Claude sub-agents and PR-prompt turn on it). The
+                # model was already normalized to a Claude id above.
+                thread_id = codex_pool.create_claude_session_thread(
+                    cwd=session_cwd,
+                    name=thread_name,
+                    model=settings.model or None,
+                    project=None if target.project_cleared else source_project,
+                )
+            else:
+                create_thread_kwargs: dict[str, Any] = {
+                    "cwd": session_cwd,
+                    "name": thread_name,
+                    "developer_instructions": source_developer_instructions or None,
+                    "model": settings.model or None,
+                    "enable_memories": settings.enable_memories,
+                }
+                if web_search_mode:
+                    create_thread_kwargs["web_search_mode"] = web_search_mode
+                if base_instructions:
+                    create_thread_kwargs["base_instructions"] = base_instructions
+                thread_id = codex_pool.create_session_thread(**create_thread_kwargs)
         except Exception:
             if proposal_claimed:
                 assert proposed_session is not None
@@ -12252,12 +12317,10 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         # Claude model so the CLI does not reject the turn.
         if spawn_kwargs.get("model") not in claude_options.VALID_CLAUDE_MODELS:
             spawn_kwargs["model"] = claude_options.DEFAULT_CLAUDE_MODEL
-        # Auto-QA runs entirely on the local worker backend: the QA workflow
-        # records the session's backend and spawns its sub-agents as Claude
-        # workers, and an LGTM with ``open_pr_on_lgtm=False`` just completes the
-        # workflow. Auto-PR (GitHub PR-open) and the Spec Critic preflight are
-        # not wired for Claude yet, so they stay disabled here.
-        auto_pr_enabled = False
+        # Auto-QA and Auto-PR both run on the local worker backend now: the QA
+        # workflow records the session's backend and spawns its sub-agents as
+        # Claude workers, and the PR is opened by hitch via ``gh`` rather than the
+        # agent, so neither needs the Codex app-server.
     if input_image_paths:
         spawn_kwargs["input_image_paths"] = input_image_paths
     if web_search_mode:

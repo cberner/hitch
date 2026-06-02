@@ -9867,6 +9867,32 @@ class NewSessionViewTests(TestCase):
         self.assertTrue(kwargs.get("plan_mode"))
         self.assertEqual(kwargs["model"], claude_options.DEFAULT_CLAUDE_MODEL)
 
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_claude_session_forwards_auto_pr(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        # Auto-PR is now driven by hitch via gh, so a Claude session honors the
+        # auto_pr setting rather than being forced off.
+        _seed_cookies(self.client, hitch_provider="claude")
+        mock_discover.return_value = [Path(self.REPO)]
+        _setup_codex(mock_codex, models=[])
+        mock_spawn.return_value = SimpleNamespace(thread_id="claude-pr")
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "Build a feature", "cwd": self.REPO, "auto_pr": "true"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(kwargs["backend"], CodexInstance.BACKEND_CLAUDE)
+        self.assertTrue(kwargs.get("auto_pr_enabled"))
+
     @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
     @patch("hitch.main.views.codex_pool.create_session_thread", return_value="thread-spec")
@@ -11437,7 +11463,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_turn")
-    def test_claude_candidate_qa_activation_is_rejected(
+    def test_claude_candidate_qa_activation_starts_workflow(
         self,
         mock_turn: MagicMock,
         mock_codex: MagicMock,
@@ -11445,9 +11471,9 @@ class NewSessionViewTests(TestCase):
         mock_managed_worktrees: MagicMock,
         mock_start_qa: MagicMock,
     ) -> None:
-        # PR/QA is not wired for Claude, so a /qa acceptance of a Claude candidate
-        # must return the same unsupported error other Claude sessions get -- not
-        # silently fall through to an ordinary continuation turn.
+        # PR/QA now runs on the local Claude backend (the PR is opened by hitch
+        # via gh), so a /qa acceptance of a Claude candidate starts the workflow
+        # on the candidate thread rather than being rejected.
         mock_discover.return_value = [Path(self.REPO)]
         mock_managed_worktrees.return_value = [Path("/repo-worktree")]
         _setup_codex(mock_codex, models=[])
@@ -11491,10 +11517,14 @@ class NewSessionViewTests(TestCase):
             },
         )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertIn(b"not supported for Claude", response.content)
+        self.assertEqual(response.status_code, 302)
+        mock_start_qa.assert_called_once()
+        self.assertEqual(
+            mock_start_qa.call_args.kwargs["main_thread_id"], "candidate-thread"
+        )
+        # /qa reviews without opening a PR.
+        self.assertFalse(mock_start_qa.call_args.kwargs.get("open_pr_on_lgtm", True))
         mock_turn.assert_not_called()
-        mock_start_qa.assert_not_called()
 
     @patch("hitch.main.views.system_agents.spec_critic_should_run")
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")

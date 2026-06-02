@@ -1738,6 +1738,48 @@ class ClaudeFollowUpAutoQaTests(TestCase):
         # The session's prior Claude model is preserved rather than defaulting.
         self.assertEqual(mock_spawn.call_args.kwargs["model"], "claude-sonnet-4-6")
 
+    def test_manual_qa_starts_workflow_on_claude_session(self) -> None:
+        from hitch.main import system_agents, views
+
+        self._claude_instance(model="claude-sonnet-4-6")
+        with (
+            patch.object(views, "_is_allowed_session_cwd", return_value=True),
+            patch.object(views, "_claude_user_message_index", return_value=2),
+            patch.object(system_agents, "start_pr_qa_workflow") as mock_start,
+        ):
+            response = views._start_claude_qa_workflow(
+                session_id="claude-thread",
+                qa_activation=True,
+                settings=self._settings(model="claude-sonnet-4-6"),
+                input_image_paths=[],
+            )
+        self.assertEqual(response.status_code, 302)
+        kwargs = mock_start.call_args.kwargs
+        self.assertEqual(kwargs["main_thread_id"], "claude-thread")
+        self.assertEqual(kwargs["model"], "claude-sonnet-4-6")
+        self.assertEqual(kwargs["initial_user_message_index"], 2)
+        # /qa reviews without opening a PR; the workflow records the Claude
+        # backend from the thread and runs its sub-agents as Claude workers.
+        self.assertFalse(kwargs["open_pr_on_lgtm"])
+
+    def test_manual_pr_opens_pr_on_claude_session(self) -> None:
+        from hitch.main import system_agents, views
+
+        self._claude_instance(model="claude-sonnet-4-6")
+        with (
+            patch.object(views, "_is_allowed_session_cwd", return_value=True),
+            patch.object(views, "_claude_user_message_index", return_value=0),
+            patch.object(system_agents, "start_pr_qa_workflow") as mock_start,
+        ):
+            views._start_claude_qa_workflow(
+                session_id="claude-thread",
+                qa_activation=False,  # /pr
+                settings=self._settings(),
+                input_image_paths=[],
+            )
+        # /pr leaves open_pr_on_lgtm at its default (True) so hitch opens the PR.
+        self.assertNotIn("open_pr_on_lgtm", mock_start.call_args.kwargs)
+
 
 class CandidateThreadIndexTests(TestCase):
     """A Claude candidate thread is local-only, so its user-message index must
