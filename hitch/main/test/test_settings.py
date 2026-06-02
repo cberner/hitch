@@ -44,8 +44,12 @@ class DatabaseSettingsTests(SimpleTestCase):
         database = common_settings.DATABASES["default"]
         options = cast(dict[str, object], database["OPTIONS"])
 
-        self.assertEqual(options["timeout"], 30)
-        self.assertEqual(options["init_command"], "PRAGMA journal_mode=WAL")
+        self.assertEqual(options["timeout"], 60)
+        self.assertEqual(options["transaction_mode"], "IMMEDIATE")
+        init_command = str(options["init_command"])
+        self.assertIn("PRAGMA journal_mode=WAL", init_command)
+        self.assertIn("PRAGMA synchronous=NORMAL", init_command)
+        self.assertIn("PRAGMA busy_timeout=60000", init_command)
 
 
 class CodingAgentsTests(SimpleTestCase):

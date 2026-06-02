@@ -8,11 +8,12 @@ import threading
 from collections.abc import Iterable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import cast, override
+from typing import Any, cast, override
 from unittest.mock import MagicMock, call, patch
 
 from django.core.management import call_command
 from django.core.management.base import CommandError
+from django.db import connection
 from django.http import StreamingHttpResponse
 from django.test import RequestFactory, TestCase, override_settings
 from django.urls import reverse
@@ -597,6 +598,35 @@ class DemoRegistrationTests(TestCase):
         self.assertNotEqual(session_demo.registration_token, "old-token")
         self.assertEqual(session_demo.container_id, "")
 
+    @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
+    @patch("hitch.main.demo._remove_container")
+    def test_request_demo_start_cleans_existing_container_outside_transaction(
+        self, mock_remove: MagicMock, _cleanup: MagicMock
+    ) -> None:
+        SessionDemo.objects.create(
+            thread_id="thread-1",
+            host="127.0.0.1",
+            port=4567,
+            container_id="old-container",
+            container_name="hitch-demo-thread-1-old",
+            runtime="podman",
+            status=SessionDemo.STATUS_ACTIVE,
+            registration_token="old-token",
+            generation=1,
+        )
+        baseline_savepoints = list(connection.savepoint_ids)
+
+        def assert_unlocked(_demo: SessionDemo, *, ignore_missing: bool) -> None:
+            self.assertEqual(connection.savepoint_ids, baseline_savepoints)
+            self.assertTrue(ignore_missing)
+
+        mock_remove.side_effect = assert_unlocked
+
+        session_demo = demo.request_demo_start("thread-1")
+
+        mock_remove.assert_called_once()
+        self.assertEqual(session_demo.status, SessionDemo.STATUS_REQUESTED)
+
     def test_register_demo_management_command_marks_preparing(self) -> None:
         SessionDemo.objects.create(
             thread_id="thread-1",
@@ -1105,6 +1135,136 @@ class DemoRegistrationTests(TestCase):
         )
 
     @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
+    @patch("hitch.main.demo._verify_registered_container_labels")
+    def test_register_active_verifies_container_outside_transaction(
+        self, mock_verify: MagicMock, _cleanup: MagicMock
+    ) -> None:
+        session_demo = demo.request_demo_start("thread-1")
+        baseline_savepoints = list(connection.savepoint_ids)
+
+        def assert_unlocked(**kwargs: object) -> None:
+            self.assertEqual(connection.savepoint_ids, baseline_savepoints)
+            self.assertEqual(kwargs["target"], "container123")
+            self.assertEqual(kwargs["thread_id"], "thread-1")
+            self.assertEqual(kwargs["token"], session_demo.registration_token)
+            self.assertEqual(kwargs["container_name"], "hitch-demo-thread-1-abcd")
+            self.assertEqual(kwargs["port"], 45678)
+
+        mock_verify.side_effect = assert_unlocked
+
+        updated = demo.register_demo_container(
+            "thread-1",
+            {
+                "token": session_demo.registration_token,
+                "status": "active",
+                "container_name": "hitch-demo-thread-1-abcd",
+                "container_id": "container123",
+                "host": "127.0.0.1",
+                "port": 45678,
+                "logs": "ready",
+            },
+        )
+
+        self.assertEqual(updated.status, SessionDemo.STATUS_ACTIVE)
+        mock_verify.assert_called_once()
+
+    @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
+    @patch("hitch.main.demo._verify_registered_container_labels")
+    def test_register_active_rechecks_snapshot_after_verify(
+        self, mock_verify: MagicMock, _cleanup: MagicMock
+    ) -> None:
+        session_demo = demo.request_demo_start("thread-1")
+
+        def replace_demo(**_kwargs: object) -> None:
+            SessionDemo.objects.filter(thread_id="thread-1").update(
+                status=SessionDemo.STATUS_REQUESTED,
+                generation=2,
+                registration_token=session_demo.registration_token,
+                container_id="replacement-id",
+                container_name="hitch-demo-thread-1-replacement",
+                last_error="",
+                logs="replacement logs",
+            )
+
+        mock_verify.side_effect = replace_demo
+
+        with self.assertRaisesRegex(demo.DemoError, "demo registration changed"):
+            demo.register_demo_container(
+                "thread-1",
+                {
+                    "token": session_demo.registration_token,
+                    "status": "active",
+                    "container_name": "hitch-demo-thread-1-abcd",
+                    "container_id": "container123",
+                    "host": "127.0.0.1",
+                    "port": 45678,
+                    "logs": "ready",
+                },
+            )
+
+        replacement = SessionDemo.objects.get(thread_id="thread-1")
+        self.assertEqual(replacement.status, SessionDemo.STATUS_REQUESTED)
+        self.assertEqual(replacement.generation, 2)
+        self.assertEqual(replacement.registration_token, session_demo.registration_token)
+        self.assertEqual(replacement.container_id, "replacement-id")
+        self.assertEqual(replacement.container_name, "hitch-demo-thread-1-replacement")
+        self.assertEqual(replacement.logs, "replacement logs")
+
+    @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
+    @patch("hitch.main.demo._remove_container")
+    @patch("hitch.main.demo._verify_registered_container_labels")
+    def test_register_failed_does_not_remove_after_active_interleaving(
+        self,
+        _mock_verify: MagicMock,
+        mock_remove: MagicMock,
+        _mock_cleanup: MagicMock,
+    ) -> None:
+        session_demo = demo.request_demo_start("thread-1")
+        demo.register_demo_container(
+            "thread-1",
+            {
+                "token": session_demo.registration_token,
+                "status": "preparing",
+                "container_name": "hitch-demo-thread-1-abcd",
+            },
+        )
+        apply_failed_registration = demo._apply_failed_registration
+
+        def active_wins(demo_to_fail: SessionDemo, payload: dict[str, Any]) -> None:
+            apply_failed_registration(demo_to_fail, payload)
+            demo.register_demo_container(
+                "thread-1",
+                {
+                    "token": session_demo.registration_token,
+                    "status": "active",
+                    "container_name": "hitch-demo-thread-1-abcd",
+                    "container_id": "container123",
+                    "host": "127.0.0.1",
+                    "port": 45678,
+                    "logs": "ready",
+                },
+            )
+
+        with (
+            patch("hitch.main.demo._apply_failed_registration", side_effect=active_wins),
+            self.assertRaisesRegex(demo.DemoError, "already complete"),
+        ):
+            demo.register_demo_container(
+                "thread-1",
+                {
+                    "token": session_demo.registration_token,
+                    "status": "failed",
+                    "error": "server crashed",
+                },
+            )
+
+        session_demo.refresh_from_db()
+        self.assertEqual(session_demo.status, SessionDemo.STATUS_ACTIVE)
+        self.assertEqual(session_demo.container_id, "container123")
+        self.assertEqual(session_demo.container_name, "hitch-demo-thread-1-abcd")
+        mock_remove.assert_not_called()
+
+    @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
     @patch("hitch.main.demo.subprocess.run")
     def test_register_active_rejects_unpublished_port(
         self, mock_run: MagicMock, _cleanup: MagicMock
@@ -1342,6 +1502,42 @@ class DemoRegistrationTests(TestCase):
             timeout=30,
         ))
 
+    @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
+    @patch("hitch.main.demo._remove_container")
+    def test_register_failed_removes_container_outside_transaction(
+        self, mock_remove: MagicMock, _cleanup: MagicMock
+    ) -> None:
+        session_demo = demo.request_demo_start("thread-1")
+        demo.register_demo_container(
+            "thread-1",
+            {
+                "token": session_demo.registration_token,
+                "status": "preparing",
+                "container_name": "hitch-demo-thread-1-abcd",
+            },
+        )
+        baseline_savepoints = list(connection.savepoint_ids)
+
+        def assert_unlocked(_demo: SessionDemo, *, ignore_missing: bool) -> None:
+            self.assertEqual(connection.savepoint_ids, baseline_savepoints)
+            self.assertTrue(ignore_missing)
+            self.assertEqual(_demo.container_name, "hitch-demo-thread-1-abcd")
+
+        mock_remove.side_effect = assert_unlocked
+
+        updated = demo.register_demo_container(
+            "thread-1",
+            {
+                "token": session_demo.registration_token,
+                "status": "failed",
+                "error": "server crashed",
+            },
+        )
+
+        self.assertEqual(updated.status, SessionDemo.STATUS_FAILED)
+        self.assertEqual(updated.container_name, "")
+        mock_remove.assert_called_once()
+
     @patch("hitch.main.demo.logger")
     @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
     @patch("hitch.main.demo.subprocess.run")
@@ -1427,6 +1623,133 @@ class DemoRegistrationTests(TestCase):
             timeout=30,
         ))
         mock_cleanup.assert_called_once()
+
+    @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
+    @patch("hitch.main.demo._remove_container")
+    def test_on_codex_instance_finished_cleans_outside_transaction(
+        self, mock_remove: MagicMock, _mock_cleanup: MagicMock
+    ) -> None:
+        SessionDemo.objects.create(
+            thread_id="thread-1",
+            host="127.0.0.1",
+            port=3000,
+            status=SessionDemo.STATUS_PREPARING,
+            container_name="hitch-demo-thread-1-abcd",
+            registration_token="token",
+        )
+        instance = CodexInstance.objects.create(
+            thread_id="thread-1",
+            cwd="/repo",
+            prompt="Registration token: token\n",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            pid=1,
+            agent_kind=demo.DEMO_AGENT_KIND,
+        )
+
+        baseline_savepoints = list(connection.savepoint_ids)
+
+        def assert_unlocked(_demo: SessionDemo, *, ignore_missing: bool) -> None:
+            self.assertEqual(connection.savepoint_ids, baseline_savepoints)
+            self.assertTrue(ignore_missing)
+
+        mock_remove.side_effect = assert_unlocked
+
+        demo.on_codex_instance_finished(instance)
+
+        mock_remove.assert_called_once()
+
+    @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
+    @patch("hitch.main.demo._remove_container")
+    def test_on_codex_instance_finished_does_not_clear_replacement_demo(
+        self, mock_remove: MagicMock, _mock_cleanup: MagicMock
+    ) -> None:
+        SessionDemo.objects.create(
+            thread_id="thread-1",
+            host="127.0.0.1",
+            port=3000,
+            status=SessionDemo.STATUS_PREPARING,
+            container_id="old-container",
+            container_name="hitch-demo-thread-1-old",
+            registration_token="old-token",
+            generation=1,
+        )
+        instance = CodexInstance.objects.create(
+            thread_id="thread-1",
+            cwd="/repo",
+            prompt="Registration token: old-token\n",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            pid=1,
+            agent_kind=demo.DEMO_AGENT_KIND,
+        )
+
+        def replace_demo(_demo: SessionDemo, *, ignore_missing: bool) -> None:
+            self.assertTrue(ignore_missing)
+            SessionDemo.objects.filter(thread_id="thread-1").update(
+                status=SessionDemo.STATUS_ACTIVE,
+                container_id="new-container",
+                container_name="hitch-demo-thread-1-new",
+                registration_token="new-token",
+                generation=2,
+                last_error="",
+            )
+
+        mock_remove.side_effect = replace_demo
+
+        demo.on_codex_instance_finished(instance)
+
+        session_demo = SessionDemo.objects.get(thread_id="thread-1")
+        self.assertEqual(session_demo.status, SessionDemo.STATUS_ACTIVE)
+        self.assertEqual(session_demo.container_id, "new-container")
+        self.assertEqual(session_demo.container_name, "hitch-demo-thread-1-new")
+        self.assertEqual(session_demo.registration_token, "new-token")
+        self.assertEqual(session_demo.last_error, "")
+
+    @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
+    @patch("hitch.main.demo._remove_container")
+    def test_on_codex_instance_finished_does_not_overwrite_replacement_error(
+        self, mock_remove: MagicMock, _mock_cleanup: MagicMock
+    ) -> None:
+        SessionDemo.objects.create(
+            thread_id="thread-1",
+            host="127.0.0.1",
+            port=3000,
+            status=SessionDemo.STATUS_PREPARING,
+            container_name="hitch-demo-thread-1-old",
+            registration_token="old-token",
+            generation=1,
+        )
+        instance = CodexInstance.objects.create(
+            thread_id="thread-1",
+            cwd="/repo",
+            prompt="Registration token: old-token\n",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            pid=1,
+            agent_kind=demo.DEMO_AGENT_KIND,
+        )
+
+        def replace_and_fail(_demo: SessionDemo, *, ignore_missing: bool) -> None:
+            self.assertTrue(ignore_missing)
+            SessionDemo.objects.filter(thread_id="thread-1").update(
+                status=SessionDemo.STATUS_ACTIVE,
+                container_name="hitch-demo-thread-1-new",
+                registration_token="new-token",
+                generation=2,
+                last_error="",
+            )
+            raise demo.DemoError("podman timed out")
+
+        mock_remove.side_effect = replace_and_fail
+
+        demo.on_codex_instance_finished(instance)
+
+        session_demo = SessionDemo.objects.get(thread_id="thread-1")
+        self.assertEqual(session_demo.status, SessionDemo.STATUS_ACTIVE)
+        self.assertEqual(session_demo.container_name, "hitch-demo-thread-1-new")
+        self.assertEqual(session_demo.registration_token, "new-token")
+        self.assertEqual(session_demo.last_error, "")
 
     @patch("hitch.main.demo.cleanup_unregistered_demo_containers")
     @patch("hitch.main.demo.subprocess.run")

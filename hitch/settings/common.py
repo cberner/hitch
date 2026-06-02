@@ -78,10 +78,15 @@ DATABASES = {
         "OPTIONS": {
             # Session pages refresh cached metadata while worker subprocesses
             # update state rows. WAL keeps readers from blocking writers, and
-            # the busy timeout lets brief write contention settle instead of
-            # surfacing intermittent "database is locked" errors.
-            "init_command": "PRAGMA journal_mode=WAL",
-            "timeout": 30,
+            # IMMEDIATE transactions avoid SQLite's lock-upgrade failure mode
+            # when workflow code reads state and then writes inside atomic().
+            "init_command": (
+                "PRAGMA journal_mode=WAL;"
+                "PRAGMA synchronous=NORMAL;"
+                "PRAGMA busy_timeout=60000"
+            ),
+            "timeout": 60,
+            "transaction_mode": "IMMEDIATE",
         },
     }
 }
