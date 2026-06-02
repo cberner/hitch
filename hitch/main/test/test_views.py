@@ -820,6 +820,82 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(metadata.derived_stage, "done_merged")
         mock_codex.assert_not_called()
 
+    @patch("hitch.main.system_agents._gh_pr_view")
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_inactive_session_detail_refreshes_ready_pr_to_done_merged(
+        self,
+        mock_codex: MagicMock,
+        _start_models_refresh: MagicMock,
+        mock_gh_pr_view: MagicMock,
+    ) -> None:
+        pr_url = "https://github.com/cberner/hitch/pull/344"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Fix database locks"},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Fixed."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="ready-pr-merged-detail",
+            cwd=str(rollout_path.parent),
+            codex_path=str(rollout_path),
+            codex_name="Ready PR merged detail",
+            codex_preview="Fix database locks",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="ready-pr-merged-detail",
+            cwd=str(rollout_path.parent),
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_READY,
+            state={
+                "pr_handoff": {
+                    "url": pr_url,
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 344,
+                    "state": "open",
+                },
+            },
+        )
+        mock_gh_pr_view.return_value = {
+            "url": pr_url,
+            "repository_full_name": "cberner/hitch",
+            "pr_number": 344,
+            "state": "closed",
+            "merged": True,
+            "merged_at": "2026-06-02T08:26:51Z",
+        }
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "ready-pr-merged-detail"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+        )
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
+        self.assertTrue(workflow.state["pr_handoff"]["merged"])
+        mock_gh_pr_view.assert_called_once()
+        mock_codex.assert_not_called()
+
     @patch("hitch.main.views._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_stamps_stage_cache_with_pre_read_mtime(
@@ -2567,6 +2643,283 @@ class IndexViewTests(TestCase):
             '<span class="stage-badge" data-tone="done">Done: Merged</span>',
         )
         self.assertNotContains(response, "QA")
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.system_agents._gh_pr_view")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cached_session_list_refreshes_ready_pr_to_done_merged(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_gh_pr_view: MagicMock,
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        pr_url = "https://github.com/cberner/hitch/pull/344"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Fix database locks"},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Fixed."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="ready-pr-merged-list",
+            cwd=str(rollout_path.parent),
+            codex_display_title="Ready PR merged list",
+            codex_preview="Fix database locks",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="ready-pr-merged-list",
+            cwd=str(rollout_path.parent),
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_READY,
+            state={
+                "pr_handoff": {
+                    "url": pr_url,
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 344,
+                    "state": "open",
+                },
+            },
+        )
+        mock_gh_pr_view.return_value = {
+            "url": pr_url,
+            "repository_full_name": "cberner/hitch",
+            "pr_number": 344,
+            "state": "closed",
+            "merged": True,
+            "merged_at": "2026-06-02T08:26:51Z",
+        }
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Ready PR merged list")
+        self.assertContains(
+            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+        )
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
+        self.assertTrue(workflow.state["pr_handoff"]["merged"])
+        mock_gh_pr_view.assert_called_once()
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.system_agents._gh_pr_view")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cached_session_list_caps_ready_pr_refreshes(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_gh_pr_view: MagicMock,
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        for index in range(2):
+            pr_number = 400 + index
+            pr_url = f"https://github.com/cberner/hitch/pull/{pr_number}"
+            rollout_path = _make_rollout(
+                self,
+                [
+                    _rollout_line(
+                        "event_msg",
+                        {
+                            "type": "user_message",
+                            "message": f"Fix database locks {index}",
+                        },
+                    ),
+                    _rollout_line(
+                        "response_item",
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "Fixed."}],
+                            "phase": "final_answer",
+                        },
+                    ),
+                ],
+            )
+            SessionMetadata.objects.create(
+                thread_id=f"ready-pr-refresh-cap-{index}",
+                cwd=str(rollout_path.parent),
+                codex_display_title=f"Ready PR refresh cap {index}",
+                codex_preview="Fix database locks",
+                codex_path=str(rollout_path),
+                codex_created_at=now - timedelta(seconds=index),
+                codex_updated_at=now - timedelta(seconds=index),
+                codex_last_synced_at=now,
+            )
+            SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id=f"ready-pr-refresh-cap-{index}",
+                cwd=str(rollout_path.parent),
+                status=SystemWorkflow.STATUS_COMPLETED,
+                step=system_agents.STEP_PR_READY,
+                state={
+                    "pr_handoff": {
+                        "url": pr_url,
+                        "repository_full_name": "cberner/hitch",
+                        "pr_number": pr_number,
+                        "state": "open",
+                    },
+                },
+            )
+
+        def merged_pr_for_selector(
+            _workflow: SystemWorkflow,
+            *,
+            selector: str | None = None,
+            source_tool: str,
+            timeout_seconds: int,
+        ) -> dict[str, object]:
+            self.assertEqual(source_tool, "gh_pr_stage_refresh")
+            self.assertEqual(
+                timeout_seconds, system_agents._PR_STAGE_REFRESH_TIMEOUT_SECONDS
+            )
+            self.assertIsNotNone(selector)
+            pr_number = int(str(selector).rsplit("/", 1)[1])
+            return {
+                "url": str(selector),
+                "repository_full_name": "cberner/hitch",
+                "pr_number": pr_number,
+                "state": "closed",
+                "merged": True,
+                "merged_at": "2026-06-02T08:26:51Z",
+            }
+
+        mock_gh_pr_view.side_effect = merged_pr_for_selector
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Ready PR refresh cap 0")
+        self.assertContains(response, "Ready PR refresh cap 1")
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="done">Done: Merged</span>',
+            count=1,
+        )
+        steps = list(
+            SystemWorkflow.objects.order_by("main_thread_id").values_list(
+                "step", flat=True
+            )
+        )
+        self.assertEqual(steps.count(system_agents.STEP_PR_CLOSED), 1)
+        self.assertEqual(steps.count(system_agents.STEP_PR_READY), 1)
+        mock_gh_pr_view.assert_called_once()
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.system_agents.logger")
+    @patch("hitch.main.system_agents._gh_pr_view")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cached_session_list_backs_off_failed_ready_pr_refresh(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_gh_pr_view: MagicMock,
+        mock_logger: MagicMock,
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        pr_url = "https://github.com/cberner/hitch/pull/344"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Fix database locks"},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Fixed."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="ready-pr-refresh-backoff",
+            cwd=str(rollout_path.parent),
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_READY,
+            state={
+                "pr_handoff": {
+                    "url": pr_url,
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 344,
+                    "state": "open",
+                },
+            },
+        )
+        SessionMetadata.objects.create(
+            thread_id="ready-pr-refresh-backoff",
+            cwd=str(rollout_path.parent),
+            codex_display_title="Ready PR refresh backoff",
+            codex_preview="Fix database locks",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+        )
+        mock_gh_pr_view.side_effect = system_agents._GhPrOpenError("gh unavailable")
+
+        first_response = self.client.get(reverse("index"))
+        second_response = self.client.get(reverse("index"))
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        workflow.refresh_from_db()
+        self.assertIn(system_agents._PR_STAGE_REFRESH_STATE_KEY, workflow.state)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
+        mock_gh_pr_view.assert_called_once()
+        mock_logger.exception.assert_called_once()
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
