@@ -313,6 +313,172 @@ class PrQaWorkflowTests(TestCase):
         self.assertTrue(workflow.state["failure_surfaced"])
 
 
+class SessionPrStageRefreshTests(TestCase):
+    @patch("hitch.main.system_agents._gh_pr_view")
+    def test_refresh_unarchived_session_pr_stages_refreshes_all_due_latest_workflows(
+        self, mock_gh_pr_view: MagicMock
+    ) -> None:
+        now = datetime.now(UTC)
+
+        def handoff(pr_number: int) -> dict[str, object]:
+            return {
+                "url": f"https://github.com/cberner/hitch/pull/{pr_number}",
+                "repository_full_name": "cberner/hitch",
+                "pr_number": pr_number,
+                "state": "open",
+            }
+
+        with tempfile.TemporaryDirectory() as cwd:
+            for thread_id in ("main-1", "main-2", "superseded-main"):
+                SessionMetadata.objects.create(
+                    thread_id=thread_id,
+                    cwd=cwd,
+                    codex_created_at=now,
+                    codex_updated_at=now,
+                    codex_last_synced_at=now,
+                    codex_archived=False,
+                )
+            SessionMetadata.objects.create(
+                thread_id="stale-cached-done-main",
+                cwd=cwd,
+                codex_created_at=now,
+                codex_updated_at=now,
+                codex_last_synced_at=now,
+                codex_archived=False,
+                derived_stage="done_merged",
+            )
+            SessionMetadata.objects.create(
+                thread_id="terminal-handoff-main",
+                cwd=cwd,
+                codex_created_at=now,
+                codex_updated_at=now,
+                codex_last_synced_at=now,
+                codex_archived=False,
+            )
+            SessionMetadata.objects.create(
+                thread_id="archived-main",
+                cwd=cwd,
+                codex_created_at=now,
+                codex_updated_at=now,
+                codex_last_synced_at=now,
+                codex_archived=True,
+            )
+            merged_workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="main-1",
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_COMPLETED,
+                step=system_agents.STEP_PR_READY,
+                state={system_agents._PR_HANDOFF_STATE_KEY: handoff(101)},
+            )
+            closed_workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="main-2",
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_COMPLETED,
+                step=system_agents.STEP_PR_READY,
+                state={system_agents._PR_HANDOFF_STATE_KEY: handoff(102)},
+            )
+            archived_workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="archived-main",
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_COMPLETED,
+                step=system_agents.STEP_PR_READY,
+                state={system_agents._PR_HANDOFF_STATE_KEY: handoff(103)},
+            )
+            stale_cached_done_workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="stale-cached-done-main",
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_COMPLETED,
+                step=system_agents.STEP_PR_READY,
+                state={system_agents._PR_HANDOFF_STATE_KEY: handoff(105)},
+            )
+            terminal_handoff_workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="terminal-handoff-main",
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_COMPLETED,
+                step=system_agents.STEP_PR_READY,
+                state={
+                    system_agents._PR_HANDOFF_STATE_KEY: {
+                        **handoff(106),
+                        "state": "closed",
+                        "merged": True,
+                    }
+                },
+            )
+            superseded_workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="superseded-main",
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_COMPLETED,
+                step=system_agents.STEP_PR_READY,
+                state={system_agents._PR_HANDOFF_STATE_KEY: handoff(104)},
+            )
+            latest_workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="superseded-main",
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_COMPLETED,
+                step=system_agents.STEP_QA_APPROVED,
+            )
+
+            def refreshed_pr(
+                _workflow: SystemWorkflow,
+                *,
+                selector: str | None = None,
+                source_tool: str,
+                timeout_seconds: int,
+            ) -> dict[str, object]:
+                self.assertEqual(source_tool, "gh_pr_stage_refresh")
+                self.assertEqual(
+                    timeout_seconds, system_agents._PR_STAGE_REFRESH_TIMEOUT_SECONDS
+                )
+                self.assertIsNotNone(selector)
+                pr_number = int(str(selector).rsplit("/", 1)[1])
+                if pr_number == 101:
+                    return {
+                        **handoff(pr_number),
+                        "state": "closed",
+                        "merged": True,
+                        "merged_at": "2026-06-02T08:26:51Z",
+                    }
+                return {**handoff(pr_number), "state": "closed", "merged": False}
+
+            mock_gh_pr_view.side_effect = refreshed_pr
+
+            refreshed = system_agents.refresh_unarchived_session_pr_stages()
+
+        self.assertEqual(refreshed, 3)
+        self.assertEqual(mock_gh_pr_view.call_count, 3)
+        merged_workflow.refresh_from_db()
+        self.assertEqual(merged_workflow.step, system_agents.STEP_PR_CLOSED)
+        self.assertTrue(
+            merged_workflow.state[system_agents._PR_HANDOFF_STATE_KEY]["merged"]
+        )
+        closed_workflow.refresh_from_db()
+        self.assertEqual(closed_workflow.step, system_agents.STEP_PR_CLOSED)
+        self.assertFalse(
+            closed_workflow.state[system_agents._PR_HANDOFF_STATE_KEY]["merged"]
+        )
+        archived_workflow.refresh_from_db()
+        self.assertEqual(archived_workflow.step, system_agents.STEP_PR_READY)
+        stale_cached_done_workflow.refresh_from_db()
+        self.assertEqual(
+            stale_cached_done_workflow.step, system_agents.STEP_PR_CLOSED
+        )
+        terminal_handoff_workflow.refresh_from_db()
+        self.assertEqual(
+            terminal_handoff_workflow.step, system_agents.STEP_PR_READY
+        )
+        superseded_workflow.refresh_from_db()
+        latest_workflow.refresh_from_db()
+        self.assertEqual(superseded_workflow.step, system_agents.STEP_PR_READY)
+        self.assertEqual(latest_workflow.step, system_agents.STEP_QA_APPROVED)
+
+
 class SpecCriticWorkflowTests(TestCase):
     def test_prompt_classifier_targets_vague_broad_and_high_impact_prompts(self) -> None:
         self.assertTrue(system_agents.spec_critic_should_run("Improve the app"))
