@@ -14480,6 +14480,12 @@ class AutonomousGoalViewTests(TestCase):
             title="Other goal",
             goal="Should not render.",
         )
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Deleted goal",
+            goal="Should not render.",
+            deleted_at=timezone.now(),
+        )
         ProposedSession.objects.create(
             autonomous_goal=goal,
             title="Add parser coverage",
@@ -14533,6 +14539,11 @@ class AutonomousGoalViewTests(TestCase):
             response,
             f'action="{reverse("run_autonomous_goal", args=[goal.pk])}"',
         )
+        self.assertContains(response, 'role="menuitem">Delete</button>')
+        self.assertContains(
+            response,
+            f'action="{reverse("delete_autonomous_goal", args=[goal.pk])}"',
+        )
         self.assertContains(
             response,
             f'data-edit-url="{reverse("edit_autonomous_goal", args=[goal.pk])}"',
@@ -14551,6 +14562,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertNotContains(response, "Add parser coverage")
         self.assertNotContains(response, 'name="proposed_session"')
         self.assertNotContains(response, "Other goal")
+        self.assertNotContains(response, "Deleted goal")
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
@@ -15581,6 +15593,193 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(goal.title, "Improve tests")
         self.assertEqual(goal.goal, "Find useful test coverage increments.")
 
+    def test_delete_autonomous_goal_soft_deletes_selected_project_goal(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other_project = Project.objects.create(name="Other", repo_path="/other")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        other_goal = AutonomousGoal.objects.create(
+            project=other_project,
+            title="Other goal",
+            goal="Should stay.",
+        )
+
+        response = self.client.post(reverse("delete_autonomous_goal", args=[goal.pk]))
+
+        self.assertEqual(response.status_code, 302)
+        goal.refresh_from_db()
+        other_goal.refresh_from_db()
+        self.assertIsNotNone(goal.deleted_at)
+        self.assertFalse(goal.auto_proposal_enabled)
+        self.assertIsNone(other_goal.deleted_at)
+
+    def test_delete_autonomous_goal_is_scoped_to_selected_project(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        other_project = Project.objects.create(name="Other", repo_path="/other")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        goal = AutonomousGoal.objects.create(
+            project=other_project,
+            title="Other goal",
+            goal="Should not delete.",
+        )
+
+        response = self.client.post(reverse("delete_autonomous_goal", args=[goal.pk]))
+
+        self.assertEqual(response.status_code, 404)
+        goal.refresh_from_db()
+        self.assertIsNone(goal.deleted_at)
+
+    def test_delete_autonomous_goal_preserves_accepted_proposal(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo",
+            project=project,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            accepted_session=candidate,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            title="Add parser coverage",
+        )
+
+        response = self.client.post(reverse("delete_autonomous_goal", args=[goal.pk]))
+
+        self.assertEqual(response.status_code, 302)
+        goal.refresh_from_db()
+        self.assertIsNotNone(goal.deleted_at)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.autonomous_goal_id, goal.pk)
+        self.assertEqual(
+            system_agents.accepted_visible_system_thread_ids(),
+            {"candidate-thread"},
+        )
+
+    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
+    def test_delete_autonomous_goal_stops_running_workflow(
+        self, mock_interrupt: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(goal.pk),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={"autonomous_goal_id": goal.pk},
+        )
+        instance = CodexInstance.objects.create(
+            pid=0,
+            thread_id="goal-thread",
+            cwd="/repo",
+            prompt="run autonomous goal",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id=instance.thread_id,
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+        mock_interrupt.return_value = instance
+
+        response = self.client.post(reverse("delete_autonomous_goal", args=[goal.pk]))
+
+        self.assertEqual(response.status_code, 302)
+        mock_interrupt.assert_called_once_with(
+            instance.pk, expected_thread_id=instance.thread_id
+        )
+        run.refresh_from_db()
+        workflow.refresh_from_db()
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertEqual(run.error, "Autonomous goal deleted by user")
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        self.assertEqual(workflow.state["error"], "Autonomous goal deleted by user")
+        goal.refresh_from_db()
+        self.assertIsNotNone(goal.deleted_at)
+
+    @patch(
+        "hitch.main.system_agents.codex_pool.interrupt_instance",
+        return_value=None,
+    )
+    def test_delete_autonomous_goal_keeps_goal_when_running_workflow_cannot_stop(
+        self, mock_interrupt: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(goal.pk),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={"autonomous_goal_id": goal.pk},
+        )
+        instance = CodexInstance.objects.create(
+            pid=0,
+            thread_id="goal-thread",
+            cwd="/repo",
+            prompt="run autonomous goal",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id=instance.thread_id,
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        response = self.client.post(reverse("delete_autonomous_goal", args=[goal.pk]))
+
+        self.assertContains(
+            response,
+            "autonomous goal run could not be stopped",
+            status_code=400,
+        )
+        mock_interrupt.assert_called_once_with(
+            instance.pk, expected_thread_id=instance.thread_id
+        )
+        run.refresh_from_db()
+        workflow.refresh_from_db()
+        self.assertEqual(run.status, SystemAgentRun.STATUS_RUNNING)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        goal.refresh_from_db()
+        self.assertIsNone(goal.deleted_at)
+
     @patch("hitch.main.views.system_agents.start_autonomous_goal_workflow")
     def test_run_single_starts_selected_project_goal(
         self, mock_start: MagicMock
@@ -15661,6 +15860,12 @@ class AutonomousGoalViewTests(TestCase):
             project=project,
             title="Improve docs",
             goal="Find useful docs increments.",
+        )
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Deleted goal",
+            goal="Should not run.",
+            deleted_at=timezone.now(),
         )
         AutonomousGoal.objects.create(
             project=other_project,

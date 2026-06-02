@@ -895,7 +895,8 @@ def start_pr_qa_workflow(
 
 def maybe_start_auto_proposal_workflows(*, project: Project | None = None) -> int:
     goals = AutonomousGoal.objects.select_related("project").filter(
-        auto_proposal_enabled=True
+        auto_proposal_enabled=True,
+        deleted_at__isnull=True,
     )
     if project is not None:
         goals = goals.filter(project=project)
@@ -1012,7 +1013,7 @@ def _maybe_start_auto_proposal_workflow(autonomous_goal_id: int) -> bool:
         autonomous_goal = (
             AutonomousGoal.objects.select_related("project")
             .select_for_update()
-            .get(pk=autonomous_goal_id)
+            .get(pk=autonomous_goal_id, deleted_at__isnull=True)
         )
         Project.objects.select_for_update().get(pk=autonomous_goal.project_id)
         if not autonomous_goal.auto_proposal_enabled:
@@ -1154,7 +1155,7 @@ def start_autonomous_goal_workflow(
 ) -> SystemWorkflow:
     autonomous_goal = (
         AutonomousGoal.objects.select_related("project")
-        .filter(pk=autonomous_goal.pk)
+        .filter(pk=autonomous_goal.pk, deleted_at__isnull=True)
         .get()
     )
     workflow, created = _create_autonomous_goal_workflow_record(
@@ -1569,6 +1570,37 @@ def stop_active_workflow(main_thread_id: str) -> bool:
     else:
         _mark_system_agent_runs_failed(interrupted_runs, "QA workflow stopped by user")
         _block_workflow(workflow, "QA workflow stopped by user")
+    return True
+
+
+def stop_running_autonomous_goal_workflow(autonomous_goal_id: int, error: str) -> bool:
+    """Stop a goal-owned workflow before the goal becomes unreachable.
+
+    Returns ``False`` only when a running agent exists but could not be
+    interrupted.
+    """
+    workflow = (
+        SystemWorkflow.objects.filter(
+            kind=AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=_autonomous_goal_main_thread_id(autonomous_goal_id),
+            status=SystemWorkflow.STATUS_RUNNING,
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    if workflow is None:
+        return True
+    runs = list(
+        workflow.agent_runs.filter(status=SystemAgentRun.STATUS_RUNNING)
+        .select_related("instance")
+        .order_by("-created_at")
+    )
+    if runs:
+        interrupted_runs = _interrupt_system_agent_runs(runs)
+        if not interrupted_runs:
+            return False
+        _mark_system_agent_runs_failed(interrupted_runs, error)
+    _block_workflow(workflow, error, surface_to_thread=False)
     return True
 
 
@@ -3538,7 +3570,10 @@ def _handle_autonomous_goal_agent_finished(
         return
     autonomous_goal = (
         AutonomousGoal.objects.select_related("project")
-        .filter(pk=_state_int(workflow, "autonomous_goal_id"))
+        .filter(
+            pk=_state_int(workflow, "autonomous_goal_id"),
+            deleted_at__isnull=True,
+        )
         .first()
     )
     if autonomous_goal is None:

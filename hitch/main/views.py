@@ -3053,7 +3053,12 @@ def autonomous_goals(request: HttpRequest) -> HttpResponse:
     projects = list(Project.objects.all())
     current_project = _selected_project_for_settings(current_settings, projects)
     goals = (
-        list(AutonomousGoal.objects.filter(project=current_project))
+        list(
+            AutonomousGoal.objects.filter(
+                project=current_project,
+                deleted_at__isnull=True,
+            )
+        )
         if current_project is not None
         else []
     )
@@ -3133,6 +3138,7 @@ def edit_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpR
     autonomous_goal = AutonomousGoal.objects.filter(
         pk=autonomous_goal_id,
         project=project,
+        deleted_at__isnull=True,
     ).first()
     if autonomous_goal is None:
         raise Http404("autonomous goal not found")
@@ -3174,6 +3180,33 @@ def edit_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpR
 
 
 @require_http_methods(["POST"])
+def delete_autonomous_goal(
+    request: HttpRequest, autonomous_goal_id: int
+) -> HttpResponse:
+    project = _active_project_from_request(request)
+    if project is None:
+        return HttpResponseBadRequest("active project is required")
+    autonomous_goal = AutonomousGoal.objects.filter(
+        pk=autonomous_goal_id,
+        project=project,
+        deleted_at__isnull=True,
+    ).first()
+    if autonomous_goal is None:
+        raise Http404("autonomous goal not found")
+    stop_error = "Autonomous goal deleted by user"
+    if not system_agents.stop_running_autonomous_goal_workflow(
+        autonomous_goal.pk, stop_error
+    ):
+        return HttpResponseBadRequest("autonomous goal run could not be stopped")
+    autonomous_goal.deleted_at = timezone.now()
+    autonomous_goal.auto_proposal_enabled = False
+    autonomous_goal.save(
+        update_fields=["deleted_at", "auto_proposal_enabled", "updated_at"]
+    )
+    return redirect("autonomous_goals")
+
+
+@require_http_methods(["POST"])
 def run_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpResponse:
     project = _active_project_from_request(request)
     if project is None:
@@ -3181,6 +3214,7 @@ def run_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpRe
     autonomous_goal = AutonomousGoal.objects.filter(
         pk=autonomous_goal_id,
         project=project,
+        deleted_at__isnull=True,
     ).first()
     if autonomous_goal is None:
         raise Http404("autonomous goal not found")
@@ -3196,7 +3230,10 @@ def run_autonomous_goals(request: HttpRequest) -> HttpResponse:
     project = _active_project_from_request(request)
     if project is None:
         return HttpResponseBadRequest("active project is required")
-    for autonomous_goal in AutonomousGoal.objects.filter(project=project):
+    for autonomous_goal in AutonomousGoal.objects.filter(
+        project=project,
+        deleted_at__isnull=True,
+    ):
         system_agents.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal,
             use_worktrees=True,

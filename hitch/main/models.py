@@ -136,6 +136,7 @@ class AutonomousGoal(models.Model):
     )
     auto_merge_to_local_branch = models.BooleanField(default=False)
     auto_merge_branch = models.CharField(max_length=255, blank=True, default="")
+    deleted_at = models.DateTimeField(null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

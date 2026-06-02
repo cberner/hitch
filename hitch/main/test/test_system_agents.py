@@ -7022,6 +7022,27 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_default_sha.assert_not_called()
         mock_spawn.assert_not_called()
 
+    @patch("hitch.main.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_ignores_soft_deleted_goal(
+        self, mock_spawn: MagicMock, mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+            auto_proposal_enabled=True,
+            deleted_at=datetime.now(UTC),
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 0)
+        self.assertFalse(SystemWorkflow.objects.exists())
+        mock_default_sha.assert_not_called()
+        mock_spawn.assert_not_called()
+
     def test_auto_proposal_batch_survives_a_goal_raising_mid_iteration(self) -> None:
         # The goal ids are a snapshot, so a goal (or its project) deleted between
         # the snapshot and the select_for_update().get() makes the per-goal call
