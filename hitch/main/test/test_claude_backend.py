@@ -485,6 +485,87 @@ class ApprovalRoutingTests(TestCase):
         # they are approving -- not just the tool name.
         self.assertEqual(params["item"]["arguments"], {"title": "x"})
 
+    def test_file_approval_params_extract_path(self) -> None:
+        from hitch.main.management.commands import claude_worker
+
+        params = claude_worker._approval_params(
+            claude_worker._FILE_APPROVAL_METHOD, "Edit", {"file_path": "/repo/a.py"}
+        )
+        self.assertEqual(params["item"]["type"], "fileChange")
+        self.assertEqual(params["item"]["changes"], [{"path": "/repo/a.py"}])
+        # Falls back to ``notebook_path`` when ``file_path``/``path`` are absent.
+        nb = claude_worker._approval_params(
+            claude_worker._FILE_APPROVAL_METHOD,
+            "NotebookEdit",
+            {"notebook_path": "/repo/n.ipynb"},
+        )
+        self.assertEqual(nb["item"]["changes"], [{"path": "/repo/n.ipynb"}])
+
+
+class WorkerHelperEdgeCaseTests(TestCase):
+    """Edge branches of the worker's pure helpers."""
+
+    def test_ask_user_question_params_skips_malformed(self) -> None:
+        from hitch.main.management.commands import claude_worker
+
+        self.assertEqual(claude_worker._ask_user_question_params({}), [])
+        self.assertEqual(
+            claude_worker._ask_user_question_params({"questions": "nope"}), []
+        )
+        questions = claude_worker._ask_user_question_params(
+            {
+                "questions": [
+                    "not-a-dict",
+                    {"header": "No text"},  # missing question -> skipped
+                    {
+                        "question": "Pick?",
+                        "header": "Pick",
+                        "options": ["bad", {"description": "no label"}, {"label": "ok"}],
+                    },
+                ]
+            }
+        )
+        self.assertEqual(len(questions), 1)
+        self.assertEqual(questions[0]["id"], "q2")
+        self.assertEqual([o["label"] for o in questions[0]["options"]], ["ok"])
+
+    def test_format_ask_user_answers_skips_blank_and_falls_back_to_question(
+        self,
+    ) -> None:
+        from hitch.main.management.commands import claude_worker
+
+        questions = [
+            {"id": "q0", "header": "", "question": "Which one?"},
+            {"id": "q1", "header": "Lib", "question": "?"},
+        ]
+        text = claude_worker._format_ask_user_answers(
+            questions, {"q0": "alpha", "q1": ""}
+        )
+        # q1 (blank answer) is skipped; q0 has no header so falls back to its text.
+        self.assertIn("Which one?: alpha", text)
+        self.assertNotIn("Lib", text)
+
+    def test_image_content_blocks_non_list_is_empty(self) -> None:
+        from hitch.main.management.commands import claude_worker
+
+        self.assertEqual(claude_worker._image_content_blocks(None), [])
+        self.assertEqual(claude_worker._image_content_blocks("x.png"), [])
+
+    def test_decision_allows(self) -> None:
+        from hitch.main.management.commands import claude_worker
+        from hitch.main.models import ApprovalRequest
+
+        self.assertTrue(claude_worker._decision_allows({"updated": 1}))
+        self.assertTrue(
+            claude_worker._decision_allows(ApprovalRequest.DECISION_ACCEPT)
+        )
+        self.assertFalse(claude_worker._decision_allows("decline"))
+
+    def test_steer_request_handles_undecodable_line(self) -> None:
+        from hitch.main.management.commands import claude_worker
+
+        self.assertEqual(claude_worker._steer_request(b"\xff\xfe not json"), ("", []))
+
 
 class StopUnblocksApprovalWaitTests(TestCase):
     """A Stop click while ``can_use_tool`` waits on a browser approval must set
