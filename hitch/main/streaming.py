@@ -25,6 +25,8 @@ from collections.abc import Generator, Iterator
 from pathlib import Path
 from typing import Any
 
+from django.db import close_old_connections
+
 from hitch.main import codex_events, codex_pool, system_agents
 from hitch.main.models import (
     CodexInstance,
@@ -207,7 +209,7 @@ def idle_stream(
     deadline = time.monotonic() + _IDLE_MAX_STREAM_SECONDS
     last_heartbeat = time.monotonic()
     while True:
-        if codex_pool.latest_id_for_thread(session_id) != baseline_id:
+        if _latest_id_for_thread(session_id) != baseline_id:
             # A worker showed up after the page rendered (still running,
             # or already terminal from a fast turn). End the stream so the
             # client reloads and re-renders with the live UI.
@@ -229,7 +231,7 @@ def system_workflow_stream(
 ) -> Iterator[bytes]:
     """Heartbeat stream while a hidden system workflow owns the main thread."""
     yield b"retry: 2000\n\n"
-    codex_pool.reconcile_dead_for_workflow(workflow_id, main_thread_id=session_id)
+    _reconcile_dead_for_workflow(workflow_id, main_thread_id=session_id)
     workflow = _running_system_workflow(session_id, workflow_id)
     yield _heartbeat_frame(
         working=True,
@@ -242,10 +244,10 @@ def system_workflow_stream(
     if workflow is not None:
         yield from _workflow_input_request_frames(workflow.pk, seen_inputs)
     while True:
-        if codex_pool.latest_id_for_thread(session_id) != baseline_id:
+        if _latest_id_for_thread(session_id) != baseline_id:
             yield _end_frame("active")
             return
-        codex_pool.reconcile_dead_for_workflow(workflow_id, main_thread_id=session_id)
+        _reconcile_dead_for_workflow(workflow_id, main_thread_id=session_id)
         workflow = _running_system_workflow(session_id, workflow_id)
         if workflow is None:
             yield _end_frame("workflow")
@@ -278,11 +280,14 @@ def reload_stream() -> Iterator[bytes]:
 
 
 def demo_stream_token(session_id: str) -> str:
-    row = (
-        SessionDemo.objects.filter(thread_id=session_id)
-        .values_list("status", "updated_at")
-        .first()
-    )
+    try:
+        row = (
+            SessionDemo.objects.filter(thread_id=session_id)
+            .values_list("status", "updated_at")
+            .first()
+        )
+    finally:
+        close_old_connections()
     if row is None:
         return ""
     status, updated_at = row
@@ -325,13 +330,16 @@ def _message_frame(method: str, payload: dict[str, object]) -> bytes:
 def _workflow_input_request_frames(
     workflow_id: int, seen: dict[int, str]
 ) -> Iterator[bytes]:
-    requests = (
-        UserInputRequest.objects.filter(
-            instance__system_agent_runs__workflow_id=workflow_id
+    try:
+        requests = list(
+            UserInputRequest.objects.filter(
+                instance__system_agent_runs__workflow_id=workflow_id
+            )
+            .order_by("created_at", "id")
+            .values("id", "method", "params", "response")
         )
-        .order_by("created_at", "id")
-        .values("id", "method", "params", "response")
-    )
+    finally:
+        close_old_connections()
     for row in requests:
         request_id = row["id"]
         if not isinstance(request_id, int):
@@ -480,11 +488,14 @@ def _is_qa_agent_instance(instance: CodexInstance) -> bool:
 
 
 def _qa_panel_status_text(workflow: SystemWorkflow) -> str:
-    runs = list(
-        SystemAgentRun.objects.filter(workflow=workflow)
-        .select_related("instance")
-        .order_by("created_at", "id")
-    )
+    try:
+        runs = list(
+            SystemAgentRun.objects.filter(workflow=workflow)
+            .select_related("instance")
+            .order_by("created_at", "id")
+        )
+    finally:
+        close_old_connections()
     synthesizer = next(
         (
             run
@@ -558,31 +569,40 @@ def _running_system_workflow(
     session_id: str,
     workflow_id: int,
 ) -> SystemWorkflow | None:
-    system_agents.reconcile_terminal_workflow_instances(workflow_id=workflow_id)
-    return SystemWorkflow.objects.filter(
-        pk=workflow_id,
-        main_thread_id=session_id,
-        status=SystemWorkflow.STATUS_RUNNING,
-    ).first()
+    try:
+        system_agents.reconcile_terminal_workflow_instances(workflow_id=workflow_id)
+        return SystemWorkflow.objects.filter(
+            pk=workflow_id,
+            main_thread_id=session_id,
+            status=SystemWorkflow.STATUS_RUNNING,
+        ).first()
+    finally:
+        close_old_connections()
 
 
 def _running_system_agent_instance(workflow_id: int) -> CodexInstance | None:
-    run = (
-        SystemAgentRun.objects.filter(
-            workflow_id=workflow_id,
-            status=SystemAgentRun.STATUS_RUNNING,
+    try:
+        run = (
+            SystemAgentRun.objects.filter(
+                workflow_id=workflow_id,
+                status=SystemAgentRun.STATUS_RUNNING,
+            )
+            .select_related("instance")
+            .order_by("-created_at")
+            .first()
         )
-        .select_related("instance")
-        .order_by("-created_at")
-        .first()
-    )
+    finally:
+        close_old_connections()
     return run.instance if run is not None else None
 
 
 def _workflow_for_instance(instance: CodexInstance) -> SystemWorkflow | None:
     if instance.workflow_id is None:
         return None
-    return SystemWorkflow.objects.filter(pk=instance.workflow_id).first()
+    try:
+        return SystemWorkflow.objects.filter(pk=instance.workflow_id).first()
+    finally:
+        close_old_connections()
 
 
 def _is_done(instance_id: int) -> bool:
@@ -591,9 +611,12 @@ def _is_done(instance_id: int) -> bool:
     before recording a status — we'd otherwise tail forever.
     """
     try:
-        instance = CodexInstance.objects.get(pk=instance_id)
-    except CodexInstance.DoesNotExist:
-        return True
+        try:
+            instance = CodexInstance.objects.get(pk=instance_id)
+        except CodexInstance.DoesNotExist:
+            return True
+    finally:
+        close_old_connections()
     if instance.status in (CodexInstance.STATUS_COMPLETED, CodexInstance.STATUS_FAILED):
         return True
     return bool(instance.pid) and not codex_pool.worker_is_alive(instance)
@@ -601,6 +624,29 @@ def _is_done(instance_id: int) -> bool:
 
 def _current_status(instance_id: int) -> str:
     try:
-        return CodexInstance.objects.values_list("status", flat=True).get(pk=instance_id)
-    except CodexInstance.DoesNotExist:
-        return "unknown"
+        try:
+            return CodexInstance.objects.values_list("status", flat=True).get(
+                pk=instance_id
+            )
+        except CodexInstance.DoesNotExist:
+            return "unknown"
+    finally:
+        close_old_connections()
+
+
+def _latest_id_for_thread(session_id: str) -> int | None:
+    try:
+        return codex_pool.latest_id_for_thread(session_id)
+    finally:
+        close_old_connections()
+
+
+def _reconcile_dead_for_workflow(
+    workflow_id: int, *, main_thread_id: str | None
+) -> None:
+    try:
+        codex_pool.reconcile_dead_for_workflow(
+            workflow_id, main_thread_id=main_thread_id
+        )
+    finally:
+        close_old_connections()

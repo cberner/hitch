@@ -7043,6 +7043,66 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_default_sha.assert_not_called()
         mock_spawn.assert_not_called()
 
+    @patch("hitch.main.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_rechecks_enablement_after_sha_lookup(
+        self, mock_spawn: MagicMock, mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+            auto_proposal_enabled=True,
+        )
+
+        def disable_goal(_repo_path: str) -> str:
+            AutonomousGoal.objects.filter(pk=autonomous_goal.pk).update(
+                auto_proposal_enabled=False
+            )
+            return "a" * 40
+
+        mock_default_sha.side_effect = disable_goal
+
+        started = system_agents._maybe_start_auto_proposal_workflow(autonomous_goal.pk)
+
+        self.assertFalse(started)
+        self.assertFalse(SystemWorkflow.objects.exists())
+        mock_default_sha.assert_called_once_with("/repo")
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.system_agents.commit_hash_for_ref")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_rechecks_base_selection_after_sha_lookup(
+        self, mock_spawn: MagicMock, mock_ref_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Keep release tests current",
+            goal="Find useful test improvements for release.",
+            auto_proposal_enabled=True,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            auto_qa_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="release",
+        )
+
+        def retarget_goal(_repo_path: str, _ref: str) -> str:
+            AutonomousGoal.objects.filter(pk=autonomous_goal.pk).update(
+                auto_merge_branch="main"
+            )
+            return "b" * 40
+
+        mock_ref_sha.side_effect = retarget_goal
+
+        started = system_agents._maybe_start_auto_proposal_workflow(autonomous_goal.pk)
+
+        self.assertFalse(started)
+        self.assertFalse(SystemWorkflow.objects.exists())
+        mock_ref_sha.assert_called_once_with("/repo", "refs/heads/release")
+        mock_spawn.assert_not_called()
+
     def test_auto_proposal_batch_survives_a_goal_raising_mid_iteration(self) -> None:
         # The goal ids are a snapshot, so a goal (or its project) deleted between
         # the snapshot and the select_for_update().get() makes the per-goal call

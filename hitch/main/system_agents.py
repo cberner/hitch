@@ -1010,6 +1010,19 @@ def _rate_limit_window_below_auto_proposal_quota(
 
 
 def _maybe_start_auto_proposal_workflow(autonomous_goal_id: int) -> bool:
+    autonomous_goal = (
+        AutonomousGoal.objects.select_related("project").get(pk=autonomous_goal_id)
+    )
+    if not autonomous_goal.auto_proposal_enabled:
+        return False
+    start_snapshot = _autonomous_goal_auto_proposal_start_snapshot(autonomous_goal)
+    default_branch_sha = _autonomous_goal_auto_proposal_start_sha(
+        autonomous_goal,
+        start_snapshot=start_snapshot,
+    )
+    if default_branch_sha is None:
+        return False
+
     with transaction.atomic():
         autonomous_goal = (
             AutonomousGoal.objects.select_related("project")
@@ -1019,8 +1032,13 @@ def _maybe_start_auto_proposal_workflow(autonomous_goal_id: int) -> bool:
         Project.objects.select_for_update().get(pk=autonomous_goal.project_id)
         if not autonomous_goal.auto_proposal_enabled:
             return False
-        default_branch_sha = _autonomous_goal_auto_proposal_start_sha(autonomous_goal)
-        if default_branch_sha is None:
+        if not _autonomous_goal_auto_proposal_snapshot_matches(
+            autonomous_goal, start_snapshot
+        ):
+            return False
+        if not _autonomous_goal_auto_proposal_db_allows_start(
+            autonomous_goal, default_branch_sha
+        ):
             return False
         workflow, created = _create_autonomous_goal_workflow_record(
             autonomous_goal=autonomous_goal,
@@ -1033,8 +1051,59 @@ def _maybe_start_auto_proposal_workflow(autonomous_goal_id: int) -> bool:
     return workflow.status == SystemWorkflow.STATUS_RUNNING
 
 
+def _autonomous_goal_auto_proposal_db_allows_start(
+    autonomous_goal: AutonomousGoal, current_sha: str
+) -> bool:
+    if _autonomous_goal_pending_proposal_exists(autonomous_goal):
+        return False
+    if _autonomous_goal_unresolved_failure_notice_exists(autonomous_goal):
+        return False
+    if _autonomous_goal_in_flight_automation_exists(autonomous_goal):
+        return False
+    if _project_running_auto_proposal_workflow_exists(autonomous_goal):
+        return False
+    if _autonomous_goal_running_workflow_exists(autonomous_goal):
+        return False
+    last_no_proposal_sha = autonomous_goal.auto_proposal_last_no_proposal_sha.strip()
+    return not last_no_proposal_sha or last_no_proposal_sha != current_sha
+
+
+@dataclass(frozen=True)
+class _AutonomousGoalAutoProposalStartSnapshot:
+    project_id: int
+    repo_path: str
+    autonomy: str
+    auto_qa_enabled: bool
+    auto_merge_to_local_branch: bool
+    auto_merge_branch: str
+    base_ref: str
+
+
+def _autonomous_goal_auto_proposal_start_snapshot(
+    autonomous_goal: AutonomousGoal,
+) -> _AutonomousGoalAutoProposalStartSnapshot:
+    return _AutonomousGoalAutoProposalStartSnapshot(
+        project_id=autonomous_goal.project_id,
+        repo_path=autonomous_goal.project.repo_path,
+        autonomy=autonomous_goal.autonomy,
+        auto_qa_enabled=autonomous_goal.auto_qa_enabled,
+        auto_merge_to_local_branch=autonomous_goal.auto_merge_to_local_branch,
+        auto_merge_branch=autonomous_goal.auto_merge_branch,
+        base_ref=_autonomous_goal_auto_merge_base_ref(autonomous_goal),
+    )
+
+
+def _autonomous_goal_auto_proposal_snapshot_matches(
+    autonomous_goal: AutonomousGoal,
+    start_snapshot: _AutonomousGoalAutoProposalStartSnapshot,
+) -> bool:
+    return _autonomous_goal_auto_proposal_start_snapshot(autonomous_goal) == start_snapshot
+
+
 def _autonomous_goal_auto_proposal_start_sha(
     autonomous_goal: AutonomousGoal,
+    *,
+    start_snapshot: _AutonomousGoalAutoProposalStartSnapshot,
 ) -> str | None:
     if _autonomous_goal_pending_proposal_exists(autonomous_goal):
         return None
@@ -1047,7 +1116,7 @@ def _autonomous_goal_auto_proposal_start_sha(
     if _autonomous_goal_running_workflow_exists(autonomous_goal):
         return None
 
-    current_sha = _autonomous_goal_auto_proposal_base_sha(autonomous_goal)
+    current_sha = _autonomous_goal_auto_proposal_base_sha_for_snapshot(start_snapshot)
     if not current_sha:
         return None
     last_no_proposal_sha = autonomous_goal.auto_proposal_last_no_proposal_sha.strip()
@@ -1061,10 +1130,17 @@ def _autonomous_goal_auto_proposal_start_sha(
 def _autonomous_goal_auto_proposal_base_sha(
     autonomous_goal: AutonomousGoal,
 ) -> str | None:
-    auto_merge_ref = _autonomous_goal_auto_merge_base_ref(autonomous_goal)
-    if auto_merge_ref:
-        return commit_hash_for_ref(autonomous_goal.project.repo_path, auto_merge_ref)
-    return default_branch_commit_hash(autonomous_goal.project.repo_path)
+    return _autonomous_goal_auto_proposal_base_sha_for_snapshot(
+        _autonomous_goal_auto_proposal_start_snapshot(autonomous_goal)
+    )
+
+
+def _autonomous_goal_auto_proposal_base_sha_for_snapshot(
+    start_snapshot: _AutonomousGoalAutoProposalStartSnapshot,
+) -> str | None:
+    if start_snapshot.base_ref:
+        return commit_hash_for_ref(start_snapshot.repo_path, start_snapshot.base_ref)
+    return default_branch_commit_hash(start_snapshot.repo_path)
 
 
 def _autonomous_goal_auto_merge_base_ref(

@@ -11,6 +11,7 @@ import secrets
 import shlex
 import subprocess
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any, Final, cast
 from urllib.parse import urlsplit
 
@@ -186,36 +187,48 @@ def demo_runtime() -> str:
 def request_demo_start(session_id: str) -> SessionDemo:
     runtime = demo_runtime()
     protected_targets: set[tuple[str, str]] = set()
-    with transaction.atomic():
-        demo, created = SessionDemo.objects.select_for_update().get_or_create(
-            thread_id=session_id,
-            defaults={
-                "host": DEFAULT_HOST,
-                "port": DEFAULT_CONTAINER_PORT,
-                "runtime": runtime,
-                "status": SessionDemo.STATUS_REQUESTED,
-                "generation": 1,
-                "registration_token": _new_registration_token(),
-            },
-        )
-        if not created:
-            if demo.status in {
+    demo, created = SessionDemo.objects.get_or_create(
+        thread_id=session_id,
+        defaults={
+            "host": DEFAULT_HOST,
+            "port": DEFAULT_CONTAINER_PORT,
+            "runtime": runtime,
+            "status": SessionDemo.STATUS_REQUESTED,
+            "generation": 1,
+            "registration_token": _new_registration_token(),
+        },
+    )
+    if not created:
+        if demo.status in {
+            SessionDemo.STATUS_REQUESTED,
+            SessionDemo.STATUS_PREPARING,
+        }:
+            raise DemoAlreadyRunningError("demo setup is already running")
+        original_generation = demo.generation
+        original_registration_token = demo.registration_token
+        try:
+            _remove_container(demo, ignore_missing=True)
+        except DemoContainerLabelMismatchError:
+            logger.warning(
+                "resetting demo %s despite unverified prior container %s",
+                demo.thread_id,
+                demo.container_name or demo.container_id,
+            )
+            if demo.container_id:
+                protected_targets.add(("id", demo.container_id))
+            if demo.container_name:
+                protected_targets.add(("name", demo.container_name))
+        with transaction.atomic():
+            demo = SessionDemo.objects.select_for_update().get(thread_id=session_id)
+            row_changed = (
+                demo.generation != original_generation
+                or demo.registration_token != original_registration_token
+            )
+            if row_changed or demo.status in {
                 SessionDemo.STATUS_REQUESTED,
                 SessionDemo.STATUS_PREPARING,
             }:
                 raise DemoAlreadyRunningError("demo setup is already running")
-            try:
-                _remove_container(demo, ignore_missing=True)
-            except DemoContainerLabelMismatchError:
-                logger.warning(
-                    "resetting demo %s despite unverified prior container %s",
-                    demo.thread_id,
-                    demo.container_name or demo.container_id,
-                )
-                if demo.container_id:
-                    protected_targets.add(("id", demo.container_id))
-                if demo.container_name:
-                    protected_targets.add(("name", demo.container_name))
             demo.generation += 1
             demo.host = DEFAULT_HOST
             demo.port = DEFAULT_CONTAINER_PORT
@@ -254,30 +267,83 @@ def register_demo_container(session_id: str, payload: dict[str, Any]) -> Session
     }:
         raise DemoError("invalid demo status")
     token = str(payload.get("token") or "")
+    demo = _validate_demo_registration(
+        SessionDemo.objects.filter(thread_id=session_id).first(),
+        token=token,
+        status=status,
+    )
+    snapshot = _demo_registration_snapshot(demo)
+    if status == SessionDemo.STATUS_PREPARING:
+        _apply_preparing_registration(demo, payload)
+    elif status == SessionDemo.STATUS_ACTIVE:
+        _apply_active_registration(demo, payload)
+    else:
+        _apply_failed_registration(demo, payload)
     with transaction.atomic():
-        demo = SessionDemo.objects.select_for_update().filter(thread_id=session_id).first()
-        if demo is None or not demo.registration_token or not secrets.compare_digest(
-            token, demo.registration_token
-        ):
-            raise DemoError("invalid demo registration token")
-        if demo.status == SessionDemo.STATUS_STOPPED:
-            raise DemoError("demo has been stopped")
-        allowed_statuses = DEMO_REGISTRATION_TRANSITIONS.get(demo.status)
-        if allowed_statuses is None or status not in allowed_statuses:
-            raise DemoError("demo registration is already complete")
-        if status == SessionDemo.STATUS_PREPARING:
-            _apply_preparing_registration(demo, payload)
-        elif status == SessionDemo.STATUS_ACTIVE:
-            _apply_active_registration(demo, payload)
-        else:
-            _apply_failed_registration(demo, payload)
-        demo.save()
-    if status == SessionDemo.STATUS_ACTIVE or (
-        status == SessionDemo.STATUS_FAILED
-        and not (demo.container_id or demo.container_name)
-    ):
+        current = _validate_demo_registration(
+            SessionDemo.objects.select_for_update().filter(pk=snapshot.pk).first(),
+            token=token,
+            status=status,
+        )
+        if _demo_registration_snapshot(current) != snapshot:
+            raise DemoError("demo registration changed")
+        _copy_demo_registration_fields(current, demo)
+        current.save()
+        demo = current
+    if status == SessionDemo.STATUS_ACTIVE:
         cleanup_unregistered_demo_containers()
+    elif status == SessionDemo.STATUS_FAILED:
+        demo = _cleanup_failed_registration(demo)
+        if not (demo.container_id or demo.container_name):
+            cleanup_unregistered_demo_containers()
     return demo
+
+
+@dataclass(frozen=True)
+class _DemoRegistrationSnapshot:
+    pk: int
+    generation: int
+    registration_token: str
+    status: str
+    container_id: str
+    container_name: str
+
+
+def _demo_registration_snapshot(demo: SessionDemo) -> _DemoRegistrationSnapshot:
+    return _DemoRegistrationSnapshot(
+        pk=demo.pk,
+        generation=demo.generation,
+        registration_token=demo.registration_token,
+        status=demo.status,
+        container_id=demo.container_id,
+        container_name=demo.container_name,
+    )
+
+
+def _validate_demo_registration(
+    demo: SessionDemo | None, *, token: str, status: str
+) -> SessionDemo:
+    if demo is None or not demo.registration_token or not secrets.compare_digest(
+        token, demo.registration_token
+    ):
+        raise DemoError("invalid demo registration token")
+    if demo.status == SessionDemo.STATUS_STOPPED:
+        raise DemoError("demo has been stopped")
+    allowed_statuses = DEMO_REGISTRATION_TRANSITIONS.get(demo.status)
+    if allowed_statuses is None or status not in allowed_statuses:
+        raise DemoError("demo registration is already complete")
+    return demo
+
+
+def _copy_demo_registration_fields(target: SessionDemo, source: SessionDemo) -> None:
+    target.status = source.status
+    target.host = source.host
+    target.port = source.port
+    target.container_id = source.container_id
+    target.container_name = source.container_name
+    target.runtime = source.runtime
+    target.logs = source.logs
+    target.last_error = source.last_error
 
 
 def _apply_preparing_registration(demo: SessionDemo, payload: dict[str, Any]) -> None:
@@ -325,14 +391,30 @@ def _apply_failed_registration(demo: SessionDemo, payload: dict[str, Any]) -> No
     demo.last_error = error
     demo.logs = _bounded_text(payload.get("logs")) or error
     demo.runtime = _clean_runtime(payload.get("runtime"))
+
+
+def _cleanup_failed_registration(demo_snapshot: SessionDemo) -> SessionDemo:
+    if not (demo_snapshot.container_id or demo_snapshot.container_name):
+        return demo_snapshot
     try:
-        _remove_container(demo, ignore_missing=True)
+        _remove_container(demo_snapshot, ignore_missing=True)
     except DemoError as exc:
-        demo.last_error = f"{error}; cleanup failed: {exc}"
-        logger.exception("failed to remove failed demo container for %s", demo.thread_id)
+        demo_snapshot.last_error = f"{demo_snapshot.last_error}; cleanup failed: {exc}"
+        _record_demo_cleanup_result_if_current(
+            demo_snapshot,
+            last_error=demo_snapshot.last_error,
+        )
+        logger.exception(
+            "failed to remove failed demo container for %s", demo_snapshot.thread_id
+        )
     else:
-        demo.container_id = ""
-        demo.container_name = ""
+        _record_demo_cleanup_result_if_current(
+            demo_snapshot,
+            clear_container=True,
+        )
+        demo_snapshot.container_id = ""
+        demo_snapshot.container_name = ""
+    return demo_snapshot
 
 
 def cleanup_demo_for_session(session_id: str) -> None:
@@ -391,6 +473,7 @@ def on_codex_instance_finished(instance: CodexInstance) -> None:
     run_status = SystemAgentRun.STATUS_COMPLETED
     run_error = ""
     workflow_status = SystemWorkflow.STATUS_COMPLETED
+    demo_to_clean: SessionDemo | None = None
     with transaction.atomic():
         demo = SessionDemo.objects.select_for_update().filter(
             thread_id=instance.thread_id
@@ -413,18 +496,8 @@ def on_codex_instance_finished(instance: CodexInstance) -> None:
             run_status = SystemAgentRun.STATUS_FAILED
             run_error = demo.last_error
             workflow_status = SystemWorkflow.STATUS_FAILED
-            update_fields = ["status", "last_error", "updated_at"]
-            try:
-                _remove_container(demo, ignore_missing=True)
-            except DemoError as exc:
-                demo.last_error = f"{demo.last_error}; cleanup failed: {exc}"
-                run_error = demo.last_error
-                logger.exception("failed to remove demo container after agent exit")
-            else:
-                demo.container_id = ""
-                demo.container_name = ""
-                update_fields.extend(["container_id", "container_name"])
-            demo.save(update_fields=update_fields)
+            demo_to_clean = demo
+            demo.save(update_fields=["status", "last_error", "updated_at"])
         elif demo is not None and demo.status == SessionDemo.STATUS_FAILED:
             run_status = SystemAgentRun.STATUS_FAILED
             run_error = demo.last_error or "demo setup failed"
@@ -433,13 +506,55 @@ def on_codex_instance_finished(instance: CodexInstance) -> None:
             run_status = SystemAgentRun.STATUS_FAILED
             run_error = instance.error or "demo agent did not complete"
             workflow_status = SystemWorkflow.STATUS_FAILED
-        _finish_demo_system_run(
-            instance,
-            run_status=run_status,
-            run_error=run_error,
-            workflow_status=workflow_status,
-        )
+    if demo_to_clean is not None:
+        try:
+            _remove_container(demo_to_clean, ignore_missing=True)
+        except DemoError as exc:
+            run_error = f"{run_error}; cleanup failed: {exc}"
+            _record_demo_cleanup_result_if_current(
+                demo_to_clean,
+                last_error=run_error,
+            )
+            logger.exception("failed to remove demo container after agent exit")
+        else:
+            _record_demo_cleanup_result_if_current(
+                demo_to_clean,
+                clear_container=True,
+            )
+    _finish_demo_system_run(
+        instance,
+        run_status=run_status,
+        run_error=run_error,
+        workflow_status=workflow_status,
+    )
     cleanup_unregistered_demo_containers()
+
+
+def _record_demo_cleanup_result_if_current(
+    demo_snapshot: SessionDemo,
+    *,
+    last_error: str = "",
+    clear_container: bool = False,
+) -> None:
+    with transaction.atomic():
+        current = SessionDemo.objects.select_for_update().filter(
+            pk=demo_snapshot.pk,
+            generation=demo_snapshot.generation,
+            registration_token=demo_snapshot.registration_token,
+            status=SessionDemo.STATUS_FAILED,
+        ).first()
+        if current is None:
+            return
+        update_fields = ["updated_at"]
+        if last_error:
+            current.last_error = last_error
+            update_fields.append("last_error")
+        if clear_container:
+            current.container_id = ""
+            current.container_name = ""
+            update_fields.extend(["container_id", "container_name"])
+        if len(update_fields) > 1:
+            current.save(update_fields=update_fields)
 
 
 def _finish_demo_system_run(
