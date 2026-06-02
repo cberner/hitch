@@ -2050,6 +2050,7 @@
                 <div class="session-menu" role="menu" data-session-menu-panel hidden>
                     <button type="button" role="menuitem" data-edit-title-open>Rename</button>
                     <button type="button" role="menuitem" data-diff-open {% if not diff_view.has_changes %}disabled{% endif %}>View diff</button>
+                    <a href="{{ debug_chat_url }}" role="menuitem">Debug chat</a>
                     <button type="button" role="menuitem" data-move-project-open>Move to project</button>
                     <form method="post" action="{{ start_demo_url }}" role="none">
                         {% csrf_token %}
