@@ -213,6 +213,9 @@ class ClaudeOptionsTests(TestCase):
         # A shell command can mutate the workspace, so read-only must block Bash.
         self.assertIn("Bash", disallowed)
         self.assertNotIn("Bash", allowed)
+        # ``Monitor`` runs a background script under Bash rules; gate it too so
+        # ``approve_all`` cannot run commands despite the read-only sandbox.
+        self.assertIn("Monitor", disallowed)
 
     def test_web_search_disabled_blocks_tool(self) -> None:
         allowed, disallowed = claude_options.resolve_tool_lists(
@@ -800,6 +803,18 @@ class HiddenAutoReviewApprovalTests(TestCase):
             runner._can_use_tool("mcp__github__create_pr", {"title": "x"}, None)
         )
         self.assertIsInstance(result, PermissionResultDeny)
+
+    def test_demo_agent_runs_setup_commands_without_write_sandbox(self) -> None:
+        import asyncio
+
+        from hitch.main import demo
+
+        # The demo is a trusted Hitch setup agent that must run shell/podman
+        # commands even with no write sandbox.
+        runner = self._runner(sandbox_policy=None)
+        runner._instance.agent_kind = demo.DEMO_AGENT_KIND
+        result = asyncio.run(runner._can_use_tool("Bash", {"command": "podman ps"}, None))
+        self.assertIsInstance(result, PermissionResultAllow)
 
 
 class ClaudeSystemAgentIndexingTests(TestCase):

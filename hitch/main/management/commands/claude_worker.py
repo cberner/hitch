@@ -330,14 +330,21 @@ class _TurnRunner:
             self._instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
             and self._approval_mode == claude_options.APPROVAL_AUTO_REVIEW
         ):
-            # Auto-approve only the built-in mutating tools, and only when the
-            # workflow runs under a write sandbox. ``readOnly`` already blocks
-            # Bash/file via ``resolve_tool_lists``; a run with no sandbox would
-            # otherwise auto-run *unsandboxed* commands/edits with no visible
-            # approval, so a propose/review-only or prompt-injected hidden agent
-            # could touch the host. Anything else (and project ``.claude`` MCP
-            # tools, which also reach here) is denied.
-            writes_allowed = self._sandbox_policy in (
+            from hitch.main import demo
+
+            # The demo agent is a trusted Hitch-authored setup flow (opt-in via
+            # "Start demo") that must run shell/podman commands to bring up the
+            # container, so auto-approve its built-in tools regardless of sandbox
+            # -- mirroring how the Codex backend lets demo commands proceed.
+            is_demo = self._instance.agent_kind == demo.DEMO_AGENT_KIND
+            # Otherwise auto-approve the built-in mutating tools only under a write
+            # sandbox. ``readOnly`` already blocks Bash/file via
+            # ``resolve_tool_lists``; a run with no sandbox would otherwise
+            # auto-run *unsandboxed* commands/edits with no visible approval, so a
+            # propose/review-only or prompt-injected hidden agent could touch the
+            # host. Anything else (and project ``.claude`` MCP tools, which also
+            # reach here) is denied.
+            writes_allowed = is_demo or self._sandbox_policy in (
                 claude_options.SANDBOX_WORKSPACE_WRITE,
                 claude_options.SANDBOX_DANGER_FULL_ACCESS,
             )

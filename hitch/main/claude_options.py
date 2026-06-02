@@ -59,6 +59,8 @@ WRITE_TOOLS: tuple[str, ...] = (
 _WEB_SEARCH_TOOL = "WebSearch"
 _WEB_FETCH_TOOL = "WebFetch"
 _BASH_TOOL = "Bash"
+# Runs a background script under Bash permission rules; gated with Bash.
+_MONITOR_TOOL = "Monitor"
 
 # Codex sandbox policy strings (cookie/CLI values) -> behaviour.
 SANDBOX_READ_ONLY = "readOnly"
@@ -129,11 +131,15 @@ def resolve_tool_lists(
         disallowed.extend([_WEB_SEARCH_TOOL, _WEB_FETCH_TOOL])
         allowed = [tool for tool in allowed if tool != _WEB_FETCH_TOOL]
     if sandbox_policy == SANDBOX_READ_ONLY:
-        # Block file-edit tools AND Bash: a shell command can mutate the
-        # workspace just as a write tool can, so a read-only session must deny
-        # both regardless of the approval mode.
+        # Block file-edit tools AND command-capable tools: a shell command can
+        # mutate the workspace just as a write tool can, so a read-only session
+        # must deny them regardless of the approval mode. ``Monitor`` runs a
+        # background script under Bash permission rules, so it is gated too --
+        # otherwise ``approve_all`` (bypassPermissions) would let it run commands
+        # despite the read-only sandbox.
         disallowed.extend(WRITE_TOOLS)
         disallowed.append(_BASH_TOOL)
+        disallowed.append(_MONITOR_TOOL)
         allowed = [tool for tool in allowed if tool != _BASH_TOOL]
     return allowed, disallowed
 
