@@ -96,6 +96,10 @@ _PR_PROMPT_ALIASES = frozenset(
         ),
     }
 )
+_PR_WORKFLOW_PROMPT_PREFIXES = (
+    "Hitch QA agent could not complete the PR workflow.",
+    "Hitch PR monitor found follow-up work on the active PR.",
+)
 _PLAN_APPROVAL_PROMPT = "Implement the plan."
 _COLLABORATION_MODE_PLAN = "plan"
 _COLLABORATION_MODE_DEFAULT = "default"
@@ -366,7 +370,7 @@ def _latest_pr_url_from_lines(lines: list[dict[str, Any]]) -> str | None:
     function_calls_by_id = _function_calls_by_id(lines)
     latest: str | None = None
     for _, turn_lines in _lines_by_turn(lines):
-        if not _turn_is_pr_prompt(turn_lines):
+        if not _turn_is_pr_creation_prompt(turn_lines):
             continue
         if _find_final_agent_line_idx(turn_lines) == -1:
             continue
@@ -405,7 +409,9 @@ def _latest_pr_observation_result_from_lines(
 ) -> codex_events.PrObservationResult:
     turns: list[codex_events.PrObservationTurn] = []
     for _, turn_lines in _lines_by_turn(lines):
-        is_pr_prompt = _turn_is_pr_prompt(turn_lines)
+        mcp_items = tuple(_github_mcp_items_from_lines(turn_lines))
+        is_pr_prompt = _turn_starts_pr_observation_epoch(turn_lines, mcp_items)
+        is_pr_workflow_notice = _turn_is_pr_workflow_notice(turn_lines)
         final_idx = _find_final_agent_line_idx(turn_lines)
         # Scan every entry in a PR-prompt turn, not just lines before the
         # final-answer message: the same Responses-API shape behind the
@@ -417,9 +423,10 @@ def _latest_pr_observation_result_from_lines(
             codex_events.PrObservationTurn(
                 is_pr_prompt=is_pr_prompt,
                 is_completed=final_idx != -1,
-                items=tuple(_github_mcp_items_from_lines(turn_lines)),
+                items=mcp_items,
                 has_lifecycle_activity=(
                     not is_pr_prompt
+                    and not is_pr_workflow_notice
                     and final_idx != -1
                     and _turn_has_lifecycle_activity(turn_lines)
                 ),
@@ -720,8 +727,13 @@ def _is_user_message_line(entry: dict[str, Any]) -> bool:
     return payload.get("type") == "user_message"
 
 
-def _is_pr_prompt(text: str) -> bool:
-    return text in _PR_PROMPT_ALIASES
+def _is_pr_creation_prompt(text: str) -> bool:
+    return text.strip() in _PR_PROMPT_ALIASES
+
+
+def _is_pr_workflow_prompt(text: str) -> bool:
+    text = text.strip()
+    return any(text.startswith(prefix) for prefix in _PR_WORKFLOW_PROMPT_PREFIXES)
 
 
 def _function_calls_by_id(lines: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -738,13 +750,32 @@ def _function_calls_by_id(lines: list[dict[str, Any]]) -> dict[str, dict[str, An
     return calls
 
 
-def _turn_is_pr_prompt(turn_lines: list[dict[str, Any]]) -> bool:
+def _turn_is_pr_creation_prompt(turn_lines: list[dict[str, Any]]) -> bool:
     for entry in turn_lines:
         if not _is_user_message_line(entry):
             continue
         payload = entry.get("payload") or {}
-        return _is_pr_prompt(_user_message_text(payload).strip())
+        return _is_pr_creation_prompt(_user_message_text(payload))
     return False
+
+
+def _turn_is_pr_workflow_notice(turn_lines: list[dict[str, Any]]) -> bool:
+    for entry in turn_lines:
+        if not _is_user_message_line(entry):
+            continue
+        payload = entry.get("payload") or {}
+        return _is_pr_workflow_prompt(_user_message_text(payload))
+    return False
+
+
+def _turn_starts_pr_observation_epoch(
+    turn_lines: list[dict[str, Any]], mcp_items: tuple[dict[str, Any], ...]
+) -> bool:
+    if _turn_is_pr_creation_prompt(turn_lines):
+        return True
+    if not _turn_is_pr_workflow_notice(turn_lines):
+        return False
+    return codex_events.pr_snapshot_from_completed_mcp_items(mcp_items) is not None
 
 
 def _find_final_agent_line_idx(turn_lines: list[dict[str, Any]]) -> int:

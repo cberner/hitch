@@ -244,6 +244,55 @@ class LatestPrUrlTests(TestCase):
         self.assertIsNone(rollout.latest_pr_url(path))
         self.assertIsNone(rollout.latest_pr_snapshot(path))
 
+    def test_pr_workflow_notice_without_observation_keeps_existing_pr(self) -> None:
+        url = "https://github.com/cberner/hitch/pull/94"
+        path = self._make(
+            [
+                _line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "mcp_tool_call_end",
+                        "invocation": {
+                            "server": "github",
+                            "tool": "_create_pull_request",
+                        },
+                        "result": {"url": url, "state": "open"},
+                    },
+                ),
+                _line("event_msg", {"type": "agent_message", "message": "Opened."}),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "user_message",
+                        "message": (
+                            "Hitch QA agent could not complete the PR workflow.\n\n"
+                            "Status: Hitch checked the PR gates and is waiting on "
+                            "external PR state.\n\n"
+                            "Tell the user the PR workflow needs attention before "
+                            "continuing."
+                        ),
+                    },
+                ),
+                _line(
+                    "event_msg",
+                    {
+                        "type": "agent_message",
+                        "message": "PR workflow needs attention.",
+                    },
+                ),
+            ]
+        )
+
+        self.assertEqual(rollout.latest_pr_url(path), url)
+        snapshot = rollout.latest_pr_snapshot(path)
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["url"], url)
+
     def test_pr_snapshot_reads_ok_wrapped_mcp_result(self) -> None:
         url = "https://github.com/cberner/hitch/pull/94"
         path = self._make(

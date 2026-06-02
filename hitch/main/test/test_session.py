@@ -353,6 +353,42 @@ class PrUrlDetectionTests(TestCase):
 
         self.assertIsNone(_pr_url_for_thread(thread))
 
+    def test_pr_workflow_notice_without_observation_keeps_existing_pr(self) -> None:
+        url = "https://github.com/cberner/hitch/pull/94"
+        thread = _thread(
+            [
+                _turn(
+                    [
+                        _user_message(system_agents.PR_SLASH_PROMPT),
+                        _mcp_tool_call(
+                            "github",
+                            "_create_pull_request",
+                            {"url": url, "state": "open"},
+                        ),
+                        _agent_message("Opened the PR."),
+                    ]
+                ),
+                _turn(
+                    [
+                        _user_message(
+                            "Hitch QA agent could not complete the PR workflow.\n\n"
+                            "Status: Hitch checked the PR gates and is waiting on "
+                            "external PR state.\n\n"
+                            "Tell the user the PR workflow needs attention before "
+                            "continuing."
+                        ),
+                        _agent_message("PR workflow needs attention."),
+                    ]
+                ),
+            ]
+        )
+
+        self.assertEqual(_pr_url_for_thread(thread), url)
+        snapshot = _pr_snapshot_for_thread(thread)
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot["url"], url)
+
     def test_detects_pr_url_when_mcp_tool_call_follows_final_message(self) -> None:
         # The model can emit the create_pull_request MCP call in the same
         # response that carries the final-answer message: the tool runs after
