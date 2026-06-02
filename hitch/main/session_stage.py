@@ -69,7 +69,12 @@ def derive_stage(
     )
 
     if workflow is not None and workflow.status == SystemWorkflow.STATUS_RUNNING:
-        if running_stage := _running_workflow_stage(workflow, selected_pr):
+        running_pr_snapshot = (
+            selected_pr
+            if _has_pr_identity(workflow_pr_snapshot)
+            else workflow_pr_snapshot
+        )
+        if running_stage := _running_workflow_stage(workflow, running_pr_snapshot):
             return running_stage
         return IMPLEMENTATION
 
