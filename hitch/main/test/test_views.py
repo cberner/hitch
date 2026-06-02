@@ -896,6 +896,86 @@ class SessionDetailFastPathTests(TestCase):
         mock_gh_pr_view.assert_called_once()
         mock_codex.assert_not_called()
 
+    @patch("hitch.main.system_agents._gh_pr_view")
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_inactive_session_detail_refreshes_cached_pr_stage_to_done_merged(
+        self,
+        mock_codex: MagicMock,
+        _start_models_refresh: MagicMock,
+        mock_gh_pr_view: MagicMock,
+    ) -> None:
+        pr_url = "https://github.com/cberner/hitch/pull/94"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_fetch_pr",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps({"url": pr_url, "state": "open"}),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Open."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        metadata = SessionMetadata.objects.create(
+            thread_id="cached-pr-merged-detail",
+            cwd=str(rollout_path.parent),
+            codex_path=str(rollout_path),
+            codex_name="Cached PR merged detail",
+            codex_preview="Open a PR",
+            codex_created_at=now,
+            codex_updated_at=now,
+            derived_stage="pr",
+            derived_stage_source_mtime_ns=rollout_path.stat().st_mtime_ns,
+        )
+        mock_gh_pr_view.return_value = {
+            "url": pr_url,
+            "repository_full_name": "cberner/hitch",
+            "pr_number": 94,
+            "state": "closed",
+            "merged": True,
+            "merged_at": "2026-06-02T08:26:51Z",
+        }
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "cached-pr-merged-detail"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+        )
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.derived_stage, "done_merged")
+        self.assertIsNotNone(metadata.derived_stage_pr_refresh_attempted_at)
+        mock_gh_pr_view.assert_called_once()
+        mock_codex.assert_not_called()
+
     @patch("hitch.main.views._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_stamps_stage_cache_with_pre_read_mtime(
@@ -1954,6 +2034,95 @@ class IndexViewTests(TestCase):
             response,
             '<span class="stage-badge" data-tone="active">PR #94</span>',
         )
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
+    @patch("hitch.main.system_agents._gh_pr_view")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cached_session_list_refreshes_cached_pr_stage_to_done_merged(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_gh_pr_view: MagicMock,
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        pr_url = "https://github.com/cberner/hitch/pull/94"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_fetch_pr",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps({"url": pr_url, "state": "open"}),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Open."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        metadata = SessionMetadata.objects.create(
+            thread_id="cached-pr-merged",
+            cwd=str(rollout_path.parent),
+            codex_display_title="Cached PR merged",
+            codex_preview="Open a PR",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+            derived_stage="pr",
+            derived_stage_source_mtime_ns=rollout_path.stat().st_mtime_ns,
+        )
+        mock_gh_pr_view.return_value = {
+            "url": pr_url,
+            "repository_full_name": "cberner/hitch",
+            "pr_number": 94,
+            "state": "closed",
+            "merged": True,
+            "merged_at": "2026-06-02T08:26:51Z",
+        }
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Cached PR merged")
+        self.assertContains(
+            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+        )
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.derived_stage, "done_merged")
+        self.assertIsNotNone(metadata.derived_stage_pr_refresh_attempted_at)
+        mock_gh_pr_view.assert_called_once()
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 

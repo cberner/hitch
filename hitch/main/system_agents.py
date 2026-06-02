@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -6296,6 +6296,54 @@ def refreshed_pr_handoff_for_stage(
     return refreshed
 
 
+def pr_snapshot_stage_refresh_due(
+    *,
+    cwd: str,
+    snapshot: Mapping[str, Any] | None,
+    attempted_at: datetime | None,
+    force: bool = False,
+) -> bool:
+    return _should_refresh_pr_snapshot_for_stage(
+        cwd,
+        _compact_pr_handoff(snapshot),
+        attempted_at=attempted_at,
+        force=force,
+    )
+
+
+def refreshed_pr_snapshot_for_stage(
+    *,
+    cwd: str,
+    snapshot: Mapping[str, Any] | None,
+    force: bool = False,
+) -> dict[str, Any]:
+    handoff = _compact_pr_handoff(snapshot)
+    if not _should_refresh_pr_snapshot_for_stage(
+        cwd,
+        handoff,
+        attempted_at=None,
+        force=force,
+    ):
+        return handoff
+    selector = _pr_handoff_selector(handoff)
+    if not selector:
+        return handoff
+    workflow = SystemWorkflow(kind=SystemWorkflow.KIND_PR_QA, cwd=cwd)
+    try:
+        observed = _gh_pr_view(
+            workflow,
+            selector=selector,
+            source_tool="gh_pr_stage_refresh",
+            timeout_seconds=_PR_STAGE_REFRESH_TIMEOUT_SECONDS,
+        )
+    except _GhPrOpenError:
+        logger.exception("failed to refresh PR stage for %s", selector)
+        return handoff
+    if observed is None or _pr_handoff_identity_changed(handoff, observed):
+        return handoff
+    return _merge_pr_handoff_dicts(handoff, observed)
+
+
 def _should_refresh_pr_handoff_for_stage(
     workflow: SystemWorkflow, handoff: dict[str, Any], *, force: bool
 ) -> bool:
@@ -6315,6 +6363,29 @@ def _should_refresh_pr_handoff_for_stage(
     if last_attempted_at <= 0:
         return True
     return int(timezone.now().timestamp()) - last_attempted_at >= (
+        _PR_STAGE_REFRESH_MIN_SECONDS
+    )
+
+
+def _should_refresh_pr_snapshot_for_stage(
+    cwd: str,
+    handoff: dict[str, Any],
+    *,
+    attempted_at: datetime | None,
+    force: bool,
+) -> bool:
+    if _pr_handoff_is_terminal(handoff):
+        return False
+    if not _pr_handoff_selector(handoff):
+        return False
+    if not Path(cwd).is_dir():
+        return False
+    if force:
+        return True
+    if attempted_at is None:
+        return True
+    attempted_seconds = int(attempted_at.timestamp())
+    return int(timezone.now().timestamp()) - attempted_seconds >= (
         _PR_STAGE_REFRESH_MIN_SECONDS
     )
 
