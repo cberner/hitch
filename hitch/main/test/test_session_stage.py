@@ -84,3 +84,26 @@ class SessionStageTests(SimpleTestCase):
         )
 
         self.assertEqual(stage, session_stage.PR)
+
+    def test_running_workflow_uses_terminal_main_pr_state_for_same_pr(self) -> None:
+        workflow = SystemWorkflow(
+            kind=SystemWorkflow.KIND_PR_QA,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_QA_RUNNING,
+        )
+
+        stage = session_stage.derive_stage(
+            entries=[{"kind": "user"}],
+            workflow=workflow,
+            pr_snapshot={
+                "url": "https://github.com/cberner/hitch/pull/93",
+                "state": "closed",
+                "merged": True,
+            },
+            workflow_pr_snapshot={
+                "url": "https://github.com/cberner/hitch/pull/93",
+                "state": "open",
+            },
+        )
+
+        self.assertEqual(stage, session_stage.DONE_MERGED)
