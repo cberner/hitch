@@ -15667,9 +15667,71 @@ class AutonomousGoalViewTests(TestCase):
             {"candidate-thread"},
         )
 
+    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    def test_delete_autonomous_goal_dismisses_unresolved_proposal(
+        self, mock_cleanup: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            title="Add parser coverage",
+        )
+
+        response = self.client.post(reverse("delete_autonomous_goal", args=[goal.pk]))
+
+        self.assertEqual(response.status_code, 302)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_DISMISSED)
+        self.assertEqual(proposal.outcome_notes, "Autonomous goal deleted by user")
+        mock_cleanup.assert_called_once_with("/repo-worktree")
+
+    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    def test_delete_autonomous_goal_keeps_accepted_proposal_worktree(
+        self, mock_cleanup: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            accepted_session=candidate,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            title="Add parser coverage",
+        )
+
+        response = self.client.post(reverse("delete_autonomous_goal", args=[goal.pk]))
+
+        self.assertEqual(response.status_code, 302)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
+        mock_cleanup.assert_not_called()
+
+    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
     @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
     def test_delete_autonomous_goal_stops_running_workflow(
-        self, mock_interrupt: MagicMock
+        self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
@@ -15684,7 +15746,7 @@ class AutonomousGoalViewTests(TestCase):
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
-            state={"autonomous_goal_id": goal.pk},
+            state={"autonomous_goal_id": goal.pk, "session_cwd": "/repo-worktree"},
         )
         instance = CodexInstance.objects.create(
             pid=0,
@@ -15712,6 +15774,7 @@ class AutonomousGoalViewTests(TestCase):
         mock_interrupt.assert_called_once_with(
             instance.pk, expected_thread_id=instance.thread_id
         )
+        mock_cleanup.assert_called_once_with("/repo-worktree")
         run.refresh_from_db()
         workflow.refresh_from_db()
         self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
@@ -15722,12 +15785,13 @@ class AutonomousGoalViewTests(TestCase):
         goal.refresh_from_db()
         self.assertIsNotNone(goal.deleted_at)
 
+    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
     @patch(
         "hitch.main.system_agents.codex_pool.interrupt_instance",
         return_value=None,
     )
     def test_delete_autonomous_goal_keeps_goal_when_running_workflow_cannot_stop(
-        self, mock_interrupt: MagicMock
+        self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
@@ -15742,7 +15806,7 @@ class AutonomousGoalViewTests(TestCase):
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
-            state={"autonomous_goal_id": goal.pk},
+            state={"autonomous_goal_id": goal.pk, "session_cwd": "/repo-worktree"},
         )
         instance = CodexInstance.objects.create(
             pid=0,
@@ -15773,6 +15837,7 @@ class AutonomousGoalViewTests(TestCase):
         mock_interrupt.assert_called_once_with(
             instance.pk, expected_thread_id=instance.thread_id
         )
+        mock_cleanup.assert_not_called()
         run.refresh_from_db()
         workflow.refresh_from_db()
         self.assertEqual(run.status, SystemAgentRun.STATUS_RUNNING)

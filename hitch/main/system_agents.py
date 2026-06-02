@@ -45,6 +45,7 @@ from hitch.main.worktrees import (
     ManagedWorktree,
     WorktreeCleanupError,
     WorktreeCreationError,
+    cleanup_managed_worktree_path,
     cleanup_worktree,
     create_worktree_for_session,
 )
@@ -1153,17 +1154,19 @@ def start_autonomous_goal_workflow(
     default_branch_sha: str | None = None,
     use_worktrees: bool = False,
 ) -> SystemWorkflow:
-    autonomous_goal = (
-        AutonomousGoal.objects.select_related("project")
-        .filter(pk=autonomous_goal.pk, deleted_at__isnull=True)
-        .get()
-    )
-    workflow, created = _create_autonomous_goal_workflow_record(
-        autonomous_goal=autonomous_goal,
-        auto_proposal=auto_proposal,
-        default_branch_sha=default_branch_sha,
-        use_worktrees=use_worktrees,
-    )
+    with transaction.atomic():
+        autonomous_goal = (
+            AutonomousGoal.objects.select_related("project")
+            .select_for_update()
+            .filter(pk=autonomous_goal.pk, deleted_at__isnull=True)
+            .get()
+        )
+        workflow, created = _create_autonomous_goal_workflow_record(
+            autonomous_goal=autonomous_goal,
+            auto_proposal=auto_proposal,
+            default_branch_sha=default_branch_sha,
+            use_worktrees=use_worktrees,
+        )
     if created:
         _spawn_autonomous_goal_candidate_or_block(workflow, autonomous_goal)
     return workflow
@@ -1601,6 +1604,7 @@ def stop_running_autonomous_goal_workflow(autonomous_goal_id: int, error: str) -
             return False
         _mark_system_agent_runs_failed(interrupted_runs, error)
     _block_workflow(workflow, error, surface_to_thread=False)
+    _cleanup_autonomous_goal_workflow_worktree(workflow)
     return True
 
 
@@ -3961,6 +3965,19 @@ def _cleanup_new_autonomous_goal_worktree(worktree: ManagedWorktree | None) -> N
         logger.exception(
             "failed to clean up autonomous goal candidate worktree %s",
             worktree.path,
+        )
+
+
+def _cleanup_autonomous_goal_workflow_worktree(workflow: SystemWorkflow) -> None:
+    session_cwd = _autonomous_goal_session_cwd(workflow)
+    if session_cwd == workflow.cwd:
+        return
+    try:
+        cleanup_managed_worktree_path(session_cwd)
+    except WorktreeCleanupError:
+        logger.exception(
+            "failed to clean up autonomous goal workflow worktree %s",
+            session_cwd,
         )
 
 

@@ -3186,24 +3186,59 @@ def delete_autonomous_goal(
     project = _active_project_from_request(request)
     if project is None:
         return HttpResponseBadRequest("active project is required")
-    autonomous_goal = AutonomousGoal.objects.filter(
-        pk=autonomous_goal_id,
-        project=project,
-        deleted_at__isnull=True,
-    ).first()
-    if autonomous_goal is None:
-        raise Http404("autonomous goal not found")
     stop_error = "Autonomous goal deleted by user"
-    if not system_agents.stop_running_autonomous_goal_workflow(
-        autonomous_goal.pk, stop_error
-    ):
-        return HttpResponseBadRequest("autonomous goal run could not be stopped")
-    autonomous_goal.deleted_at = timezone.now()
-    autonomous_goal.auto_proposal_enabled = False
-    autonomous_goal.save(
-        update_fields=["deleted_at", "auto_proposal_enabled", "updated_at"]
-    )
+    with transaction.atomic():
+        autonomous_goal = (
+            AutonomousGoal.objects.select_for_update()
+            .filter(
+                pk=autonomous_goal_id,
+                project=project,
+                deleted_at__isnull=True,
+            )
+            .first()
+        )
+        if autonomous_goal is None:
+            raise Http404("autonomous goal not found")
+        if not system_agents.stop_running_autonomous_goal_workflow(
+            autonomous_goal.pk, stop_error
+        ):
+            return HttpResponseBadRequest("autonomous goal run could not be stopped")
+        deleted_at = timezone.now()
+        cleanup_proposals = _dismiss_unresolved_autonomous_goal_proposals(
+            autonomous_goal,
+            reason=stop_error,
+            now=deleted_at,
+        )
+        autonomous_goal.deleted_at = deleted_at
+        autonomous_goal.auto_proposal_enabled = False
+        autonomous_goal.save(
+            update_fields=["deleted_at", "auto_proposal_enabled", "updated_at"]
+        )
+    for proposal in cleanup_proposals:
+        _cleanup_proposed_session_candidate_worktree(proposal)
     return redirect("autonomous_goals")
+
+
+def _dismiss_unresolved_autonomous_goal_proposals(
+    autonomous_goal: AutonomousGoal, *, reason: str, now: datetime
+) -> list[ProposedSession]:
+    proposals = list(
+        ProposedSession.objects.select_for_update()
+        .select_related("candidate_session")
+        .filter(
+            autonomous_goal=autonomous_goal,
+            outcome_status=ProposedSession.OUTCOME_UNSET,
+        )
+    )
+    if proposals:
+        ProposedSession.objects.filter(
+            pk__in=[proposal.pk for proposal in proposals]
+        ).update(
+            outcome_status=ProposedSession.OUTCOME_DISMISSED,
+            outcome_notes=reason,
+            updated_at=now,
+        )
+    return proposals
 
 
 @require_http_methods(["POST"])
