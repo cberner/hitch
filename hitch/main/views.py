@@ -7835,8 +7835,6 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
     archived = request.POST.get("archived", "").strip()
     if archived not in {"true", "false"}:
         return HttpResponseBadRequest("archived must be true or false")
-    if archived == "true":
-        demo.cleanup_demo_for_session(session_id)
     settings = _stored_settings(request)
     config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
     with Codex(config=config) as codex:
@@ -7844,6 +7842,8 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
             codex.thread_archive(session_id)
         else:
             codex.thread_unarchive(session_id)
+    if archived == "true":
+        demo.cleanup_demo_for_session(session_id)
     session_index.update_cached_archived(session_id, archived=archived == "true")
     # Codex moves this thread's rollout in/out of ``archived_sessions/`` when
     # the archive bit flips, which invalidates *this* thread's cached usage
