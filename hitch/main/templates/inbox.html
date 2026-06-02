@@ -607,6 +607,7 @@
                 });
             }
             if (doCancel) doCancel.addEventListener("click", () => hideDialog(doDialog));
+            if (doForm) doForm.addEventListener("submit", () => hideDialog(doDialog));
             for (const button of document.querySelectorAll("[data-proposed-session-reject]")) {
                 button.addEventListener("click", () => {
                     if (!rejectForm) return;
