@@ -309,6 +309,18 @@ class ClaudeOptionsTests(TestCase):
         self.assertIsNone(claude_options.map_effort("minimal"))
         self.assertIsNone(claude_options.map_effort(None))
 
+    @patch("hitch.main.claude_options.claude_bin", return_value=None)
+    def test_filesystem_settings_gated_for_hidden_runs(self, _bin: MagicMock) -> None:
+        # Visible user turns load repo/user .claude settings (CLAUDE.md, MCP);
+        # hidden runs must not, so an untrusted repo's shell hooks can't run
+        # outside the approval gate.
+        visible = claude_options.build_options(cwd="/repo", model=None)
+        self.assertEqual(visible.setting_sources, ["user", "project", "local"])
+        hidden = claude_options.build_options(
+            cwd="/repo", model=None, load_filesystem_settings=False
+        )
+        self.assertEqual(hidden.setting_sources, [])
+
     @patch("hitch.main.claude_options.claude_bin", return_value="/usr/bin/claude")
     def test_build_options_first_run_fixes_session_id(self, _bin: MagicMock) -> None:
         options = claude_options.build_options(
@@ -890,6 +902,49 @@ class WorkspaceWriteConfinementTests(TestCase):
         runner = self._runner()
         result = asyncio.run(runner._can_use_tool("Bash", {"command": "ls"}, None))
         self.assertIsInstance(result, PermissionResultAllow)
+
+
+class ClaudePlanModeStateTests(TestCase):
+    """Claude sessions have no rollout collaboration mode, so plan-mode state
+    must come from the transcript -- not a sticky per-turn ``plan_mode`` flag
+    that would keep follow-ups in plan mode after the plan is resolved."""
+
+    def _claude_instance(self) -> None:
+        CodexInstance.objects.create(
+            thread_id="c",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_COMPLETED,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            purpose=CodexInstance.PURPOSE_USER,
+            plan_mode=True,
+        )
+
+    def test_plan_mode_clears_after_final_answer(self) -> None:
+        from types import SimpleNamespace
+
+        from hitch.main import views
+
+        self._claude_instance()
+        entries = [{"kind": "plan", "text": "# plan"}, {"kind": "agent", "text": "done"}]
+        state = views._thread_plan_mode_state(
+            "c", SimpleNamespace(), entries, latest_collaboration_mode=None
+        )
+        self.assertFalse(state.active)
+
+    def test_plan_mode_active_while_awaiting_approval(self) -> None:
+        from types import SimpleNamespace
+
+        from hitch.main import views
+
+        self._claude_instance()
+        entries = [{"kind": "plan", "text": "# plan"}]
+        state = views._thread_plan_mode_state(
+            "c", SimpleNamespace(), entries, latest_collaboration_mode=None
+        )
+        self.assertTrue(state.active)
 
 
 class ClaudeSystemAgentIndexingTests(TestCase):

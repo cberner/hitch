@@ -192,6 +192,7 @@ def build_options(
     session_id: str | None = None,
     mcp_server: McpSdkServerConfig | None = None,
     can_use_tool: CanUseTool | None = None,
+    load_filesystem_settings: bool = True,
 ) -> ClaudeAgentOptions:
     """Assemble ``ClaudeAgentOptions`` for one worker turn."""
     allowed, disallowed = resolve_tool_lists(
@@ -225,7 +226,14 @@ def build_options(
         mcp_servers=mcp_servers,
         # Load user/project/local settings so CLAUDE.md memory and project MCP
         # config apply, matching how a developer's own ``claude`` runs behave.
-        setting_sources=["user", "project", "local"],
+        # Hidden system-agent runs (QA/spec/autonomous) disable this: a repo
+        # ``.claude/settings*.json`` can register shell *hooks* that run in the
+        # SDK outside ``can_use_tool``, so an untrusted repo could execute
+        # commands during a read-only/propose-only hidden run despite the tool
+        # gating. Those runs get no filesystem settings at all.
+        setting_sources=(
+            ["user", "project", "local"] if load_filesystem_settings else []
+        ),
         can_use_tool=can_use_tool,
     )
     if can_use_tool is not None:

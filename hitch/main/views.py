@@ -10681,9 +10681,15 @@ def _thread_plan_mode_state(
         if latest_collaboration_mode is _ROLLOUT_COLLABORATION_MODE_NOT_PROVIDED
         else latest_collaboration_mode
     )
+    # Claude sessions have no rollout collaboration mode, so ``latest_mode`` is
+    # always None for them. The flag-only fallback would then treat any completed
+    # plan-mode turn as still in plan mode forever -- even after the agent exited
+    # plan and gave a final answer -- so ordinary follow-ups would keep defaulting
+    # to plan mode. For Claude rely on ``awaiting_approval`` (which correctly
+    # clears once a final reply follows the plan) and the active-turn flag instead.
     stored_plan_mode = (
         _latest_user_instance_ended_in_plan_mode(session_id)
-        if latest_mode is None
+        if latest_mode is None and not _session_is_claude(session_id)
         else False
     )
     active = (

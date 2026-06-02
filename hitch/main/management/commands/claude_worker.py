@@ -260,6 +260,10 @@ class _TurnRunner:
             session_id=None if resume else instance.thread_id,
             mcp_server=mcp_server,
             can_use_tool=self._can_use_tool,
+            # Only visible user sessions load repo/user ``.claude`` settings (and
+            # their hooks). Hidden system-agent runs must not, so an untrusted
+            # repo's hooks can't run outside the approval gate.
+            load_filesystem_settings=instance.purpose == CodexInstance.PURPOSE_USER,
         )
 
     def _turn_input(self) -> str | AsyncIterator[dict[str, Any]]:
