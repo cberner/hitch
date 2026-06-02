@@ -2,9 +2,12 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from django.test import SimpleTestCase
+from pygments.lexers import PythonLexer
 
+from hitch.main import diffs as diffs_module
 from hitch.main.diffs import build_worktree_diff, build_worktree_diff_text
 
 
@@ -20,6 +23,20 @@ def _git(repo: Path, *args: str) -> None:
 
 
 class WorktreeDiffTests(SimpleTestCase):
+    def test_highlight_reuses_cached_lexer_class_for_repeated_filename(self) -> None:
+        diffs_module._lexer_class_for_filename.cache_clear()
+        try:
+            with patch(
+                "hitch.main.diffs.find_lexer_class_for_filename",
+                return_value=PythonLexer,
+            ) as find_lexer_class:
+                diffs_module._highlight_code("example.py", "first = 1")
+                diffs_module._highlight_code("example.py", "second = 2")
+
+            self.assertEqual(find_lexer_class.call_count, 1)
+        finally:
+            diffs_module._lexer_class_for_filename.cache_clear()
+
     def test_builds_highlighted_diff_for_tracked_and_untracked_files(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             repo = Path(raw)

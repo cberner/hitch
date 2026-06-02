@@ -402,6 +402,69 @@ class SessionDetailFastPathTests(TestCase):
 
     @patch("hitch.main.views._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
+    def test_inactive_session_detail_uses_archived_rollout_for_stale_path(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        codex_home = Path(temp_dir.name) / ".codex"
+        active_path = (
+            codex_home
+            / "sessions"
+            / "2026"
+            / "06"
+            / "01"
+            / "rollout-2026-06-01T12-00-00-stale.jsonl"
+        )
+        archived_path = codex_home / "archived_sessions" / active_path.name
+        archived_path.parent.mkdir(parents=True)
+        archived_path.write_text(
+            "\n".join(
+                [
+                    _rollout_line(
+                        "event_msg",
+                        {"type": "user_message", "message": "Read archived rollout"},
+                    ),
+                    _rollout_line(
+                        "response_item",
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": "Archived rollout answer",
+                                }
+                            ],
+                            "phase": "final_answer",
+                        },
+                    ),
+                ]
+            ),
+            encoding="utf-8",
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="stale-archived-path",
+            cwd="/repo",
+            codex_path=str(active_path),
+            codex_name="Archived fast path",
+            codex_preview="Read archived rollout",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "stale-archived-path"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Read archived rollout")
+        self.assertContains(response, "Archived rollout answer")
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_reuses_loaded_rollout_data(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
