@@ -26,6 +26,11 @@ urlpatterns = [
         name="edit_autonomous_goal",
     ),
     path(
+        "autonomous-goals/<int:autonomous_goal_id>/delete/",
+        hitch.main.views.delete_autonomous_goal,
+        name="delete_autonomous_goal",
+    ),
+    path(
         "autonomous-goals/<int:autonomous_goal_id>/run/",
         hitch.main.views.run_autonomous_goal,
         name="run_autonomous_goal",

@@ -178,6 +178,9 @@
         .goal-menu-panel button:disabled:focus {
             background: transparent;
         }
+        .goal-menu-panel button.danger {
+            color: var(--danger);
+        }
         .brand {
             font-size: 1rem;
             font-weight: 700;
@@ -508,6 +511,15 @@
                                     data-auto-merge-to-local-branch="{% if goal.auto_merge_to_local_branch %}true{% else %}false{% endif %}"
                                     data-auto-merge-branch="{{ goal.auto_merge_branch }}"
                                 >Edit</button>
+                                <form
+                                    method="post"
+                                    action="{% url 'delete_autonomous_goal' goal.pk %}"
+                                    role="none"
+                                    onsubmit="return confirm('Delete this autonomous goal?');"
+                                >
+                                    {% csrf_token %}
+                                    <button type="submit" class="danger" role="menuitem">Delete</button>
+                                </form>
                             </div>
                         </div>
                     </div>
