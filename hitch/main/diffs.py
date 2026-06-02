@@ -5,13 +5,14 @@ import html
 import re
 import subprocess
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from pygments import highlight
 from pygments.formatters import HtmlFormatter
-from pygments.lexers import TextLexer, get_lexer_for_filename
-from pygments.util import ClassNotFound
+from pygments.lexer import Lexer
+from pygments.lexers import TextLexer, find_lexer_class_for_filename
 
 DiffLineKind = Literal["add", "remove", "context", "hunk", "meta"]
 
@@ -573,9 +574,11 @@ def _decode_git_path(value: str) -> str:
 def _highlight_code(filename: str, code: str) -> str:
     if not code:
         return "&nbsp;"
-    try:
-        lexer = get_lexer_for_filename(filename, stripnl=False, ensurenl=False)
-    except ClassNotFound:
-        lexer = TextLexer(stripnl=False, ensurenl=False)
+    lexer = _lexer_class_for_filename(filename)(stripnl=False, ensurenl=False)
     rendered = highlight(code, lexer, _FORMATTER).rstrip("\n")
     return rendered or "&nbsp;"
+
+
+@lru_cache(maxsize=512)
+def _lexer_class_for_filename(filename: str) -> type[Lexer]:
+    return cast(type[Lexer], find_lexer_class_for_filename(filename) or TextLexer)

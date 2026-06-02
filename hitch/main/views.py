@@ -4075,13 +4075,17 @@ def _thread_is_archived(thread: Any) -> bool:
     path = getattr(thread, "path", None)
     if not isinstance(path, str) or not path:
         return False
+    return _rollout_path_is_archived(Path(path))
+
+
+def _rollout_path_is_archived(rollout_path: Path) -> bool:
     # Walk only the rollout file's immediate ancestry. Scanning the full path
     # for ``archived_sessions`` would false-positive every active session
     # whose ``CODEX_HOME`` happens to traverse an unrelated directory of
     # that name (e.g. ``/data/archived_sessions/<user>/.codex/sessions/...``).
     return any(
         parent.name == _ARCHIVED_SESSIONS_DIR
-        for parent in list(Path(path).parents)[:_ARCHIVED_SESSIONS_ANCESTOR_DEPTH]
+        for parent in list(rollout_path.parents)[:_ARCHIVED_SESSIONS_ANCESTOR_DEPTH]
     )
 
 
@@ -4114,7 +4118,7 @@ def _metadata_resume_for_inactive_session(
     rollout_data = _session_detail_data_for_metadata_resume(rollout_path)
     if rollout_data is None:
         return None
-    thread = _metadata_thread(metadata)
+    thread = _metadata_thread(metadata, rollout_path=rollout_path)
     entries = tuple(_collapse_flat_entries(list(rollout_data.flat_entries)))
     if not _entries_include_transcript(entries):
         return None
@@ -4130,16 +4134,20 @@ def _metadata_resume_for_inactive_session(
     )
 
 
-def _metadata_thread(metadata: SessionMetadata) -> _MetadataThread:
+def _metadata_thread(
+    metadata: SessionMetadata, *, rollout_path: Path | None = None
+) -> _MetadataThread:
+    path = str(rollout_path) if rollout_path is not None else metadata.codex_path
     return _MetadataThread(
         id=metadata.thread_id,
         cwd=metadata.cwd,
-        path=metadata.codex_path,
+        path=path,
         name=metadata.codex_name,
         preview=metadata.codex_preview,
         created_at=_updated_at_seconds(metadata.codex_created_at),
         updated_at=_updated_at_seconds(metadata.codex_updated_at),
-        archived=metadata.codex_archived,
+        archived=metadata.codex_archived
+        or (rollout_path is not None and _rollout_path_is_archived(rollout_path)),
         thread_source=metadata.codex_thread_source,
     )
 
@@ -4503,7 +4511,10 @@ def _rollout_file_state_from_value(path: object) -> _RolloutFileState | None:
     if not isinstance(path, str) or not path:
         return None
     rollout_path = Path(path)
-    return _rollout_file_state_for_path(rollout_path)
+    rollout_state = _rollout_file_state_for_path(rollout_path)
+    if rollout_state is not None:
+        return rollout_state
+    return _archived_rollout_file_state_for_missing_session_path(rollout_path)
 
 
 def _rollout_file_state_for_path(rollout_path: Path) -> _RolloutFileState | None:
@@ -4514,6 +4525,32 @@ def _rollout_file_state_for_path(rollout_path: Path) -> _RolloutFileState | None
     if not S_ISREG(stat_result.st_mode):
         return None
     return _RolloutFileState(path=rollout_path, mtime_ns=stat_result.st_mtime_ns)
+
+
+def _archived_rollout_file_state_for_missing_session_path(
+    rollout_path: Path,
+) -> _RolloutFileState | None:
+    if rollout_path.suffix != ".jsonl" or not rollout_path.name.startswith("rollout-"):
+        return None
+    sessions_dir = next(
+        (parent for parent in rollout_path.parents if parent.name == "sessions"),
+        None,
+    )
+    if sessions_dir is None:
+        return None
+    archived_dir = sessions_dir.parent / _ARCHIVED_SESSIONS_DIR
+    candidates = [archived_dir / rollout_path.name]
+    try:
+        archived_relative_path = archived_dir / rollout_path.relative_to(sessions_dir)
+    except ValueError:
+        archived_relative_path = None
+    if archived_relative_path is not None and archived_relative_path not in candidates:
+        candidates.append(archived_relative_path)
+    for candidate in candidates:
+        rollout_state = _rollout_file_state_for_path(candidate)
+        if rollout_state is not None:
+            return rollout_state
+    return None
 
 
 def _rollout_mtime_ns(rollout_path: Path | None) -> int:
