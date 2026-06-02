@@ -3939,19 +3939,6 @@ class SpecCriticWorkflowTests(TestCase):
                         ],
                         "reviewDecision": "CHANGES_REQUESTED",
                         "reviews": [],
-                        "statusCheckRollup": [
-                            {
-                                "name": "lint",
-                                "status": "COMPLETED",
-                                "conclusion": "FAILURE",
-                                "detailsUrl": "https://github.com/cberner/hitch/actions/runs/1",
-                            },
-                            {
-                                "name": "tests",
-                                "status": "IN_PROGRESS",
-                                "detailsUrl": "https://github.com/cberner/hitch/actions/runs/2",
-                            },
-                        ],
                     }
                 ),
                 stderr="",
@@ -4043,11 +4030,13 @@ class SpecCriticWorkflowTests(TestCase):
             ["gh", "pr", "view", "https://github.com/cberner/hitch/pull/169"],
         )
         self.assertIn("comments", commands[0][-1])
-        self.assertIn("statusCheckRollup", commands[0][-1])
+        self.assertNotIn("statusCheckRollup", commands[0][-1])
         self.assertEqual(commands[1][:3], ["gh", "api", "graphql"])
         self.assertIn("reviewThreads", commands[1][4])
+        self.assertIn("comments(last: 20)", commands[1][4])
         self.assertEqual(commands[2][:3], ["gh", "api", "graphql"])
         self.assertIn("statusCheckRollup", commands[2][4])
+        self.assertNotIn("workflowName", commands[2][4])
         pr = observation["pr"]
         self.assertEqual(pr["review_signal"], "changes_requested")
         self.assertEqual(pr["unresolved_thread_count"], 1)
@@ -4159,6 +4148,18 @@ class SpecCriticWorkflowTests(TestCase):
 
         self.assertEqual(pr["ci_status"], "pending")
         self.assertEqual(pr["failing_jobs"], [])
+        self.assertEqual(pr["pending_jobs"], [])
+
+    def test_pr_monitor_treats_stale_check_runs_as_failing(self) -> None:
+        pr: dict[str, Any] = {}
+
+        system_agents._copy_gh_status_check_fields(
+            pr,
+            [{"name": "build", "status": "COMPLETED", "conclusion": "STALE"}],
+        )
+
+        self.assertEqual(pr["ci_status"], "failure")
+        self.assertEqual(pr["failing_jobs"][0]["name"], "build")
         self.assertEqual(pr["pending_jobs"], [])
 
     def test_pr_monitor_partial_review_thread_scan_keeps_review_pending(self) -> None:
