@@ -3186,7 +3186,7 @@ def delete_autonomous_goal(
     project = _active_project_from_request(request)
     if project is None:
         return HttpResponseBadRequest("active project is required")
-    stop_error = "Autonomous goal deleted by user"
+    stop_error = system_agents.AUTONOMOUS_GOAL_DELETED_ERROR
     with transaction.atomic():
         autonomous_goal = (
             AutonomousGoal.objects.select_for_update()

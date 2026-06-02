@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from django.db import IntegrityError, models, transaction
 from django.db.models import QuerySet
@@ -69,6 +69,7 @@ PR_MONITOR_DISPLAY_AUTHOR = "PR monitor"
 QA_PANEL_DISPLAY_AUTHOR = "QA panel"
 AUTONOMOUS_GOAL_DISPLAY_AUTHOR = "Autonomous goal agent"
 AUTONOMOUS_GOAL_JUDGE_DISPLAY_AUTHOR = "Autonomous goal judge"
+AUTONOMOUS_GOAL_DELETED_ERROR = "Autonomous goal deleted by user"
 AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE
 AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE
 SPEC_CRITIC_DISPLAY_AUTHOR = "Spec Critic"
@@ -1219,14 +1220,98 @@ def _create_autonomous_goal_workflow_record(
 def _spawn_autonomous_goal_candidate_or_block(
     workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
 ) -> None:
+    original_workflow = workflow
+    workflow, locked_goal, should_spawn = _claim_active_autonomous_goal_workflow(
+        workflow_id=workflow.pk,
+        autonomous_goal_id=autonomous_goal.pk,
+    )
+    _sync_workflow_instance(original_workflow, workflow)
+    if not should_spawn or locked_goal is None:
+        return
     try:
-        _spawn_autonomous_goal_candidate_run(workflow, autonomous_goal)
+        run = _spawn_autonomous_goal_candidate_run(workflow, locked_goal)
     except Exception as exc:
-        _block_autonomous_goal_workflow(
-            workflow,
-            autonomous_goal,
-            f"failed to start autonomous goal agent: {exc!r}",
+        workflow = _block_autonomous_goal_spawn_failure_if_active(
+            workflow_id=workflow.pk,
+            autonomous_goal_id=locked_goal.pk,
+            error=f"failed to start autonomous goal agent: {exc!r}",
         )
+        _sync_workflow_instance(original_workflow, workflow)
+        return
+    workflow = _interrupt_spawned_autonomous_goal_run_if_inactive(run)
+    _sync_workflow_instance(original_workflow, workflow)
+
+
+def _claim_active_autonomous_goal_workflow(
+    *, workflow_id: int, autonomous_goal_id: int
+) -> tuple[SystemWorkflow, AutonomousGoal | None, bool]:
+    with transaction.atomic():
+        autonomous_goal = (
+            AutonomousGoal.objects.select_related("project")
+            .select_for_update()
+            .filter(pk=autonomous_goal_id, deleted_at__isnull=True)
+            .first()
+        )
+        workflow = SystemWorkflow.objects.select_for_update().get(pk=workflow_id)
+        if workflow.status != SystemWorkflow.STATUS_RUNNING:
+            return workflow, autonomous_goal, False
+        if autonomous_goal is None:
+            _block_workflow(
+                workflow,
+                "autonomous goal no longer exists",
+                surface_to_thread=False,
+            )
+            return workflow, None, False
+        return workflow, autonomous_goal, True
+
+
+def _block_autonomous_goal_spawn_failure_if_active(
+    *, workflow_id: int, autonomous_goal_id: int, error: str
+) -> SystemWorkflow:
+    with transaction.atomic():
+        autonomous_goal = (
+            AutonomousGoal.objects.select_related("project")
+            .select_for_update()
+            .filter(pk=autonomous_goal_id, deleted_at__isnull=True)
+            .first()
+        )
+        workflow = SystemWorkflow.objects.select_for_update().get(pk=workflow_id)
+        if workflow.status != SystemWorkflow.STATUS_RUNNING:
+            return workflow
+        if autonomous_goal is None:
+            _block_workflow(
+                workflow,
+                "autonomous goal no longer exists",
+                surface_to_thread=False,
+            )
+            return workflow
+        _block_autonomous_goal_workflow(workflow, autonomous_goal, error)
+        return workflow
+
+
+def _interrupt_spawned_autonomous_goal_run_if_inactive(
+    run: SystemAgentRun,
+) -> SystemWorkflow:
+    workflow, _autonomous_goal, should_continue = _claim_active_autonomous_goal_workflow(
+        workflow_id=run.workflow_id,
+        autonomous_goal_id=int(run.input.get("autonomous_goal_id") or 0),
+    )
+    if should_continue:
+        return workflow
+    error = _state_string(workflow, "error") or "autonomous goal no longer exists"
+    interrupted_runs, terminal_instance_returned = _interrupt_autonomous_goal_runs([run])
+    if not interrupted_runs:
+        return workflow
+    _mark_system_agent_runs_failed(interrupted_runs, error)
+    if terminal_instance_returned:
+        _cleanup_autonomous_goal_workflow_worktree(workflow)
+    return workflow
+
+
+def _sync_workflow_instance(target: SystemWorkflow, source: SystemWorkflow) -> None:
+    target.status = source.status
+    target.step = source.step
+    target.state = source.state
 
 
 def spec_critic_should_run(prompt: str) -> bool:
@@ -1582,10 +1667,12 @@ def stop_running_autonomous_goal_workflow(autonomous_goal_id: int, error: str) -
     Returns ``False`` only when a running agent exists but could not be
     interrupted.
     """
+    main_thread_id = _autonomous_goal_main_thread_id(autonomous_goal_id)
+    reconcile_terminal_workflow_instances(main_thread_id=main_thread_id)
     workflow = (
         SystemWorkflow.objects.filter(
             kind=AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=_autonomous_goal_main_thread_id(autonomous_goal_id),
+            main_thread_id=main_thread_id,
             status=SystemWorkflow.STATUS_RUNNING,
         )
         .order_by("-created_at")
@@ -1598,13 +1685,17 @@ def stop_running_autonomous_goal_workflow(autonomous_goal_id: int, error: str) -
         .select_related("instance")
         .order_by("-created_at")
     )
+    terminal_instance_returned = False
     if runs:
-        interrupted_runs = _interrupt_system_agent_runs(runs)
+        interrupted_runs, terminal_instance_returned = _interrupt_autonomous_goal_runs(
+            runs
+        )
         if not interrupted_runs:
             return False
         _mark_system_agent_runs_failed(interrupted_runs, error)
     _block_workflow(workflow, error, surface_to_thread=False)
-    _cleanup_autonomous_goal_workflow_worktree(workflow)
+    if runs and terminal_instance_returned:
+        _cleanup_autonomous_goal_workflow_worktree(workflow)
     return True
 
 
@@ -1853,6 +1944,7 @@ def _route_system_agent_finished(
     instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
 ) -> None:
     if run.status in (SystemAgentRun.STATUS_COMPLETED, SystemAgentRun.STATUS_FAILED):
+        _cleanup_deleted_autonomous_goal_terminal_run(instance, run, workflow)
         return
     if workflow.kind == AUTONOMOUS_GOAL_AGENT_KIND:
         _handle_autonomous_goal_agent_finished(instance, run, workflow)
@@ -3567,33 +3659,78 @@ def _fail_unsupported_system_agent_run(
     run.save(update_fields=["status", "error", "updated_at"])
 
 
+def _cleanup_deleted_autonomous_goal_terminal_run(
+    instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
+) -> None:
+    if workflow.kind != AUTONOMOUS_GOAL_AGENT_KIND:
+        return
+    if run.status != SystemAgentRun.STATUS_FAILED:
+        return
+    if run.error != AUTONOMOUS_GOAL_DELETED_ERROR:
+        return
+    if instance.status not in (
+        CodexInstance.STATUS_COMPLETED,
+        CodexInstance.STATUS_FAILED,
+    ):
+        return
+    _cleanup_autonomous_goal_workflow_worktree(workflow)
+
+
 def _handle_autonomous_goal_agent_finished(
     instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
 ) -> None:
+    autonomous_goal_id = _state_int(workflow, "autonomous_goal_id")
+    judge_candidate: dict[str, Any] | None = None
+    autonomous_goal: AutonomousGoal | None = None
+    with transaction.atomic():
+        autonomous_goal = (
+            AutonomousGoal.objects.select_related("project")
+            .select_for_update()
+            .filter(
+                pk=autonomous_goal_id,
+                deleted_at__isnull=True,
+            )
+            .first()
+        )
+        run = SystemAgentRun.objects.select_for_update().get(pk=run.pk)
+        workflow = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        run.workflow = workflow
+        if run.status in (
+            SystemAgentRun.STATUS_COMPLETED,
+            SystemAgentRun.STATUS_FAILED,
+        ):
+            return
+        if workflow.status != SystemWorkflow.STATUS_RUNNING:
+            return
+        if autonomous_goal is None:
+            _fail_run_and_block_workflow(
+                run,
+                "autonomous goal no longer exists",
+                surface_to_thread=False,
+            )
+            return
+        judge_candidate = _handle_autonomous_goal_agent_finished_locked(
+            instance, run, workflow, autonomous_goal
+        )
+    if judge_candidate is not None and autonomous_goal is not None:
+        _spawn_autonomous_goal_judge_or_block(workflow, autonomous_goal, judge_candidate)
+
+
+def _handle_autonomous_goal_agent_finished_locked(
+    instance: CodexInstance,
+    run: SystemAgentRun,
+    workflow: SystemWorkflow,
+    autonomous_goal: AutonomousGoal,
+) -> dict[str, Any] | None:
     if workflow.status != SystemWorkflow.STATUS_RUNNING:
-        return
-    autonomous_goal = (
-        AutonomousGoal.objects.select_related("project")
-        .filter(
-            pk=_state_int(workflow, "autonomous_goal_id"),
-            deleted_at__isnull=True,
-        )
-        .first()
-    )
-    if autonomous_goal is None:
-        _fail_run_and_block_workflow(
-            run,
-            "autonomous goal no longer exists",
-            surface_to_thread=False,
-        )
-        return
+        return None
     if instance.status != CodexInstance.STATUS_COMPLETED:
         _fail_autonomous_goal_run_and_block_workflow(
             run,
             autonomous_goal,
             f"autonomous goal worker failed: {instance.error}",
         )
-        return
+        return None
 
     raw_output = _final_agent_text(instance.events_path)
     if workflow.step == STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING:
@@ -3605,7 +3742,7 @@ def _handle_autonomous_goal_agent_finished(
                 "autonomous goal candidate output was not valid JSON",
                 raw_output,
             )
-            return
+            return None
         run.status = SystemAgentRun.STATUS_COMPLETED
         run.output = candidate_output
         run.raw_output = raw_output
@@ -3631,23 +3768,15 @@ def _handle_autonomous_goal_agent_finished(
             workflow.status = SystemWorkflow.STATUS_COMPLETED
             workflow.state = {**workflow.state, "candidate": candidate_output}
             workflow.save(update_fields=["status", "step", "state", "updated_at"])
-            return
-        candidate = candidate_output["proposal"]
+            return None
+        candidate = cast(dict[str, Any], candidate_output["proposal"])
         workflow.step = STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING
         workflow.state = {**workflow.state, "candidate": candidate}
         workflow.save(update_fields=["step", "state", "updated_at"])
-        try:
-            _spawn_autonomous_goal_judge_run(workflow, autonomous_goal, candidate)
-        except Exception as exc:
-            _block_autonomous_goal_workflow(
-                workflow,
-                autonomous_goal,
-                f"failed to start autonomous goal judge: {exc!r}",
-            )
-        return
+        return candidate
 
     if workflow.step != STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING:
-        return
+        return None
     judgment = _parse_autonomous_goal_judge_output(raw_output)
     if judgment is None:
         _fail_autonomous_goal_run_and_block_workflow(
@@ -3656,7 +3785,7 @@ def _handle_autonomous_goal_agent_finished(
             "autonomous goal judge output was not valid JSON",
             raw_output,
         )
-        return
+        return None
     run.status = SystemAgentRun.STATUS_COMPLETED
     run.output = judgment
     run.raw_output = raw_output
@@ -3733,6 +3862,7 @@ def _handle_autonomous_goal_agent_finished(
     workflow.status = SystemWorkflow.STATUS_COMPLETED
     workflow.state = {**workflow.state, "judgment": judgment}
     workflow.save(update_fields=["status", "step", "state", "updated_at"])
+    return None
 
 
 # Hidden QA subagents do not surface approval prompts in the main workflow UI.
@@ -4040,6 +4170,29 @@ def _spawn_autonomous_goal_candidate_run(
         },
     )
     return run
+
+
+def _spawn_autonomous_goal_judge_or_block(
+    workflow: SystemWorkflow,
+    autonomous_goal: AutonomousGoal,
+    candidate: dict[str, Any],
+) -> None:
+    workflow, locked_goal, should_spawn = _claim_active_autonomous_goal_workflow(
+        workflow_id=workflow.pk,
+        autonomous_goal_id=autonomous_goal.pk,
+    )
+    if not should_spawn or locked_goal is None:
+        return
+    try:
+        run = _spawn_autonomous_goal_judge_run(workflow, locked_goal, candidate)
+    except Exception as exc:
+        _block_autonomous_goal_spawn_failure_if_active(
+            workflow_id=workflow.pk,
+            autonomous_goal_id=locked_goal.pk,
+            error=f"failed to start autonomous goal judge: {exc!r}",
+        )
+        return
+    _interrupt_spawned_autonomous_goal_run_if_inactive(run)
 
 
 def _spawn_autonomous_goal_judge_run(
@@ -4833,6 +4986,26 @@ def _interrupt_system_agent_runs(runs: list[SystemAgentRun]) -> list[SystemAgent
         if interrupted is not None:
             interrupted_runs.append(run)
     return interrupted_runs
+
+
+def _interrupt_autonomous_goal_runs(
+    runs: list[SystemAgentRun],
+) -> tuple[list[SystemAgentRun], bool]:
+    interrupted_runs: list[SystemAgentRun] = []
+    terminal_instance_returned = False
+    for run in runs:
+        interrupted = codex_pool.interrupt_instance(
+            run.instance_id, expected_thread_id=run.thread_id
+        )
+        if interrupted is None:
+            continue
+        interrupted_runs.append(run)
+        if interrupted.status in (
+            CodexInstance.STATUS_COMPLETED,
+            CodexInstance.STATUS_FAILED,
+        ):
+            terminal_instance_returned = True
+    return interrupted_runs, terminal_instance_returned
 
 
 def _mark_system_agent_runs_failed(runs: list[SystemAgentRun], error: str) -> None:
