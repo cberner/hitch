@@ -109,6 +109,7 @@ _MODELS_REFRESH_IN_FLIGHT: set[bool] = set()
 _MODELS_CACHE_VALUE: dict[bool, list[Any]] = {}
 _MODELS_CACHE_FETCHED_AT: dict[bool, datetime] = {}
 _MODELS_CACHE_TTL = timedelta(minutes=5)
+_SESSION_LIST_PR_STAGE_REFRESH_LIMIT = 1
 
 
 class SettingsValues(NamedTuple):
@@ -2387,6 +2388,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
     ]
     workflows_by_thread_id = _latest_pr_workflows_by_thread_id(thread_ids)
     active_instances_by_thread_id = _active_instances_by_thread_id(thread_ids)
+    pr_stage_refreshes_remaining = _SESSION_LIST_PR_STAGE_REFRESH_LIMIT
     for session in sessions:
         session_id = session.get("id")
         if not isinstance(session_id, str):
@@ -2413,7 +2415,18 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             pr_observation,
             main_updated_at=session.get("stage_main_updated_at"),
         )
-        workflow_pr_snapshot = system_agents.pr_handoff_for_workflow(stage_workflow)
+        if (
+            pr_stage_refreshes_remaining > 0
+            and system_agents.pr_handoff_stage_refresh_due(stage_workflow)
+        ):
+            workflow_pr_snapshot = system_agents.refreshed_pr_handoff_for_stage(
+                stage_workflow
+            )
+            pr_stage_refreshes_remaining -= 1
+        else:
+            workflow_pr_snapshot = system_agents.pr_handoff_for_workflow(
+                stage_workflow
+            )
         stage = session_stage.derive_stage(
             entries=entries,
             active_instance=active_instance,
@@ -3854,7 +3867,10 @@ def _render_session_detail(
         stage_pr_workflow = _workflow_after_main_lifecycle(
             stage_pr_workflow, pr_observation, main_updated_at=main_updated_at
         )
-        workflow_pr_snapshot = system_agents.pr_handoff_for_workflow(stage_pr_workflow)
+        workflow_pr_snapshot = system_agents.refreshed_pr_handoff_for_stage(
+            stage_pr_workflow,
+            force=True,
+        )
         if not pr_url:
             pr_url = _string_value(workflow_pr_snapshot.get("url")) or None
         stage = session_stage.derive_stage(

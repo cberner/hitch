@@ -166,9 +166,14 @@ def _select_pr_snapshot(
 def _terminal_pr_stage(snapshot: Mapping[str, Any] | None) -> SessionStage | None:
     if not snapshot:
         return None
-    if snapshot.get("merged") is True or _string(snapshot.get("merged_at")):
+    state = _string(snapshot.get("state")).lower()
+    if (
+        snapshot.get("merged") is True
+        or _string(snapshot.get("merged_at"))
+        or state == "merged"
+    ):
         return DONE_MERGED
-    if _string(snapshot.get("state")).lower() == "closed":
+    if state == "closed":
         return DONE_CLOSED
     return None
 

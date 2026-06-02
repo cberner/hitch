@@ -110,6 +110,16 @@ class SessionStageTests(SimpleTestCase):
 
         self.assertEqual(stage, session_stage.DONE_MERGED)
 
+    def test_merged_state_is_done_merged(self) -> None:
+        stage = session_stage.derive_stage(
+            pr_snapshot={
+                "url": "https://github.com/cberner/hitch/pull/93",
+                "state": "merged",
+            },
+        )
+
+        self.assertEqual(stage, session_stage.DONE_MERGED)
+
     def test_running_workflow_without_pr_handoff_ignores_terminal_log_pr(
         self,
     ) -> None:

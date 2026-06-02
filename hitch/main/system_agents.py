@@ -259,6 +259,9 @@ _PR_SAFE_LIST_ITEM_FIELDS = (
     "conclusion",
 )
 _GH_PR_CREATE_TIMEOUT_SECONDS = 120
+_PR_STAGE_REFRESH_MIN_SECONDS = 60
+_PR_STAGE_REFRESH_TIMEOUT_SECONDS = 5
+_PR_STAGE_REFRESH_STATE_KEY = "pr_stage_refresh"
 _GH_PR_VIEW_FIELDS = (
     "url",
     "number",
@@ -2612,12 +2615,14 @@ def _gh_pr_view(
     *,
     selector: str | None = None,
     source_tool: str,
+    timeout_seconds: int = _GH_PR_CREATE_TIMEOUT_SECONDS,
 ) -> dict[str, Any] | None:
     payload = _gh_pr_view_payload(
         workflow,
         selector=selector,
         fields=_GH_PR_VIEW_FIELDS,
         optional=selector is None,
+        timeout_seconds=timeout_seconds,
     )
     if payload is None:
         return None
@@ -2630,12 +2635,13 @@ def _gh_pr_view_payload(
     selector: str | None,
     fields: Iterable[str],
     optional: bool = False,
+    timeout_seconds: int = _GH_PR_CREATE_TIMEOUT_SECONDS,
 ) -> dict[str, Any] | None:
     args = ["pr", "view"]
     if selector:
         args.append(selector)
     args.extend(["--json", ",".join(fields)])
-    viewed = _run_gh_cli(workflow, args)
+    viewed = _run_gh_cli(workflow, args, timeout_seconds=timeout_seconds)
     if viewed.returncode != 0:
         if optional:
             return None
@@ -2650,7 +2656,10 @@ def _gh_pr_view_payload(
 
 
 def _run_gh_cli(
-    workflow: SystemWorkflow, args: list[str]
+    workflow: SystemWorkflow,
+    args: list[str],
+    *,
+    timeout_seconds: int = _GH_PR_CREATE_TIMEOUT_SECONDS,
 ) -> subprocess.CompletedProcess[str]:
     env = {**os.environ, "GH_PROMPT_DISABLED": "1"}
     command = ["gh", *args]
@@ -2661,7 +2670,7 @@ def _run_gh_cli(
             env=env,
             capture_output=True,
             text=True,
-            timeout=_GH_PR_CREATE_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
@@ -6202,6 +6211,92 @@ def pr_handoff_for_workflow(workflow: SystemWorkflow | None) -> dict[str, Any]:
     return _pr_handoff_from_workflow(workflow)
 
 
+def pr_handoff_stage_refresh_due(workflow: SystemWorkflow | None) -> bool:
+    if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
+        return False
+    handoff = _pr_handoff_from_workflow(workflow)
+    return _should_refresh_pr_handoff_for_stage(workflow, handoff, force=False)
+
+
+def refreshed_pr_handoff_for_stage(
+    workflow: SystemWorkflow | None, *, force: bool = False
+) -> dict[str, Any]:
+    if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
+        return {}
+    handoff = _pr_handoff_from_workflow(workflow)
+    if not _should_refresh_pr_handoff_for_stage(workflow, handoff, force=force):
+        return handoff
+    selector = _pr_handoff_selector(handoff)
+    if not selector:
+        return handoff
+    _mark_pr_stage_refresh_attempt(workflow)
+    try:
+        observed = _gh_pr_view(
+            workflow,
+            selector=selector,
+            source_tool="gh_pr_stage_refresh",
+            timeout_seconds=_PR_STAGE_REFRESH_TIMEOUT_SECONDS,
+        )
+    except _GhPrOpenError:
+        workflow.save(update_fields=["state", "updated_at"])
+        logger.exception("failed to refresh PR stage for workflow %s", workflow.pk)
+        return handoff
+    if observed is None or _pr_handoff_identity_changed(handoff, observed):
+        workflow.save(update_fields=["state", "updated_at"])
+        return handoff
+    _merge_pr_handoff(workflow, observed)
+    refreshed = _pr_handoff_from_workflow(workflow)
+    if _pr_handoff_is_terminal(refreshed):
+        workflow.status = SystemWorkflow.STATUS_COMPLETED
+        workflow.step = STEP_PR_CLOSED
+        workflow.save(update_fields=["status", "step", "state", "updated_at"])
+    else:
+        workflow.save(update_fields=["state", "updated_at"])
+    return refreshed
+
+
+def _should_refresh_pr_handoff_for_stage(
+    workflow: SystemWorkflow, handoff: dict[str, Any], *, force: bool
+) -> bool:
+    if workflow.status != SystemWorkflow.STATUS_COMPLETED:
+        return False
+    if workflow.step != STEP_PR_READY:
+        return False
+    if _pr_handoff_is_terminal(handoff):
+        return False
+    if not _hitch_pr_handoff_marker(handoff):
+        return False
+    if not Path(workflow.cwd).is_dir():
+        return False
+    if force:
+        return True
+    last_attempted_at = _pr_stage_refresh_attempted_at(workflow)
+    if last_attempted_at <= 0:
+        return True
+    return int(timezone.now().timestamp()) - last_attempted_at >= (
+        _PR_STAGE_REFRESH_MIN_SECONDS
+    )
+
+
+def _mark_pr_stage_refresh_attempt(workflow: SystemWorkflow) -> None:
+    workflow.state = {
+        **workflow.state,
+        _PR_STAGE_REFRESH_STATE_KEY: {
+            "attempted_at": int(timezone.now().timestamp()),
+        },
+    }
+
+
+def _pr_stage_refresh_attempted_at(workflow: SystemWorkflow) -> int:
+    value = workflow.state.get(_PR_STAGE_REFRESH_STATE_KEY)
+    if not isinstance(value, dict):
+        return 0
+    attempted_at = value.get("attempted_at")
+    if isinstance(attempted_at, int) and not isinstance(attempted_at, bool):
+        return attempted_at
+    return 0
+
+
 def hitch_pr_handoff_for_workflow(workflow: SystemWorkflow | None) -> dict[str, Any]:
     if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
         return {}
@@ -6331,7 +6426,7 @@ def _pr_list_item_for_monitor_schema(item: Any) -> str | dict[str, Any] | None:
 def _pr_handoff_is_terminal(handoff: dict[str, Any]) -> bool:
     state = handoff.get("state")
     return handoff.get("merged") is True or (
-        isinstance(state, str) and state.lower() == "closed"
+        isinstance(state, str) and state.lower() in {"closed", "merged"}
     )
 
 
