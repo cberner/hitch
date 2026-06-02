@@ -1553,6 +1553,8 @@ class ClaudeFollowUpAutoQaTests(TestCase):
             show_archived_sessions=False,
             last_selected_repo="",
             selected_project_id=None,
+            visible_session_project_ids=None,
+            show_no_project_sessions=False,
             enable_memories=False,
             provider=coding_agents.PROVIDER_CLAUDE,
         )
