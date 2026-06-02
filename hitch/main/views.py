@@ -2412,36 +2412,15 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         cached_stage = _cached_stage_for_session_row(session, rollout_state)
         if active_instance is None and workflow is None and cached_stage is not None:
             assert rollout_state is not None
-            pr_snapshot = None
-            stage = cached_stage
-            if cached_stage.key == session_stage.PR.key:
-                cached_rollout_path = rollout_state.path
-                pr_snapshot = _pr_snapshot_for_rollout_path(cached_rollout_path)
-                if pr_snapshot is not None:
-                    refresh_pr_snapshot = (
-                        pr_stage_refreshes_remaining > 0
-                        and system_agents.pr_snapshot_stage_refresh_due(
-                            cwd=_string_value(session.get("cwd")),
-                            snapshot=pr_snapshot,
-                            attempted_at=_datetime_value(
-                                session.get("stage_pr_refresh_attempted_at")
-                            ),
-                        )
-                    )
-                    if refresh_pr_snapshot:
-                        _mark_cached_pr_stage_refresh_attempt(session_id)
-                        pr_snapshot = system_agents.refreshed_pr_snapshot_for_stage(
-                            cwd=_string_value(session.get("cwd")),
-                            snapshot=pr_snapshot,
-                        )
-                        pr_stage_refreshes_remaining -= 1
-                    stage = session_stage.derive_stage(pr_snapshot=pr_snapshot)
-                    if stage.key != cached_stage.key:
-                        _update_cached_stage_best_effort(
-                            session_id,
-                            stage,
-                            rollout_state.mtime_ns,
-                        )
+            stage, pr_snapshot, pr_stage_refreshes_remaining = (
+                _stage_from_cached_session_row(
+                    session_id,
+                    session,
+                    rollout_state=rollout_state,
+                    cached_stage=cached_stage,
+                    pr_stage_refreshes_remaining=pr_stage_refreshes_remaining,
+                )
+            )
             session["stage"] = _session_list_stage_context(
                 stage, pr_snapshot=pr_snapshot
             )
@@ -2455,6 +2434,25 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             pr_observation,
             main_updated_at=session.get("stage_main_updated_at"),
         )
+        if (
+            active_instance is None
+            and stage_workflow is None
+            and cached_stage is not None
+        ):
+            assert rollout_state is not None
+            stage, pr_snapshot, pr_stage_refreshes_remaining = (
+                _stage_from_cached_session_row(
+                    session_id,
+                    session,
+                    rollout_state=rollout_state,
+                    cached_stage=cached_stage,
+                    pr_stage_refreshes_remaining=pr_stage_refreshes_remaining,
+                )
+            )
+            session["stage"] = _session_list_stage_context(
+                stage, pr_snapshot=pr_snapshot
+            )
+            continue
         if (
             pr_stage_refreshes_remaining > 0
             and system_agents.pr_handoff_stage_refresh_due(stage_workflow)
@@ -2495,6 +2493,46 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
                 stage,
                 rollout_state.mtime_ns if rollout_state is not None else 0,
             )
+
+
+def _stage_from_cached_session_row(
+    session_id: str,
+    session: Mapping[str, Any],
+    *,
+    rollout_state: _RolloutFileState,
+    cached_stage: session_stage.SessionStage,
+    pr_stage_refreshes_remaining: int,
+) -> tuple[session_stage.SessionStage, Mapping[str, Any] | None, int]:
+    pr_snapshot = None
+    stage = cached_stage
+    if cached_stage.key == session_stage.PR.key:
+        pr_snapshot = _pr_snapshot_for_rollout_path(rollout_state.path)
+        if pr_snapshot is not None:
+            refresh_pr_snapshot = (
+                pr_stage_refreshes_remaining > 0
+                and system_agents.pr_snapshot_stage_refresh_due(
+                    cwd=_string_value(session.get("cwd")),
+                    snapshot=pr_snapshot,
+                    attempted_at=_datetime_value(
+                        session.get("stage_pr_refresh_attempted_at")
+                    ),
+                )
+            )
+            if refresh_pr_snapshot:
+                _mark_cached_pr_stage_refresh_attempt(session_id)
+                pr_snapshot = system_agents.refreshed_pr_snapshot_for_stage(
+                    cwd=_string_value(session.get("cwd")),
+                    snapshot=pr_snapshot,
+                )
+                pr_stage_refreshes_remaining -= 1
+            stage = session_stage.derive_stage(pr_snapshot=pr_snapshot)
+            if stage.key != cached_stage.key:
+                _update_cached_stage_best_effort(
+                    session_id,
+                    stage,
+                    rollout_state.mtime_ns,
+                )
+    return stage, pr_snapshot, pr_stage_refreshes_remaining
 
 
 def _session_list_pr_snapshot_for_stage(
