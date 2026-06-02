@@ -320,6 +320,19 @@ class _TurnRunner:
         method = _approval_method(tool_name)
         if self._approval_mode == claude_options.APPROVAL_DENY_ALL:
             return claude_options.deny_result("Denied by Hitch approval policy.")
+        # ``workspaceWrite`` confines edits to the repo, but ``SandboxSettings``
+        # only sandboxes bash -- the SDK's Write/Edit tools are not -- so enforce
+        # the cwd boundary here for every approval mode (``approve_all`` no longer
+        # bypasses ``can_use_tool`` under this sandbox). A file edit resolving
+        # outside ``cwd`` is denied before any approval/auto-approval.
+        if (
+            self._sandbox_policy == claude_options.SANDBOX_WORKSPACE_WRITE
+            and tool_name in _FILE_TOOLS
+            and not self._file_edit_within_cwd(tool_input)
+        ):
+            return claude_options.deny_result(
+                "workspaceWrite confines file edits to the session directory."
+            )
         # Hidden system-agent runs (QA/spec/autonomous) have no visible approval
         # UI, so a browser ``ApprovalRequest`` would just wait out the timeout
         # and be denied. Under ``auto_review`` -- the mode these runs are pinned
@@ -356,6 +369,12 @@ class _TurnRunner:
             )
         if tool_name == _ASK_USER_QUESTION_TOOL:
             return await self._ask_user_question(tool_input)
+        if self._approval_mode == claude_options.APPROVAL_APPROVE_ALL:
+            # ``approve_all`` auto-approves without prompting. It only reaches the
+            # callback for a confining sandbox (``dangerFullAccess`` maps to
+            # ``bypassPermissions`` and skips it); the cwd guard above already
+            # bounded file edits, so the rest just proceeds.
+            return claude_options.allow_result()
         params = _approval_params(method, tool_name, tool_input)
         request_id = await asyncio.to_thread(
             _create_pending_approval,
@@ -374,6 +393,24 @@ class _TurnRunner:
         if _decision_allows(decision):
             return claude_options.allow_result()
         return claude_options.deny_result("Declined by the user.")
+
+    def _file_edit_within_cwd(self, tool_input: dict[str, Any]) -> bool:
+        """Whether a file-edit tool's target stays inside the session ``cwd``.
+
+        Resolves the path (following symlinks, so a symlink inside ``cwd``
+        pointing out is caught) and confirms it is ``cwd`` or a descendant. A
+        relative path is taken against ``cwd``. No path -> treated as in-bounds.
+        """
+        cwd = Path(self._instance.cwd).resolve()
+        for key in ("file_path", "path", "notebook_path"):
+            value = tool_input.get(key)
+            if isinstance(value, str) and value:
+                target = Path(value)
+                if not target.is_absolute():
+                    target = cwd / target
+                target = target.resolve()
+                return target == cwd or cwd in target.parents
+        return True
 
     async def _ask_user_question(self, tool_input: dict[str, Any]) -> Any:
         """Collect answers to a Claude ``AskUserQuestion`` via the input UI.

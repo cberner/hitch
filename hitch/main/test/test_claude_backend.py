@@ -171,12 +171,25 @@ class ClaudeOptionsTests(TestCase):
             "plan",
         )
 
-    def test_approve_all_maps_to_bypass(self) -> None:
+    def test_approve_all_bypasses_only_under_danger_full_access(self) -> None:
+        # Only the deliberate full-access opt-out fully bypasses; under a
+        # confining sandbox approve_all stays on the callback so file edits are
+        # bounded (SandboxSettings only sandboxes bash).
         self.assertEqual(
             claude_options.resolve_permission_mode(
-                plan_mode=False, sandbox_policy=None, approval_mode="approve_all"
+                plan_mode=False,
+                sandbox_policy="dangerFullAccess",
+                approval_mode="approve_all",
             ),
             "bypassPermissions",
+        )
+        self.assertEqual(
+            claude_options.resolve_permission_mode(
+                plan_mode=False,
+                sandbox_policy="workspaceWrite",
+                approval_mode="approve_all",
+            ),
+            "default",
         )
 
     def test_danger_full_access_keeps_approval_gate(self) -> None:
@@ -814,6 +827,68 @@ class HiddenAutoReviewApprovalTests(TestCase):
         runner = self._runner(sandbox_policy=None)
         runner._instance.agent_kind = demo.DEMO_AGENT_KIND
         result = asyncio.run(runner._can_use_tool("Bash", {"command": "podman ps"}, None))
+        self.assertIsInstance(result, PermissionResultAllow)
+
+
+class WorkspaceWriteConfinementTests(TestCase):
+    """Under ``workspaceWrite``, SandboxSettings only sandboxes bash, so the
+    worker confines the SDK Write/Edit tools to ``cwd`` itself -- even under
+    ``approve_all`` (which no longer fully bypasses for this sandbox)."""
+
+    def _runner(self) -> Any:
+        import io
+
+        from hitch.main.management.commands import claude_worker
+
+        instance = CodexInstance(
+            thread_id="t",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_RUNNING,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            purpose=CodexInstance.PURPOSE_USER,
+        )
+        return claude_worker._TurnRunner(
+            instance=instance,
+            events_file=io.StringIO(),
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy="workspaceWrite",
+            approval_mode=claude_options.APPROVAL_APPROVE_ALL,
+            web_search_mode=None,
+            plan_mode=False,
+        )
+
+    def test_edit_inside_cwd_is_allowed(self) -> None:
+        import asyncio
+
+        runner = self._runner()
+        for path in ("/repo/a.py", "sub/b.py"):
+            result = asyncio.run(
+                runner._can_use_tool("Edit", {"file_path": path}, None)
+            )
+            self.assertIsInstance(result, PermissionResultAllow, path)
+
+    def test_edit_outside_cwd_is_denied_even_under_approve_all(self) -> None:
+        import asyncio
+
+        from claude_agent_sdk import PermissionResultDeny
+
+        runner = self._runner()
+        for path in ("/etc/passwd", "/repo/../escape.py"):
+            result = asyncio.run(
+                runner._can_use_tool("Write", {"file_path": path}, None)
+            )
+            self.assertIsInstance(result, PermissionResultDeny, path)
+
+    def test_bash_still_allowed_under_approve_all(self) -> None:
+        import asyncio
+
+        # Bash is confined by SandboxSettings; approve_all auto-approves it.
+        runner = self._runner()
+        result = asyncio.run(runner._can_use_tool("Bash", {"command": "ls"}, None))
         self.assertIsInstance(result, PermissionResultAllow)
 
 

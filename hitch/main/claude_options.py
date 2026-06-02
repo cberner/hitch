@@ -100,9 +100,16 @@ def resolve_permission_mode(
     """Map Hitch's plan/sandbox/approval knobs onto a Claude permission mode."""
     if plan_mode:
         return "plan"
-    # ``dangerFullAccess`` only widens filesystem access; it must not bypass the
-    # approval gate. Only an explicit ``approve_all`` removes the gate.
-    if approval_mode == APPROVAL_APPROVE_ALL:
+    # ``bypassPermissions`` skips ``can_use_tool`` entirely. ``SandboxSettings``
+    # only sandboxes *bash* -- the SDK's own Write/Edit tools are confined via the
+    # permission callback, not the sandbox -- so bypassing under ``workspaceWrite``
+    # would let approved file edits escape ``cwd``. Only the deliberate
+    # ``dangerFullAccess`` opt-out fully bypasses; otherwise keep ``can_use_tool``
+    # authoritative (it auto-approves under ``approve_all`` but confines edits).
+    if (
+        approval_mode == APPROVAL_APPROVE_ALL
+        and sandbox_policy == SANDBOX_DANGER_FULL_ACCESS
+    ):
         return "bypassPermissions"
     return "default"
 
