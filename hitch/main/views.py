@@ -1634,6 +1634,9 @@ def _session_row_for_metadata(
                 "stage_main_updated_at": metadata.codex_updated_at,
                 "stage_cache_key": metadata.derived_stage,
                 "stage_cache_mtime_ns": metadata.derived_stage_source_mtime_ns,
+                "stage_pr_refresh_attempted_at": (
+                    metadata.derived_stage_pr_refresh_attempted_at
+                ),
             }
         )
     if system_only:
@@ -2355,6 +2358,11 @@ def _session_row_for_thread(
                     if metadata is not None
                     else 0
                 ),
+                "stage_pr_refresh_attempted_at": (
+                    metadata.derived_stage_pr_refresh_attempted_at
+                    if metadata is not None
+                    else None
+                ),
             }
         )
     if system_only:
@@ -2398,12 +2406,39 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         active_instance = active_instances_by_thread_id.get(session_id)
         cached_stage = _cached_stage_for_session_row(session, rollout_state)
         if active_instance is None and workflow is None and cached_stage is not None:
+            assert rollout_state is not None
             pr_snapshot = None
+            stage = cached_stage
             if cached_stage.key == session_stage.PR.key:
-                rollout_path = rollout_state.path if rollout_state is not None else None
-                pr_snapshot = _pr_snapshot_for_rollout_path(rollout_path)
+                cached_rollout_path = rollout_state.path
+                pr_snapshot = _pr_snapshot_for_rollout_path(cached_rollout_path)
+                if pr_snapshot is not None:
+                    refresh_pr_snapshot = (
+                        pr_stage_refreshes_remaining > 0
+                        and system_agents.pr_snapshot_stage_refresh_due(
+                            cwd=_string_value(session.get("cwd")),
+                            snapshot=pr_snapshot,
+                            attempted_at=_datetime_value(
+                                session.get("stage_pr_refresh_attempted_at")
+                            ),
+                        )
+                    )
+                    if refresh_pr_snapshot:
+                        _mark_cached_pr_stage_refresh_attempt(session_id)
+                        pr_snapshot = system_agents.refreshed_pr_snapshot_for_stage(
+                            cwd=_string_value(session.get("cwd")),
+                            snapshot=pr_snapshot,
+                        )
+                        pr_stage_refreshes_remaining -= 1
+                    stage = session_stage.derive_stage(pr_snapshot=pr_snapshot)
+                    if stage.key != cached_stage.key:
+                        _update_cached_stage_best_effort(
+                            session_id,
+                            stage,
+                            rollout_state.mtime_ns,
+                        )
             session["stage"] = _session_list_stage_context(
-                cached_stage, pr_snapshot=pr_snapshot
+                stage, pr_snapshot=pr_snapshot
             )
             continue
         rollout_path = rollout_state.path if rollout_state is not None else None
@@ -2573,6 +2608,17 @@ def _update_cached_stage_best_effort(
         if not _is_database_locked_error(exc):
             raise
         logger.warning("skipping session stage cache update because database is locked")
+
+
+def _mark_cached_pr_stage_refresh_attempt(session_id: str) -> None:
+    try:
+        SessionMetadata.objects.filter(thread_id=session_id).update(
+            derived_stage_pr_refresh_attempted_at=timezone.now()
+        )
+    except OperationalError as exc:
+        if not _is_database_locked_error(exc):
+            raise
+        logger.warning("skipping PR stage refresh backoff because database is locked")
 
 
 def _is_database_locked_error(exc: BaseException) -> bool:
@@ -3871,13 +3917,45 @@ def _render_session_detail(
             stage_pr_workflow,
             force=True,
         )
+        log_pr_snapshot = pr_observation.snapshot
+        if (
+            active_instance is None
+            and stage_pr_workflow is None
+            and log_pr_snapshot is not None
+        ):
+            detail_cwd = (
+                metadata.cwd
+                if metadata is not None and metadata.cwd
+                else _thread_cwd(thread) or ""
+            )
+            if system_agents.pr_snapshot_stage_refresh_due(
+                cwd=detail_cwd,
+                snapshot=log_pr_snapshot,
+                attempted_at=(
+                    metadata.derived_stage_pr_refresh_attempted_at
+                    if metadata is not None
+                    else None
+                ),
+                force=True,
+            ):
+                if metadata is not None:
+                    _mark_cached_pr_stage_refresh_attempt(session_id)
+                log_pr_snapshot = system_agents.refreshed_pr_snapshot_for_stage(
+                    cwd=detail_cwd,
+                    snapshot=log_pr_snapshot,
+                    force=True,
+                )
         if not pr_url:
-            pr_url = _string_value(workflow_pr_snapshot.get("url")) or None
+            pr_url = (
+                _string_value(workflow_pr_snapshot.get("url"))
+                or _string_value(log_pr_snapshot.get("url") if log_pr_snapshot else None)
+                or None
+            )
         stage = session_stage.derive_stage(
             entries=entries,
             active_instance=active_instance,
             workflow=stage_workflow,
-            pr_snapshot=pr_observation.snapshot,
+            pr_snapshot=log_pr_snapshot,
             workflow_pr_snapshot=workflow_pr_snapshot,
         )
         # Only persist a rollout-derived stage; see _attach_session_stage_context
@@ -4948,6 +5026,10 @@ def _updated_at_seconds(updated_at: Any) -> float | None:
     if isinstance(updated_at, datetime):
         return updated_at.timestamp()
     return None
+
+
+def _datetime_value(value: Any) -> datetime | None:
+    return value if isinstance(value, datetime) else None
 
 
 def _latest_updated_at(*values: Any) -> Any:
