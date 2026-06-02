@@ -820,6 +820,105 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(metadata.derived_stage, "done_merged")
         mock_codex.assert_not_called()
 
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_inactive_session_detail_uses_pr_workflow_failure_observation_for_pr_link(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        pr_url = "https://github.com/cberner-ai/raptorq-ai/pull/44"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Committed."}],
+                        "phase": "final_answer",
+                    },
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {
+                        "type": "user_message",
+                        "message": (
+                            "Hitch QA agent could not complete the PR workflow.\n\n"
+                            "Status: Hitch checked the PR gates and is waiting on "
+                            "external PR state.\n\n"
+                            "Tell the user the PR workflow needs attention before "
+                            "continuing."
+                        ),
+                    },
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {
+                        "type": "mcp_tool_call_end",
+                        "invocation": {
+                            "server": "codex_apps",
+                            "tool": "github_get_pr_info",
+                            "arguments": {
+                                "repo_full_name": "cberner-ai/raptorq-ai",
+                                "pr_number": 44,
+                            },
+                        },
+                        "result": {
+                            "Ok": {
+                                "structuredContent": {
+                                    "url": pr_url,
+                                    "number": 44,
+                                    "state": "open",
+                                    "merged": False,
+                                }
+                            }
+                        },
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "PR workflow needs attention.",
+                            }
+                        ],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="pr-workflow-failure-observed-pr",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Observed PR",
+            codex_preview="Open a PR",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+
+        response = self.client.get(
+            reverse(
+                "session", kwargs={"session_id": "pr-workflow-failure-observed-pr"}
+            )
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, f'href="{pr_url}"')
+        self.assertContains(
+            response, '<span class="stage-badge" data-tone="active">PR</span>'
+        )
+        mock_codex.assert_not_called()
+
     @patch("hitch.main.system_agents._gh_pr_view")
     @patch("hitch.main.views._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")

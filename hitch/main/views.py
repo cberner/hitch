@@ -598,6 +598,10 @@ _PR_PROMPT_ALIASES = frozenset(
         _LEGACY_PR_SLASH_FINAL_PROMPT,
     }
 )
+_PR_WORKFLOW_PROMPT_PREFIXES = (
+    "Hitch QA agent could not complete the PR workflow.",
+    "Hitch PR monitor found follow-up work on the active PR.",
+)
 _QA_SLASH_COMMAND = "/qa"
 _QA_SLASH_PROMPT = system_agents.QA_SLASH_DISPLAY_PROMPT
 _PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium.value
@@ -8716,7 +8720,7 @@ def _pr_url_for_thread(thread: Any) -> str | None:
     turns = getattr(thread, "turns", []) or []
     for turn in reversed(turns):
         items = [thread_item.root for thread_item in getattr(turn, "items", []) or []]
-        if not _is_pr_prompt_turn(items):
+        if not _is_pr_creation_prompt_turn(items):
             continue
         final_idx = _find_final_agent_idx(items)
         if final_idx == -1:
@@ -8753,7 +8757,9 @@ def _pr_observation_result_for_thread(thread: Any) -> codex_events.PrObservation
     observation_turns: list[codex_events.PrObservationTurn] = []
     for turn in getattr(thread, "turns", []) or []:
         items = [thread_item.root for thread_item in getattr(turn, "items", []) or []]
-        is_pr_prompt = _is_pr_prompt_turn(items)
+        mcp_items = tuple(_mcp_tool_items_for_items(items))
+        is_pr_prompt = _turn_starts_pr_observation_epoch(items, mcp_items)
+        is_pr_workflow_notice = _is_pr_workflow_notice_turn(items)
         final_idx = _find_final_agent_idx(items)
         # Scan the whole turn rather than ``items[:final_idx]``: the create_
         # pull_request ``mcpToolCall`` (and any other GitHub MCP result) can
@@ -8767,9 +8773,10 @@ def _pr_observation_result_for_thread(thread: Any) -> codex_events.PrObservation
             codex_events.PrObservationTurn(
                 is_pr_prompt=is_pr_prompt,
                 is_completed=final_idx != -1,
-                items=tuple(_mcp_tool_items_for_items(items)),
+                items=mcp_items,
                 has_lifecycle_activity=(
                     not is_pr_prompt
+                    and not is_pr_workflow_notice
                     and final_idx != -1
                     and _turn_has_lifecycle_activity(items)
                 ),
@@ -8791,13 +8798,43 @@ def _mcp_tool_items_for_items(items: Iterable[Any]) -> Iterator[dict[str, Any]]:
         }
 
 
-def _is_pr_prompt_turn(items: list[Any]) -> bool:
+def _is_pr_creation_prompt_turn(items: list[Any]) -> bool:
     for item in items:
         if _value_for(item, "type") != "userMessage":
             continue
-        if _user_message_text(item).strip() in _PR_PROMPT_ALIASES:
+        if _is_pr_creation_prompt(_user_message_text(item)):
             return True
     return False
+
+
+def _is_pr_workflow_notice_turn(items: list[Any]) -> bool:
+    for item in items:
+        if _value_for(item, "type") != "userMessage":
+            continue
+        if _is_pr_workflow_notice(_user_message_text(item)):
+            return True
+    return False
+
+
+def _turn_starts_pr_observation_epoch(
+    items: list[Any], mcp_items: tuple[dict[str, Any], ...]
+) -> bool:
+    if _is_pr_creation_prompt_turn(items):
+        return True
+    if not _is_pr_workflow_notice_turn(items):
+        return False
+    return codex_events.pr_snapshot_from_completed_mcp_items(mcp_items) is not None
+
+
+def _is_pr_creation_prompt(text: str) -> bool:
+    return text.strip() in _PR_PROMPT_ALIASES
+
+
+def _is_pr_workflow_notice(text: str) -> bool:
+    text = text.strip()
+    return any(
+        text.startswith(prefix) for prefix in _PR_WORKFLOW_PROMPT_PREFIXES
+    )
 
 
 def _turn_has_lifecycle_activity(items: list[Any]) -> bool:
