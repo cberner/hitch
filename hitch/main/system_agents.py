@@ -2365,7 +2365,6 @@ def _git_push_rejected_non_fast_forward(
     return any(marker in detail for marker in rejection_markers)
 
 
-
 def _current_git_branch(workflow: SystemWorkflow) -> str:
     result = _run_git_cli(workflow, ["symbolic-ref", "--quiet", "--short", "HEAD"])
     if result.returncode != 0:
@@ -2725,9 +2724,7 @@ def _safe_gh_comment_identifier(comment: Any) -> dict[str, Any]:
 def _copy_gh_status_check_fields(
     target: dict[str, Any], raw_checks: Any, *, complete: bool = True
 ) -> None:
-    status, failing, pending = _ci_status_from_gh_status_checks(
-        raw_checks
-    )
+    status, failing, pending = _ci_status_from_gh_status_checks(raw_checks)
     if not complete and status != "failure":
         status = "pending"
     if not status:
