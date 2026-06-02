@@ -14515,6 +14515,10 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, start_modal_title)
         self.assertContains(response, "if (doHeading) doHeading.focus();")
         self.assertNotContains(response, "doPrompt.focus()")
+        self.assertContains(
+            response,
+            'if (doForm) doForm.addEventListener("submit", () => hideDialog(doDialog));',
+        )
         self.assertContains(response, 'data-proposed-session-auto-pr="true"')
         self.assertContains(response, 'data-proposed-session-auto-qa="false"')
         self.assertContains(
