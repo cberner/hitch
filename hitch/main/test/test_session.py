@@ -545,8 +545,11 @@ class SessionViewTests(TestCase):
                 self.assertContains(response, 'role="menuitem">Archive</button>')
                 self.assertNotContains(response, ">Edit</button>")
 
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/tmp/demo")])
     @patch("hitch.main.views.Codex")
-    def test_action_menu_includes_debug_chat_link(self, mock_codex: MagicMock) -> None:
+    def test_action_menu_includes_debug_chat_link(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/tmp/demo")
         SessionMetadata.objects.create(
             thread_id="thread-1", cwd="/tmp/demo", project=project
@@ -571,11 +574,59 @@ class SessionViewTests(TestCase):
             ],
         )
 
+    @patch(
+        "hitch.main.views.discover_repos",
+        return_value=[Path("/tmp/other"), Path("/tmp/hitch")],
+    )
+    @patch("hitch.main.views.Codex")
+    def test_action_menu_prefers_hitch_project_for_debug_chat_link(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        session_project = Project.objects.create(name="Other", repo_path="/tmp/other")
+        hitch_project = Project.objects.create(name="Hitch", repo_path="/tmp/hitch")
+        SessionMetadata.objects.create(
+            thread_id="thread-1", cwd="/tmp/other", project=session_project
+        )
+        thread = _thread([_turn([_user_message("hi")])], cwd="/tmp/other")
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        debug_url = cast(str, cast(Any, response).context["debug_chat_url"])
+        query = parse_qs(urlparse(debug_url).query)
+        self.assertEqual(query["project"], [str(hitch_project.pk)])
+        self.assertNotEqual(query["project"], [str(session_project.pk)])
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/tmp/other")])
+    @patch("hitch.main.views.Codex")
+    def test_action_menu_ignores_undiscovered_hitch_project_for_debug_chat_link(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        session_project = Project.objects.create(name="Other", repo_path="/tmp/other")
+        hitch_project = Project.objects.create(
+            name="Hitch", repo_path="/tmp/missing-hitch"
+        )
+        SessionMetadata.objects.create(
+            thread_id="thread-1", cwd="/tmp/other", project=session_project
+        )
+        thread = _thread([_turn([_user_message("hi")])], cwd="/tmp/other")
+        _patch_thread(self, mock_codex, thread)
+
+        response = _get_session(self.client)
+
+        self.assertEqual(response.status_code, 200)
+        debug_url = cast(str, cast(Any, response).context["debug_chat_url"])
+        query = parse_qs(urlparse(debug_url).query)
+        self.assertEqual(query["project"], [str(session_project.pk)])
+        self.assertNotEqual(query["project"], [str(hitch_project.pk)])
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/tmp/demo")])
     @patch("hitch.main.views.Codex")
     def test_action_menu_includes_cwd_for_bare_repo_debug_chat_link(
-        self, mock_codex: MagicMock
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
-        Project.objects.create(name="Hitch", repo_path="/tmp/demo")
+        Project.objects.create(name="Other", repo_path="/tmp/demo")
         SessionMetadata.objects.create(
             thread_id="thread-1", cwd="/tmp/demo", project_cleared=True
         )

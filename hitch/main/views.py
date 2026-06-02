@@ -368,6 +368,7 @@ _VISIBLE_SESSION_PROJECTS_COOKIE = "hitch_visible_session_project_ids"
 _SHOW_NO_PROJECT_SESSIONS_COOKIE = "hitch_show_no_project_sessions"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 _BARE_REPO_PROJECT_VALUE = "__bare_repo__"
+_DEBUG_CHAT_PROJECT_NAME = "hitch"
 _DEBUG_CHAT_PROMPT_TEMPLATE = (
     "Debug and fix the user's issue from session UID {session_id}.\n\n"
     "User issue: "
@@ -3964,7 +3965,7 @@ def _render_session_detail(
         else ""
     )
     debug_chat_url = _debug_chat_new_session_url(
-        session_id, session_project, cwd=thread_cwd
+        session_id, session_project, projects, cwd=thread_cwd
     )
     response = render(
         request,
@@ -4070,14 +4071,42 @@ def _thread_resume_missing_or_invalid(exc: InvalidRequestError) -> bool:
 
 
 def _debug_chat_new_session_url(
-    session_id: str, project: Project | None, *, cwd: str | None
+    session_id: str,
+    project: Project | None,
+    projects: Iterable[Project],
+    *,
+    cwd: str | None,
 ) -> str:
     query_params = {"prompt": _DEBUG_CHAT_PROMPT_TEMPLATE.format(session_id=session_id)}
+    repo_set = {str(path) for path in discover_repos()}
+    project = _debug_chat_project(project, projects, repo_set=repo_set)
     if project is not None:
         query_params["project"] = str(project.pk)
-    elif cwd:
+    elif cwd and cwd in repo_set:
         query_params["cwd"] = cwd
     return f"{reverse('new_session')}?{urlencode(query_params)}"
+
+
+def _debug_chat_project(
+    fallback_project: Project | None,
+    projects: Iterable[Project],
+    *,
+    repo_set: set[str],
+) -> Project | None:
+    hitch_project = next(
+        (
+            project
+            for project in projects
+            if project.name.casefold() == _DEBUG_CHAT_PROJECT_NAME
+            and project.repo_path in repo_set
+        ),
+        None,
+    )
+    if hitch_project is not None:
+        return hitch_project
+    if fallback_project is not None and fallback_project.repo_path in repo_set:
+        return fallback_project
+    return None
 
 
 @require_http_methods(["GET", "POST"])
