@@ -11360,11 +11360,16 @@ def _start_candidate_proposal_session(
         ),
     )
     if candidate_backend == CodexInstance.BACKEND_CLAUDE:
-        # Auto-PR (GitHub PR-open) and the manual PR/QA activation are not wired
-        # for Claude, but auto-QA review runs on the local worker backend, so it
-        # is preserved here (matching new-session and follow-up Claude turns).
+        # Auto-PR (GitHub PR-open) and manual PR/QA activation are not wired for
+        # Claude. Reject a /qa or /pr acceptance the same way other Claude
+        # sessions do, rather than silently dropping the activation and running an
+        # ordinary continuation turn. Auto-QA review runs on the local worker
+        # backend, so that (the non-activation path) is preserved.
+        if qa_workflow_activation:
+            return HttpResponseBadRequest(
+                "PR/QA workflow is not supported for Claude sessions"
+            )
         auto_pr_enabled = False
-        qa_workflow_activation = False
     base_instructions = _base_instructions_for_settings(spawn_settings)
     project = None if target.project_cleared else candidate_session.project or target.project
     developer_instructions = _developer_instructions_for_project(settings, project)

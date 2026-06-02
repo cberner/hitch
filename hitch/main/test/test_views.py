@@ -11432,6 +11432,70 @@ class NewSessionViewTests(TestCase):
         self.assertTrue(candidate.auto_qa_enabled)
         self.assertFalse(candidate.auto_pr_enabled)
 
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    def test_claude_candidate_qa_activation_is_rejected(
+        self,
+        mock_turn: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_managed_worktrees: MagicMock,
+        mock_start_qa: MagicMock,
+    ) -> None:
+        # PR/QA is not wired for Claude, so a /qa acceptance of a Claude candidate
+        # must return the same unsupported error other Claude sessions get -- not
+        # silently fall through to an ordinary continuation turn.
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
+        _setup_codex(mock_codex, models=[])
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            auto_qa_enabled=True,
+            provider="claude",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+            is_hidden_system_session=True,
+        )
+        CodexInstance.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            prompt="prev",
+            events_path="y",
+            pid=0,
+            status=CodexInstance.STATUS_COMPLETED,
+            backend=CodexInstance.BACKEND_CLAUDE,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            title="Add parser coverage",
+            outcome_metadata={"auto_pr_enabled": False, "auto_qa_enabled": True},
+        )
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "/qa",
+                "cwd": self.REPO,
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"not supported for Claude", response.content)
+        mock_turn.assert_not_called()
+        mock_start_qa.assert_not_called()
+
     @patch("hitch.main.views.system_agents.spec_critic_should_run")
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
     @patch("hitch.main.views.discover_managed_worktrees")

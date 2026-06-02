@@ -529,21 +529,20 @@ class WorkerHelperEdgeCaseTests(TestCase):
         self.assertEqual(questions[0]["id"], "q2")
         self.assertEqual([o["label"] for o in questions[0]["options"]], ["ok"])
 
-    def test_format_ask_user_answers_skips_blank_and_falls_back_to_question(
-        self,
-    ) -> None:
+    def test_ask_user_answers_map_keys_by_question_and_header(self) -> None:
         from hitch.main.management.commands import claude_worker
 
-        questions = [
-            {"id": "q0", "header": "", "question": "Which one?"},
-            {"id": "q1", "header": "Lib", "question": "?"},
-        ]
-        text = claude_worker._format_ask_user_answers(
-            questions, {"q0": "alpha", "q1": ""}
+        tool_input = {
+            "questions": [
+                {"question": "Which one?", "header": "Pick"},
+                {"question": "Skipped?", "header": "Skip"},
+            ]
+        }
+        answers = claude_worker._ask_user_answers_map(
+            tool_input, {"q0": "alpha", "q1": ""}
         )
-        # q1 (blank answer) is skipped; q0 has no header so falls back to its text.
-        self.assertIn("Which one?: alpha", text)
-        self.assertNotIn("Lib", text)
+        # q0 is recorded under both its text and header; q1 (blank) is skipped.
+        self.assertEqual(answers, {"Which one?": "alpha", "Pick": "alpha"})
 
     def test_image_content_blocks_non_list_is_empty(self) -> None:
         from hitch.main.management.commands import claude_worker
@@ -669,7 +668,7 @@ class AskUserQuestionTests(TestCase):
     def test_routes_to_input_request_and_returns_answers(self) -> None:
         import asyncio
 
-        from claude_agent_sdk import PermissionResultDeny
+        from claude_agent_sdk import PermissionResultAllow
 
         from hitch.main.management.commands import claude_worker
 
@@ -701,11 +700,12 @@ class AskUserQuestionTests(TestCase):
             )
         mock_create.assert_called_once()
         mock_wait.assert_called_once()
-        # The input has no answer field, so selections come back via the deny
-        # message channel the model reads as the tool outcome.
-        self.assertIsInstance(result, PermissionResultDeny)
-        self.assertIn("httpx", result.message)
-        self.assertIn("Library", result.message)
+        # Selections ride back to the tool via ``answers`` in updated_input on an
+        # allow -- keyed by both question text and header so the CLI can match.
+        self.assertIsInstance(result, PermissionResultAllow)
+        answers = result.updated_input["answers"]
+        self.assertEqual(answers["Which library?"], "httpx")
+        self.assertEqual(answers["Library"], "httpx")
 
     def test_unanswered_question_declines(self) -> None:
         import asyncio
@@ -740,11 +740,11 @@ class AskUserQuestionTests(TestCase):
 
 
 class HiddenAutoReviewApprovalTests(TestCase):
-    """Hidden auto-review runs auto-approve only built-in mutating tools; a
-    project/user MCP tool reaching ``can_use_tool`` must be denied, since these
-    runs have no approval UI to gate it."""
+    """Hidden auto-review runs auto-approve built-in mutating tools only under a
+    write sandbox; an unsandboxed run, or a project/user MCP tool reaching
+    ``can_use_tool``, must be denied since these runs have no approval UI."""
 
-    def _runner(self) -> Any:
+    def _runner(self, *, sandbox_policy: str | None = "workspaceWrite") -> Any:
         import io
 
         from hitch.main.management.commands import claude_worker
@@ -764,26 +764,38 @@ class HiddenAutoReviewApprovalTests(TestCase):
             events_file=io.StringIO(),
             model=None,
             reasoning_effort=None,
-            sandbox_policy=None,
+            sandbox_policy=sandbox_policy,
             approval_mode=claude_options.APPROVAL_AUTO_REVIEW,
             web_search_mode=None,
             plan_mode=False,
         )
 
-    def test_builtin_mutating_tools_are_auto_allowed(self) -> None:
+    def test_builtin_mutating_tools_auto_allowed_under_write_sandbox(self) -> None:
         import asyncio
 
-        runner = self._runner()
+        runner = self._runner(sandbox_policy="workspaceWrite")
         for tool in ("Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"):
             result = asyncio.run(runner._can_use_tool(tool, {}, None))
             self.assertIsInstance(result, PermissionResultAllow, tool)
+
+    def test_mutating_tools_denied_without_write_sandbox(self) -> None:
+        import asyncio
+
+        from claude_agent_sdk import PermissionResultDeny
+
+        # No sandbox: an unsandboxed Bash/file edit in a hidden, prompt-injectable
+        # agent must not be auto-run.
+        runner = self._runner(sandbox_policy=None)
+        for tool in ("Bash", "Edit"):
+            result = asyncio.run(runner._can_use_tool(tool, {}, None))
+            self.assertIsInstance(result, PermissionResultDeny, tool)
 
     def test_mcp_tool_is_denied_without_approval_ui(self) -> None:
         import asyncio
 
         from claude_agent_sdk import PermissionResultDeny
 
-        runner = self._runner()
+        runner = self._runner(sandbox_policy="workspaceWrite")
         result = asyncio.run(
             runner._can_use_tool("mcp__github__create_pr", {"title": "x"}, None)
         )
@@ -1553,7 +1565,13 @@ class WorkerTurnTests(TestCase):
 
 
 class WorkerApprovalTests(TestCase):
-    def _runner(self, *, purpose: str, approval_mode: str | None) -> Any:
+    def _runner(
+        self,
+        *,
+        purpose: str,
+        approval_mode: str | None,
+        sandbox_policy: str | None = "workspaceWrite",
+    ) -> Any:
         import io
 
         from hitch.main.management.commands import claude_worker
@@ -1573,7 +1591,7 @@ class WorkerApprovalTests(TestCase):
             events_file=io.StringIO(),
             model="claude-opus-4-8",
             reasoning_effort=None,
-            sandbox_policy=None,
+            sandbox_policy=sandbox_policy,
             approval_mode=approval_mode,
             web_search_mode=None,
             plan_mode=False,

@@ -330,16 +330,22 @@ class _TurnRunner:
             self._instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
             and self._approval_mode == claude_options.APPROVAL_AUTO_REVIEW
         ):
-            # Auto-approve only the built-in mutating tools these runs are
-            # expected to use. ``build_options`` loads user/project/local
-            # settings, so a project ``.claude`` MCP server can expose other
-            # mutating tools; those reach here (they are not in the read-only
-            # allow list) and must not run unattended through the same blanket
-            # approval -- deny them, since hidden runs have no approval UI.
-            if tool_name == "Bash" or tool_name in _FILE_TOOLS:
+            # Auto-approve only the built-in mutating tools, and only when the
+            # workflow runs under a write sandbox. ``readOnly`` already blocks
+            # Bash/file via ``resolve_tool_lists``; a run with no sandbox would
+            # otherwise auto-run *unsandboxed* commands/edits with no visible
+            # approval, so a propose/review-only or prompt-injected hidden agent
+            # could touch the host. Anything else (and project ``.claude`` MCP
+            # tools, which also reach here) is denied.
+            writes_allowed = self._sandbox_policy in (
+                claude_options.SANDBOX_WORKSPACE_WRITE,
+                claude_options.SANDBOX_DANGER_FULL_ACCESS,
+            )
+            if writes_allowed and (tool_name == "Bash" or tool_name in _FILE_TOOLS):
                 return claude_options.allow_result()
             return claude_options.deny_result(
-                "Hidden system-agent runs may only auto-run built-in Bash/file tools."
+                "Hidden system-agent runs may only auto-run built-in Bash/file "
+                "tools under a write sandbox."
             )
         if tool_name == _ASK_USER_QUESTION_TOOL:
             return await self._ask_user_question(tool_input)
@@ -367,10 +373,10 @@ class _TurnRunner:
 
         Reuses the ``UserInputRequest`` handoff the Codex ``request_user_input``
         tool uses: render the generated questions/options, wait for the user's
-        picks, then return them to the model. ``AskUserQuestionInput`` has no
-        field to carry answers, so ``updated_input`` cannot deliver them; the
-        ``deny`` message channel is what the model receives as the tool outcome,
-        so the selections ride there.
+        picks, then return them to the tool. ``AskUserQuestionInput`` carries an
+        optional ``answers`` map "populated by the permission component", so the
+        selections ride back through ``updated_input`` on an *allow* -- a deny
+        would surface a valid answer to the model as a declined tool call.
         """
         questions = _ask_user_question_params(tool_input)
         if not questions:
@@ -391,12 +397,17 @@ class _TurnRunner:
             "input/resolved",
             {"id": request_id, "method": _ASK_USER_QUESTION_METHOD, "response": response},
         )
-        answers = response.get("answers") if isinstance(response, dict) else None
-        if not isinstance(answers, dict) or not any(
-            _str(value) for value in answers.values()
-        ):
+        raw_answers = response.get("answers") if isinstance(response, dict) else None
+        answers_map = (
+            _ask_user_answers_map(tool_input, raw_answers)
+            if isinstance(raw_answers, dict)
+            else {}
+        )
+        if not answers_map:
             return claude_options.deny_result("The user did not answer the question.")
-        return claude_options.deny_result(_format_ask_user_answers(questions, answers))
+        return claude_options.allow_result(
+            updated_input={**tool_input, "answers": answers_map}
+        )
 
     # -- steering & interrupt ---------------------------------------------
 
@@ -551,17 +562,30 @@ def _ask_user_question_params(tool_input: dict[str, Any]) -> list[dict[str, Any]
     return questions
 
 
-def _format_ask_user_answers(
-    questions: list[dict[str, Any]], answers: dict[str, Any]
-) -> str:
-    lines = ["The user answered your questions:"]
-    for question in questions:
-        value = _str(answers.get(question["id"]))
+def _ask_user_answers_map(
+    tool_input: dict[str, Any], raw_answers: dict[str, Any]
+) -> dict[str, str]:
+    """Build the ``AskUserQuestion`` ``answers`` map from the collected picks.
+
+    ``raw_answers`` is keyed by the synthetic ``q<index>`` ids the input UI uses;
+    the tool's ``answers`` map is keyed by the question itself. The exact key the
+    CLI matches on is unspecified, so each answered question is recorded under
+    both its ``question`` text and its ``header`` (extra keys are ignored).
+    """
+    raw_questions = tool_input.get("questions")
+    if not isinstance(raw_questions, list):
+        return {}
+    answers: dict[str, str] = {}
+    for index, raw in enumerate(raw_questions):
+        if not isinstance(raw, dict):
+            continue
+        value = _str(raw_answers.get(f"q{index}"))
         if not value:
             continue
-        label = question.get("header") or question.get("question") or question["id"]
-        lines.append(f"- {label}: {value}")
-    return "\n".join(lines)
+        for key in (_str(raw.get("question")), _str(raw.get("header"))):
+            if key:
+                answers[key] = value
+    return answers
 
 
 _IMAGE_MEDIA_TYPES = {
