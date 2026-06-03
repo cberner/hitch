@@ -3092,6 +3092,15 @@ def _session_list_page_from_codex_or_warm_index(
         return fallback
 
 
+def _prevent_stale_cache(response: HttpResponse) -> HttpResponse:
+    # These pages render live session state (running workers, stage badges, and
+    # names/archive bits that may change from another page). no-store keeps them
+    # out of the browser's back/forward and heuristic caches so a Back
+    # navigation re-renders against current state instead of a frozen snapshot.
+    response["Cache-Control"] = "no-store"
+    return response
+
+
 def index(request: HttpRequest) -> HttpResponse:
     # Sweep workers whose pid is gone: a Popen that crashed before a worker
     # could record its terminal status (or a row stuck in ``starting``)
@@ -3148,7 +3157,7 @@ def index(request: HttpRequest) -> HttpResponse:
         },
     )
     _apply_cookie_updates(response, cookie_updates)
-    return response
+    return _prevent_stale_cache(response)
 
 
 @require_http_methods(["GET"])
@@ -3195,7 +3204,7 @@ def system_sessions(request: HttpRequest) -> HttpResponse:
         },
     )
     _apply_cookie_updates(response, cookie_updates)
-    return response
+    return _prevent_stale_cache(response)
 
 
 @require_http_methods(["GET"])
@@ -4390,7 +4399,7 @@ def _render_session_detail(
         },
     )
     _apply_cookie_updates(response, cookie_updates)
-    return response
+    return _prevent_stale_cache(response)
 
 
 def _thread_resume_missing_or_invalid(exc: InvalidRequestError) -> bool:
@@ -4865,7 +4874,11 @@ def session_intermediate(
         entry_index=entry_index,
         hide_demo_agent_entries=hide_demo_agent_entries,
     )
-    return render(request, "_session_intermediate_body.html", {"entry": entry})
+    response = render(request, "_session_intermediate_body.html", {"entry": entry})
+    # The body depends on the current rollout contents; with no validators a
+    # browser may heuristically cache this lazily-fetched fragment and show a
+    # stale block after the rollout entry changes.
+    return _prevent_stale_cache(response)
 
 
 def _session_intermediate_demo_context(session_id: str, run_id: int) -> str:

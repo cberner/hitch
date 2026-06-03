@@ -416,6 +416,9 @@ class SessionDetailFastPathTests(TestCase):
         response = self.client.get(reverse("session", kwargs={"session_id": "indexed"}))
 
         self.assertEqual(response.status_code, 200)
+        # The live session page must stay out of the browser bfcache/heuristic
+        # cache so a Back navigation re-renders against current state.
+        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
         self.assertContains(response, "Read from rollout")
         self.assertContains(response, "Rollout answer")
         self.assertContains(response, "Indexed session")
@@ -2217,6 +2220,9 @@ class IndexViewTests(TestCase):
         response = self.client.get(reverse("index"))
 
         self.assertEqual(response.status_code, 200)
+        # The live session list must not be served from the browser bfcache so a
+        # Back navigation reflects sessions archived/renamed elsewhere.
+        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
         self.assertContains(response, "Cached session")
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
