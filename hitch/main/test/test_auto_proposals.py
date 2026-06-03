@@ -140,7 +140,11 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         workflow_maintenance._run_workflow_maintenance_scheduler_tick()
 
         mock_reconcile_dead.assert_called_once_with()
-        mock_refresh.assert_called_once_with()
+        # PR-monitor backoff polling shells out to gh per due monitor, so it is
+        # bounded per tick like the PR-stage sweep below.
+        mock_refresh.assert_called_once_with(
+            limit=workflow_maintenance._PR_MONITOR_BACKOFF_LIMIT_PER_TICK
+        )
         # The maintenance scheduler runs under production server commands, so it
         # owns background PR-stage convergence to keep gh out of the request
         # path -- bounded per tick so it can't starve the reconcile sweep.
@@ -187,7 +191,9 @@ class UnarchivedSessionStateRefreshTests(TestCase):
         self.assertFalse(result.failed)
         self.assertEqual(result.pr_stages_refreshed, 2)
         mock_codex.assert_called_once_with(config=config)
-        mock_refresh_pr_stages.assert_called_once_with()
+        mock_refresh_pr_stages.assert_called_once_with(
+            limit=auto_proposals._PR_STAGE_REFRESH_LIMIT_PER_TICK
+        )
         metadata = SessionMetadata.objects.get(thread_id="thread-1")
         self.assertEqual(metadata.codex_display_title, "Renamed session")
         self.assertEqual(metadata.codex_updated_at, datetime.fromtimestamp(10, UTC))
@@ -211,7 +217,9 @@ class UnarchivedSessionStateRefreshTests(TestCase):
         self.assertEqual(result.synced, 0)
         self.assertTrue(result.failed)
         self.assertEqual(result.pr_stages_refreshed, 1)
-        mock_refresh_pr_stages.assert_called_once_with()
+        mock_refresh_pr_stages.assert_called_once_with(
+            limit=auto_proposals._PR_STAGE_REFRESH_LIMIT_PER_TICK
+        )
         mock_log_exception.assert_called_once_with(
             "failed to refresh active Codex session metadata"
         )
