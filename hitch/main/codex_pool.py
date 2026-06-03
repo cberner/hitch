@@ -14,6 +14,7 @@ re-implementing Django bootstrap.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import fcntl
 import json
@@ -26,6 +27,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Generator, Iterable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -1484,6 +1486,194 @@ def open_codex(factory: Callable[[], Codex]) -> Generator[Codex]:
     codex = _start_codex_with_retry(factory)
     with codex as entered:
         yield entered
+
+
+# The Django web process used to open (and so re-init the CODEX_HOME state DB
+# for) a fresh app-server on every short metadata call -- session lists, model
+# lookups, archive/resume. Those bursty per-request inits were the dominant
+# source of the state-DB init races ``open_codex`` only retries after the fact.
+# ``borrow_codex`` instead keeps a small pool of long-lived app-servers warm and
+# hands one out per call, so the state DB is initialized once per pooled server
+# (the same property the auto-proposal scheduler gets from its single reused
+# app-server) and steady-state borrows neither spawn a subprocess nor touch the
+# init lock. Bursts past the cap still construct a private server via the
+# lock+retry path rather than blocking or failing, so this only ever reduces
+# init churn.
+_SHARED_POOL_MAX = 4
+
+# (enable_memories, normalized web_search_mode). In practice every web call uses
+# the default web_search_mode, so the live key space is just enable_memories.
+_ConfigKey = tuple[bool, str | None]
+
+
+def _pool_key(enable_memories: bool, web_search_mode: str | None) -> _ConfigKey:
+    return (enable_memories, _normalized_web_search_mode(web_search_mode))
+
+
+def _close_quietly(codex: Codex) -> None:
+    with contextlib.suppress(Exception):
+        codex.close()
+
+
+def _codex_is_alive(codex: Codex) -> bool:
+    """Best-effort check that the app-server subprocess is still running.
+
+    A pooled server is long-lived, so an idle one may have exited (crash, OOM
+    kill) since it was returned -- or been returned looking healthy by a borrow
+    whose helper swallowed the ``TransportClosedError``. Handing such a dead
+    server back would surface an error to a single request that the old
+    open-per-call path never hit, so the pool drops it on checkout and reuses a
+    live one instead. Reaches into the SDK client's process handle the way our
+    call sites already reach into ``codex._client``; ``poll()`` is a cheap,
+    non-blocking liveness probe (no app-server round-trip).
+    """
+    proc = getattr(getattr(codex, "_client", None), "_proc", None)
+    if proc is None:
+        return False
+    try:
+        return proc.poll() is None
+    except Exception:
+        return False
+
+
+class _SharedCodexPool:
+    """Bounded pool of long-lived app-servers with exclusive checkout.
+
+    Only one borrower drives a given ``Codex`` at a time, so reuse never relies
+    on the SDK being safe for concurrent stdin writes from multiple request
+    threads. Checkout skips (and closes) idle servers whose subprocess has died
+    so a stale transport never reaches a borrower; a borrow that dies mid-use
+    drops its instance -- mirroring ``_SchedulerCodex.reset`` -- so the next
+    borrow reconnects. The cap bounds total warm servers; a full pool evicts an
+    idle server from *another* config key rather than refusing to keep this
+    key's, so no key is starved of a warm server. Checkouts past the cap
+    construct (and on return close) a private server rather than blocking.
+    """
+
+    def __init__(self, max_size: int = _SHARED_POOL_MAX) -> None:
+        self._lock = threading.Lock()
+        self._idle: dict[_ConfigKey, deque[Codex]] = {}
+        self._in_use = 0
+        self._max = max_size
+
+    def _total_warm(self) -> int:
+        return self._in_use + sum(len(idle) for idle in self._idle.values())
+
+    def _pop_idle_other_key(self, key: _ConfigKey) -> Codex | None:
+        """Pop the oldest idle server belonging to a different config key."""
+        for other_key, servers in self._idle.items():
+            if other_key != key and servers:
+                return servers.pop()
+        return None
+
+    def checkout(self, key: _ConfigKey, factory: Callable[[], Codex]) -> Codex:
+        dead: list[Codex] = []
+        with self._lock:
+            idle = self._idle.get(key)
+            reused: Codex | None = None
+            while idle:
+                candidate = idle.pop()
+                if _codex_is_alive(candidate):
+                    reused = candidate
+                    break
+                dead.append(candidate)
+            self._in_use += 1
+        for stale in dead:
+            _close_quietly(stale)
+        if reused is not None:
+            return reused
+        # Construct outside the structure lock: a cold start can block up to
+        # _APPSERVER_INIT_LOCK_WAIT_SECONDS on the cross-process init lock.
+        try:
+            return _start_codex_with_retry(factory)
+        except BaseException:
+            with self._lock:
+                self._in_use -= 1
+            raise
+
+    def release(self, key: _ConfigKey, codex: Codex, *, healthy: bool) -> None:
+        to_close: Codex | None = None
+        with self._lock:
+            self._in_use -= 1
+            if healthy:
+                if self._total_warm() < self._max:
+                    self._idle.setdefault(key, deque()).appendleft(codex)
+                    return
+                # Pool full: keep this key's server by evicting an idle server
+                # from another key. If only this key is idle we are already at
+                # our share, so close the returning server instead.
+                to_close = self._pop_idle_other_key(key)
+                if to_close is not None:
+                    self._idle.setdefault(key, deque()).appendleft(codex)
+            if to_close is None:
+                to_close = codex
+        _close_quietly(to_close)
+
+    def close_all(self) -> None:
+        with self._lock:
+            idle, self._idle = self._idle, {}
+        for servers in idle.values():
+            for codex in servers:
+                _close_quietly(codex)
+
+
+_SHARED_POOL = _SharedCodexPool()
+atexit.register(_SHARED_POOL.close_all)
+
+
+def close_shared_pool() -> None:
+    """Close every pooled app-server (process shutdown / test teardown)."""
+    _SHARED_POOL.close_all()
+
+
+def _shared_pool_enabled() -> bool:
+    # Under tests each case patches ``Codex`` fresh and expects construction per
+    # call, so caching pooled instances across cases would leak mocks. The pool
+    # itself is covered directly by test_codex_pool_shared.
+    return not getattr(settings, "TESTING", False)
+
+
+@contextlib.contextmanager
+def borrow_codex(
+    codex_factory: Callable[..., Codex],
+    *,
+    enable_memories: bool = False,
+    web_search_mode: str | None = None,
+) -> Generator[Codex]:
+    """Borrow a warm, already-initialized app-server from the shared pool.
+
+    ``codex_factory`` is the caller's ``Codex`` symbol (constructed as
+    ``codex_factory(config=...)``); keeping construction at the call site lets
+    callers tune the config and keeps test patches on the caller's module
+    effective. Steady-state borrows reuse an idle long-lived server with no
+    subprocess spawn and no init lock; cold construction still goes through
+    ``_start_codex_with_retry`` so a genuine state-DB init race is retried. The
+    pool owns the server's lifecycle, so -- unlike ``open_codex`` -- the yielded
+    server is not entered/closed per borrow.
+    """
+    config = app_server_config(
+        enable_memories=enable_memories, web_search_mode=web_search_mode
+    )
+
+    def factory() -> Codex:
+        return codex_factory(config=config)
+
+    if not _shared_pool_enabled():
+        with open_codex(factory) as codex:
+            yield codex
+        return
+
+    key = _pool_key(enable_memories, web_search_mode)
+    codex = _SHARED_POOL.checkout(key, factory)
+    healthy = True
+    try:
+        yield codex
+    except BaseException:
+        # A failed borrow may have killed the transport; drop rather than reuse.
+        healthy = False
+        raise
+    finally:
+        _SHARED_POOL.release(key, codex, healthy=healthy)
 
 
 def _normalized_input_image_paths(input_image_paths: Any) -> list[str]:
