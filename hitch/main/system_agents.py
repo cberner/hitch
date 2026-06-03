@@ -301,6 +301,13 @@ _GH_PR_MONITOR_FIELDS = (
 _GH_MONITOR_TEXT_MAX_CHARS = 6000
 _GH_REVIEW_THREAD_PAGE_LIMIT = 5
 _GH_STATUS_CHECK_PAGE_LIMIT = 10
+# PR monitor polling (gh pr view + paginated reviewThreads/statusCheckRollup
+# GraphQL) runs on the background workflow-maintenance tick. Without a bound
+# each gh call inherits the 120s create timeout, so a slow GitHub could stall a
+# single poll for ~1800s and starve the tick's reconcile_dead sweep -- leaving
+# finished workers showing a stale "running" badge in the UI. These are
+# read-only polls that normally return in a couple seconds, so cap each call.
+_GH_PR_MONITOR_TIMEOUT_SECONDS = 20
 _PR_MONITOR_BACKOFF_CLAIM_SECONDS = (
     _GH_PR_CREATE_TIMEOUT_SECONDS
     * (1 + _GH_REVIEW_THREAD_PAGE_LIMIT + _GH_STATUS_CHECK_PAGE_LIMIT)
@@ -2979,6 +2986,7 @@ def _pr_monitor_observation_from_gh(workflow: SystemWorkflow) -> dict[str, Any]:
         workflow,
         selector=selector or None,
         fields=_GH_PR_MONITOR_FIELDS,
+        timeout_seconds=_GH_PR_MONITOR_TIMEOUT_SECONDS,
     )
     if payload is None:
         raise _GhPrOpenError("`gh pr view` did not return PR data")
@@ -3229,7 +3237,9 @@ def _gh_pr_review_threads(
         ]
         if after:
             args.extend(["-F", f"after={after}"])
-        result = _run_gh_cli(workflow, args)
+        result = _run_gh_cli(
+            workflow, args, timeout_seconds=_GH_PR_MONITOR_TIMEOUT_SECONDS
+        )
         if result.returncode != 0:
             raise _GhPrOpenError(f"`gh api graphql` failed: {_gh_error(result)}")
         try:
@@ -3299,7 +3309,9 @@ def _gh_pr_status_checks(
         ]
         if after:
             args.extend(["-F", f"after={after}"])
-        result = _run_gh_cli(workflow, args)
+        result = _run_gh_cli(
+            workflow, args, timeout_seconds=_GH_PR_MONITOR_TIMEOUT_SECONDS
+        )
         if result.returncode != 0:
             raise _GhPrOpenError(f"`gh api graphql` failed: {_gh_error(result)}")
         try:
