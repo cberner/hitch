@@ -80,10 +80,36 @@ SENSITIVE_REQUEST_HEADERS: Final = {
     "x-csrftoken",
     "x-csrf-token",
 }
+# A browser that cached a previous demo build still revalidates against it. If
+# the rebuilt container answers 304 Not Modified, the proxy would relay the
+# bodiless 304 and the browser would reuse the stale asset despite the no-store
+# response header. Strip only the cache-revalidation validators from safe
+# requests so the container always returns a fresh 200 with a body. Other
+# conditional headers are preserved: If-Match/If-Unmodified-Since are write
+# preconditions, and If-Range must stay paired with Range or the container could
+# answer 206 against a rebuilt resource and corrupt a resumed download.
+REVALIDATION_REQUEST_HEADERS: Final = {
+    "if-modified-since",
+    "if-none-match",
+}
 SENSITIVE_RESPONSE_HEADERS: Final = {
     "clear-site-data",
     "set-cookie",
     "set-cookie2",
+}
+# The proxy URL is stable across demo rebuilds (a new demo generation reuses the
+# same ``/sessions/<id>/demo/`` path), so the container's cache-freshness
+# directives would let the browser serve a previous build's HTML/JS/CSS after
+# the demo is restarted. Strip them and force ``no-store`` instead so a reload
+# always reflects the current container. ETag/Last-Modified are intentionally
+# left intact: with no-store and the request revalidators stripped they can no
+# longer trigger a stale 304, and an app's JS still needs them as representation
+# validators (e.g. to populate If-Match on a later write).
+CACHE_RESPONSE_HEADERS: Final = {
+    "age",
+    "cache-control",
+    "expires",
+    "pragma",
 }
 TEXT_REWRITE_TYPES: Final = ("text/html", "text/css", "application/javascript", "text/javascript")
 DNS_LABEL_RE: Final = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
@@ -1073,6 +1099,12 @@ def _proxy_request_headers(
         | SENSITIVE_REQUEST_HEADERS
         | _connection_header_tokens(request.headers.get("Connection", ""))
     )
+    # Only drop cache revalidators from safe requests. On unsafe methods
+    # (PUT/PATCH/DELETE) If-None-Match/If-Modified-Since can act as write
+    # preconditions (e.g. If-None-Match: * for create-if-absent), so leave them
+    # intact there.
+    if request.method in {"GET", "HEAD"}:
+        blocked_headers = blocked_headers | REVALIDATION_REQUEST_HEADERS
     headers = {
         key: value
         for key, value in request.headers.items()
@@ -1097,6 +1129,7 @@ def _proxy_response_headers(
     blocked_headers = (
         HOP_BY_HOP_HEADERS
         | SENSITIVE_RESPONSE_HEADERS
+        | CACHE_RESPONSE_HEADERS
         | {"content-length"}
         | {
             token
@@ -1120,6 +1153,7 @@ def _proxy_response_headers(
             # because the generator's close() never runs. Drop such headers.
             continue
         headers[key] = value
+    headers["Cache-Control"] = "no-store"
     return headers
 
 
