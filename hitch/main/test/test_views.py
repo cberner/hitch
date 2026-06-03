@@ -9609,6 +9609,48 @@ class NewSessionViewTests(TestCase):
             thread_name="Add parser coverage",
         )
 
+    @patch("hitch.main.views.system_agents.spec_critic_should_run")
+    @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_project_proposal_start_skips_preflight_and_repo_discovery(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+        mock_start_spec_critic: MagicMock,
+        mock_spec_critic_should_run: MagicMock,
+    ) -> None:
+        _seed_cookies(self.client, **{_SPEC_CRITIC_COOKIE: "true"})
+        _setup_codex(mock_codex, models=[])
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Add parser coverage",
+        )
+        prompt = "Go ahead and implement this proposed session."
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": prompt,
+                "project": str(project.pk),
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self._assert_new_session_spawn(
+            mock_spawn,
+            prompt=prompt,
+            thread_name="Add parser coverage",
+        )
+        mock_discover.assert_not_called()
+        mock_spec_critic_should_run.assert_not_called()
+        mock_start_spec_critic.assert_not_called()
+
     @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
     @patch("hitch.main.views.discover_managed_worktrees")
     @patch("hitch.main.views.discover_repos")
@@ -10100,13 +10142,13 @@ class NewSessionViewTests(TestCase):
         self.assertTrue(candidate.auto_merge_to_local_branch)
         self.assertEqual(candidate.auto_merge_branch, "release")
 
-    @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
+    @patch("hitch.main.views.system_agents.spec_critic_should_run")
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
     @patch("hitch.main.views.discover_managed_worktrees")
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_turn")
-    def test_new_session_candidate_worktree_uses_spec_critic(
+    def test_new_session_candidate_worktree_skips_spec_critic_preflight(
         self,
         mock_turn: MagicMock,
         mock_codex: MagicMock,
@@ -10119,9 +10161,6 @@ class NewSessionViewTests(TestCase):
         mock_discover.return_value = [Path(self.REPO)]
         mock_managed_worktrees.return_value = [Path("/repo-worktree")]
         codex = _setup_codex(mock_codex, models=[])
-        codex._client.thread_resume.return_value = SimpleNamespace(
-            thread=SimpleNamespace(turns=[])
-        )
         project = Project.objects.create(name="Hitch", repo_path=self.REPO)
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -10153,12 +10192,8 @@ class NewSessionViewTests(TestCase):
             response.headers["Location"],
             reverse("session", kwargs={"session_id": "candidate-thread"}),
         )
-        mock_turn.assert_not_called()
-        mock_spec_critic_should_run.assert_called_once_with(
-            "Go ahead and implement this proposed session.", cwd="/repo-worktree"
-        )
-        mock_start_spec_critic.assert_called_once_with(
-            main_thread_id="candidate-thread",
+        mock_turn.assert_called_once_with(
+            thread_id="candidate-thread",
             cwd="/repo-worktree",
             prompt=(
                 "First, rebase or otherwise update this worktree onto the current "
@@ -10166,16 +10201,15 @@ class NewSessionViewTests(TestCase):
                 "continue with the user's instructions.\n\n"
                 "Go ahead and implement this proposed session."
             ),
-            sandbox_policy=None,
-            approval_mode="auto_review",
+            developer_instructions=None,
             model=None,
             reasoning_effort=None,
-            developer_instructions=None,
-            enable_memories=False,
-            initial_user_message_index=0,
-            auto_pr_enabled=False,
-            auto_qa_enabled=False,
+            sandbox_policy=None,
+            approval_mode="auto_review",
         )
+        mock_spec_critic_should_run.assert_not_called()
+        mock_start_spec_critic.assert_not_called()
+        codex._client.thread_resume.assert_not_called()
         proposal.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
         self.assertEqual(proposal.accepted_session, candidate)

@@ -294,6 +294,7 @@ class _NewSessionTarget(NamedTuple):
     cwd: str
     project: Project | None
     project_cleared: bool
+    requires_discovered_repo: bool
 
 
 @dataclass(frozen=True)
@@ -8159,19 +8160,27 @@ def _posted_new_session_target(
     raw_project = request.POST.get("project")
     if raw_project is None:
         cwd = request.POST.get("cwd", "").strip()
-        return _NewSessionTarget(cwd, _project_for_cwd(cwd, projects), False), None
+        return (
+            _NewSessionTarget(
+                cwd,
+                _project_for_cwd(cwd, projects),
+                False,
+                True,
+            ),
+            None,
+        )
 
     value = raw_project.strip()
     if value == _BARE_REPO_PROJECT_VALUE:
         cwd = request.POST.get("cwd", "").strip()
-        return _NewSessionTarget(cwd, None, True), None
+        return _NewSessionTarget(cwd, None, True, True), None
     if not value:
         return None, "project is required"
 
     project, error = _posted_project(value)
     if error is not None or project is None:
         return None, error or "invalid project"
-    return _NewSessionTarget(project.repo_path, project, False), None
+    return _NewSessionTarget(project.repo_path, project, False, False), None
 
 
 def _posted_proposed_session_for_new_session(
@@ -9642,7 +9651,6 @@ def _start_candidate_proposal_session(
         return HttpResponseBadRequest(
             "candidate session cwd is not an allowed repository"
         )
-    original_prompt = prompt
     prompt = _candidate_proposal_continuation_prompt(prompt)
     base_instructions = _base_instructions_for_settings(spawn_settings)
     project = None if target.project_cleared else candidate_session.project or target.project
@@ -9731,50 +9739,6 @@ def _start_candidate_proposal_session(
         if auto_merge_to_local_branch:
             spawn_kwargs["auto_merge_to_local_branch"] = True
             spawn_kwargs["auto_merge_branch"] = auto_merge_branch
-    if (
-        settings.spec_critic_enabled
-        and not input_image_paths
-        and not plan_mode
-        and system_agents.spec_critic_should_run(original_prompt, cwd=candidate_cwd)
-    ):
-        spec_workflow_kwargs: dict[str, Any] = {
-            "main_thread_id": candidate_session.thread_id,
-            "cwd": candidate_cwd,
-            "prompt": prompt,
-            "sandbox_policy": settings.sandbox_policy or None,
-            "approval_mode": settings.approval_mode,
-            "model": settings.model or None,
-            "reasoning_effort": settings.reasoning_effort or None,
-            "developer_instructions": developer_instructions or None,
-            "enable_memories": settings.enable_memories,
-            "initial_user_message_index": _next_user_message_index_for_candidate_thread(
-                candidate_session.thread_id, settings
-            ),
-            "auto_pr_enabled": auto_pr_enabled,
-            "auto_qa_enabled": auto_qa_enabled,
-        }
-        if base_instructions:
-            spec_workflow_kwargs["base_instructions"] = base_instructions
-        if web_search_mode:
-            spec_workflow_kwargs["web_search_mode"] = web_search_mode
-        if auto_merge_to_local_branch:
-            spec_workflow_kwargs["auto_merge_to_local_branch"] = True
-            spec_workflow_kwargs["auto_merge_branch"] = auto_merge_branch
-        if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
-            spec_workflow_kwargs["qa_panel_enabled"] = True
-        system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
-        return _finish_candidate_proposal_start(
-            request=request,
-            proposed_session=proposed_session,
-            candidate_session=candidate_session,
-            cwd=cwd,
-            target=target,
-            settings=settings,
-            cookie_updates=cookie_updates,
-            auto_pr_enabled=auto_pr_enabled,
-            auto_qa_enabled=auto_qa_enabled,
-        )
-
     input_images_owned = False
     try:
         codex_pool.spawn_turn(**spawn_kwargs)
@@ -10179,11 +10143,13 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest("prompt is required")
     if not cwd:
         return HttpResponseBadRequest("cwd is required")
-    # Restrict cwd to a discovered repo so an arbitrary path can't be injected
-    # via the form post.
-    allowed = {str(p) for p in discover_repos()}
-    if cwd not in allowed:
-        return HttpResponseBadRequest("cwd must be a discovered repository")
+    # Raw cwd posts still need discovery validation. Project-id posts use the
+    # server-side Project.repo_path, so they do not need a home-directory scan
+    # on the hot Start path.
+    if target.requires_discovered_repo:
+        allowed = {str(p) for p in discover_repos()}
+        if cwd not in allowed:
+            return HttpResponseBadRequest("cwd must be a discovered repository")
 
     # Re-reconcile the cookies against Codex's current model list before
     # spawning. A long-lived tab might still be carrying a model the index
@@ -10405,8 +10371,11 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         spawn_kwargs["auto_qa_enabled"] = True
     if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
         spawn_kwargs["qa_panel_enabled"] = True
+    # Proposed sessions already represent reviewed work for the user to start;
+    # do not add another synchronous Spec Critic preflight to that hot path.
     if (
-        settings.spec_critic_enabled
+        proposed_session is None
+        and settings.spec_critic_enabled
         and not input_image_paths
         and not plan_mode
         and system_agents.spec_critic_should_run(prompt, cwd=session_cwd)
