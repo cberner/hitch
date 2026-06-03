@@ -3951,7 +3951,8 @@ def _render_session_detail(
         config = codex_pool.app_server_config(
             enable_memories=initial_settings.enable_memories
         )
-        with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
+
+        def _resume_for_detail(codex: Codex) -> tuple[Any, Any, list[Any], Any, Any]:
             # ``thread/read`` only works for threads already loaded into the
             # app-server's in-memory map. Each request spawns a fresh app-server
             # subprocess, so newly-created threads (or any thread persisted by a
@@ -3971,9 +3972,22 @@ def _render_session_detail(
                 raise Http404("system session not found")
             models_data = _models_for_plan_mode_fallback(codex)
             resolved_settings = _resolved_settings(request, models_data)
-            settings = resolved_settings.values
-            cookie_updates = resolved_settings.cookie_updates
-            plan_model = _plan_mode_model_from_models(resumed, settings, models_data)
+            plan_model = _plan_mode_model_from_models(
+                resumed, resolved_settings.values, models_data
+            )
+            return resumed, thread, models_data, resolved_settings, plan_model
+
+        # ``thread_resume`` lazily migrates a foreign thread's state-DB rows and
+        # can exit the app-server on a contended CODEX_HOME lock; retry the
+        # open+resume (the resume is idempotent) so a transient lock does not
+        # 500 the page. See ``codex_pool.run_codex_op_with_retry``.
+        resumed, thread, models_data, resolved_settings, plan_model = (
+            codex_pool.run_codex_op_with_retry(
+                lambda: Codex(config=config), _resume_for_detail
+            )
+        )
+        settings = resolved_settings.values
+        cookie_updates = resolved_settings.cookie_updates
         # Capture the rollout mtime before reading entries; see the
         # metadata-resume branch above for why the order matters.
         stage_cache_mtime_ns = _rollout_mtime_ns(_rollout_path_for(thread))
@@ -7915,9 +7929,11 @@ def set_session_project(request: HttpRequest, session_id: str) -> HttpResponse:
     if not cwd:
         settings = _stored_settings(request)
         config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
-        with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
-            resumed = codex._client.thread_resume(session_id)
-            cwd = _thread_cwd(resumed.thread) or ""
+        resumed = codex_pool.run_codex_op_with_retry(
+            lambda: Codex(config=config),
+            lambda codex: codex._client.thread_resume(session_id),
+        )
+        cwd = _thread_cwd(resumed.thread) or ""
     SessionMetadata.objects.update_or_create(
         thread_id=session_id,
         defaults={
@@ -8293,9 +8309,11 @@ def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
         return HttpResponseBadRequest("demo setup workflow is already running")
     settings = _stored_settings(request)
     config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
-    with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
-        resumed = codex._client.thread_resume(session_id)
-        thread = resumed.thread
+    resumed = codex_pool.run_codex_op_with_retry(
+        lambda: Codex(config=config),
+        lambda codex: codex._client.thread_resume(session_id),
+    )
+    thread = resumed.thread
     cwd = _thread_cwd(thread)
     if not cwd:
         return HttpResponseBadRequest("thread has no cwd")
@@ -9347,8 +9365,10 @@ def _candidate_thread_user_message_index(
     thread_id: str, settings: SettingsValues
 ) -> int:
     config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
-    with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
-        resumed = codex._client.thread_resume(thread_id)
+    resumed = codex_pool.run_codex_op_with_retry(
+        lambda: Codex(config=config),
+        lambda codex: codex._client.thread_resume(thread_id),
+    )
     return _count_user_entries(list(_entries_for(resumed.thread)))
 
 

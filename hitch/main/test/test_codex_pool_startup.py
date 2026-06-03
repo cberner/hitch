@@ -111,6 +111,98 @@ class OpenCodexTests(SimpleTestCase):
             self.assertTrue(codex.closed)
 
 
+class RunCodexOpWithRetryTests(SimpleTestCase):
+    def test_returns_operation_result_on_clean_run(self) -> None:
+        codex = _FakeCodex()
+        factory = MagicMock(return_value=codex)
+        operation = MagicMock(return_value="ok")
+        with (
+            patch("hitch.main.codex_pool._appserver_init_lock", _noop_lock),
+            patch("hitch.main.codex_pool.time.sleep") as mock_sleep,
+        ):
+            result = codex_pool.run_codex_op_with_retry(factory, operation)
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(factory.call_count, 1)
+        operation.assert_called_once_with(codex)
+        # open_codex closes the session even on the success path.
+        self.assertTrue(codex.closed)
+        mock_sleep.assert_not_called()
+
+    def test_retries_locked_operation_with_fresh_server(self) -> None:
+        servers: list[_FakeCodex] = []
+
+        def factory() -> _FakeCodex:
+            server = _FakeCodex()
+            servers.append(server)
+            return server
+
+        attempts = {"n": 0}
+
+        def operation(_codex: object) -> str:
+            attempts["n"] += 1
+            if attempts["n"] < 3:
+                raise TransportClosedError(_LOCKED)
+            return "ok"
+
+        with (
+            patch("hitch.main.codex_pool._appserver_init_lock", _noop_lock),
+            patch("hitch.main.codex_pool.time.sleep") as mock_sleep,
+        ):
+            result = codex_pool.run_codex_op_with_retry(
+                cast("Callable[[], Any]", factory), operation
+            )
+
+        self.assertEqual(result, "ok")
+        # Each attempt opened (and closed) a fresh app-server, never reusing the
+        # one that exited on the locked state DB.
+        self.assertEqual(len(servers), 3)
+        self.assertTrue(all(server.closed for server in servers))
+        self.assertEqual(mock_sleep.call_count, 2)
+
+    def test_non_locked_transport_error_is_not_retried(self) -> None:
+        codex = _FakeCodex()
+        factory = MagicMock(return_value=codex)
+        operation = MagicMock(
+            side_effect=TransportClosedError("app-server closed stdout. crash")
+        )
+        with (
+            patch("hitch.main.codex_pool._appserver_init_lock", _noop_lock),
+            patch("hitch.main.codex_pool.time.sleep"),
+            self.assertRaises(TransportClosedError),
+        ):
+            codex_pool.run_codex_op_with_retry(factory, operation)
+
+        self.assertEqual(operation.call_count, 1)
+
+    def test_non_transport_error_propagates_immediately(self) -> None:
+        codex = _FakeCodex()
+        factory = MagicMock(return_value=codex)
+        operation = MagicMock(side_effect=ValueError("boom"))
+        with (
+            patch("hitch.main.codex_pool._appserver_init_lock", _noop_lock),
+            patch("hitch.main.codex_pool.time.sleep"),
+            self.assertRaises(ValueError),
+        ):
+            codex_pool.run_codex_op_with_retry(factory, operation)
+
+        self.assertEqual(operation.call_count, 1)
+
+    def test_reraises_after_exhausting_attempts(self) -> None:
+        factory = MagicMock(side_effect=lambda: _FakeCodex())
+        operation = MagicMock(side_effect=TransportClosedError(_LOCKED))
+        with (
+            patch("hitch.main.codex_pool._appserver_init_lock", _noop_lock),
+            patch("hitch.main.codex_pool.time.sleep"),
+            self.assertRaises(TransportClosedError),
+        ):
+            codex_pool.run_codex_op_with_retry(factory, operation)
+
+        self.assertEqual(
+            operation.call_count, codex_pool._APPSERVER_START_MAX_ATTEMPTS
+        )
+
+
 class AppServerInitLockTests(SimpleTestCase):
     def test_creates_and_releases_lockfile_in_codex_home(self) -> None:
         with (
