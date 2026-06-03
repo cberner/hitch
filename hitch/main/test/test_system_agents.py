@@ -9,7 +9,15 @@ from unittest.mock import MagicMock, patch
 from django.core.management import call_command
 from django.db import IntegrityError, transaction
 from django.test import TestCase
-from openai_codex.generated.v2_all import GetAccountRateLimitsResponse, ThreadSource
+from openai_codex.generated.v2_all import (
+    AgentMessageThreadItem,
+    GetAccountRateLimitsResponse,
+    ThreadItem,
+    ThreadSource,
+    Turn,
+    TurnCompletedNotification,
+    TurnStatus,
+)
 
 from hitch.main import demo, streaming, system_agents
 from hitch.main.local_merges import (
@@ -494,7 +502,13 @@ class SessionPrStageRefreshTests(TestCase):
 
 
 class SpecCriticWorkflowTests(TestCase):
-    def test_prompt_classifier_targets_vague_broad_and_high_impact_prompts(self) -> None:
+    @patch(
+        "hitch.main.system_agents._classify_spec_critic_prompt_with_codex",
+        return_value=None,
+    )
+    def test_prompt_classifier_fallback_targets_vague_broad_and_high_impact_prompts(
+        self, _mock_classify: MagicMock
+    ) -> None:
         self.assertTrue(system_agents.spec_critic_should_run("Improve the app"))
         self.assertTrue(
             system_agents.spec_critic_should_run(
@@ -509,8 +523,73 @@ class SpecCriticWorkflowTests(TestCase):
                 'Change the settings checkbox label from "Auto-PR" to "Open PR automatically".'
             )
         )
+        self.assertFalse(
+            system_agents.spec_critic_should_run(
+                "Extend the CI benchmark step to include 20000 symbol count. "
+                "Also, I think some of the groups are missing some symbol counts. "
+                "They should all use the same and go up to 20000, after this change."
+            )
+        )
+        self.assertFalse(
+            system_agents.spec_critic_should_run(
+                "Support fallback handling for Codex CLI output in worker logs without "
+                "changing visible behavior"
+            )
+        )
+        self.assertTrue(system_agents.spec_critic_should_run("Update all benchmarks"))
+        self.assertTrue(
+            system_agents.spec_critic_should_run(
+                "Build dashboards for usage reporting across teams projects and "
+                "monthly allocation policies"
+            )
+        )
+        self.assertTrue(
+            system_agents.spec_critic_should_run(
+                "Build workflows for queue management across repositories projects "
+                "and user sessions"
+            )
+        )
         self.assertFalse(system_agents.spec_critic_should_run("Change tokenizer tests"))
         self.assertFalse(system_agents.spec_critic_should_run("Explain how sessions work"))
+
+    @patch("hitch.main.system_agents.Codex")
+    def test_prompt_classifier_asks_codex_with_smallest_model(
+        self, mock_codex_class: MagicMock
+    ) -> None:
+        codex = mock_codex_class.return_value.__enter__.return_value
+        codex.models.return_value.data = [
+            SimpleNamespace(id="gpt-5", hidden=False, is_default=True),
+            SimpleNamespace(id="gpt-5-mini", hidden=False, is_default=False),
+        ]
+        thread = codex.thread_start.return_value
+        final_turn = Turn(
+            id="turn-1",
+            status=TurnStatus.completed,
+            items=[
+                ThreadItem(
+                    root=AgentMessageThreadItem(
+                        id="message-1",
+                        type="agentMessage",
+                        text='{"should_run": false, "reason": "specific"}',
+                    )
+                )
+            ],
+        )
+        thread.turn.return_value.stream.return_value = [
+            SimpleNamespace(
+                payload=TurnCompletedNotification(thread_id="thread-1", turn=final_turn)
+            )
+        ]
+
+        self.assertFalse(
+            system_agents.spec_critic_should_run("Improve onboarding", cwd="/repo")
+        )
+
+        codex.thread_start.assert_called_once()
+        self.assertEqual(codex.thread_start.call_args.kwargs["cwd"], "/repo")
+        self.assertEqual(codex.thread_start.call_args.kwargs["model"], "gpt-5-mini")
+        thread.turn.assert_called_once()
+        self.assertEqual(thread.turn.call_args.kwargs["model"], "gpt-5-mini")
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_spec_critic_starts_hidden_specialized_agents(

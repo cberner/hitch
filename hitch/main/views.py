@@ -8696,7 +8696,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             and not input_image_paths
             and not plan_mode
             and not collaboration_mode
-            and system_agents.spec_critic_should_run(prompt)
+            and system_agents.spec_critic_should_run(prompt, cwd=cwd)
         ):
             workflow_model = (
                 _string_value(getattr(resumed, "model", None)) or settings.model
@@ -9403,7 +9403,7 @@ def _start_candidate_proposal_session(
         return HttpResponseBadRequest(
             "candidate session cwd is not an allowed repository"
         )
-    spec_critic_should_run = system_agents.spec_critic_should_run(prompt)
+    original_prompt = prompt
     prompt = _candidate_proposal_continuation_prompt(prompt)
     base_instructions = _base_instructions_for_settings(spawn_settings)
     project = None if target.project_cleared else candidate_session.project or target.project
@@ -9496,7 +9496,7 @@ def _start_candidate_proposal_session(
         settings.spec_critic_enabled
         and not input_image_paths
         and not plan_mode
-        and spec_critic_should_run
+        and system_agents.spec_critic_should_run(original_prompt, cwd=candidate_cwd)
     ):
         spec_workflow_kwargs: dict[str, Any] = {
             "main_thread_id": candidate_session.thread_id,
@@ -10170,7 +10170,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         settings.spec_critic_enabled
         and not input_image_paths
         and not plan_mode
-        and system_agents.spec_critic_should_run(prompt)
+        and system_agents.spec_critic_should_run(prompt, cwd=session_cwd)
     ):
         spec_create_thread_kwargs: dict[str, Any] = {
             "cwd": session_cwd,

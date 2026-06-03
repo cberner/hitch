@@ -8702,6 +8702,7 @@ class NewSessionViewTests(TestCase):
         )
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5.4")
 
+    @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
     @patch("hitch.main.views.codex_pool.create_session_thread", return_value="thread-spec")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
@@ -8714,6 +8715,7 @@ class NewSessionViewTests(TestCase):
         mock_spawn: MagicMock,
         mock_create_thread: MagicMock,
         mock_start_spec_critic: MagicMock,
+        mock_spec_critic_should_run: MagicMock,
     ) -> None:
         _seed_cookies(
             self.client,
@@ -8733,6 +8735,9 @@ class NewSessionViewTests(TestCase):
             reverse("session", kwargs={"session_id": "thread-spec"}),
         )
         mock_spawn.assert_not_called()
+        mock_spec_critic_should_run.assert_called_once_with(
+            "Improve onboarding", cwd=self.REPO
+        )
         mock_create_thread.assert_called_once_with(
             cwd=self.REPO,
             name="Improve onboarding",
@@ -9249,6 +9254,7 @@ class NewSessionViewTests(TestCase):
             thread_name="Add parser coverage",
         )
 
+    @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
     @patch("hitch.main.views.discover_managed_worktrees")
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -9261,6 +9267,7 @@ class NewSessionViewTests(TestCase):
         mock_codex: MagicMock,
         mock_discover: MagicMock,
         mock_managed_worktrees: MagicMock,
+        mock_spec_critic_should_run: MagicMock,
     ) -> None:
         mock_discover.return_value = [Path(self.REPO)]
         mock_managed_worktrees.return_value = [Path("/repo-worktree")]
@@ -9347,6 +9354,7 @@ class NewSessionViewTests(TestCase):
             "candidate-thread", "Add parser coverage"
         )
         mock_new_session.assert_not_called()
+        mock_spec_critic_should_run.assert_not_called()
 
     @patch("hitch.main.views.discover_managed_worktrees")
     @patch("hitch.main.views.discover_repos")
@@ -9555,6 +9563,7 @@ class NewSessionViewTests(TestCase):
         # The losing accept must not have adopted the candidate as a live session.
         self.assertTrue(candidate.is_hidden_system_session)
 
+    @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.discover_managed_worktrees")
     @patch("hitch.main.views.discover_repos")
@@ -9567,7 +9576,9 @@ class NewSessionViewTests(TestCase):
         mock_discover: MagicMock,
         mock_managed_worktrees: MagicMock,
         mock_start_workflow: MagicMock,
+        mock_spec_critic_should_run: MagicMock,
     ) -> None:
+        _seed_cookies(self.client, **{_SPEC_CRITIC_COOKIE: "true"})
         mock_discover.return_value = [Path(self.REPO)]
         mock_managed_worktrees.return_value = [Path("/repo-worktree")]
         codex = _setup_codex(mock_codex, models=[])
@@ -9602,6 +9613,7 @@ class NewSessionViewTests(TestCase):
                 mock_discover.return_value = [Path(project.repo_path)]
                 mock_start_workflow.reset_mock()
                 mock_turn.reset_mock()
+                mock_spec_critic_should_run.reset_mock()
 
                 response = self.client.post(
                     reverse("new_session"),
@@ -9634,6 +9646,7 @@ class NewSessionViewTests(TestCase):
                 workflow_kwargs.update(expected)
                 mock_start_workflow.assert_called_once_with(**workflow_kwargs)
                 mock_turn.assert_not_called()
+                mock_spec_critic_should_run.assert_not_called()
                 proposal.refresh_from_db()
                 candidate.refresh_from_db()
                 self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
@@ -9732,6 +9745,7 @@ class NewSessionViewTests(TestCase):
         self.assertTrue(candidate.auto_merge_to_local_branch)
         self.assertEqual(candidate.auto_merge_branch, "release")
 
+    @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
     @patch("hitch.main.views.discover_managed_worktrees")
     @patch("hitch.main.views.discover_repos")
@@ -9744,6 +9758,7 @@ class NewSessionViewTests(TestCase):
         mock_discover: MagicMock,
         mock_managed_worktrees: MagicMock,
         mock_start_spec_critic: MagicMock,
+        mock_spec_critic_should_run: MagicMock,
     ) -> None:
         _seed_cookies(self.client, **{_SPEC_CRITIC_COOKIE: "true"})
         mock_discover.return_value = [Path(self.REPO)]
@@ -9784,6 +9799,9 @@ class NewSessionViewTests(TestCase):
             reverse("session", kwargs={"session_id": "candidate-thread"}),
         )
         mock_turn.assert_not_called()
+        mock_spec_critic_should_run.assert_called_once_with(
+            "Go ahead and implement this proposed session.", cwd="/repo-worktree"
+        )
         mock_start_spec_critic.assert_called_once_with(
             main_thread_id="candidate-thread",
             cwd="/repo-worktree",
@@ -11860,6 +11878,7 @@ class SendMessageViewTests(TestCase):
             ),
         )
 
+    @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
@@ -11870,6 +11889,7 @@ class SendMessageViewTests(TestCase):
         mock_spawn: MagicMock,
         mock_discover: MagicMock,
         mock_start_spec_critic: MagicMock,
+        mock_spec_critic_should_run: MagicMock,
     ) -> None:
         _seed_cookies(
             self.client,
@@ -11885,6 +11905,9 @@ class SendMessageViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         mock_spawn.assert_not_called()
+        mock_spec_critic_should_run.assert_called_once_with(
+            "Improve onboarding", cwd="/repo"
+        )
         mock_start_spec_critic.assert_called_once_with(
             main_thread_id="abc",
             cwd="/repo",
@@ -11901,6 +11924,7 @@ class SendMessageViewTests(TestCase):
             auto_qa_enabled=False,
         )
 
+    @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
@@ -11911,6 +11935,7 @@ class SendMessageViewTests(TestCase):
         mock_spawn: MagicMock,
         mock_discover: MagicMock,
         mock_start_spec_critic: MagicMock,
+        mock_spec_critic_should_run: MagicMock,
     ) -> None:
         _seed_cookies(self.client, **{_SPEC_CRITIC_COOKIE: "true"})
         self._patch_codex(mock_codex)
@@ -11930,12 +11955,16 @@ class SendMessageViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         mock_spawn.assert_not_called()
+        mock_spec_critic_should_run.assert_called_once_with(
+            "Improve onboarding", cwd="/repo"
+        )
         kwargs = mock_start_spec_critic.call_args.kwargs
         self.assertFalse(kwargs["auto_pr_enabled"])
         self.assertTrue(kwargs["auto_qa_enabled"])
         self.assertTrue(kwargs["auto_merge_to_local_branch"])
         self.assertEqual(kwargs["auto_merge_branch"], "main")
 
+    @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=False)
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
@@ -11946,6 +11975,7 @@ class SendMessageViewTests(TestCase):
         mock_spawn: MagicMock,
         mock_discover: MagicMock,
         mock_start_spec_critic: MagicMock,
+        mock_spec_critic_should_run: MagicMock,
     ) -> None:
         _seed_cookies(self.client, **{_SPEC_CRITIC_COOKIE: "true"})
         self._patch_codex(mock_codex)
@@ -11962,6 +11992,10 @@ class SendMessageViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
+        mock_spec_critic_should_run.assert_called_once_with(
+            'Change the settings checkbox label from "Auto-PR" to "Open PR automatically".',
+            cwd="/repo",
+        )
         mock_start_spec_critic.assert_not_called()
         mock_spawn.assert_called_once_with(
             thread_id="abc",
