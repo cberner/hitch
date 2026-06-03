@@ -4020,9 +4020,14 @@ def _render_session_detail(
         stage_pr_workflow = _workflow_after_main_lifecycle(
             stage_pr_workflow, pr_observation, main_updated_at=main_updated_at
         )
+        # Refresh the PR stage off gh only when the TTL/backoff window allows
+        # (force=False). A forced refresh here shells out to ``gh pr view``
+        # synchronously on *every* detail render, which dominated page latency;
+        # the throttle keyed on the workflow/metadata attempt timestamps caps
+        # this to one gh call per session per refresh window, matching the
+        # session-list path.
         workflow_pr_snapshot = system_agents.refreshed_pr_handoff_for_stage(
             stage_pr_workflow,
-            force=True,
         )
         log_pr_snapshot = pr_observation.snapshot
         if (
@@ -4043,14 +4048,12 @@ def _render_session_detail(
                     if metadata is not None
                     else None
                 ),
-                force=True,
             ):
                 if metadata is not None:
                     _mark_cached_pr_stage_refresh_attempt(session_id)
                 log_pr_snapshot = system_agents.refreshed_pr_snapshot_for_stage(
                     cwd=detail_cwd,
                     snapshot=log_pr_snapshot,
-                    force=True,
                 )
         if not pr_url:
             pr_url = (
