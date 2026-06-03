@@ -340,6 +340,7 @@ def create_claude_session_thread(
     name: str,
     model: str | None = None,
     project: Project | None = None,
+    developer_instructions: str | None = None,
     auto_pr_enabled: bool = False,
     auto_qa_enabled: bool = False,
     auto_merge_to_local_branch: bool = False,
@@ -354,6 +355,12 @@ def create_claude_session_thread(
     Critic preflight (which needs the thread before the visible implementation
     turn) records the right backend and ``spawn_turn`` later resumes as Claude --
     and lets the session page render an empty transcript while the preflight runs.
+
+    ``developer_instructions`` is stored on the placeholder so a later follow-up
+    turn -- which inherits them from the latest instance on the thread when none
+    is passed -- keeps the project/extra developer prompt. Without this a fresh
+    ``/qa`` shell (whose workflow may finish without spawning a visible turn)
+    would hand every subsequent turn an empty developer prompt.
     """
     from hitch.main import session_index
 
@@ -378,6 +385,7 @@ def create_claude_session_thread(
         backend=CodexInstance.BACKEND_CLAUDE,
         purpose=CodexInstance.PURPOSE_USER,
         model=model or "",
+        developer_instructions=developer_instructions or "",
     )
     return thread_id
 

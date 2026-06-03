@@ -23,7 +23,7 @@ from claude_agent_sdk import (
 from django.test import TestCase, override_settings
 
 from hitch.main import claude_options, claude_translate, codex_pool, coding_agents
-from hitch.main.models import CodexInstance
+from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
 
 
 def _assistant(*blocks: Any, message_id: str = "m1") -> AssistantMessage:
@@ -1377,6 +1377,156 @@ class ClaudeImageCleanupTests(TestCase):
             self.assertFalse(image.exists())
 
 
+class ClaudeDanglingRequestCleanupTests(TestCase):
+    """A worker that fails after creating an approval/input row but before the
+    wait path records a decision must close those rows out -- otherwise the
+    session keeps rendering an actionable card for a dead worker and any user
+    response is silently dropped (mirrors the Codex worker's failure path)."""
+
+    def _run_handle(self, *, messages: list[Any], raise_in_stream: bool) -> Any:
+        from hitch.main.management.commands import claude_worker
+
+        with tempfile.TemporaryDirectory() as tmp:
+            events_path = Path(tmp) / "events.jsonl"
+            instance = CodexInstance.objects.create(
+                thread_id="thread-dangle",
+                cwd=tmp,
+                prompt="do it",
+                events_path=str(events_path),
+                pid=0,
+                status=CodexInstance.STATUS_RUNNING,
+                backend=CodexInstance.BACKEND_CLAUDE,
+                purpose=CodexInstance.PURPOSE_USER,
+            )
+            approval = ApprovalRequest.objects.create(
+                instance=instance,
+                method="item/commandExecution/requestApproval",
+                params={},
+            )
+            user_input = UserInputRequest.objects.create(
+                instance=instance,
+                method="session/request_user_input",
+                params={},
+            )
+
+            class _FailingClient(_FakeClient):
+                @override
+                async def receive_response(self) -> Any:
+                    if raise_in_stream:
+                        raise RuntimeError("events-file write failed")
+                        yield  # pragma: no cover - unreachable, marks a generator
+                    for message in messages:
+                        yield message
+
+            fake = _FailingClient([])
+
+            def _factory(*, options: Any) -> _FakeClient:
+                fake.options = options
+                return fake
+
+            with (
+                patch.object(claude_worker, "ClaudeSDKClient", _factory),
+                patch.object(claude_worker, "_apply_worker_oom_score_adjust"),
+                patch("hitch.main.management.commands.claude_worker.signal.signal"),
+                patch.object(claude_worker, "_build_query_input", return_value="do it"),
+            ):
+                if raise_in_stream:
+                    with self.assertRaises(RuntimeError):
+                        claude_worker.Command().handle(
+                            instance_id=instance.pk,
+                            model=None,
+                            reasoning_effort=None,
+                            sandbox_policy=None,
+                            approval_mode=None,
+                            web_search_mode=None,
+                            plan_mode=False,
+                        )
+                else:
+                    claude_worker.Command().handle(
+                        instance_id=instance.pk,
+                        model=None,
+                        reasoning_effort=None,
+                        sandbox_policy=None,
+                        approval_mode=None,
+                        web_search_mode=None,
+                        plan_mode=False,
+                    )
+            approval.refresh_from_db()
+            user_input.refresh_from_db()
+            instance.refresh_from_db()
+            return instance, approval, user_input
+
+    def test_exception_path_resolves_dangling_rows(self) -> None:
+        instance, approval, user_input = self._run_handle(
+            messages=[], raise_in_stream=True
+        )
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertEqual(approval.decision, ApprovalRequest.DECISION_CANCEL)
+        self.assertIsNotNone(approval.decided_at)
+        self.assertEqual(user_input.response, {"answers": {}})
+        self.assertIsNotNone(user_input.responded_at)
+
+    def test_failed_result_resolves_dangling_rows(self) -> None:
+        # The stream completes, but the ResultMessage is an error -> the turn is
+        # marked failed, and the dangling rows still need closing.
+        instance, approval, user_input = self._run_handle(
+            messages=[_assistant(TextBlock(text="oops")), _result(subtype="error", is_error=True)],
+            raise_in_stream=False,
+        )
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertEqual(approval.decision, ApprovalRequest.DECISION_CANCEL)
+        self.assertEqual(user_input.response, {"answers": {}})
+
+    def test_completed_turn_leaves_resolved_rows_untouched(self) -> None:
+        # A successful turn already resolved its own rows; the cleanup must not
+        # run (status COMPLETED), so an *accepted* approval keeps its decision.
+        from hitch.main.management.commands import claude_worker
+
+        with tempfile.TemporaryDirectory() as tmp:
+            events_path = Path(tmp) / "events.jsonl"
+            instance = CodexInstance.objects.create(
+                thread_id="thread-ok",
+                cwd=tmp,
+                prompt="do it",
+                events_path=str(events_path),
+                pid=0,
+                status=CodexInstance.STATUS_RUNNING,
+                backend=CodexInstance.BACKEND_CLAUDE,
+                purpose=CodexInstance.PURPOSE_USER,
+            )
+            approval = ApprovalRequest.objects.create(
+                instance=instance,
+                method="item/commandExecution/requestApproval",
+                params={},
+                decision=ApprovalRequest.DECISION_ACCEPT,
+            )
+            fake = _FakeClient([_assistant(TextBlock(text="ok")), _result()])
+
+            def _factory(*, options: Any) -> _FakeClient:
+                fake.options = options
+                return fake
+
+            with (
+                patch.object(claude_worker, "ClaudeSDKClient", _factory),
+                patch.object(claude_worker, "_apply_worker_oom_score_adjust"),
+                patch("hitch.main.management.commands.claude_worker.signal.signal"),
+                patch.object(claude_worker, "_build_query_input", return_value="do it"),
+            ):
+                claude_worker.Command().handle(
+                    instance_id=instance.pk,
+                    model=None,
+                    reasoning_effort=None,
+                    sandbox_policy=None,
+                    approval_mode=None,
+                    web_search_mode=None,
+                    plan_mode=False,
+                )
+            instance.refresh_from_db()
+            approval.refresh_from_db()
+            self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
+            self.assertEqual(approval.decision, ApprovalRequest.DECISION_ACCEPT)
+
+
 class ClaudeWorkflowBaseInstructionsTests(TestCase):
     """A Claude QA/PR/Spec-Critic workflow never carries Codex base instructions,
     even when the global provider was switched back to Codex."""
@@ -1705,6 +1855,29 @@ class CreateClaudeSessionThreadTests(TestCase):
         self.assertEqual(placeholder.pid, 0)
         # No worker is launched -- the placeholder only fixes the backend.
         self.assertEqual(placeholder.events_path, "")
+
+    def test_developer_instructions_persist_on_placeholder(self) -> None:
+        # A fresh ``/qa`` shell may finish its workflow without spawning a visible
+        # turn, so the developer prompt has to live on the placeholder -- otherwise
+        # a later follow-up inherits the latest instance's empty value and silently
+        # drops the project/extra developer instructions.
+        thread_id = codex_pool.create_claude_session_thread(
+            cwd="/repo",
+            name="QA review",
+            model=claude_options.DEFAULT_CLAUDE_MODEL,
+            developer_instructions="Always run the linter.",
+        )
+        placeholder = CodexInstance.objects.get(thread_id=thread_id)
+        self.assertEqual(
+            placeholder.developer_instructions, "Always run the linter."
+        )
+
+    def test_developer_instructions_default_to_empty(self) -> None:
+        thread_id = codex_pool.create_claude_session_thread(
+            cwd="/repo", name="Spec preflight"
+        )
+        placeholder = CodexInstance.objects.get(thread_id=thread_id)
+        self.assertEqual(placeholder.developer_instructions, "")
 
 
 class CodexFollowupModelTests(TestCase):

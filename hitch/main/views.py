@@ -12331,6 +12331,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
                     name=thread_name,
                     model=settings.model or None,
                     project=None if target.project_cleared else source_project,
+                    developer_instructions=source_developer_instructions or None,
                 )
             else:
                 create_thread_kwargs: dict[str, Any] = {

@@ -49,6 +49,7 @@ from hitch.main.claude_tools import PROPOSE_SESSION_TOOL_NAME, build_hitch_mcp_s
 from hitch.main.codex_pool import (
     cleanup_input_images_for,
     control_path_for,
+    resolve_dangling_requests_for_instance,
 )
 from hitch.main.management.commands.codex_worker import (
     _apply_worker_oom_score_adjust,
@@ -174,6 +175,12 @@ class Command(BaseCommand):
             instance.ended_at = timezone.now()
             instance.error = repr(exc)
             instance.save(update_fields=["status", "ended_at", "error"])
+            # A crash after ``approval/requested``/``input/requested`` but before
+            # the wait path recorded a decision leaves dangling ApprovalRequest/
+            # UserInputRequest rows. Without this the session keeps rendering an
+            # actionable card for a dead worker and silently drops any response;
+            # close them out (cancel/empty) as the Codex worker does on failure.
+            resolve_dangling_requests_for_instance(instance.pk)
             _notify_system_agents(instance)
             # Claude inlines uploaded images as base64 into the query and the
             # transcript keeps only ``[image]`` markers, so no resume needs the
@@ -195,6 +202,11 @@ class Command(BaseCommand):
         else:
             instance.status = CodexInstance.STATUS_COMPLETED
         instance.save(update_fields=update_fields)
+        if instance.status == CodexInstance.STATUS_FAILED:
+            # As in the exception path, a failed turn must not leave an approval/
+            # input card live for a worker that is gone -- close out any rows the
+            # turn created but never resolved.
+            resolve_dangling_requests_for_instance(instance.pk)
         _record_token_usage(instance, runner)
         _notify_system_agents(instance)
         # Claude images are inlined into the query, not referenced on resume, so
