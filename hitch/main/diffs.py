@@ -89,26 +89,7 @@ def build_worktree_diff(cwd: str | None) -> DiffView:
     The viewer is informational, so git failures degrade to an empty/error
     state instead of blocking the session page render.
     """
-    if not cwd:
-        return DiffView(files=[])
-    repo = _repo_root(Path(cwd))
-    if repo is None:
-        return DiffView(files=[])
-
-    diff_base = _branch_diff_base_ref(repo)
-    raw_diff = None
-    if diff_base is not None:
-        raw_diff = _git_output(repo, [*_DIFF_ARGS, diff_base, "--"])
-    if raw_diff is None:
-        raw_diff = _git_output(repo, [*_DIFF_ARGS, "HEAD", "--"])
-    if raw_diff is None:
-        raw_diff = _git_output(repo, [*_DIFF_ARGS, "--"]) or ""
-
-    parts = [raw_diff] if raw_diff else []
-    untracked_diff = _untracked_diff(repo)
-    if untracked_diff:
-        parts.append(untracked_diff)
-    text = "\n".join(part for part in parts if part)
+    text = _worktree_diff_text(cwd)
     truncated = len(text) > _MAX_DIFF_CHARS
     if truncated:
         text = text[:_MAX_DIFF_CHARS]
@@ -117,29 +98,34 @@ def build_worktree_diff(cwd: str | None) -> DiffView:
 
 def build_worktree_diff_text(cwd: str | None) -> str:
     """Return the raw current git diff text for system-agent prompts."""
+    text = _worktree_diff_text(cwd)
+    if len(text) > _MAX_DIFF_CHARS:
+        text = text[:_MAX_DIFF_CHARS] + "\n\n[diff truncated]"
+    return text
+
+
+def _worktree_diff_text(cwd: str | None) -> str:
     if not cwd:
         return ""
     repo = _repo_root(Path(cwd))
     if repo is None:
         return ""
 
+    return "\n".join(
+        part for part in (_tracked_diff(repo), _untracked_diff(repo)) if part
+    )
+
+
+def _tracked_diff(repo: Path) -> str:
     diff_base = _branch_diff_base_ref(repo)
-    raw_diff = None
     if diff_base is not None:
         raw_diff = _git_output(repo, [*_DIFF_ARGS, diff_base, "--"])
-    if raw_diff is None:
-        raw_diff = _git_output(repo, [*_DIFF_ARGS, "HEAD", "--"])
-    if raw_diff is None:
-        raw_diff = _git_output(repo, [*_DIFF_ARGS, "--"]) or ""
-
-    parts = [raw_diff] if raw_diff else []
-    untracked_diff = _untracked_diff(repo)
-    if untracked_diff:
-        parts.append(untracked_diff)
-    text = "\n".join(part for part in parts if part)
-    if len(text) > _MAX_DIFF_CHARS:
-        text = text[:_MAX_DIFF_CHARS] + "\n\n[diff truncated]"
-    return text
+        if raw_diff is not None:
+            return raw_diff
+    raw_diff = _git_output(repo, [*_DIFF_ARGS, "HEAD", "--"])
+    if raw_diff is not None:
+        return raw_diff
+    return _git_output(repo, [*_DIFF_ARGS, "--"]) or ""
 
 
 def _branch_diff_base_ref(repo: Path) -> str | None:
