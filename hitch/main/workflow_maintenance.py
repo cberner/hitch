@@ -76,6 +76,15 @@ def _run_workflow_maintenance_scheduler_tick() -> None:
         refreshed = system_agents.refresh_due_pr_monitor_backoffs()
         if refreshed:
             logger.info("refreshed %s PR monitor backoff workflow(s)", refreshed)
+        # Converge GitHub-backed PR stages in the background. This scheduler
+        # runs under production server commands (gunicorn et al.), whereas the
+        # auto-proposal scheduler does not, so without this the per-session
+        # `gh pr view` stage refresh only ever fires from the session-list
+        # request path (capped at one row per render) -- dominating dashboard
+        # latency once a session's 5-minute refresh window elapses.
+        pr_stages = system_agents.refresh_unarchived_session_pr_stages()
+        if pr_stages:
+            logger.info("refreshed %s session PR stage(s)", pr_stages)
     except Exception:
         logger.exception("failed to run workflow maintenance scheduler tick")
     finally:
