@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import subprocess
 import threading
 from collections.abc import Iterable, Mapping
@@ -142,6 +143,7 @@ _QA_DESIGN_FEEDBACK_SUMMARY_CHARS = 360
 _PR_HANDOFF_STATE_KEY = "pr_handoff"
 _PR_HITCH_HANDOFF_STATE_KEY = "hitch_pr_handoff"
 _PR_MONITOR_STATE_KEY = "last_pr_monitor"
+_PR_MONITOR_BACKOFF_STATE_KEY = "pr_monitor_backoff"
 _PR_GATES_STATE_KEY = "pr_gates"
 _PR_PENDING_CHECKS_STATE_KEY = "pr_pending_checks"
 _PR_GATE_MERGE_CONFLICTS = "merge_conflicts"
@@ -259,9 +261,11 @@ _PR_SAFE_LIST_ITEM_FIELDS = (
     "conclusion",
 )
 _GH_PR_CREATE_TIMEOUT_SECONDS = 120
-_PR_STAGE_REFRESH_MIN_SECONDS = 60
+_PR_STAGE_REFRESH_MIN_SECONDS = 5 * _SECONDS_PER_MINUTE
 _PR_STAGE_REFRESH_TIMEOUT_SECONDS = 5
 _PR_STAGE_REFRESH_STATE_KEY = "pr_stage_refresh"
+_PR_MONITOR_PENDING_POLL_MIN_SECONDS = 5 * _SECONDS_PER_MINUTE
+_PR_MONITOR_PENDING_POLL_MAX_SECONDS = 30 * _SECONDS_PER_MINUTE
 _GH_PR_VIEW_FIELDS = (
     "url",
     "number",
@@ -289,6 +293,12 @@ _GH_PR_MONITOR_FIELDS = (
 _GH_MONITOR_TEXT_MAX_CHARS = 6000
 _GH_REVIEW_THREAD_PAGE_LIMIT = 5
 _GH_STATUS_CHECK_PAGE_LIMIT = 10
+_PR_MONITOR_BACKOFF_CLAIM_SECONDS = (
+    _GH_PR_CREATE_TIMEOUT_SECONDS
+    * (1 + _GH_REVIEW_THREAD_PAGE_LIMIT + _GH_STATUS_CHECK_PAGE_LIMIT)
+    + _SECONDS_PER_MINUTE
+)
+_PR_MONITOR_RETRY_LIMIT_REASONS = frozenset({"missing_cwd", "gh_error"})
 _GH_REVIEW_THREADS_QUERY = """
 query($owner: String!, $repo: String!, $number: Int!, $after: String) {
   repository(owner: $owner, name: $repo) {
@@ -1720,6 +1730,12 @@ def stop_active_workflow(main_thread_id: str) -> bool:
         .order_by("-created_at")
     )
     if not runs:
+        if _workflow_waits_on_pr_monitor_backoff(workflow):
+            workflow.state = dict(workflow.state)
+            workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
+            workflow.save(update_fields=["state", "updated_at"])
+            _block_workflow(workflow, "QA workflow stopped by user")
+            return True
         if workflow.kind == SPEC_CRITIC_WORKFLOW_KIND:
             error = "Spec Critic workflow stopped by user"
             _cancel_pending_spec_critic_input_requests(workflow, error)
@@ -3605,12 +3621,29 @@ def _handle_pr_followup_monitor_finished(
         )
         return
 
-    run_input = run.input if isinstance(run.input, dict) else {}
-    gh_observation = (
-        run_input.get("gh_observation") if isinstance(run_input, dict) else None
+    parsed = _authoritative_pr_monitor_result(
+        parsed,
+        _refresh_pr_monitor_observation(
+            workflow, _run_gh_observation_fallback(run)
+        ),
     )
-    gh_observation = gh_observation if isinstance(gh_observation, dict) else {}
-    gh_observation = _refresh_pr_monitor_observation(workflow, gh_observation)
+    run.status = SystemAgentRun.STATUS_COMPLETED
+    run.output = parsed
+    run.raw_output = raw_output
+    run.save(update_fields=["status", "output", "raw_output", "updated_at"])
+
+    _advance_pr_workflow_from_monitor_result(workflow, parsed)
+
+
+def _run_gh_observation_fallback(run: SystemAgentRun) -> dict[str, Any]:
+    run_input = run.input if isinstance(run.input, dict) else {}
+    gh_observation = run_input.get("gh_observation")
+    return gh_observation if isinstance(gh_observation, dict) else {}
+
+
+def _authoritative_pr_monitor_result(
+    parsed: dict[str, Any], gh_observation: dict[str, Any]
+) -> dict[str, Any]:
     authoritative_pr = _compact_pr_handoff(gh_observation.get("pr"))
     monitor_pr = authoritative_pr or parsed["pr"]
     monitor_status = parsed["status"]
@@ -3620,23 +3653,39 @@ def _handle_pr_followup_monitor_finished(
         )
     gh_feedback = _string_from_any(gh_observation.get("feedback"))
     gh_blockers = _string_list(gh_observation.get("blockers"))
-    parsed = {
+    return {
         **parsed,
         "status": monitor_status,
         "pr": monitor_pr,
         "feedback": gh_feedback or parsed["feedback"],
         "blockers": gh_blockers or parsed["blockers"],
     }
+
+
+def _pr_monitor_result_from_gh_observation(
+    gh_observation: dict[str, Any]
+) -> dict[str, Any]:
+    pr = _compact_pr_handoff(gh_observation.get("pr"))
+    return {
+        "status": "terminal" if _pr_handoff_is_terminal(pr) else "blocked",
+        "summary": _string_from_any(gh_observation.get("summary"))
+        or "Hitch checked the PR gates.",
+        "feedback": _string_from_any(gh_observation.get("feedback")),
+        "pr": pr,
+        "blockers": _string_list(gh_observation.get("blockers")),
+    }
+
+
+def _advance_pr_workflow_from_monitor_result(
+    workflow: SystemWorkflow, parsed: dict[str, Any]
+) -> None:
+    monitor_pr = _compact_pr_handoff(parsed.get("pr"))
     if monitor_pr:
         _merge_pr_handoff(workflow, monitor_pr)
     workflow.state = {**workflow.state, _PR_MONITOR_STATE_KEY: parsed}
-    run.status = SystemAgentRun.STATUS_COMPLETED
-    run.output = parsed
-    run.raw_output = raw_output
-    run.save(update_fields=["status", "output", "raw_output", "updated_at"])
-
     handoff = _pr_handoff_from_workflow(workflow)
     if _pr_handoff_is_terminal(handoff):
+        workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
         workflow.status = SystemWorkflow.STATUS_COMPLETED
         workflow.step = STEP_PR_CLOSED
         workflow.save(update_fields=["status", "step", "state", "updated_at"])
@@ -3645,6 +3694,7 @@ def _handle_pr_followup_monitor_finished(
     gates = _evaluate_pr_gates(_pr_gate_observation_handoff(handoff, monitor_pr))
     workflow.state = {**workflow.state, _PR_GATES_STATE_KEY: gates}
     if _pr_gates_all_passed(gates):
+        workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
         workflow.status = SystemWorkflow.STATUS_COMPLETED
         workflow.step = STEP_PR_READY
         workflow.save(update_fields=["status", "step", "state", "updated_at"])
@@ -3652,6 +3702,7 @@ def _handle_pr_followup_monitor_finished(
 
     actionable_blockers = _pr_gates_have_actionable_blockers(gates)
     if actionable_blockers and workflow.iteration >= workflow.max_iterations:
+        workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
         workflow.status = SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED
         workflow.step = STEP_MAX_ITERATIONS_REACHED
         workflow.save(update_fields=["status", "step", "state", "updated_at"])
@@ -3667,6 +3718,7 @@ def _handle_pr_followup_monitor_finished(
     if actionable_blockers:
         feedback = _pr_actionable_feedback(gates, parsed)
         workflow.state = {**workflow.state, _PR_PENDING_CHECKS_STATE_KEY: 0}
+        workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
         workflow.iteration += 1
         workflow.step = STEP_PR_FEEDBACK_RUNNING
         workflow.save(update_fields=["iteration", "step", "state", "updated_at"])
@@ -3680,17 +3732,17 @@ def _handle_pr_followup_monitor_finished(
     pending_checks = _state_int(workflow, _PR_PENDING_CHECKS_STATE_KEY) + 1
     workflow.state = {**workflow.state, _PR_PENDING_CHECKS_STATE_KEY: pending_checks}
     if pending_checks >= workflow.max_iterations:
+        workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
         workflow.status = SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED
         workflow.step = STEP_MAX_ITERATIONS_REACHED
         workflow.save(update_fields=["status", "step", "state", "updated_at"])
         _surface_workflow_failure(workflow, feedback)
         return
-    workflow.step = STEP_PR_MONITORING
-    workflow.save(update_fields=["step", "state", "updated_at"])
-    try:
-        _spawn_pr_followup_monitor_run(workflow)
-    except Exception as exc:
-        _block_workflow(workflow, f"failed to continue PR follow-up monitor: {exc!r}")
+    _schedule_pr_monitor_backoff(
+        workflow,
+        reason="pending_gates",
+        pending_checks=pending_checks,
+    )
 
 
 def _refresh_pr_monitor_observation(
@@ -3703,6 +3755,260 @@ def _refresh_pr_monitor_observation(
     except _GhPrOpenError:
         logger.exception("failed to refresh PR observation after monitor completion")
         return fallback
+
+
+def refresh_due_pr_monitor_backoffs(
+    *,
+    limit: int | None = None,
+    main_thread_id: str | None = None,
+    workflow_id: int | None = None,
+) -> int:
+    """Poll delayed PR monitors whose backoff window has elapsed."""
+    workflows = (
+        SystemWorkflow.objects.filter(
+            kind=SystemWorkflow.KIND_PR_QA,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=STEP_PR_MONITORING,
+        )
+        .order_by("updated_at", "pk")
+    )
+    if main_thread_id is not None:
+        workflows = workflows.filter(main_thread_id=main_thread_id)
+    if workflow_id is not None:
+        workflows = workflows.filter(pk=workflow_id)
+    refreshed = 0
+    for workflow in workflows:
+        if limit is not None and refreshed >= limit:
+            break
+        claimed_workflow = _claim_due_pr_monitor_backoff(workflow)
+        if claimed_workflow is None:
+            continue
+        refreshed += 1
+        if not Path(claimed_workflow.cwd).is_dir():
+            _reschedule_claimed_pr_monitor_backoff(
+                claimed_workflow,
+                reason="missing_cwd",
+                pending_checks=_state_int(
+                    claimed_workflow, _PR_PENDING_CHECKS_STATE_KEY
+                ),
+                error=f"workflow cwd is missing: {claimed_workflow.cwd}",
+            )
+            continue
+        try:
+            observation = _pr_monitor_observation_from_gh(claimed_workflow)
+        except _GhPrOpenError as exc:
+            logger.exception(
+                "failed to poll PR monitor backoff for workflow %s",
+                claimed_workflow.pk,
+            )
+            _reschedule_claimed_pr_monitor_backoff(
+                claimed_workflow,
+                reason="gh_error",
+                pending_checks=_state_int(
+                    claimed_workflow, _PR_PENDING_CHECKS_STATE_KEY
+                ),
+                error=str(exc),
+            )
+            continue
+        _advance_claimed_pr_monitor_backoff(
+            claimed_workflow,
+            _pr_monitor_result_from_gh_observation(observation),
+        )
+    return refreshed
+
+
+def _claim_due_pr_monitor_backoff(workflow: SystemWorkflow) -> SystemWorkflow | None:
+    now = timezone.now()
+    now_timestamp = int(now.timestamp())
+    backoff = workflow.state.get(_PR_MONITOR_BACKOFF_STATE_KEY)
+    if not _pr_monitor_backoff_value_due(backoff, now_timestamp):
+        return None
+    if _pr_monitor_has_active_agent_run(workflow):
+        return None
+    claim_token = secrets.token_hex(12)
+    claimed_backoff = {
+        **cast(dict[str, Any], backoff),
+        "claim_token": claim_token,
+        "claim_started_at": now_timestamp,
+        "next_attempt_at": now_timestamp + _PR_MONITOR_BACKOFF_CLAIM_SECONDS,
+    }
+    claimed_state = {
+        **workflow.state,
+        _PR_MONITOR_BACKOFF_STATE_KEY: claimed_backoff,
+    }
+    updated = SystemWorkflow.objects.filter(
+        pk=workflow.pk,
+        status=SystemWorkflow.STATUS_RUNNING,
+        step=STEP_PR_MONITORING,
+        updated_at=workflow.updated_at,
+    ).update(state=claimed_state, updated_at=now)
+    if updated != 1:
+        return None
+    workflow.state = claimed_state
+    workflow.updated_at = now
+    return workflow
+
+
+def _advance_claimed_pr_monitor_backoff(
+    workflow: SystemWorkflow, parsed: dict[str, Any]
+) -> None:
+    claimed_workflow = _claimed_pr_monitor_workflow(workflow)
+    if claimed_workflow is None:
+        return
+    _advance_pr_workflow_from_monitor_result(claimed_workflow, parsed)
+
+
+def _reschedule_claimed_pr_monitor_backoff(
+    workflow: SystemWorkflow,
+    *,
+    reason: str,
+    pending_checks: int,
+    error: str,
+) -> None:
+    claimed_workflow = _claimed_pr_monitor_workflow(workflow)
+    if claimed_workflow is None:
+        return
+    _schedule_pr_monitor_backoff(
+        claimed_workflow,
+        reason=reason,
+        pending_checks=pending_checks,
+        error=error,
+    )
+
+
+def _claimed_pr_monitor_workflow(workflow: SystemWorkflow) -> SystemWorkflow | None:
+    claim_token = _pr_monitor_backoff_claim_token(workflow)
+    if not claim_token:
+        return None
+    try:
+        current = SystemWorkflow.objects.get(pk=workflow.pk)
+    except SystemWorkflow.DoesNotExist:
+        return None
+    if (
+        current.status != SystemWorkflow.STATUS_RUNNING
+        or current.step != STEP_PR_MONITORING
+    ):
+        return None
+    if _pr_monitor_backoff_claim_token(current) != claim_token:
+        return None
+    return current
+
+
+def _pr_monitor_backoff_claim_token(workflow: SystemWorkflow) -> str:
+    value = workflow.state.get(_PR_MONITOR_BACKOFF_STATE_KEY)
+    if not isinstance(value, dict):
+        return ""
+    token = value.get("claim_token")
+    return token if isinstance(token, str) else ""
+
+
+def _pr_monitor_has_active_agent_run(workflow: SystemWorkflow) -> bool:
+    return workflow.agent_runs.filter(
+        agent_kind=PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        status=SystemAgentRun.STATUS_RUNNING,
+        instance__status__in=(
+            CodexInstance.STATUS_STARTING,
+            CodexInstance.STATUS_RUNNING,
+        ),
+    ).exists()
+
+
+def _workflow_waits_on_pr_monitor_backoff(workflow: SystemWorkflow) -> bool:
+    return (
+        workflow.kind == SystemWorkflow.KIND_PR_QA
+        and workflow.status == SystemWorkflow.STATUS_RUNNING
+        and workflow.step == STEP_PR_MONITORING
+        and isinstance(workflow.state.get(_PR_MONITOR_BACKOFF_STATE_KEY), dict)
+    )
+
+
+def _schedule_pr_monitor_backoff(
+    workflow: SystemWorkflow,
+    *,
+    reason: str,
+    pending_checks: int,
+    error: str = "",
+) -> None:
+    now = int(timezone.now().timestamp())
+    retry_attempts = _next_pr_monitor_retry_attempts(workflow, reason)
+    if retry_attempts and retry_attempts >= workflow.max_iterations:
+        workflow.state = dict(workflow.state)
+        workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
+        workflow.save(update_fields=["state", "updated_at"])
+        _block_workflow(
+            workflow,
+            _pr_monitor_backoff_exhausted_error(
+                workflow, reason=reason, attempts=retry_attempts, error=error
+            ),
+        )
+        return
+    delay_seconds = _pr_monitor_backoff_seconds(max(pending_checks, retry_attempts))
+    backoff: dict[str, Any] = {
+        "reason": reason,
+        "scheduled_at": now,
+        "next_attempt_at": now + delay_seconds,
+        "delay_seconds": delay_seconds,
+    }
+    if retry_attempts:
+        backoff["retry_attempts"] = retry_attempts
+    if error:
+        backoff["error"] = error[:500]
+    workflow.state = {
+        **workflow.state,
+        _PR_MONITOR_BACKOFF_STATE_KEY: backoff,
+    }
+    workflow.step = STEP_PR_MONITORING
+    workflow.save(update_fields=["step", "state", "updated_at"])
+
+
+def _next_pr_monitor_retry_attempts(workflow: SystemWorkflow, reason: str) -> int:
+    if reason not in _PR_MONITOR_RETRY_LIMIT_REASONS:
+        return 0
+    value = workflow.state.get(_PR_MONITOR_BACKOFF_STATE_KEY)
+    if not isinstance(value, dict):
+        return 1
+    attempts = value.get("retry_attempts", value.get("error_attempts"))
+    if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 1:
+        return 1
+    return attempts + 1
+
+
+def _pr_monitor_backoff_exhausted_error(
+    workflow: SystemWorkflow,
+    *,
+    reason: str,
+    attempts: int,
+    error: str,
+) -> str:
+    if reason == "missing_cwd":
+        return (
+            f"PR monitor could not continue after {attempts} attempts: "
+            f"workflow cwd is missing: {workflow.cwd}"
+        )
+    detail = error or "unknown GitHub CLI error"
+    return f"PR monitor could not poll GitHub after {attempts} attempts: {detail}"
+
+
+def _pr_monitor_backoff_seconds(pending_checks: int) -> int:
+    exponent = min(max(pending_checks, 1) - 1, 10)
+    delay = _PR_MONITOR_PENDING_POLL_MIN_SECONDS * (2**exponent)
+    return int(min(delay, _PR_MONITOR_PENDING_POLL_MAX_SECONDS))
+
+
+def _pr_monitor_backoff_due(workflow: SystemWorkflow) -> bool:
+    return _pr_monitor_backoff_value_due(
+        workflow.state.get(_PR_MONITOR_BACKOFF_STATE_KEY),
+        int(timezone.now().timestamp()),
+    )
+
+
+def _pr_monitor_backoff_value_due(value: Any, now: int) -> bool:
+    if not isinstance(value, dict):
+        return False
+    next_attempt_at = value.get("next_attempt_at")
+    if not isinstance(next_attempt_at, int) or isinstance(next_attempt_at, bool):
+        return False
+    return now >= next_attempt_at
 
 
 def _handle_pr_feedback_finished(
@@ -4525,6 +4831,10 @@ def _record_autonomous_goal_proposal_created(autonomous_goal: AutonomousGoal) ->
 
 def _spawn_pr_followup_monitor_run(workflow: SystemWorkflow) -> SystemAgentRun:
     handoff = _pr_handoff_from_workflow(workflow)
+    if _PR_MONITOR_BACKOFF_STATE_KEY in workflow.state:
+        workflow.state = dict(workflow.state)
+        workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
+        workflow.save(update_fields=["state", "updated_at"])
     observation = _pr_monitor_observation_from_gh(workflow)
     prompt = _pr_followup_monitor_prompt(workflow, handoff, observation)
     instance = codex_pool.spawn_new_session(
