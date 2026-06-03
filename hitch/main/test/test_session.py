@@ -8,6 +8,7 @@ from typing import Any, cast, override
 from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
+from django.conf import settings as django_settings
 from django.core import signing
 from django.http import HttpResponse
 from django.test import Client, TestCase
@@ -602,10 +603,20 @@ class SessionViewTests(TestCase):
         query = parse_qs(parsed.query)
         self.assertEqual(parsed.path, reverse("new_session"))
         self.assertEqual(query["project"], [str(project.pk)])
+        server_cwd = Path(django_settings.BASE_DIR)
+        database_path = Path(str(django_settings.DATABASES["default"]["NAME"]))
+        if not database_path.is_absolute():
+            database_path = server_cwd / database_path
         self.assertEqual(
             query["prompt"],
             [
                 "Debug and fix the user's issue from session UID thread-1.\n\n"
+                f"Hitch server working directory: {server_cwd}\n"
+                f"Configured Hitch SQLite database path: {database_path}\n"
+                "If you need to inspect it, copy the database first and use the copy; "
+                "do not modify the main database file. When copying files directly, include "
+                f"the WAL sidecars {database_path}-wal and {database_path}-shm if they exist "
+                "so recent rows are included. A SQLite .backup snapshot is also acceptable.\n\n"
                 "User issue: "
             ],
         )

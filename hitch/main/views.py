@@ -19,6 +19,7 @@ from stat import S_ISREG
 from typing import Any, NamedTuple, override
 from urllib.parse import urlencode
 
+from django.conf import settings as django_settings
 from django.contrib.auth import login as auth_login
 from django.contrib.auth import logout as auth_logout
 from django.contrib.auth.forms import AuthenticationForm, UserCreationForm
@@ -371,6 +372,12 @@ _BARE_REPO_PROJECT_VALUE = "__bare_repo__"
 _DEBUG_CHAT_PROJECT_NAME = "hitch"
 _DEBUG_CHAT_PROMPT_TEMPLATE = (
     "Debug and fix the user's issue from session UID {session_id}.\n\n"
+    "Hitch server working directory: {server_cwd}\n"
+    "Configured Hitch SQLite database path: {database_path}\n"
+    "If you need to inspect it, copy the database first and use the copy; "
+    "do not modify the main database file. When copying files directly, include "
+    "the WAL sidecars {wal_path} and {shm_path} if they exist so recent rows are "
+    "included. A SQLite .backup snapshot is also acceptable.\n\n"
     "User issue: "
 )
 
@@ -4216,7 +4223,17 @@ def _debug_chat_new_session_url(
     *,
     cwd: str | None,
 ) -> str:
-    query_params = {"prompt": _DEBUG_CHAT_PROMPT_TEMPLATE.format(session_id=session_id)}
+    server_cwd = Path(django_settings.BASE_DIR)
+    database_path = _debug_chat_database_path()
+    query_params = {
+        "prompt": _DEBUG_CHAT_PROMPT_TEMPLATE.format(
+            session_id=session_id,
+            server_cwd=str(server_cwd),
+            database_path=str(database_path),
+            wal_path=f"{database_path}-wal",
+            shm_path=f"{database_path}-shm",
+        )
+    }
     repo_set = {str(path) for path in discover_repos()}
     project = _debug_chat_project(project, projects, repo_set=repo_set)
     if project is not None:
@@ -4224,6 +4241,13 @@ def _debug_chat_new_session_url(
     elif cwd and cwd in repo_set:
         query_params["cwd"] = cwd
     return f"{reverse('new_session')}?{urlencode(query_params)}"
+
+
+def _debug_chat_database_path() -> Path:
+    database_path = Path(str(django_settings.DATABASES["default"]["NAME"]))
+    if database_path.is_absolute():
+        return database_path
+    return Path(django_settings.BASE_DIR) / database_path
 
 
 def _debug_chat_project(
