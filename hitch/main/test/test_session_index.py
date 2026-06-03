@@ -24,6 +24,30 @@ def _thread(thread_id: str, *, updated_at: int = 1) -> SimpleNamespace:
 
 
 class SessionIndexRefreshTests(TestCase):
+    def test_local_session_stores_and_preserves_codex_path(self) -> None:
+        metadata = session_index.upsert_local_session(
+            thread_id="local-thread",
+            cwd="/repo",
+            name="Initial title",
+            codex_path="/root/.codex/sessions/rollout-local-thread.jsonl",
+        )
+
+        self.assertEqual(
+            metadata.codex_path,
+            "/root/.codex/sessions/rollout-local-thread.jsonl",
+        )
+
+        metadata = session_index.upsert_local_session(
+            thread_id="local-thread",
+            cwd="/repo",
+            name="Updated title",
+        )
+
+        self.assertEqual(
+            metadata.codex_path,
+            "/root/.codex/sessions/rollout-local-thread.jsonl",
+        )
+
     def test_capped_refresh_preserves_previously_complete_source(self) -> None:
         SessionIndexSyncState.objects.create(
             source=SessionIndexSyncState.SOURCE_ACTIVE,

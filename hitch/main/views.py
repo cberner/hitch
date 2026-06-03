@@ -1,6 +1,7 @@
 import base64
 import binascii
 import contextlib
+import glob
 import json
 import logging
 import math
@@ -4566,10 +4567,51 @@ def _rollout_path_is_archived(rollout_path: Path) -> bool:
 
 
 def _session_detail_metadata(session_id: str) -> SessionMetadata | None:
-    return (
+    metadata = (
         SessionMetadata.objects.select_related("project")
         .filter(thread_id=session_id)
         .first()
+    )
+    if metadata is None or metadata.codex_path:
+        return metadata
+    rollout_path = _stored_rollout_path_for_thread(session_id)
+    if rollout_path is None:
+        return metadata
+    metadata.codex_path = str(rollout_path)
+    metadata.codex_archived = metadata.codex_archived or _rollout_path_is_archived(
+        rollout_path
+    )
+    SessionMetadata.objects.filter(pk=metadata.pk, codex_path="").update(
+        codex_path=metadata.codex_path,
+        codex_archived=metadata.codex_archived,
+        codex_last_synced_at=timezone.now(),
+    )
+    return metadata
+
+
+def _stored_rollout_path_for_thread(session_id: str) -> Path | None:
+    if not session_id:
+        return None
+    codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    pattern = f"rollout-*-{glob.escape(session_id)}.jsonl"
+    for base_name in ("sessions", _ARCHIVED_SESSIONS_DIR):
+        base = codex_home / base_name
+        if not base.is_dir():
+            continue
+        try:
+            for path in sorted(base.rglob(pattern), reverse=True):
+                if path.is_file() and _rollout_filename_matches_thread_id(
+                    path, session_id
+                ):
+                    return path
+        except OSError:
+            logger.warning("failed to search Codex rollout directory: %s", base)
+    return None
+
+
+def _rollout_filename_matches_thread_id(path: Path, session_id: str) -> bool:
+    return path.name.startswith("rollout-") and path.name.endswith(
+        f"-{session_id}.jsonl"
     )
 
 
@@ -10477,6 +10519,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         preview=prompt,
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
+        codex_path=codex_pool.thread_path_for_instance(instance),
     )
     _accept_proposed_session_for_session(proposed_session, session_metadata)
     remembered_values = settings._replace(last_selected_repo=cwd)

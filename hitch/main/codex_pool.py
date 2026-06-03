@@ -66,6 +66,7 @@ _PID_ASSIGNMENT_GRACE = timedelta(minutes=2)
 _WORKER_ISOLATION_AUTO = "auto"
 _WORKER_ISOLATION_DIRECT = "direct"
 _WORKER_ISOLATION_SYSTEMD = "systemd"
+_CODEX_THREAD_PATH_ATTR = "_hitch_codex_thread_path"
 
 
 @dataclass(frozen=True)
@@ -146,7 +147,9 @@ def spawn_new_session(
         if purpose == CodexInstance.PURPOSE_USER:
             start_kwargs["dynamicTools"] = registered_dynamic_tool_specs()
         response = codex._client.thread_start(start_kwargs)
-        thread_id = response.thread.id
+        thread = response.thread
+        thread_id = thread.id
+        thread_path = _thread_path_value(thread)
         # ``thread/start`` only creates the thread in the app-server's
         # in-memory map; the rollout file on disk is not written until
         # something triggers a metadata persist. Without this step, the
@@ -166,7 +169,7 @@ def spawn_new_session(
             else prompt
         )
         codex._client.thread_set_name(thread_id, _initial_thread_name(name_source))
-    return _spawn_worker(
+    instance = _spawn_worker(
         thread_id=thread_id,
         cwd=cwd,
         prompt=prompt,
@@ -193,6 +196,9 @@ def spawn_new_session(
         auto_merge_to_local_branch=auto_merge_to_local_branch,
         auto_merge_branch=auto_merge_branch,
     )
+    if thread_path:
+        setattr(instance, _CODEX_THREAD_PATH_ATTR, thread_path)
+    return instance
 
 
 def create_session_thread(
@@ -239,6 +245,16 @@ def _initial_thread_name(prompt: str) -> str:
     """
     first_line = prompt.split("\n", 1)[0].strip()[:_INITIAL_THREAD_NAME_MAX_LEN].rstrip()
     return first_line or "New session"
+
+
+def thread_path_for_instance(instance: object) -> str:
+    value = getattr(instance, _CODEX_THREAD_PATH_ATTR, "")
+    return value if isinstance(value, str) else ""
+
+
+def _thread_path_value(thread: object) -> str:
+    value = getattr(thread, "path", "")
+    return value if isinstance(value, str) else ""
 
 
 def spawn_turn(
