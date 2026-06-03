@@ -329,7 +329,7 @@ class SessionPrStageRefreshTests(TestCase):
             }
 
         with tempfile.TemporaryDirectory() as cwd:
-            for thread_id in ("main-1", "main-2", "superseded-main"):
+            for thread_id in ("main-1", "main-2", "maxed-main", "superseded-main"):
                 SessionMetadata.objects.create(
                     thread_id=thread_id,
                     cwd=cwd,
@@ -395,6 +395,14 @@ class SessionPrStageRefreshTests(TestCase):
                 step=system_agents.STEP_PR_READY,
                 state={system_agents._PR_HANDOFF_STATE_KEY: handoff(105)},
             )
+            maxed_workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="maxed-main",
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED,
+                step=system_agents.STEP_MAX_ITERATIONS_REACHED,
+                state={system_agents._PR_HANDOFF_STATE_KEY: handoff(107)},
+            )
             terminal_handoff_workflow = SystemWorkflow.objects.create(
                 kind=SystemWorkflow.KIND_PR_QA,
                 main_thread_id="terminal-handoff-main",
@@ -438,7 +446,7 @@ class SessionPrStageRefreshTests(TestCase):
                 )
                 self.assertIsNotNone(selector)
                 pr_number = int(str(selector).rsplit("/", 1)[1])
-                if pr_number == 101:
+                if pr_number in {101, 107}:
                     return {
                         **handoff(pr_number),
                         "state": "closed",
@@ -451,12 +459,18 @@ class SessionPrStageRefreshTests(TestCase):
 
             refreshed = system_agents.refresh_unarchived_session_pr_stages()
 
-        self.assertEqual(refreshed, 3)
-        self.assertEqual(mock_gh_pr_view.call_count, 3)
+        self.assertEqual(refreshed, 4)
+        self.assertEqual(mock_gh_pr_view.call_count, 4)
         merged_workflow.refresh_from_db()
         self.assertEqual(merged_workflow.step, system_agents.STEP_PR_CLOSED)
         self.assertTrue(
             merged_workflow.state[system_agents._PR_HANDOFF_STATE_KEY]["merged"]
+        )
+        maxed_workflow.refresh_from_db()
+        self.assertEqual(maxed_workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(maxed_workflow.step, system_agents.STEP_PR_CLOSED)
+        self.assertTrue(
+            maxed_workflow.state[system_agents._PR_HANDOFF_STATE_KEY]["merged"]
         )
         closed_workflow.refresh_from_db()
         self.assertEqual(closed_workflow.step, system_agents.STEP_PR_CLOSED)

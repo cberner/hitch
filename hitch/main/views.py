@@ -2453,6 +2453,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
                 stage, pr_snapshot=pr_snapshot
             )
             continue
+        log_pr_snapshot = pr_observation.snapshot
         if (
             pr_stage_refreshes_remaining > 0
             and system_agents.pr_handoff_stage_refresh_due(stage_workflow)
@@ -2465,18 +2466,36 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             workflow_pr_snapshot = system_agents.pr_handoff_for_workflow(
                 stage_workflow
             )
+        if (
+            pr_stage_refreshes_remaining > 0
+            and stage_workflow is None
+            and log_pr_snapshot is not None
+            and system_agents.pr_snapshot_stage_refresh_due(
+                cwd=_string_value(session.get("cwd")),
+                snapshot=log_pr_snapshot,
+                attempted_at=_datetime_value(
+                    session.get("stage_pr_refresh_attempted_at")
+                ),
+            )
+        ):
+            _mark_cached_pr_stage_refresh_attempt(session_id)
+            log_pr_snapshot = system_agents.refreshed_pr_snapshot_for_stage(
+                cwd=_string_value(session.get("cwd")),
+                snapshot=log_pr_snapshot,
+            )
+            pr_stage_refreshes_remaining -= 1
         stage = session_stage.derive_stage(
             entries=entries,
             active_instance=active_instance,
             workflow=stage_workflow,
-            pr_snapshot=pr_observation.snapshot,
+            pr_snapshot=log_pr_snapshot,
             workflow_pr_snapshot=workflow_pr_snapshot,
         )
         session["stage"] = _session_list_stage_context(
             stage,
             pr_snapshot=_session_list_pr_snapshot_for_stage(
                 stage_workflow=stage_workflow,
-                log_pr_snapshot=pr_observation.snapshot,
+                log_pr_snapshot=log_pr_snapshot,
                 workflow_pr_snapshot=workflow_pr_snapshot,
             ),
         )
@@ -2487,7 +2506,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         # worker/workflow goes away without rewriting the rollout, the cached
         # row would still satisfy the read guard and resurrect the stale active
         # badge. Persist only when no such owner contributed to the stage.
-        if active_instance is None and workflow is None:
+        if active_instance is None and stage_workflow is None:
             _update_cached_stage_best_effort(
                 session_id,
                 stage,
