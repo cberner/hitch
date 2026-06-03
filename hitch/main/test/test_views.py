@@ -47,6 +47,7 @@ from hitch.main import (
     coding_agents,
     demo,
     session_index,
+    session_stage,
     streaming,
     system_agents,
     views,
@@ -2470,6 +2471,99 @@ class IndexViewTests(TestCase):
             response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
         )
         mock_gh_pr_view.assert_called_once()
+
+    @patch("hitch.main.views._schedule_pr_stage_refresh")
+    @patch("hitch.main.system_agents.pr_snapshot_stage_refresh_due", return_value=True)
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_session_list_skips_caching_stale_pr_stage_for_budget_deferred_row(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        _mock_due: MagicMock,
+        mock_schedule: MagicMock,
+    ) -> None:
+        # Two PR rows are due for a gh refresh but the per-render budget allows
+        # only one. The deferred row's snapshot is known-stale, so its derived
+        # terminal stage must not be persisted to the mtime-keyed cache: the
+        # cached fast path only rechecks PR stages, so a stale Done badge would
+        # otherwise stick without ever scheduling another refresh.
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        pr_url = "https://github.com/cberner/hitch/pull/94"
+        rows = []
+        for index in range(2):
+            rollout_path = _make_rollout(
+                self,
+                [
+                    _rollout_line(
+                        "event_msg",
+                        {
+                            "type": "user_message",
+                            "message": system_agents.PR_SLASH_PROMPT,
+                        },
+                    ),
+                    _rollout_line(
+                        "response_item",
+                        {
+                            "type": "function_call",
+                            "name": "github_fetch_pr",
+                            "arguments": "{}",
+                            "call_id": "call-pr",
+                        },
+                    ),
+                    _rollout_line(
+                        "response_item",
+                        {
+                            "type": "function_call_output",
+                            "call_id": "call-pr",
+                            "output": json.dumps(
+                                {"url": pr_url, "state": "closed", "merged": True}
+                            ),
+                        },
+                    ),
+                    _rollout_line(
+                        "response_item",
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "Merged."}],
+                            "phase": "final_answer",
+                        },
+                    ),
+                ],
+            )
+            rows.append(
+                SessionMetadata.objects.create(
+                    thread_id=f"pr-row-{index}",
+                    cwd=str(rollout_path.parent),
+                    codex_display_title=f"PR row {index}",
+                    codex_preview="Open a PR",
+                    codex_path=str(rollout_path),
+                    codex_created_at=now,
+                    codex_updated_at=now - timedelta(minutes=index),
+                    codex_last_synced_at=now,
+                )
+            )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        # Budget is 1: exactly one row schedules an off-request refresh.
+        self.assertEqual(mock_schedule.call_count, 1)
+        # Neither row caches its stale terminal stage while a refresh is due.
+        for metadata in rows:
+            metadata.refresh_from_db()
+            self.assertEqual(metadata.derived_stage, "")
+            self.assertEqual(metadata.derived_stage_source_mtime_ns, 0)
+        mock_codex.assert_not_called()
 
     @patch("hitch.main.system_agents._gh_pr_view")
     @patch("hitch.main.views.discover_repos")
@@ -17836,3 +17930,43 @@ class PrStageRefreshSchedulingTests(TestCase):
             views._schedule_pr_stage_refresh("sess-x")
         mock_thread.assert_called_once()
         mock_thread.return_value.start.assert_called_once()
+
+    @patch("hitch.main.views._schedule_pr_stage_refresh")
+    @patch("hitch.main.views.system_agents.pr_snapshot_stage_refresh_due", return_value=True)
+    @patch("hitch.main.views._pr_snapshot_for_rollout_path")
+    def test_cached_pr_row_drops_refreshing_when_budget_exhausted(
+        self,
+        mock_snapshot: MagicMock,
+        _mock_due: MagicMock,
+        mock_schedule: MagicMock,
+    ) -> None:
+        # A cached PR row whose refresh is due must only render data-refreshing
+        # when a refresh was actually scheduled; otherwise rows beyond the
+        # per-render budget keep _stage_refresh_script reloading forever.
+        mock_snapshot.return_value = {"url": "https://github.com/cberner/hitch/pull/94"}
+        rollout_state = views._RolloutFileState(path=Path("/tmp/rollout.jsonl"), mtime_ns=1)
+        session = {"cwd": "/repo", "stage_pr_refresh_attempted_at": None}
+
+        _stage, _snap, remaining, refreshing = views._stage_from_cached_session_row(
+            "sess-budget",
+            session,
+            rollout_state=rollout_state,
+            cached_stage=session_stage.PR,
+            pr_stage_refreshes_remaining=1,
+        )
+        self.assertTrue(refreshing)
+        self.assertEqual(remaining, 0)
+        mock_schedule.assert_called_once_with("sess-budget")
+
+        mock_schedule.reset_mock()
+
+        _stage, _snap, remaining, refreshing = views._stage_from_cached_session_row(
+            "sess-exhausted",
+            session,
+            rollout_state=rollout_state,
+            cached_stage=session_stage.PR,
+            pr_stage_refreshes_remaining=0,
+        )
+        self.assertFalse(refreshing)
+        self.assertEqual(remaining, 0)
+        mock_schedule.assert_not_called()

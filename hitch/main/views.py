@@ -2576,7 +2576,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         # waiting-for-input row shows its own stage, and flagging that refreshing
         # would schedule a needless worker and reload.
         pr_stage_displayed = active_instance is None and not awaiting_user_input
-        refreshing = pr_stage_displayed and system_agents.pr_handoff_stage_refresh_due(
+        refresh_due = pr_stage_displayed and system_agents.pr_handoff_stage_refresh_due(
             stage_workflow
         )
         if (
@@ -2591,10 +2591,19 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
                 ),
             )
         ):
-            refreshing = True
-        if refreshing and pr_stage_refreshes_remaining > 0:
+            refresh_due = True
+        # Flag the badge refreshing only when a refresh actually runs this
+        # render. A row whose refresh is due but falls outside the per-render
+        # budget must not keep data-refreshing set, or _stage_refresh_script
+        # reloads every 7s for a result that never lands; the reload still fires
+        # while a scheduled refresh is pending, so budget-deferred rows are
+        # picked up on a later render. ``refresh_due`` (independent of the
+        # budget) still gates the cache write below.
+        badge_refreshing = False
+        if refresh_due and pr_stage_refreshes_remaining > 0:
             _schedule_pr_stage_refresh(session_id)
             pr_stage_refreshes_remaining -= 1
+            badge_refreshing = True
         stage = session_stage.derive_stage(
             entries=entries,
             active_instance=active_instance,
@@ -2610,7 +2619,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
                 log_pr_snapshot=log_pr_snapshot,
                 workflow_pr_snapshot=workflow_pr_snapshot,
             ),
-            refreshing=refreshing,
+            refreshing=badge_refreshing,
         )
         # The stage cache is keyed only on the rollout file's mtime, so it may
         # only hold stages that are a pure function of the rollout. A stage that
@@ -2619,13 +2628,15 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         # worker/workflow goes away without rewriting the rollout, the cached
         # row would still satisfy the read guard and resurrect the stale active
         # badge. Persist only when no such owner contributed to the stage.
-        # Skip while refreshing: the snapshot is known-stale and the background
-        # refresh will write the authoritative stage.
+        # Skip whenever a refresh is due -- even if the budget deferred it this
+        # render -- because the snapshot is known-stale: caching its derived
+        # stage (possibly a stale terminal PR stage) under the rollout mtime
+        # would let the cached fast path serve it without ever rechecking.
         if (
             active_instance is None
             and stage_workflow is None
             and not awaiting_user_input
-            and not refreshing
+            and not refresh_due
         ):
             _update_cached_stage_best_effort(
                 session_id,
@@ -2658,6 +2669,12 @@ def _stage_from_cached_session_row(
             if pr_stage_refreshes_remaining > 0:
                 _schedule_pr_stage_refresh(session_id)
                 pr_stage_refreshes_remaining -= 1
+            else:
+                # Budget spent on earlier PR rows: no refresh scheduled, so don't
+                # flag this badge refreshing or _stage_refresh_script reloads
+                # every 7s for a result that never lands (mirrors the
+                # rollout-derived path in _attach_session_stage_context).
+                refreshing = False
     return stage, pr_snapshot, pr_stage_refreshes_remaining, refreshing
 
 
