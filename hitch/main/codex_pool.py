@@ -1418,25 +1418,35 @@ def run_codex_op_with_retry(
     ``thread_resume`` -- resuming a thread persisted by another worker migrates
     that thread's rows -- and a lock there *exits the app-server mid-operation*,
     surfacing as a ``TransportClosedError`` the construction-only retry never
-    sees. Because the server is gone, recovery means reconstructing it, so the
-    retry boundary has to wrap the open and the operation together; a fresh
-    ``open_codex`` runs on each attempt. ``operation`` must therefore be
-    idempotent (it may run more than once) -- safe for reads like
-    ``thread_resume``/``thread_list``, not for turn starts. Non-locked errors
-    (including ``Http404`` the operation may raise) propagate immediately; the
-    same bounded backoff as startup caps the retries.
+    sees. Because the server is gone, recovery means reconstructing it, so this
+    is a single retry loop spanning both construction and the operation: each
+    attempt builds a fresh app-server under the init lock (mirroring
+    ``open_codex``) and then runs ``operation`` against it. A locked
+    ``TransportClosedError`` from *either* phase is retried by this one loop, so
+    a persistent construction lock stays bounded at ``_APPSERVER_START_MAX_ATTEMPTS``
+    rather than nesting ``_start_codex_with_retry``'s loop inside this one.
+    ``operation`` must therefore be idempotent (it may run more than once) --
+    safe for reads like ``thread_resume``/``thread_list``, not for turn starts.
+    Non-locked errors (including ``Http404`` the operation may raise) propagate
+    immediately.
     """
     last_error: TransportClosedError | None = None
     for attempt in range(_APPSERVER_START_MAX_ATTEMPTS):
         try:
-            with open_codex(factory) as codex:
-                return operation(codex)
+            # Hold the init lock only around construction, never the returned
+            # session, so a long-running operation does not block other startups
+            # (matching ``open_codex``/``_start_codex_with_retry``).
+            with _appserver_init_lock():
+                codex = factory()
+            with codex as entered:
+                return operation(entered)
         except TransportClosedError as exc:
             if not is_database_locked_error(exc):
                 raise
             last_error = exc
             logger.warning(
-                "Codex app-server state DB locked during operation (attempt %s/%s)",
+                "Codex app-server state DB locked during open+operation "
+                "(attempt %s/%s)",
                 attempt + 1,
                 _APPSERVER_START_MAX_ATTEMPTS,
             )

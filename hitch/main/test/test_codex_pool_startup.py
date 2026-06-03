@@ -175,6 +175,24 @@ class RunCodexOpWithRetryTests(SimpleTestCase):
 
         self.assertEqual(operation.call_count, 1)
 
+    def test_locked_construction_retries_stay_bounded(self) -> None:
+        # A lock during *construction* (factory raising) must be retried by this
+        # single loop, not by a nested startup loop -- so factory runs at most
+        # _APPSERVER_START_MAX_ATTEMPTS times, never that count squared.
+        factory = MagicMock(side_effect=TransportClosedError(_LOCKED))
+        operation = MagicMock()
+        with (
+            patch("hitch.main.codex_pool._appserver_init_lock", _noop_lock),
+            patch("hitch.main.codex_pool.time.sleep"),
+            self.assertRaises(TransportClosedError),
+        ):
+            codex_pool.run_codex_op_with_retry(factory, operation)
+
+        self.assertEqual(
+            factory.call_count, codex_pool._APPSERVER_START_MAX_ATTEMPTS
+        )
+        operation.assert_not_called()
+
     def test_non_transport_error_propagates_immediately(self) -> None:
         codex = _FakeCodex()
         factory = MagicMock(return_value=codex)
