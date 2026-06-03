@@ -4274,6 +4274,12 @@ def _handle_autonomous_goal_agent_finished(
     autonomous_goal_id = _state_int(workflow, "autonomous_goal_id")
     judge_candidate: dict[str, Any] | None = None
     autonomous_goal: AutonomousGoal | None = None
+    # Read and parse the agent's JSONL events file before taking the write
+    # lock: doing it inside the IMMEDIATE/select_for_update transaction below
+    # would hold SQLite's single global writer for the whole (unbounded) file
+    # read+parse. Mirrors the QA/spec-critic finish handlers, which all read
+    # ``_final_agent_text`` before their locked section.
+    raw_output = _final_agent_text(instance.events_path)
     with transaction.atomic():
         autonomous_goal = (
             AutonomousGoal.objects.select_related("project")
@@ -4302,7 +4308,7 @@ def _handle_autonomous_goal_agent_finished(
             )
             return
         judge_candidate = _handle_autonomous_goal_agent_finished_locked(
-            instance, run, workflow, autonomous_goal
+            instance, run, workflow, autonomous_goal, raw_output
         )
     if judge_candidate is not None and autonomous_goal is not None:
         _spawn_autonomous_goal_judge_or_block(workflow, autonomous_goal, judge_candidate)
@@ -4313,6 +4319,7 @@ def _handle_autonomous_goal_agent_finished_locked(
     run: SystemAgentRun,
     workflow: SystemWorkflow,
     autonomous_goal: AutonomousGoal,
+    raw_output: str,
 ) -> dict[str, Any] | None:
     if workflow.status != SystemWorkflow.STATUS_RUNNING:
         return None
@@ -4324,7 +4331,6 @@ def _handle_autonomous_goal_agent_finished_locked(
         )
         return None
 
-    raw_output = _final_agent_text(instance.events_path)
     if workflow.step == STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING:
         candidate_output = _parse_autonomous_goal_candidate_output(raw_output)
         if candidate_output is None:
