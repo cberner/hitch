@@ -80,6 +80,7 @@ _STEP_USER_STEERING_RUNNING = "user_steering_running"
 _STEP_PR_PROMPT_RUNNING = "pr_prompt_running"
 _STEP_PR_MONITORING = "pr_monitoring"
 _STEP_PR_FEEDBACK_RUNNING = "pr_feedback_running"
+_STEP_SPEC_CRITIC_CLASSIFYING = "spec_critic_classifying"
 _STEP_SPEC_CRITIC_ANALYZING = "spec_critic_analyzing"
 _STEP_SPEC_CRITIC_CLARIFYING = "spec_critic_clarifying"
 _STEP_SPEC_CRITIC_SYNTHESIZING = "spec_critic_synthesizing"
@@ -461,8 +462,10 @@ def system_workflow_status_text(workflow: SystemWorkflow | None) -> str:
             return "Spec Critic is waiting for clarification..."
         if workflow.step == _STEP_SPEC_CRITIC_SYNTHESIZING:
             return "Spec Critic is synthesizing the brief..."
-        if workflow.step == _STEP_SPEC_CRITIC_ANALYZING:
+        if workflow.step == _STEP_SPEC_CRITIC_CLASSIFYING:
             return "Spec Critic is reviewing the request..."
+        if workflow.step == _STEP_SPEC_CRITIC_ANALYZING:
+            return "Spec Critic is analyzing the request..."
         return "Spec Critic is preparing the implementation..."
     if workflow.kind != SystemWorkflow.KIND_PR_QA:
         return "Hitch system agent is working..."

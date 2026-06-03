@@ -424,12 +424,15 @@ class SpawnNewSessionTests(TestCase):
         )
 
         self.assertEqual(thread_id, "thread-abc")
-        codex.thread_start.assert_called_once_with(
-            cwd="/repo",
-            developer_instructions=None,
-            model=None,
-            base_instructions="Base override.",
-        )
+        payload = _thread_start_payload(codex)
+        self.assertEqual(payload["cwd"], "/repo")
+        self.assertIsNone(payload["developerInstructions"])
+        self.assertIsNone(payload["model"])
+        self.assertEqual(payload["baseInstructions"], "Base override.")
+        # Visible sessions are real user threads, so they register the Hitch
+        # dynamic tools (e.g. propose_session) like spawn_new_session does.
+        self.assertEqual(payload["dynamicTools"][0]["namespace"], "hitch")
+        self.assertEqual(payload["dynamicTools"][0]["name"], "propose_session")
         codex._client.thread_set_name.assert_called_once_with("thread-abc", "QA")
 
     @patch("hitch.main.codex_pool._launch_worker_process")
@@ -6384,6 +6387,36 @@ class StreamForInstanceTests(TestCase):
         self.assertEqual(
             streaming.system_workflow_status_text(workflow),
             "Hitch system agent is working...",
+        )
+
+    def test_system_workflow_status_text_handles_spec_critic_classifying(self) -> None:
+        workflow = cast(
+            SystemWorkflow,
+            SimpleNamespace(
+                kind="spec_critic",
+                step="spec_critic_classifying",
+                state={},
+            ),
+        )
+
+        self.assertEqual(
+            streaming.system_workflow_status_text(workflow),
+            "Spec Critic is reviewing the request...",
+        )
+
+    def test_system_workflow_status_text_handles_spec_critic_analyzing(self) -> None:
+        workflow = cast(
+            SystemWorkflow,
+            SimpleNamespace(
+                kind="spec_critic",
+                step="spec_critic_analyzing",
+                state={},
+            ),
+        )
+
+        self.assertEqual(
+            streaming.system_workflow_status_text(workflow),
+            "Spec Critic is analyzing the request...",
         )
 
     def test_system_workflow_status_text_handles_panel_feedback_step(self) -> None:

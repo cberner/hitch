@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 
-from django.db import IntegrityError, models, transaction
+from django.db import IntegrityError, close_old_connections, models, transaction
 from django.db.models import QuerySet
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -124,6 +124,7 @@ STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING = "autonomous_goal_judge_running"
 STEP_AUTONOMOUS_GOAL_PROPOSED = "autonomous_goal_proposed"
 STEP_AUTONOMOUS_GOAL_DRAFT_STARTED = "autonomous_goal_draft_started"
 STEP_AUTONOMOUS_GOAL_SKIPPED = "autonomous_goal_skipped"
+STEP_SPEC_CRITIC_CLASSIFYING = "spec_critic_classifying"
 STEP_SPEC_CRITIC_ANALYZING = "spec_critic_analyzing"
 STEP_SPEC_CRITIC_CLARIFYING = "spec_critic_clarifying"
 STEP_SPEC_CRITIC_SYNTHESIZING = "spec_critic_synthesizing"
@@ -144,6 +145,11 @@ _AUTONOMOUS_GOAL_SESSION_CWD_STATE_KEY = "session_cwd"
 _QA_DESIGN_SYNTHESIS_STATE_KEY = "qa_design_synthesis_gate"
 _QA_REVIEW_REVISION_STATE_KEY = "qa_review_revision"
 _WORKFLOW_ROUTE_CLAIM_TIMEOUT = timedelta(minutes=10)
+# A Spec Critic classification runs in an in-process daemon thread, so it is
+# lost if the web process restarts mid-flight. Reconciliation re-arms a
+# CLASSIFYING workflow whose timestamp is older than this; the window is well
+# above a normal classification (a few seconds) to avoid racing a live thread.
+_SPEC_CRITIC_CLASSIFY_STALE_TIMEOUT = timedelta(minutes=5)
 _QA_DESIGN_SYNTHESIS_MIN_CATEGORY_OVERLAP = 2
 _QA_DESIGN_SYNTHESIS_RECENT_RUN_LIMIT = 50
 _QA_DESIGN_SYNTHESIS_MATCH_LIMIT = 3
@@ -1622,7 +1628,14 @@ def start_spec_critic_workflow(
     auto_merge_to_local_branch: bool = False,
     auto_merge_branch: str = "",
 ) -> SystemWorkflow:
-    """Start hidden Spec Critic agents before the visible implementation turn."""
+    """Start the Spec Critic workflow for the visible implementation turn.
+
+    The workflow opens in ``STEP_SPEC_CRITIC_CLASSIFYING`` and runs the
+    should-run classifier on a background thread, so the request that triggered
+    it returns immediately instead of blocking on an LLM call. The classifier
+    then either advances to the analysis agents or skips straight to the user's
+    original prompt.
+    """
     auto_merge_branch = (
         auto_merge_branch.strip() if auto_merge_to_local_branch else ""
     )
@@ -1636,7 +1649,7 @@ def start_spec_critic_workflow(
                 main_thread_id=main_thread_id,
                 cwd=cwd,
                 status=SystemWorkflow.STATUS_RUNNING,
-                step=STEP_SPEC_CRITIC_ANALYZING,
+                step=STEP_SPEC_CRITIC_CLASSIFYING,
                 max_iterations=1,
                 state={
                     "original_prompt": prompt,
@@ -1666,13 +1679,134 @@ def start_spec_critic_workflow(
             raise
         return existing_workflow
 
+    _start_spec_critic_classification(workflow)
+    return workflow
+
+
+def _begin_spec_critic_analysis(workflow: SystemWorkflow) -> None:
     try:
         _spawn_spec_critic_analysis_runs(workflow)
     except Exception as exc:
         _block_spec_critic_workflow(
             workflow, f"failed to start Spec Critic agents: {exc!r}"
         )
-    return workflow
+
+
+def _start_spec_critic_classification(workflow: SystemWorkflow) -> None:
+    """Classify the prompt off the request path, then route the workflow."""
+    try:
+        threading.Thread(
+            target=_run_spec_critic_classification,
+            args=(workflow.pk,),
+            name=f"spec-critic-classify-{workflow.pk}",
+            daemon=True,
+        ).start()
+    except Exception:
+        # If the classifier thread cannot even start, run the critique inline so
+        # the request is never silently dropped.
+        logger.exception("failed to start Spec Critic classifier thread")
+        _advance_spec_critic_to_analysis(workflow)
+
+
+def _run_spec_critic_classification(workflow_id: int) -> None:
+    close_old_connections()
+    try:
+        workflow = SystemWorkflow.objects.filter(
+            pk=workflow_id,
+            kind=SPEC_CRITIC_WORKFLOW_KIND,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=STEP_SPEC_CRITIC_CLASSIFYING,
+        ).first()
+        if workflow is None:
+            return
+        try:
+            needs_critique = spec_critic_should_run(
+                _state_string(workflow, "original_prompt"), cwd=workflow.cwd or None
+            )
+        except Exception:
+            # spec_critic_should_run already falls back to a heuristic internally,
+            # so reaching here is unexpected; skip the critique rather than trap
+            # the user's turn behind a broken preflight.
+            logger.exception("Spec Critic prompt classification raised")
+            needs_critique = False
+        if needs_critique:
+            _advance_spec_critic_to_analysis(workflow)
+        else:
+            _skip_spec_critic_and_implement(workflow)
+    except Exception:
+        logger.exception(
+            "Spec Critic classification routing failed for workflow %s", workflow_id
+        )
+    finally:
+        close_old_connections()
+
+
+def _advance_spec_critic_to_analysis(workflow: SystemWorkflow) -> None:
+    with transaction.atomic():
+        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        if (
+            locked.status != SystemWorkflow.STATUS_RUNNING
+            or locked.step != STEP_SPEC_CRITIC_CLASSIFYING
+        ):
+            return
+        locked.step = STEP_SPEC_CRITIC_ANALYZING
+        locked.save(update_fields=["step", "updated_at"])
+        workflow.step = locked.step
+        workflow.state = locked.state
+    _begin_spec_critic_analysis(workflow)
+
+
+def _skip_spec_critic_and_implement(workflow: SystemWorkflow) -> None:
+    """Run the user's original prompt directly when no critique is warranted."""
+    with transaction.atomic():
+        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        if (
+            locked.status != SystemWorkflow.STATUS_RUNNING
+            or locked.step != STEP_SPEC_CRITIC_CLASSIFYING
+        ):
+            return
+        # Claim the workflow before spawning so the turn cannot be double-started.
+        # ``skipped_classification`` is recorded now (not on completion) so a
+        # reconciler can tell a stranded IMPLEMENTATION_SPAWNED workflow apart
+        # from the synthesis path and recover it with the original prompt.
+        locked.step = STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED
+        locked.state = {**locked.state, "skipped_classification": True}
+        locked.save(update_fields=["step", "state", "updated_at"])
+        workflow.step = locked.step
+        workflow.state = locked.state
+    _finalize_spec_critic_skip(workflow)
+
+
+def _finalize_spec_critic_skip(workflow: SystemWorkflow) -> None:
+    """Spawn the original-prompt turn for a skipped workflow, then complete it.
+
+    Idempotent: if the implementation turn already exists (e.g. a restart killed
+    the thread between the spawn and the completion save) it only finalizes the
+    workflow row rather than spawning a duplicate turn.
+    """
+    if not _spec_critic_implementation_turn_exists(workflow):
+        try:
+            _spawn_spec_critic_implementation_turn(workflow, None)
+        except Exception as exc:
+            _block_spec_critic_workflow(
+                workflow,
+                f"failed to start implementation after Spec Critic skip: {exc!r}",
+            )
+            return
+    workflow.status = SystemWorkflow.STATUS_COMPLETED
+    workflow.save(update_fields=["status", "updated_at"])
+
+
+def _spec_critic_implementation_turn_exists(workflow: SystemWorkflow) -> bool:
+    """Whether the skipped workflow's original-prompt turn was already spawned.
+
+    The turn is the next user turn on the visible thread, so it is uniquely
+    identified by the thread id and the recorded user-message index.
+    """
+    return CodexInstance.objects.filter(
+        thread_id=workflow.main_thread_id,
+        user_message_index=_state_int(workflow, "next_user_message_index"),
+    ).exists()
 
 
 def accepted_visible_system_thread_ids() -> set[str]:
@@ -1767,7 +1901,83 @@ def reconcile_terminal_workflow_instances(
         return 0
     reconciled = _reconcile_terminal_system_agent_instances(workflows)
     reconciled += _reconcile_terminal_workflow_turns(workflows)
+    reconciled += _reconcile_stale_spec_critic_workflows(workflows)
     return reconciled
+
+
+def _reconcile_stale_spec_critic_workflows(workflows: list[SystemWorkflow]) -> int:
+    """Recover Spec Critic workflows orphaned by a web-process restart.
+
+    Each routing step claims the next step before its durable CodexInstance work
+    exists (the classifier runs in an in-process thread; analysis/implementation
+    spawn workers right after the claim). A restart in that gap strands a RUNNING
+    workflow with nothing to advance it, which ``active_workflow_for_thread``
+    keeps treating as active. Once the row goes stale we re-drive the orphaned
+    step; each re-drive checks for the durable work it would create, so it never
+    double-spawns if a live thread still wins.
+    """
+    stale_before = timezone.now() - _SPEC_CRITIC_CLASSIFY_STALE_TIMEOUT
+    reconciled = 0
+    for workflow in workflows:
+        if workflow.kind != SPEC_CRITIC_WORKFLOW_KIND:
+            continue
+        if workflow.step == STEP_SPEC_CRITIC_CLASSIFYING:
+            locked = _claim_stale_spec_critic_step(
+                workflow, step=STEP_SPEC_CRITIC_CLASSIFYING, stale_before=stale_before
+            )
+            if locked is None:
+                continue
+            _start_spec_critic_classification(locked)
+            reconciled += 1
+        elif workflow.step == STEP_SPEC_CRITIC_ANALYZING:
+            # Only the "claimed ANALYZING but never spawned the agents" orphan is
+            # recoverable here; once any run exists, terminal-instance
+            # reconciliation owns it (and re-spawning would duplicate agents).
+            if workflow.agent_runs.exists():
+                continue
+            locked = _claim_stale_spec_critic_step(
+                workflow, step=STEP_SPEC_CRITIC_ANALYZING, stale_before=stale_before
+            )
+            if locked is None or locked.agent_runs.exists():
+                continue
+            _begin_spec_critic_analysis(locked)
+            reconciled += 1
+        elif workflow.step == STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED:
+            # Only the skip path leaves this step RUNNING (the synthesis path sets
+            # it together with COMPLETED), so finalizing with the original prompt
+            # is correct; the turn-exists guard keeps it from double-spawning.
+            if not _state_bool(workflow, "skipped_classification"):
+                continue
+            locked = _claim_stale_spec_critic_step(
+                workflow,
+                step=STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED,
+                stale_before=stale_before,
+            )
+            if locked is None:
+                continue
+            _finalize_spec_critic_skip(locked)
+            reconciled += 1
+    return reconciled
+
+
+def _claim_stale_spec_critic_step(
+    workflow: SystemWorkflow, *, step: str, stale_before: datetime
+) -> SystemWorkflow | None:
+    """Lock and claim a stale RUNNING workflow still at ``step``.
+
+    Returns the locked row (with ``updated_at`` bumped so concurrent reconcilers
+    back off for a fresh stale window) or ``None`` if it is not eligible.
+    """
+    with transaction.atomic():
+        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        if (
+            locked.status != SystemWorkflow.STATUS_RUNNING
+            or locked.step != step
+            or locked.updated_at > stale_before
+        ):
+            return None
+        locked.save(update_fields=["updated_at"])
+    return locked
 
 
 def _running_workflows_for_reconciliation(
@@ -4948,8 +5158,15 @@ def _spawn_spec_critic_synthesizer_run(workflow: SystemWorkflow) -> SystemAgentR
 
 
 def _spawn_spec_critic_implementation_turn(
-    workflow: SystemWorkflow, brief: str
+    workflow: SystemWorkflow, brief: str | None
 ) -> CodexInstance:
+    # A None brief means the classifier decided no critique was needed, so run
+    # the user's original request verbatim instead of a synthesized brief.
+    prompt = (
+        _spec_implementation_prompt(workflow, brief)
+        if brief is not None
+        else _state_string(workflow, "original_prompt")
+    )
     auto_qa_enabled = _state_bool(workflow, "auto_qa_enabled")
     auto_merge_branch = _state_string(workflow, "auto_merge_branch")
     auto_merge_to_local_branch = bool(
@@ -4960,7 +5177,7 @@ def _spawn_spec_critic_implementation_turn(
     return codex_pool.spawn_turn(
         thread_id=workflow.main_thread_id,
         cwd=workflow.cwd,
-        prompt=_spec_implementation_prompt(workflow, brief),
+        prompt=prompt,
         model=_state_string(workflow, "model") or None,
         stored_model=_state_string(workflow, "model") or None,
         reasoning_effort=_state_string(workflow, "reasoning_effort") or None,

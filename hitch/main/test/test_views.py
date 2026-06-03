@@ -9090,9 +9090,9 @@ class NewSessionViewTests(TestCase):
             reverse("session", kwargs={"session_id": "thread-spec"}),
         )
         mock_spawn.assert_not_called()
-        mock_spec_critic_should_run.assert_called_once_with(
-            "Improve onboarding", cwd=self.REPO
-        )
+        # The should-run classifier runs inside the workflow on a background
+        # thread now, so the request path must not call it synchronously.
+        mock_spec_critic_should_run.assert_not_called()
         mock_create_thread.assert_called_once_with(
             cwd=self.REPO,
             name="Improve onboarding",
@@ -12409,9 +12409,7 @@ class SendMessageViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         mock_spawn.assert_not_called()
-        mock_spec_critic_should_run.assert_called_once_with(
-            "Improve onboarding", cwd="/repo"
-        )
+        mock_spec_critic_should_run.assert_not_called()
         mock_start_spec_critic.assert_called_once_with(
             main_thread_id="abc",
             cwd="/repo",
@@ -12459,21 +12457,19 @@ class SendMessageViewTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         mock_spawn.assert_not_called()
-        mock_spec_critic_should_run.assert_called_once_with(
-            "Improve onboarding", cwd="/repo"
-        )
+        mock_spec_critic_should_run.assert_not_called()
         kwargs = mock_start_spec_critic.call_args.kwargs
         self.assertFalse(kwargs["auto_pr_enabled"])
         self.assertTrue(kwargs["auto_qa_enabled"])
         self.assertTrue(kwargs["auto_merge_to_local_branch"])
         self.assertEqual(kwargs["auto_merge_branch"], "main")
 
-    @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=False)
+    @patch("hitch.main.views.system_agents.spec_critic_should_run")
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
-    def test_spec_critic_resume_leaves_specific_prompt_on_normal_path(
+    def test_spec_critic_resume_defers_classification_to_background(
         self,
         mock_codex: MagicMock,
         mock_spawn: MagicMock,
@@ -12481,6 +12477,10 @@ class SendMessageViewTests(TestCase):
         mock_start_spec_critic: MagicMock,
         mock_spec_critic_should_run: MagicMock,
     ) -> None:
+        # The view no longer branches on the classifier: it always hands off to
+        # the workflow, which classifies on a background thread and either runs
+        # the critique or the original prompt. The request must not block on the
+        # classifier or spawn the turn synchronously.
         _seed_cookies(self.client, **{_SPEC_CRITIC_COOKIE: "true"})
         self._patch_codex(mock_codex)
         mock_discover.return_value = [Path("/repo")]
@@ -12496,18 +12496,9 @@ class SendMessageViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 302)
-        mock_spec_critic_should_run.assert_called_once_with(
-            'Change the settings checkbox label from "Auto-PR" to "Open PR automatically".',
-            cwd="/repo",
-        )
-        mock_start_spec_critic.assert_not_called()
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt='Change the settings checkbox label from "Auto-PR" to "Open PR automatically".',
-            sandbox_policy=None,
-            approval_mode="auto_review",
-        )
+        mock_spec_critic_should_run.assert_not_called()
+        mock_spawn.assert_not_called()
+        mock_start_spec_critic.assert_called_once()
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
