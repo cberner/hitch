@@ -72,11 +72,13 @@ def _events_dir() -> tempfile.TemporaryDirectory[str]:
     return tempfile.TemporaryDirectory()
 
 
-def _stub_codex_thread_start(mock_codex: MagicMock, thread_id: str = "t") -> MagicMock:
+def _stub_codex_thread_start(
+    mock_codex: MagicMock, thread_id: str = "t", thread_path: str = ""
+) -> MagicMock:
     codex: MagicMock = mock_codex.return_value.__enter__.return_value
     codex.thread_start.return_value = SimpleNamespace(id=thread_id)
     codex._client.thread_start.return_value = SimpleNamespace(
-        thread=SimpleNamespace(id=thread_id)
+        thread=SimpleNamespace(id=thread_id, path=thread_path)
     )
     return codex
 
@@ -171,7 +173,10 @@ class SpawnNewSessionTests(TestCase):
     def test_creates_thread_then_spawns_worker(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
-        codex = _stub_codex_thread_start(mock_codex, "thread-abc")
+        thread_path = "/root/.codex/sessions/rollout-thread-abc.jsonl"
+        codex = _stub_codex_thread_start(
+            mock_codex, "thread-abc", thread_path=thread_path
+        )
         mock_launch.return_value = SimpleNamespace(pid=4242)
 
         with (
@@ -188,6 +193,7 @@ class SpawnNewSessionTests(TestCase):
         self.assertEqual(instance.pid, 4242)
         self.assertEqual(instance.status, CodexInstance.STATUS_STARTING)
         self.assertTrue(instance.events_path.endswith(f"{instance.pk}.jsonl"))
+        self.assertEqual(codex_pool.thread_path_for_instance(instance), thread_path)
         # ``model=None`` means "fall back to whatever Codex's config picks".
         payload = _thread_start_payload(codex)
         self.assertEqual(payload["cwd"], "/repo")

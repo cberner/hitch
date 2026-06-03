@@ -177,6 +177,34 @@ def _make_rollout(
     return path
 
 
+def _write_codex_home_rollout(
+    codex_home: str | Path, thread_id: str, lines: list[str]
+) -> Path:
+    rollout_dir = Path(codex_home) / "sessions" / "2025" / "01" / "05"
+    rollout_dir.mkdir(parents=True)
+    path = rollout_dir / f"rollout-2025-01-05T12-00-00-{thread_id}.jsonl"
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def _basic_session_rollout_lines(user_message: str, assistant_text: str) -> list[str]:
+    return [
+        _rollout_line(
+            "event_msg",
+            {"type": "user_message", "message": user_message},
+        ),
+        _rollout_line(
+            "response_item",
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": assistant_text}],
+                "phase": "final_answer",
+            },
+        ),
+    ]
+
+
 def _seed_usage_metadata(
     thread_id: str,
     *,
@@ -461,6 +489,104 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Read archived rollout")
         self.assertContains(response, "Archived rollout answer")
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_inactive_session_detail_recovers_missing_rollout_path(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as codex_home:
+            rollout_path = _write_codex_home_rollout(
+                codex_home,
+                "recovered-thread",
+                _basic_session_rollout_lines(
+                    "Recovered from disk", "Recovered answer"
+                ),
+            )
+            now = datetime(2025, 1, 5, tzinfo=UTC)
+            metadata = SessionMetadata.objects.create(
+                thread_id="recovered-thread",
+                cwd="/repo",
+                codex_path="",
+                codex_name="Recovered session",
+                codex_preview="Recovered from disk",
+                codex_created_at=now,
+                codex_updated_at=now,
+            )
+
+            with patch.dict(os.environ, {"CODEX_HOME": codex_home}):
+                response = self.client.get(
+                    reverse("session", kwargs={"session_id": "recovered-thread"})
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Recovered from disk")
+        self.assertContains(response, "Recovered answer")
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.codex_path, str(rollout_path))
+        mock_codex.assert_not_called()
+
+    def test_session_detail_rollout_recovery_ignores_prefix_thread_id_match(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as codex_home:
+            _write_codex_home_rollout(
+                codex_home,
+                "recovered-thread-extra",
+                ["not the requested thread"],
+            )
+            metadata = SessionMetadata.objects.create(
+                thread_id="recovered-thread",
+                cwd="/repo",
+                codex_path="",
+                codex_created_at=datetime(2025, 1, 5, tzinfo=UTC),
+                codex_updated_at=datetime(2025, 1, 5, tzinfo=UTC),
+            )
+
+            with patch.dict(os.environ, {"CODEX_HOME": codex_home}):
+                recovered = views._session_detail_metadata("recovered-thread")
+
+        self.assertEqual(recovered, metadata)
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.codex_path, "")
+
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_inactive_session_detail_keeps_archived_flag_for_recovered_active_path(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as codex_home:
+            rollout_path = _write_codex_home_rollout(
+                codex_home,
+                "archived-thread",
+                _basic_session_rollout_lines(
+                    "Recovered archived thread", "Archived answer"
+                ),
+            )
+            now = datetime(2025, 1, 5, tzinfo=UTC)
+            metadata = SessionMetadata.objects.create(
+                thread_id="archived-thread",
+                cwd="/repo",
+                codex_path="",
+                codex_name="Archived recovered session",
+                codex_preview="Recovered archived thread",
+                codex_created_at=now,
+                codex_updated_at=now,
+                codex_archived=True,
+            )
+
+            with patch.dict(os.environ, {"CODEX_HOME": codex_home}):
+                response = self.client.get(
+                    reverse("session", kwargs={"session_id": "archived-thread"})
+                )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Recovered archived thread")
+        self.assertContains(response, "Archived answer")
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.codex_path, str(rollout_path))
+        self.assertTrue(metadata.codex_archived)
         mock_codex.assert_not_called()
 
     @patch("hitch.main.views._start_models_refresh_thread")

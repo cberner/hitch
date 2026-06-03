@@ -4742,6 +4742,7 @@ def _spawn_autonomous_goal_candidate_run(
         auto_qa_enabled=False,
         auto_merge_to_local_branch=False,
         auto_merge_branch="",
+        codex_path=codex_pool.thread_path_for_instance(instance),
         is_hidden_system_session=True,
     )
     workflow.state = {**workflow.state, "candidate_session_id": metadata.pk}
@@ -4818,6 +4819,7 @@ def _spawn_autonomous_goal_judge_run(
         auto_qa_enabled=False,
         auto_merge_to_local_branch=False,
         auto_merge_branch="",
+        codex_path=codex_pool.thread_path_for_instance(instance),
         is_hidden_system_session=True,
     )
     workflow.state = {**workflow.state, "judge_session_id": metadata.pk}

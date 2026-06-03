@@ -208,6 +208,7 @@ def upsert_local_session(
     auto_qa_enabled: bool | None = None,
     auto_merge_to_local_branch: bool | None = None,
     auto_merge_branch: str | None = None,
+    codex_path: str | None = None,
     is_hidden_system_session: bool = False,
 ) -> SessionMetadata:
     now = timezone.now()
@@ -219,9 +220,11 @@ def upsert_local_session(
         created_at=now,
         updated_at=now,
         archived=archived,
-        path="",
+        path=codex_path,
         thread_source="",
     )
+    if codex_path is None:
+        defaults.pop("codex_path", None)
     defaults["project"] = None if project_cleared else project
     if defaults["project"] is None and projects is not None and not project_cleared:
         defaults["project"] = _project_for_cwd(cwd, projects)
