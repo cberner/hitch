@@ -142,8 +142,11 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         mock_reconcile_dead.assert_called_once_with()
         mock_refresh.assert_called_once_with()
         # The maintenance scheduler runs under production server commands, so it
-        # owns background PR-stage convergence to keep gh out of the request path.
-        mock_refresh_pr_stages.assert_called_once_with()
+        # owns background PR-stage convergence to keep gh out of the request
+        # path -- bounded per tick so it can't starve the reconcile sweep.
+        mock_refresh_pr_stages.assert_called_once_with(
+            limit=workflow_maintenance._PR_STAGE_REFRESH_LIMIT_PER_TICK
+        )
 
 
 class UnarchivedSessionStateRefreshTests(TestCase):
