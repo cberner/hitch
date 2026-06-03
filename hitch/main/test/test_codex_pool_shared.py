@@ -10,7 +10,6 @@ covered separately.
 import threading
 from collections.abc import Callable
 from typing import Any, override
-from unittest.mock import MagicMock, patch
 
 from django.test import SimpleTestCase, override_settings
 from openai_codex import TransportClosedError
@@ -18,13 +17,6 @@ from openai_codex import TransportClosedError
 from hitch.main import codex_pool
 
 _LOCKED = "app-server closed stdout. stderr_tail=... (code: 5) database is locked"
-
-
-def _noop_lock() -> MagicMock:
-    cm = MagicMock()
-    cm.__enter__.return_value = None
-    cm.__exit__.return_value = False
-    return cm
 
 
 class _FakeProc:
@@ -88,9 +80,6 @@ def _counting_factory() -> tuple[Callable[[], Any], list[Any]]:
 class SharedCodexPoolTests(SimpleTestCase):
     @override
     def setUp(self) -> None:
-        patcher = patch.object(codex_pool, "_appserver_init_lock", _noop_lock)
-        patcher.start()
-        self.addCleanup(patcher.stop)
         self.key = codex_pool._pool_key(enable_memories=False, web_search_mode=None)
 
     def test_checkout_reuses_returned_instance(self) -> None:
@@ -221,9 +210,6 @@ class SharedCodexPoolTests(SimpleTestCase):
 class BorrowCodexTests(SimpleTestCase):
     @override
     def setUp(self) -> None:
-        patcher = patch.object(codex_pool, "_appserver_init_lock", _noop_lock)
-        patcher.start()
-        self.addCleanup(patcher.stop)
         # borrow_codex uses the module-level singleton; isolate each test.
         saved_pool = codex_pool._SHARED_POOL
         codex_pool._SHARED_POOL = codex_pool._SharedCodexPool()

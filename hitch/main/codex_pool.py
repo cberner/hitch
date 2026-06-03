@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import atexit
 import contextlib
-import fcntl
 import json
 import logging
 import os
@@ -1289,86 +1288,24 @@ def app_server_config(
 # Every ``Codex(config=config)`` spawns a ``codex app-server`` subprocess that
 # initializes the Codex Rust runtime's own SQLite state database under
 # ``$CODEX_HOME`` -- separate from Hitch's Django DB. That state DB hardcodes a
-# 5s busy_timeout, and its init/migration/backfill path has no SQLITE_BUSY
-# retry (openai/codex#20213). Hitch opens app-servers concurrently from request
-# handlers, detached workers, and the background scheduler against one shared
-# CODEX_HOME, so two startups can race the state-DB init: the loser exits with
-# "database is locked", which the SDK surfaces as a TransportClosedError whose
-# stderr tail carries that message.
+# 5s busy_timeout, and its one-time init/migration/backfill path has no
+# SQLITE_BUSY retry (openai/codex#20213). Concurrent startups (request handlers,
+# detached workers, the scheduler) can race that migration on a fresh CODEX_HOME
+# or after a codex upgrade: the loser exits with "database is locked", surfaced
+# as a TransportClosedError whose stderr tail carries that message.
 #
-# We can't raise the Rust busy_timeout (it isn't configurable), so we serialize
-# startup with a cross-process file lock in CODEX_HOME and retry as a safety
-# net for an init that still races an already-running app-server's writes.
-_APPSERVER_INIT_LOCK_NAME = ".hitch-appserver-init.lock"
-# Best-effort cap on how long to wait for the init lock before proceeding
-# anyway. A stuck holder (e.g. a slow first-run migration) must never turn this
-# lock into a worse stall than the contention it guards against.
-_APPSERVER_INIT_LOCK_WAIT_SECONDS = 30.0
-_APPSERVER_INIT_LOCK_POLL_INTERVAL = 0.05
-_APPSERVER_START_MAX_ATTEMPTS = 6
+# We do NOT serialize startups. Once the schema is current, concurrent
+# app-server opens don't write the state DB and so don't contend; serializing
+# every startup behind one machine-wide lock instead made a detached worker's
+# slow init stall every other turn waiting on it. So we just retry a locked
+# init: the race is transient (it lasts only while one process migrates) and the
+# retry budget below comfortably outlasts a real migration, leaving steady-state
+# startups fully concurrent.
+_APPSERVER_START_MAX_ATTEMPTS = 10
 _APPSERVER_START_BACKOFF_BASE_SECONDS = 0.2
-_APPSERVER_START_BACKOFF_MAX_SECONDS = 2.0
-
-
-def _codex_home() -> Path:
-    """Resolve the directory the codex app-server keeps its state DB in.
-
-    Mirrors codex's own resolution: ``$CODEX_HOME`` when set, else ``~/.codex``.
-    """
-    return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
-
-
-def _appserver_init_lock_path() -> Path | None:
-    home = _codex_home()
-    try:
-        home.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        logger.warning("could not ensure CODEX_HOME %s for app-server init lock", home)
-        return None
-    return home / _APPSERVER_INIT_LOCK_NAME
-
-
-@contextlib.contextmanager
-def _appserver_init_lock() -> Generator[None]:
-    """Serialize Codex app-server state-DB initialization across processes.
-
-    Best-effort: if the lock can't be created or acquired within the wait
-    budget, proceed unlocked and rely on the construction retry. The lock is an
-    advisory ``flock`` keyed on the open file description, so it serializes both
-    threads in this process and separate worker/scheduler processes.
-    """
-    path = _appserver_init_lock_path()
-    if path is None:
-        yield
-        return
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
-    except OSError:
-        logger.warning("could not open app-server init lock %s", path)
-        yield
-        return
-    acquired = False
-    deadline = time.monotonic() + _APPSERVER_INIT_LOCK_WAIT_SECONDS
-    try:
-        while True:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                acquired = True
-                break
-            except OSError:
-                if time.monotonic() >= deadline:
-                    logger.warning(
-                        "proceeding without app-server init lock after %ss",
-                        _APPSERVER_INIT_LOCK_WAIT_SECONDS,
-                    )
-                    break
-                time.sleep(_APPSERVER_INIT_LOCK_POLL_INTERVAL)
-        yield
-    finally:
-        if acquired:
-            with contextlib.suppress(OSError):
-                fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
+# Capped per-attempt backoff; the summed budget (~26s across all attempts) is
+# only ever spent while an actual first-run/upgrade migration is in flight.
+_APPSERVER_START_BACKOFF_MAX_SECONDS = 5.0
 
 
 def _start_codex_with_retry(factory: Callable[[], Codex]) -> Codex:
@@ -1378,16 +1315,13 @@ def _start_codex_with_retry(factory: Callable[[], Codex]) -> Codex:
     so the call site keeps referencing its own module-local ``Codex`` symbol --
     important both for clarity and so tests that patch ``<module>.Codex`` still
     intercept construction. Only a ``TransportClosedError`` carrying the state
-    DB's "database is locked" message is retried; any other startup failure
-    propagates immediately. The init lock is held only around each construction
-    attempt, never the returned session, so a long-running turn does not block
-    other startups.
+    DB's "database is locked" message is retried (the transient state-DB
+    migration race); any other startup failure propagates immediately.
     """
     last_error: TransportClosedError | None = None
     for attempt in range(_APPSERVER_START_MAX_ATTEMPTS):
         try:
-            with _appserver_init_lock():
-                return factory()
+            return factory()
         except TransportClosedError as exc:
             if not is_database_locked_error(exc):
                 raise
@@ -1422,24 +1356,18 @@ def run_codex_op_with_retry(
     surfacing as a ``TransportClosedError`` the construction-only retry never
     sees. Because the server is gone, recovery means reconstructing it, so this
     is a single retry loop spanning both construction and the operation: each
-    attempt builds a fresh app-server under the init lock (mirroring
-    ``open_codex``) and then runs ``operation`` against it. A locked
-    ``TransportClosedError`` from *either* phase is retried by this one loop, so
-    a persistent construction lock stays bounded at ``_APPSERVER_START_MAX_ATTEMPTS``
-    rather than nesting ``_start_codex_with_retry``'s loop inside this one.
-    ``operation`` must therefore be idempotent (it may run more than once) --
-    safe for reads like ``thread_resume``/``thread_list``, not for turn starts.
-    Non-locked errors (including ``Http404`` the operation may raise) propagate
-    immediately.
+    attempt builds a fresh app-server and then runs ``operation`` against it. A
+    locked ``TransportClosedError`` from *either* phase is retried by this one
+    loop, bounded at ``_APPSERVER_START_MAX_ATTEMPTS`` rather than nesting
+    ``_start_codex_with_retry``'s loop inside this one. ``operation`` must
+    therefore be idempotent (it may run more than once) -- safe for reads like
+    ``thread_resume``/``thread_list``, not for turn starts. Non-locked errors
+    (including ``Http404`` the operation may raise) propagate immediately.
     """
     last_error: TransportClosedError | None = None
     for attempt in range(_APPSERVER_START_MAX_ATTEMPTS):
         try:
-            # Hold the init lock only around construction, never the returned
-            # session, so a long-running operation does not block other startups
-            # (matching ``open_codex``/``_start_codex_with_retry``).
-            with _appserver_init_lock():
-                codex = factory()
+            codex = factory()
             with codex as entered:
                 return operation(entered)
         except TransportClosedError as exc:
@@ -1463,7 +1391,7 @@ def run_codex_op_with_retry(
 
 
 def start_codex(config: AppServerConfig) -> Codex:
-    """Construct a long-lived Codex app-server with ``open_codex``'s lock+retry.
+    """Construct a long-lived Codex app-server with ``_start_codex_with_retry``.
 
     For callers that own and reuse one app-server across many operations (e.g.
     the background scheduler) rather than opening a fresh one per use; the
@@ -1478,10 +1406,10 @@ def open_codex(factory: Callable[[], Codex]) -> Generator[Codex]:
     """Open a Codex app-server, tolerating a contended state-DB init.
 
     Replaces ``with Codex(config=config) as codex`` with
-    ``with open_codex(lambda: Codex(config=config)) as codex``: startup is
-    serialized and retried against the shared CODEX_HOME state DB lock (see
-    ``_start_codex_with_retry``), then the constructed session's own
-    ``__enter__``/``__exit__`` run as usual so it is closed on exit.
+    ``with open_codex(lambda: Codex(config=config)) as codex``: a locked
+    state-DB init is retried (see ``_start_codex_with_retry``), then the
+    constructed session's own ``__enter__``/``__exit__`` run as usual so it is
+    closed on exit.
     """
     codex = _start_codex_with_retry(factory)
     with codex as entered:
@@ -1495,10 +1423,9 @@ def open_codex(factory: Callable[[], Codex]) -> Generator[Codex]:
 # ``borrow_codex`` instead keeps a small pool of long-lived app-servers warm and
 # hands one out per call, so the state DB is initialized once per pooled server
 # (the same property the auto-proposal scheduler gets from its single reused
-# app-server) and steady-state borrows neither spawn a subprocess nor touch the
-# init lock. Bursts past the cap still construct a private server via the
-# lock+retry path rather than blocking or failing, so this only ever reduces
-# init churn.
+# app-server) and steady-state borrows do not even spawn a subprocess. Bursts
+# past the cap still construct a private server (retrying a locked init) rather
+# than blocking or failing, so this only ever reduces init churn.
 _SHARED_POOL_MAX = 4
 
 # (enable_memories, normalized web_search_mode). In practice every web call uses
@@ -1582,8 +1509,8 @@ class _SharedCodexPool:
             _close_quietly(stale)
         if reused is not None:
             return reused
-        # Construct outside the structure lock: a cold start can block up to
-        # _APPSERVER_INIT_LOCK_WAIT_SECONDS on the cross-process init lock.
+        # Construct outside the structure lock: a cold start spawns a
+        # subprocess and may retry a locked state-DB init.
         try:
             return _start_codex_with_retry(factory)
         except BaseException:
@@ -1646,7 +1573,7 @@ def borrow_codex(
     ``codex_factory(config=...)``); keeping construction at the call site lets
     callers tune the config and keeps test patches on the caller's module
     effective. Steady-state borrows reuse an idle long-lived server with no
-    subprocess spawn and no init lock; cold construction still goes through
+    subprocess spawn; cold construction still goes through
     ``_start_codex_with_retry`` so a genuine state-DB init race is retried. The
     pool owns the server's lifecycle, so -- unlike ``open_codex`` -- the yielded
     server is not entered/closed per borrow.
