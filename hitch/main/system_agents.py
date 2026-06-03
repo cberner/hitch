@@ -30,7 +30,7 @@ from openai_codex.generated.v2_all import (
     TurnStatus,
 )
 
-from hitch.main import codex_events, codex_pool, demo, rollout, session_index
+from hitch.main import codex_events, codex_pool, demo, rate_limit, rollout, session_index
 from hitch.main.diffs import build_worktree_diff_text
 from hitch.main.local_merges import (
     LocalBranchMergeError,
@@ -3029,6 +3029,24 @@ def _pr_handoff_selector(handoff: dict[str, Any]) -> str:
     number = handoff.get("pr_number")
     if isinstance(number, int) and not isinstance(number, bool):
         return str(number)
+    return ""
+
+
+def _pr_stage_rate_limit_key(handoff: Mapping[str, Any]) -> str:
+    """Stable key identifying a PR for the central refresh debounce.
+
+    Keying on PR *identity* -- not the workflow or session that triggered the
+    refresh -- is what makes the floor global: the list view, the detail view,
+    both background schedulers, and every session pointing at the same PR share
+    one window.
+    """
+    url = _string_from_any(handoff.get("url"))
+    if url:
+        return f"gh:pr-view:{url}"
+    repo = _string_from_any(handoff.get("repository_full_name"))
+    number = handoff.get("pr_number")
+    if isinstance(number, int) and not isinstance(number, bool):
+        return f"gh:pr-view:{repo}#{number}" if repo else f"gh:pr-view:#{number}"
     return ""
 
 
@@ -6710,7 +6728,22 @@ def pr_handoff_stage_refresh_due(workflow: SystemWorkflow | None) -> bool:
     if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
         return False
     handoff = _pr_handoff_from_workflow(workflow)
-    return _should_refresh_pr_handoff_for_stage(workflow, handoff, force=False)
+    if not _should_refresh_pr_handoff_for_stage(workflow, handoff, force=False):
+        return False
+    return _pr_stage_refresh_globally_due(handoff)
+
+
+def _pr_stage_refresh_globally_due(handoff: Mapping[str, Any]) -> bool:
+    """Whether the central per-PR debounce window is open for this handoff.
+
+    Layered on top of the per-workflow / per-session windows so renders and
+    background workers do not flag a PR as refreshing -- and therefore schedule
+    a worker and trigger a page reload -- when another path refreshed the same
+    PR within the global window. ``refreshed_pr_*`` still claim atomically; this
+    read-only check just keeps the UI from looping on a window that will deny.
+    """
+    key = _pr_stage_rate_limit_key(handoff)
+    return not key or rate_limit.due(key)
 
 
 def refresh_unarchived_session_pr_stages(*, limit: int | None = None) -> int:
@@ -6801,6 +6834,11 @@ def refreshed_pr_handoff_for_stage(
     selector = _pr_handoff_selector(handoff)
     if not selector:
         return handoff
+    rate_limit_key = _pr_stage_rate_limit_key(handoff)
+    if not force and rate_limit_key and not rate_limit.claim(rate_limit_key):
+        # Another path refreshed this PR within the global window; serve what we
+        # have rather than shelling out to gh again for the same thing.
+        return handoff
     _mark_pr_stage_refresh_attempt(workflow)
     try:
         observed = _gh_pr_view(
@@ -6834,12 +6872,17 @@ def pr_snapshot_stage_refresh_due(
     attempted_at: datetime | None,
     force: bool = False,
 ) -> bool:
-    return _should_refresh_pr_snapshot_for_stage(
+    handoff = _compact_pr_handoff(snapshot)
+    if not _should_refresh_pr_snapshot_for_stage(
         cwd,
-        _compact_pr_handoff(snapshot),
+        handoff,
         attempted_at=attempted_at,
         force=force,
-    )
+    ):
+        return False
+    if force:
+        return True
+    return _pr_stage_refresh_globally_due(handoff)
 
 
 def refreshed_pr_snapshot_for_stage(
@@ -6858,6 +6901,10 @@ def refreshed_pr_snapshot_for_stage(
         return handoff
     selector = _pr_handoff_selector(handoff)
     if not selector:
+        return handoff
+    rate_limit_key = _pr_stage_rate_limit_key(handoff)
+    if not force and rate_limit_key and not rate_limit.claim(rate_limit_key):
+        # Globally debounced: another session/path refreshed this PR recently.
         return handoff
     workflow = SystemWorkflow(kind=SystemWorkflow.KIND_PR_QA, cwd=cwd)
     try:
