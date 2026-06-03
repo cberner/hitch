@@ -123,17 +123,27 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         )
 
     @patch(
+        "hitch.main.workflow_maintenance.system_agents.refresh_unarchived_session_pr_stages",
+        return_value=1,
+    )
+    @patch(
         "hitch.main.workflow_maintenance.system_agents.refresh_due_pr_monitor_backoffs",
         return_value=2,
     )
     @patch("hitch.main.workflow_maintenance.codex_pool.reconcile_dead")
     def test_scheduler_tick_reconciles_and_refreshes_pr_monitor_backoffs(
-        self, mock_reconcile_dead: MagicMock, mock_refresh: MagicMock
+        self,
+        mock_reconcile_dead: MagicMock,
+        mock_refresh: MagicMock,
+        mock_refresh_pr_stages: MagicMock,
     ) -> None:
         workflow_maintenance._run_workflow_maintenance_scheduler_tick()
 
         mock_reconcile_dead.assert_called_once_with()
         mock_refresh.assert_called_once_with()
+        # The maintenance scheduler runs under production server commands, so it
+        # owns background PR-stage convergence to keep gh out of the request path.
+        mock_refresh_pr_stages.assert_called_once_with()
 
 
 class UnarchivedSessionStateRefreshTests(TestCase):
