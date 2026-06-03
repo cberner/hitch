@@ -15,7 +15,13 @@
                     const expanded = tile.classList.toggle("is-expanded");
                     tile.setAttribute("aria-expanded", expanded ? "true" : "false");
                 }
-                tile.addEventListener("click", toggleTile);
+                tile.addEventListener("click", (event) => {
+                    // Clicks inside the expanded chart (e.g. reading a bar)
+                    // bubble up to the tile; don't collapse it when the user is
+                    // interacting with the chart rather than the tile itself.
+                    if (event.target.closest(".lifetime-chart")) return;
+                    toggleTile();
+                });
                 tile.addEventListener("keydown", (event) => {
                     if (event.key !== "Enter" && event.key !== " ") return;
                     event.preventDefault();
