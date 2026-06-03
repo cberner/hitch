@@ -34,6 +34,26 @@ CLAUDE_MODELS: tuple[tuple[str, str], ...] = (
 DEFAULT_CLAUDE_MODEL = CLAUDE_MODELS[0][0]
 VALID_CLAUDE_MODELS = {value for value, _label in CLAUDE_MODELS}
 
+# Context-window sizes (tokens) used to render the "X% of context" gauge for
+# Claude sessions. Claude has no rollout file or app-server API that reports the
+# active model's window, so these static figures stand in. They are the standard
+# published API context windows; the larger 1M beta windows are not assumed.
+CLAUDE_MODEL_CONTEXT_WINDOWS: dict[str, int] = {
+    "claude-opus-4-8": 200_000,
+    "claude-sonnet-4-6": 200_000,
+    "claude-haiku-4-5-20251001": 200_000,
+}
+_DEFAULT_CLAUDE_CONTEXT_WINDOW = 200_000
+
+
+def context_window_for(model: str | None) -> int:
+    """Return the context-window size (tokens) for a Claude model id."""
+    if not model:
+        return _DEFAULT_CLAUDE_CONTEXT_WINDOW
+    return CLAUDE_MODEL_CONTEXT_WINDOWS.get(
+        model.strip(), _DEFAULT_CLAUDE_CONTEXT_WINDOW
+    )
+
 # Tools that only read state. They are auto-approved (added to allowed_tools)
 # so the interactive ``can_use_tool`` callback only ever fires for actions that
 # mutate the workspace or run commands -- mirroring Codex's auto-reviewer, which

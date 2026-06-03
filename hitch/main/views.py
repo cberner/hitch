@@ -76,6 +76,7 @@ from hitch.main.diffs import build_worktree_diff
 from hitch.main.formatting import looks_like_markdown, render_markdown
 from hitch.main.local_merges import local_branch_names
 from hitch.main.models import (
+    TOKEN_USAGE_LOGIC_VERSION,
     ApprovalRequest,
     ArchivedSessionTokenUsage,
     AutonomousGoal,
@@ -707,13 +708,12 @@ _TOKEN_USAGE_KEYS = (
     "context_tokens",
     "model_context_window",
 )
-# Bump whenever rollout->counts parsing changes meaning. A cached
+# Canonical definition lives in ``models`` so the Claude worker can stamp rows
+# with the same version without importing this (heavy) module. A cached
 # ArchivedSessionTokenUsage row stamped below this is treated as stale and
-# recomputed even when the (immutable) rollout file is byte-for-byte
-# unchanged, so counting-logic fixes reach already-cached archived sessions.
-# v1: sum positive per-event deltas and skip context-window reset events
-# (commit 20ea557), correcting sessions that hit their context window.
-_TOKEN_USAGE_LOGIC_VERSION = 1
+# recomputed even when the (immutable) rollout file is byte-for-byte unchanged,
+# so counting-logic fixes reach already-cached archived sessions.
+_TOKEN_USAGE_LOGIC_VERSION = TOKEN_USAGE_LOGIC_VERSION
 _HUMAN_TOKEN_UNITS = (
     (1_000_000_000, "B"),
     (1_000_000, "M"),
@@ -4972,6 +4972,10 @@ def _render_session_detail(
             if rollout_data.latest_token_usage is not None
             else None
         )
+    elif _session_is_claude(session_id):
+        # Claude has no rollout file; the worker writes the counts straight to
+        # the ArchivedSessionTokenUsage cache (rollout_path="") each turn.
+        token_usage = _claude_token_usage_for(session_id)
     else:
         token_usage = _token_usage_for(thread)
     _attach_lazy_intermediate_context(
@@ -5850,6 +5854,23 @@ def _token_usage_for(thread: Any) -> dict[str, str] | None:
     if usage is None:
         return None
     return _format_session_token_usage(usage)
+
+
+def _claude_token_usage_for(session_id: str) -> dict[str, str] | None:
+    """Return formatted token counts for a Claude thread, or None.
+
+    Claude sessions have no rollout file: the worker writes the counts directly
+    into the ArchivedSessionTokenUsage cache (``rollout_path=""``) at turn
+    completion, so the value is read straight from there rather than parsed.
+    """
+    cache = ArchivedSessionTokenUsage.objects.filter(thread_id=session_id).first()
+    if (
+        cache is None
+        or cache.rollout_path != ""
+        or not _cached_token_usage_logic_is_current(cache)
+    ):
+        return None
+    return _format_session_token_usage(_token_usage_from_cache(cache))
 
 
 def _format_session_token_usage(usage: Mapping[str, int]) -> dict[str, str]:

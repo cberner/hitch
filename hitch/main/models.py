@@ -855,8 +855,21 @@ class UserInputRequest(models.Model):
         )
 
 
+# Bump whenever the meaning of the cached token counts changes. A cached
+# ``ArchivedSessionTokenUsage`` row stamped below this is treated as stale and
+# recomputed (Codex re-parses the immutable rollout; Claude rewrites the row on
+# its next turn), so counting-logic fixes reach already-cached sessions.
+# v1: sum positive per-event deltas and skip context-window reset events
+# (commit 20ea557), correcting Codex sessions that hit their context window.
+TOKEN_USAGE_LOGIC_VERSION = 1
+
+
 class ArchivedSessionTokenUsage(models.Model):
-    """Cached token usage for archived Codex sessions."""
+    """Cached token usage for archived Codex sessions.
+
+    Also reused for Claude sessions, which have no rollout file: the worker
+    writes the row directly (``rollout_path=""``) at turn completion.
+    """
 
     thread_id = models.CharField(max_length=128, unique=True)
     rollout_path = models.CharField(max_length=4096, blank=True, default="")

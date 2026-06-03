@@ -784,6 +784,54 @@ class AskUserQuestionTests(TestCase):
         self.assertIsInstance(result, PermissionResultDeny)
         self.assertIn("did not answer", result.message)
 
+    def test_routed_to_input_ui_even_under_deny_all(self) -> None:
+        # A ``/plan`` clarification is not an "escalation": deny_all must still
+        # surface the input UI rather than denying the AskUserQuestion call.
+        import asyncio
+
+        from claude_agent_sdk import PermissionResultAllow
+
+        from hitch.main.management.commands import claude_worker
+
+        runner = self._runner()
+        runner._approval_mode = claude_options.APPROVAL_DENY_ALL
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Which library?",
+                    "header": "Library",
+                    "options": [{"label": "requests", "description": ""}],
+                }
+            ]
+        }
+        with (
+            patch.object(claude_worker, "_create_pending_user_input", return_value=7),
+            patch.object(
+                claude_worker,
+                "_wait_for_user_input_response",
+                return_value={"answers": {"q0": "requests"}},
+            ),
+        ):
+            result = asyncio.run(
+                runner._can_use_tool("AskUserQuestion", tool_input, None)
+            )
+        self.assertIsInstance(result, PermissionResultAllow)
+
+    def test_hidden_system_agent_does_not_show_ask_ui(self) -> None:
+        # A hidden run has no input UI; AskUserQuestion falls through to the
+        # system-agent branch and is denied rather than parked on a never-shown UI.
+        import asyncio
+
+        from claude_agent_sdk import PermissionResultDeny
+
+        runner = self._runner()
+        runner._instance.purpose = CodexInstance.PURPOSE_SYSTEM_AGENT
+        runner._approval_mode = claude_options.APPROVAL_AUTO_REVIEW
+        result = asyncio.run(
+            runner._can_use_tool("AskUserQuestion", {"questions": []}, None)
+        )
+        self.assertIsInstance(result, PermissionResultDeny)
+
 
 class HiddenAutoReviewApprovalTests(TestCase):
     """Hidden auto-review runs auto-approve built-in mutating tools only under a
@@ -920,6 +968,112 @@ class WorkspaceWriteConfinementTests(TestCase):
         runner = self._runner()
         result = asyncio.run(runner._can_use_tool("Bash", {"command": "ls"}, None))
         self.assertIsInstance(result, PermissionResultAllow)
+
+
+class ReadOnlyMcpGuardTests(TestCase):
+    """A read-only sandbox must stay authoritative: external MCP tools (which
+    Claude's bash sandbox cannot constrain) are denied even under approve_all."""
+
+    def _runner(self, approval_mode: str) -> Any:
+        import io
+
+        from hitch.main.management.commands import claude_worker
+
+        instance = CodexInstance(
+            thread_id="t",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_RUNNING,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            purpose=CodexInstance.PURPOSE_USER,
+        )
+        return claude_worker._TurnRunner(
+            instance=instance,
+            events_file=io.StringIO(),
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=claude_options.SANDBOX_READ_ONLY,
+            approval_mode=approval_mode,
+            web_search_mode=None,
+            plan_mode=False,
+        )
+
+    def test_external_mcp_tool_denied_under_read_only_approve_all(self) -> None:
+        import asyncio
+
+        from claude_agent_sdk import PermissionResultDeny
+
+        runner = self._runner(claude_options.APPROVAL_APPROVE_ALL)
+        result = asyncio.run(
+            runner._can_use_tool("mcp__github__create_pr", {"title": "x"}, None)
+        )
+        self.assertIsInstance(result, PermissionResultDeny)
+
+    def test_own_propose_tool_not_blocked_by_read_only_guard(self) -> None:
+        import asyncio
+
+        from claude_agent_sdk import PermissionResultAllow
+
+        from hitch.main.claude_tools import PROPOSE_SESSION_TOOL_NAME
+
+        # Our in-process propose tool is read-only-safe; the guard targets only
+        # external MCP servers, so under approve_all it is allowed.
+        runner = self._runner(claude_options.APPROVAL_APPROVE_ALL)
+        result = asyncio.run(
+            runner._can_use_tool(PROPOSE_SESSION_TOOL_NAME, {}, None)
+        )
+        self.assertIsInstance(result, PermissionResultAllow)
+
+
+class DemoSandboxOverrideTests(TestCase):
+    """A Claude demo run forces full host access regardless of the user's sandbox
+    so its podman/shell container setup is neither blocked nor confined."""
+
+    def _runner(self, sandbox_policy: str | None) -> Any:
+        import io
+
+        from hitch.main import demo
+        from hitch.main.management.commands import claude_worker
+
+        instance = CodexInstance(
+            thread_id="t",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_RUNNING,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=demo.DEMO_AGENT_KIND,
+        )
+        return claude_worker._TurnRunner(
+            instance=instance,
+            events_file=io.StringIO(),
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=sandbox_policy,
+            approval_mode=claude_options.APPROVAL_AUTO_REVIEW,
+            web_search_mode=None,
+            plan_mode=False,
+        )
+
+    def test_read_only_user_sandbox_is_upgraded_for_demo(self) -> None:
+        runner = self._runner(claude_options.SANDBOX_READ_ONLY)
+        self.assertEqual(
+            runner._sandbox_policy, claude_options.SANDBOX_DANGER_FULL_ACCESS
+        )
+        # The options it builds therefore leave Bash enabled and unsandboxed.
+        options = runner._build_options()
+        self.assertNotIn("Bash", options.disallowed_tools)
+        self.assertIsNone(getattr(options, "sandbox", None))
+
+    def test_workspace_write_user_sandbox_is_upgraded_for_demo(self) -> None:
+        runner = self._runner(claude_options.SANDBOX_WORKSPACE_WRITE)
+        self.assertEqual(
+            runner._sandbox_policy, claude_options.SANDBOX_DANGER_FULL_ACCESS
+        )
 
 
 class ClaudePlanModeStateTests(TestCase):
@@ -1227,6 +1381,7 @@ def _result(
     subtype: str = "success",
     is_error: bool = False,
     structured_output: Any = None,
+    usage: Any = None,
 ) -> ResultMessage:
     return ResultMessage(
         subtype=subtype,
@@ -1236,6 +1391,7 @@ def _result(
         num_turns=1,
         session_id="sess-final",
         structured_output=structured_output,
+        usage=usage,
     )
 
 
@@ -1644,6 +1800,68 @@ class WorkerTurnTests(TestCase):
         runner, _written = self._run(messages)
         self.assertTrue(runner.failed)
 
+    def test_pre_loop_sigterm_is_reconciled_once_client_connects(self) -> None:
+        # A Stop that landed before the loop installed its handlers (recorded by
+        # the protective handler) is honored as soon as the client exists, rather
+        # than letting the turn run on.
+        import asyncio
+
+        from hitch.main.management.commands import claude_worker
+
+        fake = _FakeClient([_assistant(TextBlock(text="hi")), _result()])
+
+        def _factory(*, options: Any) -> _FakeClient:
+            fake.options = options
+            return fake
+
+        with tempfile.TemporaryDirectory() as tmp:
+            events_path = Path(tmp) / "events.jsonl"
+            instance = CodexInstance(
+                pk=1,
+                thread_id="thread-x",
+                cwd=tmp,
+                prompt="please help",
+                events_path=str(events_path),
+                pid=0,
+                status=CodexInstance.STATUS_RUNNING,
+                backend=CodexInstance.BACKEND_CLAUDE,
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            )
+            claude_worker._PENDING_SIGTERM = True
+            try:
+                with (
+                    open(events_path, "a", encoding="utf-8") as events_file,
+                    patch.object(claude_worker, "ClaudeSDKClient", _factory),
+                ):
+                    runner = claude_worker._TurnRunner(
+                        instance=instance,
+                        events_file=events_file,
+                        model="claude-opus-4-8",
+                        reasoning_effort=None,
+                        sandbox_policy=None,
+                        approval_mode=None,
+                        web_search_mode=None,
+                        plan_mode=False,
+                    )
+                    asyncio.run(runner.run())
+            finally:
+                claude_worker._PENDING_SIGTERM = False
+        self.assertTrue(fake.interrupted)
+        self.assertTrue(runner._cancelled)
+
+    def test_pre_loop_handlers_record_signals(self) -> None:
+        from hitch.main.management.commands import claude_worker
+
+        try:
+            with patch.object(claude_worker, "request_cancel") as cancel:
+                claude_worker._pre_loop_sigterm(15, None)
+            self.assertTrue(claude_worker._PENDING_SIGTERM)
+            cancel.assert_called_once()
+            # SIGUSR1 handler is a no-op (the steer is already on disk).
+            claude_worker._pre_loop_sigusr1(10, None)
+        finally:
+            claude_worker._PENDING_SIGTERM = False
+
     def test_stream_without_result_is_not_marked_completed(self) -> None:
         # A truncated/aborted stream (no ResultMessage) must not look successful.
         runner, _written = self._run([_assistant(TextBlock(text="partial"))])
@@ -1725,6 +1943,164 @@ class WorkerTurnTests(TestCase):
         self.assertIn("first", written)
         self.assertIn("steered reply", written)
         self.assertFalse(runner.failed)
+
+
+class ClaudeTokenUsageTests(TestCase):
+    def test_normalize_folds_cache_into_input(self) -> None:
+        from hitch.main import claude_usage
+
+        usage = claude_usage.normalize_turn_usage(
+            {
+                "input_tokens": 100,
+                "cache_read_input_tokens": 30,
+                "cache_creation_input_tokens": 20,
+                "output_tokens": 40,
+            },
+            "claude-opus-4-8",
+        )
+        assert usage is not None
+        # Codex shape: input includes cache; cached is read+creation.
+        self.assertEqual(usage["input_tokens"], 150)
+        self.assertEqual(usage["cached_input_tokens"], 50)
+        self.assertEqual(usage["output_tokens"], 40)
+        self.assertEqual(usage["context_tokens"], 190)
+        self.assertEqual(usage["model_context_window"], 200_000)
+
+    def test_normalize_returns_none_for_empty_usage(self) -> None:
+        from hitch.main import claude_usage
+
+        self.assertIsNone(claude_usage.normalize_turn_usage(None, "claude-opus-4-8"))
+        self.assertIsNone(claude_usage.normalize_turn_usage({}, "claude-opus-4-8"))
+        self.assertIsNone(
+            claude_usage.normalize_turn_usage(
+                {"input_tokens": 0, "output_tokens": 0}, None
+            )
+        )
+
+    def test_unknown_model_uses_default_context_window(self) -> None:
+        self.assertEqual(claude_options.context_window_for("nope"), 200_000)
+        self.assertEqual(claude_options.context_window_for(None), 200_000)
+
+    def test_record_turn_usage_accumulates(self) -> None:
+        from hitch.main import claude_usage
+        from hitch.main.models import ArchivedSessionTokenUsage
+
+        raw = {
+            "input_tokens": 100,
+            "cache_read_input_tokens": 10,
+            "output_tokens": 40,
+        }
+        claude_usage.record_turn_usage("thread-tok", raw, "claude-opus-4-8")
+        claude_usage.record_turn_usage("thread-tok", raw, "claude-opus-4-8")
+        row = ArchivedSessionTokenUsage.objects.get(thread_id="thread-tok")
+        self.assertEqual(row.rollout_path, "")
+        # input (110) + output (40) accumulated over two turns.
+        self.assertEqual(row.input_tokens, 220)
+        self.assertEqual(row.cached_input_tokens, 20)
+        self.assertEqual(row.output_tokens, 80)
+        self.assertEqual(row.total_tokens, 300)
+        # Context occupancy reflects only the latest turn.
+        self.assertEqual(row.context_tokens, 150)
+        # Daily usage accumulated (non-cached input = 100 per turn).
+        day = next(iter(row.daily_usage.values()))
+        self.assertEqual(day["input"], 200)
+        self.assertEqual(day["output"], 80)
+        self.assertEqual(day["cached"], 20)
+
+    def test_record_overwrites_stale_logic_row(self) -> None:
+        from hitch.main import claude_usage, models
+        from hitch.main.models import ArchivedSessionTokenUsage
+
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="thread-stale",
+            rollout_path="",
+            input_tokens=999,
+            usage_logic_version=0,
+        )
+        claude_usage.record_turn_usage(
+            "thread-stale",
+            {"input_tokens": 50, "output_tokens": 10},
+            "claude-opus-4-8",
+        )
+        row = ArchivedSessionTokenUsage.objects.get(thread_id="thread-stale")
+        # Overwritten, not added to the stale 999.
+        self.assertEqual(row.input_tokens, 50)
+        self.assertEqual(
+            row.usage_logic_version, models.TOKEN_USAGE_LOGIC_VERSION
+        )
+
+    def test_render_helper_formats_claude_cache_row(self) -> None:
+        from hitch.main import claude_usage, views
+        from hitch.main.models import ArchivedSessionTokenUsage
+
+        claude_usage.record_turn_usage(
+            "thread-render",
+            {"input_tokens": 100, "cache_read_input_tokens": 50, "output_tokens": 40},
+            "claude-opus-4-8",
+        )
+        formatted = views._claude_token_usage_for("thread-render")
+        assert formatted is not None
+        self.assertEqual(formatted["input"], "100")
+        self.assertEqual(formatted["cached"], "50")
+        self.assertEqual(formatted["output"], "40")
+        self.assertIn("context", formatted)
+
+        # A Codex-shaped row (rollout_path set) is not served as Claude usage.
+        ArchivedSessionTokenUsage.objects.filter(thread_id="thread-render").update(
+            rollout_path="/some/rollout.jsonl"
+        )
+        self.assertIsNone(views._claude_token_usage_for("thread-render"))
+        # Missing row → None.
+        self.assertIsNone(views._claude_token_usage_for("thread-absent"))
+
+    def test_worker_records_usage_on_completion(self) -> None:
+        import asyncio
+
+        from hitch.main.management.commands import claude_worker
+        from hitch.main.models import ArchivedSessionTokenUsage
+
+        messages = [
+            _assistant(TextBlock(text="done")),
+            _result(usage={"input_tokens": 200, "output_tokens": 60}),
+        ]
+        fake = _FakeClient(messages)
+
+        def _factory(*, options: Any) -> _FakeClient:
+            fake.options = options
+            return fake
+
+        with tempfile.TemporaryDirectory() as tmp:
+            events_path = Path(tmp) / "events.jsonl"
+            instance = CodexInstance.objects.create(
+                thread_id="thread-worker-tok",
+                cwd=tmp,
+                prompt="hi",
+                events_path=str(events_path),
+                pid=0,
+                status=CodexInstance.STATUS_RUNNING,
+                backend=CodexInstance.BACKEND_CLAUDE,
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                model="claude-opus-4-8",
+            )
+            with (
+                open(events_path, "a", encoding="utf-8") as events_file,
+                patch.object(claude_worker, "ClaudeSDKClient", _factory),
+            ):
+                runner = claude_worker._TurnRunner(
+                    instance=instance,
+                    events_file=events_file,
+                    model="claude-opus-4-8",
+                    reasoning_effort=None,
+                    sandbox_policy=None,
+                    approval_mode=None,
+                    web_search_mode=None,
+                    plan_mode=False,
+                )
+                asyncio.run(runner.run())
+            claude_worker._record_token_usage(instance, runner)
+        row = ArchivedSessionTokenUsage.objects.get(thread_id="thread-worker-tok")
+        self.assertEqual(row.input_tokens, 200)
+        self.assertEqual(row.output_tokens, 60)
 
 
 class WorkerApprovalTests(TestCase):

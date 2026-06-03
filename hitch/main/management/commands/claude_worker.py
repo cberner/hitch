@@ -44,8 +44,8 @@ from claude_agent_sdk import (
 from django.core.management.base import BaseCommand, CommandParser
 from django.utils import timezone
 
-from hitch.main import claude_options, claude_translate
-from hitch.main.claude_tools import build_hitch_mcp_server
+from hitch.main import claude_options, claude_translate, claude_usage
+from hitch.main.claude_tools import PROPOSE_SESSION_TOOL_NAME, build_hitch_mcp_server
 from hitch.main.codex_pool import (
     cleanup_requested_input_images_for,
     control_path_for,
@@ -90,6 +90,28 @@ _STEER_POLL_INTERVAL = 0.2
 # before exiting so the prompt is not silently dropped.
 _STEER_DRAIN_GRACE = 0.05
 
+# Set by the protective signal handlers installed before the row is published as
+# RUNNING (and thus targetable by Stop/Steer). The asyncio loop installs the real
+# handlers once it starts; these globals bridge the window in between so a signal
+# there is recorded rather than killing the process via the default disposition.
+_PENDING_SIGTERM = False
+
+
+def _pre_loop_sigterm(_signum: int, _frame: Any) -> None:
+    global _PENDING_SIGTERM
+    _PENDING_SIGTERM = True
+    # An approval wait may already be parked in a worker thread; unblock it so the
+    # turn can wind down once the loop reconciles this Stop.
+    request_cancel()
+
+
+def _pre_loop_sigusr1(_signum: int, _frame: Any) -> None:
+    # A Steer in the pre-loop window already wrote its prompt to the control file,
+    # which the drain loop reads from offset 0, so nothing needs replaying here.
+    # The handler exists only to keep the default disposition from killing the
+    # process before the loop's own SIGUSR1 handler is installed.
+    return
+
 
 class Command(BaseCommand):
     help = "Run one Claude Code turn for an existing CodexInstance and stream events to disk."
@@ -109,6 +131,14 @@ class Command(BaseCommand):
         instance = CodexInstance.objects.get(pk=options["instance_id"])
 
         _apply_worker_oom_score_adjust()
+        # Install protective signal handlers BEFORE publishing the pid + RUNNING
+        # status. Once those are saved the UI can target this process with Stop
+        # (SIGTERM) or Steer (SIGUSR1), whose default disposition is to terminate;
+        # the asyncio loop installs the real handlers only once ``run`` starts, so
+        # without these a signal in that window would kill the worker (dropping the
+        # steer or surfacing the turn as a crash).
+        signal.signal(signal.SIGTERM, _pre_loop_sigterm)
+        signal.signal(signal.SIGUSR1, _pre_loop_sigusr1)
         instance.pid = os.getpid()
         instance.status = CodexInstance.STATUS_RUNNING
         instance.save(update_fields=["pid", "status"])
@@ -150,6 +180,7 @@ class Command(BaseCommand):
         else:
             instance.status = CodexInstance.STATUS_COMPLETED
         instance.save(update_fields=update_fields)
+        _record_token_usage(instance, runner)
         _notify_system_agents(instance)
         cleanup_requested_input_images_for(instance)
 
@@ -174,6 +205,16 @@ class _TurnRunner:
         self._model = model
         self._reasoning_effort = reasoning_effort
         self._sandbox_policy = sandbox_policy
+        # The demo is a trusted, opt-in Hitch flow ("Start demo") that brings up a
+        # container via host podman/shell. A read-only sandbox would disallow Bash
+        # outright and a workspace-write sandbox would confine it to ``cwd``, so
+        # the setup would be blocked before ``can_use_tool``'s demo auto-approval
+        # could help. Run the demo with full host access regardless of the user's
+        # sandbox choice; the ``can_use_tool`` demo branch still gates the rest.
+        from hitch.main import demo
+
+        if instance.agent_kind == demo.DEMO_AGENT_KIND:
+            self._sandbox_policy = claude_options.SANDBOX_DANGER_FULL_ACCESS
         self._approval_mode = approval_mode
         self._web_search_mode = web_search_mode
         self._plan_mode = plan_mode
@@ -193,6 +234,10 @@ class _TurnRunner:
         self.failed = False
         self.error = ""
         self.saw_result = False
+        # Raw ``ResultMessage.usage`` dicts, one per turn (steering can produce
+        # several in a single worker run). Persisted after the asyncio loop so
+        # the DB write happens in sync context.
+        self.token_usages: list[dict[str, Any]] = []
 
     async def run(self) -> None:
         options = self._build_options()
@@ -202,6 +247,12 @@ class _TurnRunner:
         self._install_signal_handlers(loop)
         async with ClaudeSDKClient(options=options) as client:
             self._client = client
+            # A Stop that arrived before the loop handlers were installed set the
+            # module flag; honor it now that the client exists rather than letting
+            # the turn run on. (A pre-loop Steer needs no replay: its prompt is in
+            # the control file, which the drain loop reads from offset 0.)
+            if _PENDING_SIGTERM:
+                self._on_sigterm()
             await client.query(self._turn_input())
             steer_task = asyncio.create_task(self._forward_steer_requests())
             try:
@@ -300,9 +351,15 @@ class _TurnRunner:
 
     def _record_result(self, message: ResultMessage) -> None:
         self.saw_result = True
+        if isinstance(message.usage, dict):
+            self.token_usages.append(message.usage)
         if message.subtype != "success" or message.is_error:
             self.failed = True
             self.error = _result_error(message)
+
+    @property
+    def effective_model(self) -> str | None:
+        return self._model or self._instance.model or None
 
     def _write_event(self, method: str, payload: dict[str, Any]) -> None:
         event = {
@@ -322,6 +379,20 @@ class _TurnRunner:
         # reach here, so anything that does is potentially mutating and must be
         # gated -- including unknown MCP tools from project/user settings.
         method = _approval_method(tool_name)
+        # ``AskUserQuestion`` is a clarification prompt, not a tool escalation, so
+        # for a visible (user) session it is routed to the input UI regardless of
+        # the approval mode -- including ``deny_all`` (whose dialog label only
+        # denies *escalations*). This must precede the deny-all check, otherwise a
+        # ``/plan`` clarification would surface to the model as a denied tool call
+        # instead of the existing input UI. Hidden runs (system agent/feedback)
+        # have no UI, so the prompt is declined rather than parked on a surface no
+        # one can answer.
+        if tool_name == _ASK_USER_QUESTION_TOOL:
+            if self._instance.purpose == CodexInstance.PURPOSE_USER:
+                return await self._ask_user_question(tool_input)
+            return claude_options.deny_result(
+                "Hidden runs cannot prompt the user for input."
+            )
         if self._approval_mode == claude_options.APPROVAL_DENY_ALL:
             return claude_options.deny_result("Denied by Hitch approval policy.")
         # ``workspaceWrite`` confines edits to the repo, but ``SandboxSettings``
@@ -336,6 +407,21 @@ class _TurnRunner:
         ):
             return claude_options.deny_result(
                 "workspaceWrite confines file edits to the session directory."
+            )
+        # ``readOnly`` blocks Bash/file/Monitor via ``resolve_tool_lists`` and
+        # auto-approves the read-only built-ins and our own propose tool, so the
+        # only thing reaching here under a read-only sandbox is an external MCP
+        # tool from project/user ``.claude`` config. Claude's sandbox does not
+        # constrain out-of-process MCP calls, so a mutating one (e.g.
+        # ``mcp__github__create_pr``) would otherwise run -- even under
+        # ``approve_all``, which auto-allows below. Deny it so read-only stays
+        # authoritative.
+        if (
+            self._sandbox_policy == claude_options.SANDBOX_READ_ONLY
+            and _is_external_mcp_tool(tool_name)
+        ):
+            return claude_options.deny_result(
+                "Read-only sessions do not permit MCP tool calls."
             )
         # Hidden system-agent runs (QA/spec/autonomous) have no visible approval
         # UI, so a browser ``ApprovalRequest`` would just wait out the timeout
@@ -371,8 +457,6 @@ class _TurnRunner:
                 "Hidden system-agent runs may only auto-run built-in Bash/file "
                 "tools under a write sandbox."
             )
-        if tool_name == _ASK_USER_QUESTION_TOOL:
-            return await self._ask_user_question(tool_input)
         if self._approval_mode == claude_options.APPROVAL_APPROVE_ALL:
             # ``approve_all`` auto-approves without prompting. It only reaches the
             # callback for a confining sandbox (``dangerFullAccess`` maps to
@@ -535,6 +619,11 @@ class _TurnRunner:
                     self._client.query(query_input), self._loop
                 )
         return offset + len(complete)
+
+
+def _is_external_mcp_tool(tool_name: str) -> bool:
+    """An MCP tool from project/user config, not our in-process hitch server."""
+    return tool_name.startswith("mcp__") and tool_name != PROPOSE_SESSION_TOOL_NAME
 
 
 def _approval_method(tool_name: str) -> str:
@@ -710,6 +799,23 @@ def _decision_allows(decision: Any) -> bool:
     if isinstance(decision, dict):
         return True
     return bool(decision == ApprovalRequest.DECISION_ACCEPT)
+
+
+def _record_token_usage(instance: CodexInstance, runner: _TurnRunner) -> None:
+    """Persist each turn's token usage to the thread's cache row.
+
+    Best-effort: a failure here must never turn an otherwise-successful turn
+    into a crash, so any error is logged and swallowed.
+    """
+    if not runner.token_usages:
+        return
+    try:
+        for raw_usage in runner.token_usages:
+            claude_usage.record_turn_usage(
+                instance.thread_id, raw_usage, runner.effective_model
+            )
+    except Exception:  # noqa: BLE001 - usage accounting is non-critical
+        logger.exception("failed to record Claude token usage")
 
 
 def _result_error(message: ResultMessage) -> str:
