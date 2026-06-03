@@ -322,6 +322,74 @@ class PrQaWorkflowTests(TestCase):
 
 
 class SessionPrStageRefreshTests(TestCase):
+    def _due_pr_workflow(self, thread_id: str, cwd: str) -> SystemWorkflow:
+        now = datetime.now(UTC)
+        SessionMetadata.objects.create(
+            thread_id=thread_id,
+            cwd=cwd,
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+            codex_archived=False,
+        )
+        return SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id=thread_id,
+            cwd=cwd,
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_READY,
+            state={
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": "https://github.com/cberner/hitch/pull/201",
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 201,
+                    "state": "open",
+                }
+            },
+        )
+
+    @patch("hitch.main.system_agents._gh_pr_view")
+    def test_refresh_respects_limit(self, mock_gh_pr_view: MagicMock) -> None:
+        mock_gh_pr_view.return_value = {
+            "url": "https://github.com/cberner/hitch/pull/201",
+            "repository_full_name": "cberner/hitch",
+            "pr_number": 201,
+            "state": "open",
+        }
+        with tempfile.TemporaryDirectory() as cwd:
+            for index in range(3):
+                self._due_pr_workflow(f"limit-main-{index}", cwd)
+
+            refreshed = system_agents.refresh_unarchived_session_pr_stages(limit=1)
+
+        self.assertEqual(refreshed, 1)
+        self.assertEqual(mock_gh_pr_view.call_count, 1)
+
+    @patch("hitch.main.system_agents._gh_pr_view")
+    def test_refresh_skips_workflow_lost_to_concurrent_claim(
+        self, mock_gh_pr_view: MagicMock
+    ) -> None:
+        # A concurrent maintenance scheduler (another server worker) advances the
+        # row's updated_at after this process selected it, so the optimistic
+        # claim must fail and skip the gh poll rather than double-poll GitHub.
+        with tempfile.TemporaryDirectory() as cwd:
+            workflow = self._due_pr_workflow("claimed-main", cwd)
+            self.assertTrue(system_agents.pr_handoff_stage_refresh_due(workflow))
+            SystemWorkflow.objects.filter(pk=workflow.pk).update(
+                updated_at=workflow.updated_at + timedelta(seconds=1)
+            )
+
+            self.assertFalse(system_agents._claim_pr_stage_refresh(workflow))
+
+            # A lost claim makes the convergence loop skip the row entirely.
+            with patch.object(
+                system_agents, "_claim_pr_stage_refresh", return_value=False
+            ):
+                refreshed = system_agents.refresh_unarchived_session_pr_stages()
+
+        self.assertEqual(refreshed, 0)
+        mock_gh_pr_view.assert_not_called()
+
     @patch("hitch.main.system_agents._gh_pr_view")
     def test_refresh_unarchived_session_pr_stages_refreshes_all_due_latest_workflows(
         self, mock_gh_pr_view: MagicMock

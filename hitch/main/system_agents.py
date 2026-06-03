@@ -308,8 +308,13 @@ _GH_STATUS_CHECK_PAGE_LIMIT = 10
 # finished workers showing a stale "running" badge in the UI. These are
 # read-only polls that normally return in a couple seconds, so cap each call.
 _GH_PR_MONITOR_TIMEOUT_SECONDS = 20
+# The claim lease must cover the worst-case poll so a crash between claiming a
+# workflow and advancing/rescheduling its backoff doesn't re-expose it sooner
+# than a poll could still be running -- but no longer, or a crashed poll leaves
+# the workflow stuck for the full lease. The poll is now bounded by the monitor
+# timeout (gh pr view + the two paginated page caps), so derive it from that.
 _PR_MONITOR_BACKOFF_CLAIM_SECONDS = (
-    _GH_PR_CREATE_TIMEOUT_SECONDS
+    _GH_PR_MONITOR_TIMEOUT_SECONDS
     * (1 + _GH_REVIEW_THREAD_PAGE_LIMIT + _GH_STATUS_CHECK_PAGE_LIMIT)
     + _SECONDS_PER_MINUTE
 )
@@ -6744,9 +6749,45 @@ def refresh_unarchived_session_pr_stages(*, limit: int | None = None) -> int:
             break
         if not pr_handoff_stage_refresh_due(workflow):
             continue
-        refreshed_pr_handoff_for_stage(workflow)
+        # Each server worker runs its own maintenance scheduler, so claim the
+        # refresh atomically before polling GitHub: the compare-and-swap on
+        # ``updated_at`` persists the attempt up front, so a concurrent worker
+        # sees the row as no longer due and skips it instead of issuing the same
+        # ``gh pr view`` every tick. Losing the claim is the normal "another
+        # worker has it" path, not an error.
+        if not _claim_pr_stage_refresh(workflow):
+            continue
+        refreshed_pr_handoff_for_stage(workflow, force=True)
         refreshed += 1
     return refreshed
+
+
+def _claim_pr_stage_refresh(workflow: SystemWorkflow) -> bool:
+    """Persist the stage-refresh attempt under optimistic locking.
+
+    Returns ``True`` only for the caller that wins the row; concurrent
+    schedulers fail the ``updated_at`` guard and get ``False``. Mirrors
+    ``_claim_due_pr_monitor_backoff`` so the per-worker maintenance schedulers
+    cannot all poll the same session at once. The claim records the attempt
+    timestamp the 5-minute refresh window keys on, so the subsequent refresh
+    runs with ``force=True`` rather than re-checking (and losing to) the window.
+    """
+    now = timezone.now()
+    claimed_state = {
+        **workflow.state,
+        _PR_STAGE_REFRESH_STATE_KEY: {
+            "attempted_at": int(now.timestamp()),
+        },
+    }
+    updated = SystemWorkflow.objects.filter(
+        pk=workflow.pk,
+        updated_at=workflow.updated_at,
+    ).update(state=claimed_state, updated_at=now)
+    if updated != 1:
+        return False
+    workflow.state = claimed_state
+    workflow.updated_at = now
+    return True
 
 
 def refreshed_pr_handoff_for_stage(

@@ -15,6 +15,12 @@ from hitch.main import codex_pool, system_agents
 logger = logging.getLogger(__name__)
 
 _WORKFLOW_MAINTENANCE_INTERVAL_SECONDS = 60
+# Cap PR-stage refreshes per tick: each due session can spend up to the gh-pr-
+# view timeout, and this tick also owns reconcile_dead and PR-monitor backoff
+# polling, so an unbounded sweep over dozens of stale sessions would delay the
+# next reconcile by minutes and revive the stale-running-badge problem. The
+# leftover rows converge on later ticks (and on demand from the request path).
+_PR_STAGE_REFRESH_LIMIT_PER_TICK = 5
 _SCHEDULER_ENV = "HITCH_WORKFLOW_MAINTENANCE_SCHEDULER"
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
@@ -82,7 +88,9 @@ def _run_workflow_maintenance_scheduler_tick() -> None:
         # `gh pr view` stage refresh only ever fires from the session-list
         # request path (capped at one row per render) -- dominating dashboard
         # latency once a session's 5-minute refresh window elapses.
-        pr_stages = system_agents.refresh_unarchived_session_pr_stages()
+        pr_stages = system_agents.refresh_unarchived_session_pr_stages(
+            limit=_PR_STAGE_REFRESH_LIMIT_PER_TICK
+        )
         if pr_stages:
             logger.info("refreshed %s session PR stage(s)", pr_stages)
     except Exception:
