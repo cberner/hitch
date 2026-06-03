@@ -808,9 +808,9 @@
                     if (editGoalTitle) editGoalTitle.focus();
                 });
             }
-            if (editGoalAutonomy) {
-                editGoalAutonomy.addEventListener("change", () => syncAutonomousGoalAutomation(editGoalForm));
-            }
+            // The edit form's autonomy <select> is already wired in the loop
+            // above (it carries data-autonomous-goal-autonomy), so it must not
+            // get a second change listener here.
             if (editGoalCancel) editGoalCancel.addEventListener("click", () => hideDialog(editGoalDialog));
             {% include "_primary_nav_script.html" %}
         })();
