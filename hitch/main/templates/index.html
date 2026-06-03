@@ -1191,7 +1191,15 @@
                         }).then((response) => {
                             if (!response.ok) throw new Error("rename request failed");
                             if (input) input.value = name;
-                            if (title) title.textContent = name;
+                            // Mirror session_index.display_title_for: the server
+                            // stores the title truncated to 80 chars, so the
+                            // optimistic update must match or the visible title
+                            // shifts on the next reload.
+                            if (title) {
+                                title.textContent = name.length > 80
+                                    ? name.slice(0, 80).replace(/\s+$/, "") + "..."
+                                    : name;
+                            }
                             if (renamePanel) renamePanel.hidden = true;
                             row.classList.remove("rename-open");
                         }).catch(() => {
