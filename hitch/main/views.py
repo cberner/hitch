@@ -8724,61 +8724,106 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         # ``Thread.cwd`` is an ``AbsolutePathBuf`` pydantic RootModel, so unwrap
         # ``.root`` to get the underlying string the worker subprocess expects;
         # also accept a plain str so a future SDK schema change does not break us.
-        with codex_pool.borrow_codex(
-            Codex, enable_memories=settings.enable_memories
-        ) as codex:
-            resumed = codex._client.thread_resume(session_id)
-            thread = resumed.thread
-            thread_entries = list(_entries_for(thread))
-            thread_plan_state = _thread_plan_mode_state(
-                session_id,
-                thread,
-                thread_entries,
-                active_instance=active_instance,
+        # Resolve the thread's state (entries, plan-mode, cwd, last model) to
+        # decide how to spawn the turn. Prefer reading SessionMetadata + the
+        # rollout file from disk: the detached worker resumes the thread itself
+        # moments later, so a live ``thread_resume`` here only duplicates that
+        # rollout read (and its lazy state-DB migration) on the request path.
+        # Fall back to a live resume for active/workflow/uncached-cwd threads.
+        metadata = _session_detail_metadata(session_id)
+        metadata_resume = _metadata_resume_for_inactive_session(
+            session_id,
+            metadata,
+            active_instance=active_instance,
+            active_system_workflow=active_system_workflow,
+            require_system_agent_thread=False,
+        )
+        resumed: Any
+        thread: Any
+        if metadata_resume is not None and _thread_cwd(metadata_resume.thread):
+            used_disk_resume = True
+            resumed = metadata_resume
+            thread = metadata_resume.thread
+            thread_entries = list(metadata_resume.entries)
+            models_data = _cached_models_for_session_detail(
+                enable_memories=settings.enable_memories
             )
-            thread_awaits_plan_approval = thread_plan_state.awaiting_approval
-            if (
-                not collaboration_mode
-                and intent.allow_pending_plan_default
-                and thread_plan_state.active
-                and not thread_awaits_plan_approval
-                and intent.explicit_plan_mode
-                and not plan_mode
-            ):
-                collaboration_mode = _DEFAULT_COLLABORATION_MODE
-            elif (
-                not collaboration_mode
-                and intent.allow_pending_plan_default
-                and thread_plan_state.active
-                and (thread_awaits_plan_approval or not intent.explicit_plan_mode)
-            ):
-                plan_mode = True
-            elif (
-                not collaboration_mode
-                and intent.allow_pending_plan_default
-                and not intent.explicit_plan_mode
-            ):
-                plan_mode = False
-            if (
-                thread_awaits_plan_approval
-                and not collaboration_mode
-                and intent.allow_pending_plan_default
-                and not intent.explicit_plan_mode
-                and prompt == _PLAN_APPROVAL_PROMPT
-            ):
-                collaboration_mode = _DEFAULT_COLLABORATION_MODE
-                plan_mode = False
-            collaboration_model = (
-                _plan_mode_model(codex, resumed, settings)
-                if plan_mode or collaboration_mode == _DEFAULT_COLLABORATION_MODE
-                else None
-            )
-            if (
+        else:
+            used_disk_resume = False
+            with codex_pool.borrow_codex(
+                Codex, enable_memories=settings.enable_memories
+            ) as codex:
+                resumed = codex._client.thread_resume(session_id)
+                thread = resumed.thread
+                thread_entries = list(_entries_for(thread))
+                models_data = _models_for_plan_mode_fallback(codex)
+        thread_plan_state = _thread_plan_mode_state(
+            session_id,
+            thread,
+            thread_entries,
+            active_instance=active_instance,
+        )
+        thread_awaits_plan_approval = thread_plan_state.awaiting_approval
+        if (
+            not collaboration_mode
+            and intent.allow_pending_plan_default
+            and thread_plan_state.active
+            and not thread_awaits_plan_approval
+            and intent.explicit_plan_mode
+            and not plan_mode
+        ):
+            collaboration_mode = _DEFAULT_COLLABORATION_MODE
+        elif (
+            not collaboration_mode
+            and intent.allow_pending_plan_default
+            and thread_plan_state.active
+            and (thread_awaits_plan_approval or not intent.explicit_plan_mode)
+        ):
+            plan_mode = True
+        elif (
+            not collaboration_mode
+            and intent.allow_pending_plan_default
+            and not intent.explicit_plan_mode
+        ):
+            plan_mode = False
+        if (
+            thread_awaits_plan_approval
+            and not collaboration_mode
+            and intent.allow_pending_plan_default
+            and not intent.explicit_plan_mode
+            and prompt == _PLAN_APPROVAL_PROMPT
+        ):
+            collaboration_mode = _DEFAULT_COLLABORATION_MODE
+            plan_mode = False
+        # A disk resume carries the thread's model/effort only when Hitch
+        # recorded a prior CodexInstance for it. For model-sensitive turns
+        # (plan, default collaboration, QA/PR) on threads Hitch never tracked --
+        # imported or CLI-created -- recover the thread's actual model with a
+        # one-off live resume, matching the old path that used the resumed model
+        # (and the live models catalog) in preference to the request's cookie.
+        # This also covers a cold (empty) models cache. Plain follow-ups never
+        # reach this and keep the disk fast path.
+        if (
+            used_disk_resume
+            and (
                 plan_mode
-                and not collaboration_model
-                and not intent.explicit_plan_mode
-            ):
-                plan_mode = False
+                or collaboration_mode == _DEFAULT_COLLABORATION_MODE
+                or qa_workflow_activation
+            )
+            and not _string_value(getattr(resumed, "model", None))
+        ):
+            with codex_pool.borrow_codex(
+                Codex, enable_memories=settings.enable_memories
+            ) as codex:
+                resumed = codex._client.thread_resume(session_id)
+                models_data = _models_for_plan_mode_fallback(codex)
+        collaboration_model = (
+            _plan_mode_model_from_models(resumed, settings, models_data)
+            if plan_mode or collaboration_mode == _DEFAULT_COLLABORATION_MODE
+            else None
+        )
+        if plan_mode and not collaboration_model and not intent.explicit_plan_mode:
+            plan_mode = False
         cwd = _thread_cwd(thread)
         if not cwd:
             _cleanup_saved_input_images(input_image_paths)
@@ -8800,11 +8845,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         previous_instance = codex_pool.latest_for_thread(session_id)
         session_project = None
         if previous_instance is None:
-            metadata = (
-                SessionMetadata.objects.select_related("project")
-                .filter(thread_id=session_id)
-                .first()
-            )
+            # ``metadata`` was already fetched (with its project) above.
             if metadata is not None and (
                 metadata.project_id is not None or metadata.project_cleared
             ):
@@ -9473,11 +9514,6 @@ def _is_qa_activation(request: HttpRequest) -> bool:
         bool(parts and parts[0].lower() == _QA_SLASH_COMMAND)
         or prompt == _QA_SLASH_PROMPT
     )
-
-
-def _plan_mode_model(codex: Codex, resumed: Any, settings: SettingsValues) -> str | None:
-    models_data = _models_for_plan_mode_fallback(codex)
-    return _plan_mode_model_from_models(resumed, settings, models_data)
 
 
 def _plan_mode_model_from_models(
