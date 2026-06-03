@@ -83,7 +83,8 @@ _FILE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 # gated as command execution (and blocked by the read-only sandbox) -- otherwise
 # ``PowerShell`` could run commands under ``approve_all`` despite a read-only
 # session, since it is not in the auto-approved read-only tool list.
-_COMMAND_TOOLS = frozenset({"Bash", "PowerShell"})
+_POWERSHELL_TOOL = "PowerShell"
+_COMMAND_TOOLS = frozenset({"Bash", _POWERSHELL_TOOL})
 # Plan mode's approval boundary: the model calls ``ExitPlanMode`` to present its
 # plan and leave plan mode. It is deliberately kept out of ``allowed_tools`` so it
 # always reaches ``can_use_tool`` -- and must never be auto-approved (even under
@@ -531,8 +532,10 @@ class _TurnRunner:
                 claude_options.SANDBOX_WORKSPACE_WRITE,
                 claude_options.SANDBOX_DANGER_FULL_ACCESS,
             )
-            if writes_allowed and (
-                tool_name in _COMMAND_TOOLS or tool_name in _FILE_TOOLS
+            if (
+                writes_allowed
+                and (tool_name in _COMMAND_TOOLS or tool_name in _FILE_TOOLS)
+                and not self._powershell_unconfined(tool_name)
             ):
                 return claude_options.allow_result()
             return claude_options.deny_result(
@@ -542,6 +545,7 @@ class _TurnRunner:
         if (
             self._approval_mode == claude_options.APPROVAL_APPROVE_ALL
             and tool_name != _EXIT_PLAN_MODE_TOOL
+            and not self._powershell_unconfined(tool_name)
         ):
             # ``approve_all`` auto-approves without prompting. It only reaches the
             # callback for a confining sandbox (``dangerFullAccess`` maps to
@@ -549,7 +553,10 @@ class _TurnRunner:
             # bounded file edits, so the rest just proceeds. ``ExitPlanMode`` is
             # excluded: leaving plan mode is the one boundary ``/plan`` must always
             # surface for explicit review, so it falls through to the interactive
-            # approval below even under ``approve_all``.
+            # approval below even under ``approve_all``. Unconfined ``PowerShell``
+            # is likewise excluded: the bash sandbox can't confine it, so a visible
+            # session routes it to interactive approval rather than auto-running it
+            # outside ``cwd``.
             return claude_options.allow_result()
         params = _approval_params(method, tool_name, tool_input)
         request_id = await asyncio.to_thread(
@@ -569,6 +576,20 @@ class _TurnRunner:
         if _decision_allows(decision):
             return claude_options.allow_result()
         return claude_options.deny_result("Declined by the user.")
+
+    def _powershell_unconfined(self, tool_name: str) -> bool:
+        """Whether this is a ``PowerShell`` call that can't be confined.
+
+        ``PowerShell`` runs host commands natively and Claude's ``SandboxSettings``
+        only confines Bash, so under any sandbox other than the explicit
+        no-confinement ``dangerFullAccess`` opt-out it would escape ``cwd``. Such a
+        call must never be auto-run: a visible session routes it to interactive
+        approval, and a hidden run (no UI) is denied.
+        """
+        return (
+            tool_name == _POWERSHELL_TOOL
+            and self._sandbox_policy != claude_options.SANDBOX_DANGER_FULL_ACCESS
+        )
 
     def _file_edit_within_cwd(self, tool_input: dict[str, Any]) -> bool:
         """Whether a file-edit tool's target stays inside the session ``cwd``.

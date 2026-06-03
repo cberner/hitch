@@ -84,6 +84,13 @@ _MONITOR_TOOL = "Monitor"
 # Runs host commands natively (Windows, or ``CLAUDE_CODE_USE_POWERSHELL_TOOL=1``);
 # gated like Bash so a read-only sandbox blocks command execution either way.
 _POWERSHELL_TOOL = "PowerShell"
+# Creates/switches an isolated git worktree (writing under ``.claude/worktrees``).
+# Claude marks it as not requiring permission, so it never reaches
+# ``can_use_tool`` -- meaning it bypasses both the cwd guard and the bash sandbox
+# and can write outside ``cwd``. The only way to keep a confining sandbox
+# authoritative is to disallow it outright unless the user opted into
+# ``dangerFullAccess``.
+_ENTER_WORKTREE_TOOL = "EnterWorktree"
 
 # Codex sandbox policy strings (cookie/CLI values) -> behaviour.
 SANDBOX_READ_ONLY = "readOnly"
@@ -172,6 +179,14 @@ def resolve_tool_lists(
         disallowed.append(_MONITOR_TOOL)
         disallowed.append(_POWERSHELL_TOOL)
         allowed = [tool for tool in allowed if tool != _BASH_TOOL]
+    # ``EnterWorktree`` is auto-approved by Claude (it never reaches
+    # ``can_use_tool``) and writes a new worktree that can land outside ``cwd``,
+    # so it escapes both the read-only block above and the workspace-write cwd
+    # guard / bash sandbox. Disallow it unless the user explicitly opted out of
+    # confinement with ``dangerFullAccess`` -- otherwise a "read-only" or
+    # workspace-confined session could still create files on the host.
+    if sandbox_policy != SANDBOX_DANGER_FULL_ACCESS:
+        disallowed.append(_ENTER_WORKTREE_TOOL)
     return allowed, disallowed
 
 

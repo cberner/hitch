@@ -11582,7 +11582,17 @@ def _start_candidate_proposal_session(
             prior_candidate_instance.model if prior_candidate_instance else None
         ),
     )
-    base_instructions = _base_instructions_for_settings(spawn_settings)
+    # The candidate's backend is fixed by its history, which can differ from the
+    # current global provider in ``spawn_settings`` (the user may have switched
+    # back to Codex). Key the base instructions off that backend, not the
+    # provider: Claude ships its own system prompt, so a Claude candidate must
+    # never inherit Hitch's Codex-specific base instructions even when the
+    # provider is now Codex.
+    base_instructions = (
+        None
+        if candidate_backend == CodexInstance.BACKEND_CLAUDE
+        else _base_instructions_for_settings(spawn_settings)
+    )
     project = None if target.project_cleared else candidate_session.project or target.project
     developer_instructions = _developer_instructions_for_project(settings, project)
     auto_merge_to_local_branch, auto_merge_branch = (
@@ -12527,6 +12537,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
                     name=spec_thread_name,
                     model=spec_model,
                     project=None if target.project_cleared else session_project,
+                    developer_instructions=developer_instructions or None,
                     auto_pr_enabled=auto_pr_enabled,
                     auto_qa_enabled=auto_qa_enabled,
                 )

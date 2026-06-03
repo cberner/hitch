@@ -1184,7 +1184,41 @@ class PlanModeApprovalTests(TestCase):
 
 
 class PowerShellGatingTests(TestCase):
-    """``PowerShell`` runs host commands natively, so it is gated like Bash."""
+    """``PowerShell`` runs host commands natively and Claude's bash sandbox can't
+    confine it, so it is never auto-run under a confining sandbox: a visible
+    session routes it to interactive approval, a hidden run is denied."""
+
+    def _runner(
+        self,
+        *,
+        purpose: str,
+        sandbox_policy: str | None,
+        approval_mode: str | None,
+    ) -> Any:
+        import io
+
+        from hitch.main.management.commands import claude_worker
+
+        instance = CodexInstance(
+            thread_id="t",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_RUNNING,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            purpose=purpose,
+        )
+        return claude_worker._TurnRunner(
+            instance=instance,
+            events_file=io.StringIO(),
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=sandbox_policy,
+            approval_mode=approval_mode,
+            web_search_mode=None,
+            plan_mode=False,
+        )
 
     def test_powershell_uses_command_approval_method(self) -> None:
         from hitch.main.management.commands import claude_worker
@@ -1199,6 +1233,130 @@ class PowerShellGatingTests(TestCase):
             sandbox_policy=claude_options.SANDBOX_READ_ONLY, web_search_mode=None
         )
         self.assertIn("PowerShell", disallowed)
+
+    def test_approve_all_visible_routes_powershell_to_interactive(self) -> None:
+        import asyncio
+
+        from hitch.main.management.commands import claude_worker
+        from hitch.main.models import ApprovalRequest
+
+        # Visible session, approve_all, default (workspace-write) sandbox: an
+        # auto-allow would run PowerShell unconfined, so it must instead go through
+        # the interactive approval flow.
+        runner = self._runner(
+            purpose=CodexInstance.PURPOSE_USER,
+            sandbox_policy=None,
+            approval_mode=claude_options.APPROVAL_APPROVE_ALL,
+        )
+        with (
+            patch.object(
+                claude_worker, "_create_pending_approval", return_value=7
+            ) as mock_create,
+            patch.object(
+                claude_worker,
+                "_wait_for_decision",
+                return_value=ApprovalRequest.DECISION_ACCEPT,
+            ) as mock_wait,
+        ):
+            result = asyncio.run(
+                runner._can_use_tool(
+                    "PowerShell", {"command": "Get-ChildItem"}, None
+                )
+            )
+        mock_create.assert_called_once()
+        mock_wait.assert_called_once()
+        self.assertIsInstance(result, PermissionResultAllow)
+
+    def test_approve_all_visible_still_auto_allows_bash(self) -> None:
+        import asyncio
+
+        from hitch.main.management.commands import claude_worker
+
+        # Bash is confined by the workspace-write bash sandbox, so approve_all may
+        # still auto-allow it -- only PowerShell is special-cased.
+        runner = self._runner(
+            purpose=CodexInstance.PURPOSE_USER,
+            sandbox_policy=None,
+            approval_mode=claude_options.APPROVAL_APPROVE_ALL,
+        )
+        with patch.object(claude_worker, "_create_pending_approval") as mock_create:
+            result = asyncio.run(
+                runner._can_use_tool("Bash", {"command": "ls"}, None)
+            )
+        mock_create.assert_not_called()
+        self.assertIsInstance(result, PermissionResultAllow)
+
+    def test_hidden_run_denies_unconfined_powershell(self) -> None:
+        import asyncio
+
+        from claude_agent_sdk import PermissionResultDeny
+
+        runner = self._runner(
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            sandbox_policy=claude_options.SANDBOX_WORKSPACE_WRITE,
+            approval_mode=claude_options.APPROVAL_AUTO_REVIEW,
+        )
+        result = asyncio.run(
+            runner._can_use_tool("PowerShell", {"command": "Get-ChildItem"}, None)
+        )
+        self.assertIsInstance(result, PermissionResultDeny)
+
+    def test_hidden_run_still_allows_bash(self) -> None:
+        import asyncio
+
+        runner = self._runner(
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            sandbox_policy=claude_options.SANDBOX_WORKSPACE_WRITE,
+            approval_mode=claude_options.APPROVAL_AUTO_REVIEW,
+        )
+        result = asyncio.run(
+            runner._can_use_tool("Bash", {"command": "ls"}, None)
+        )
+        self.assertIsInstance(result, PermissionResultAllow)
+
+    def test_powershell_unconfined_only_outside_danger_full_access(self) -> None:
+        unconfined = self._runner(
+            purpose=CodexInstance.PURPOSE_USER,
+            sandbox_policy=claude_options.SANDBOX_WORKSPACE_WRITE,
+            approval_mode=None,
+        )
+        self.assertTrue(unconfined._powershell_unconfined("PowerShell"))
+        self.assertFalse(unconfined._powershell_unconfined("Bash"))
+        confined = self._runner(
+            purpose=CodexInstance.PURPOSE_USER,
+            sandbox_policy=claude_options.SANDBOX_DANGER_FULL_ACCESS,
+            approval_mode=None,
+        )
+        self.assertFalse(confined._powershell_unconfined("PowerShell"))
+
+
+class EnterWorktreeGatingTests(TestCase):
+    """``EnterWorktree`` is auto-approved by Claude and writes a worktree that can
+    land outside ``cwd``, bypassing the cwd guard and bash sandbox. It is disallowed
+    unless the user opted out of confinement with ``dangerFullAccess``."""
+
+    def _disallowed(self, sandbox_policy: str | None) -> Any:
+        _allowed, disallowed = claude_options.resolve_tool_lists(
+            sandbox_policy=sandbox_policy, web_search_mode=None
+        )
+        return disallowed
+
+    def test_disallowed_under_read_only(self) -> None:
+        self.assertIn("EnterWorktree", self._disallowed(claude_options.SANDBOX_READ_ONLY))
+
+    def test_disallowed_under_workspace_write(self) -> None:
+        self.assertIn(
+            "EnterWorktree", self._disallowed(claude_options.SANDBOX_WORKSPACE_WRITE)
+        )
+
+    def test_disallowed_under_empty_sandbox(self) -> None:
+        self.assertIn("EnterWorktree", self._disallowed(None))
+
+    def test_allowed_under_danger_full_access(self) -> None:
+        self.assertNotIn(
+            "EnterWorktree",
+            self._disallowed(claude_options.SANDBOX_DANGER_FULL_ACCESS),
+        )
 
 
 class ClaudeArchiveUsageTests(TestCase):
