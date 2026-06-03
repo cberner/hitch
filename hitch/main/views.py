@@ -5669,9 +5669,10 @@ def _start_claude_qa_workflow(
     web_search_mode = _valid_web_search_mode_or_default(settings.web_search_mode)
     if web_search_mode:
         workflow_kwargs["web_search_mode"] = web_search_mode
-    base_instructions = _base_instructions_for_settings(settings)
-    if base_instructions:
-        workflow_kwargs["base_instructions"] = base_instructions
+    # No base instructions: this is a Claude workflow (the thread's backend, not
+    # the current global provider, decides). Claude ships its own system prompt,
+    # so Hitch's Codex/HITCH base-instruction variants must never reach a Claude
+    # QA/PR agent -- even when the global provider was switched back to Codex.
     if settings.qa_panel_enabled:
         workflow_kwargs["qa_panel_enabled"] = True
     if qa_activation:
@@ -5726,9 +5727,9 @@ def _start_claude_spec_critic_follow_up(
     web_search_mode = _valid_web_search_mode_or_default(settings.web_search_mode)
     if web_search_mode:
         spec_workflow_kwargs["web_search_mode"] = web_search_mode
-    base_instructions = _base_instructions_for_settings(settings)
-    if base_instructions:
-        spec_workflow_kwargs["base_instructions"] = base_instructions
+    # No base instructions: a Claude workflow ships its own system prompt, so
+    # Hitch's Codex base-instruction variants must not reach the Claude Spec
+    # Critic agents even if the global provider was switched back to Codex.
     if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
         spec_workflow_kwargs["qa_panel_enabled"] = True
     if auto_merge_to_local_branch and auto_merge_branch:

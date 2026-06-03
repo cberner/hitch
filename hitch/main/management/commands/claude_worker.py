@@ -224,6 +224,15 @@ class _TurnRunner:
         self._model = model
         self._reasoning_effort = reasoning_effort
         self._sandbox_policy = sandbox_policy
+        # A visible session with an empty/"Codex default" sandbox made no explicit
+        # choice. Codex's app-server defaults that to workspace-write; mirror it so
+        # the session is never left fully unconfined -- otherwise ``approve_all``
+        # would auto-allow Bash/file edits with no cwd guard and no bash sandbox,
+        # i.e. ``dangerFullAccess`` the user never selected. Hidden runs keep their
+        # explicit sandbox (and are pinned to auto_review, never approve_all), so
+        # the unconfined-default concern does not apply to them.
+        if not self._sandbox_policy and instance.purpose == CodexInstance.PURPOSE_USER:
+            self._sandbox_policy = claude_options.SANDBOX_WORKSPACE_WRITE
         # The demo is a trusted, opt-in Hitch flow ("Start demo") that brings up a
         # container via host podman/shell. A read-only sandbox would disallow Bash
         # outright and a workspace-write sandbox would confine it to ``cwd``, so
@@ -336,10 +345,18 @@ class _TurnRunner:
             session_id=None if resume else instance.thread_id,
             mcp_server=mcp_server,
             can_use_tool=self._can_use_tool,
-            # Only visible user sessions load repo/user ``.claude`` settings (and
-            # their hooks). Hidden system-agent runs must not, so an untrusted
-            # repo's hooks can't run outside the approval gate.
-            load_filesystem_settings=instance.purpose == CodexInstance.PURPOSE_USER,
+            # Load repo/user ``.claude`` settings (CLAUDE.md memory, project MCP)
+            # only for a visible session that is not read-only. Those settings can
+            # register shell *hooks* that run in the SDK outside ``can_use_tool``,
+            # so an untrusted repo could execute commands before the gate applies.
+            # ``readOnly`` exists precisely to inspect an untrusted repo safely, so
+            # it never loads them; ``workspaceWrite``/``dangerFullAccess`` (active
+            # dev on a trusted repo) do, matching a developer's own ``claude``.
+            # Hidden system-agent runs never load them.
+            load_filesystem_settings=(
+                instance.purpose == CodexInstance.PURPOSE_USER
+                and self._sandbox_policy != claude_options.SANDBOX_READ_ONLY
+            ),
         )
 
     def _turn_input(self) -> str | AsyncIterator[dict[str, Any]]:

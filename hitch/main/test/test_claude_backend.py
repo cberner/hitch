@@ -1377,6 +1377,243 @@ class ClaudeImageCleanupTests(TestCase):
             self.assertFalse(image.exists())
 
 
+class ClaudeWorkflowBaseInstructionsTests(TestCase):
+    """A Claude QA/PR/Spec-Critic workflow never carries Codex base instructions,
+    even when the global provider was switched back to Codex."""
+
+    def _settings(self, **overrides: Any) -> Any:
+        from hitch.main.views import SettingsValues
+
+        defaults: dict[str, Any] = dict(
+            model="",
+            reasoning_effort="",
+            sandbox_policy="",
+            approval_mode="auto_review",
+            coding_agent=coding_agents.CODING_AGENT_HITCH,
+            extra_system_prompt="",
+            use_worktrees=False,
+            auto_pr_enabled=False,
+            auto_qa_enabled=False,
+            qa_panel_enabled=False,
+            spec_critic_enabled=False,
+            web_search_mode="",
+            show_archived_sessions=False,
+            last_selected_repo="",
+            selected_project_id=None,
+            visible_session_project_ids=None,
+            show_no_project_sessions=True,
+            enable_memories=False,
+            provider=coding_agents.PROVIDER_CODEX,
+        )
+        defaults.update(overrides)
+        return SettingsValues(**defaults)
+
+    def test_codex_provider_settings_yield_base_instructions(self) -> None:
+        # Guard the premise: these settings *would* attach base instructions on
+        # the Codex path, so the Claude workflow omitting them is meaningful.
+        from hitch.main import views
+
+        self.assertIsNotNone(views._base_instructions_for_settings(self._settings()))
+
+    def test_qa_workflow_omits_base_instructions(self) -> None:
+        from hitch.main import views
+
+        with (
+            patch.object(
+                views,
+                "_claude_workflow_common",
+                return_value=("/repo", "claude-opus-4-8", ""),
+            ),
+            patch.object(
+                views, "_auto_merge_to_local_branch_for_session", return_value=(False, "")
+            ),
+            patch.object(views, "_claude_user_message_index", return_value=None),
+            patch("hitch.main.views.system_agents.start_pr_qa_workflow") as mock_start,
+        ):
+            views._start_claude_qa_workflow(
+                session_id="t",
+                qa_activation=False,
+                settings=self._settings(),
+                input_image_paths=[],
+            )
+        self.assertNotIn("base_instructions", mock_start.call_args.kwargs)
+
+    def test_spec_critic_follow_up_omits_base_instructions(self) -> None:
+        from hitch.main import views
+
+        with (
+            patch.object(
+                views,
+                "_claude_workflow_common",
+                return_value=("/repo", "claude-opus-4-8", ""),
+            ),
+            patch.object(views, "_auto_pr_enabled_for_session", return_value=False),
+            patch.object(views, "_auto_qa_enabled_for_session", return_value=False),
+            patch.object(
+                views, "_auto_merge_to_local_branch_for_session", return_value=(False, "")
+            ),
+            patch.object(views, "_claude_user_message_index", return_value=None),
+            patch("hitch.main.views.system_agents.start_spec_critic_workflow") as mock_spec,
+        ):
+            views._start_claude_spec_critic_follow_up(
+                session_id="t",
+                prompt="do it",
+                settings=self._settings(),
+                input_image_paths=[],
+            )
+        self.assertNotIn("base_instructions", mock_spec.call_args.kwargs)
+
+
+class ClaudeSandboxDefaultTests(TestCase):
+    """An empty/"Codex default" sandbox confines a *visible* Claude session to
+    workspace-write so approve_all can't run fully unconfined; hidden runs keep
+    their explicit (possibly empty) sandbox."""
+
+    def _runner(
+        self,
+        *,
+        purpose: str,
+        sandbox_policy: str | None,
+        approval_mode: str | None = None,
+    ) -> Any:
+        import io
+
+        from hitch.main.management.commands import claude_worker
+
+        instance = CodexInstance(
+            thread_id="t",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_RUNNING,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            purpose=purpose,
+        )
+        return claude_worker._TurnRunner(
+            instance=instance,
+            events_file=io.StringIO(),
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=sandbox_policy,
+            approval_mode=approval_mode,
+            web_search_mode=None,
+            plan_mode=False,
+        )
+
+    def test_visible_session_defaults_to_workspace_write(self) -> None:
+        runner = self._runner(
+            purpose=CodexInstance.PURPOSE_USER, sandbox_policy=None
+        )
+        self.assertEqual(
+            runner._sandbox_policy, claude_options.SANDBOX_WORKSPACE_WRITE
+        )
+
+    def test_hidden_run_keeps_empty_sandbox(self) -> None:
+        runner = self._runner(
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT, sandbox_policy=None
+        )
+        self.assertIsNone(runner._sandbox_policy)
+
+    def test_approve_all_default_sandbox_confines_edits(self) -> None:
+        import asyncio
+
+        from claude_agent_sdk import PermissionResultDeny
+
+        # Visible session, approve_all, no explicit sandbox: the workspace-write
+        # default's cwd guard still denies an edit outside the repo.
+        runner = self._runner(
+            purpose=CodexInstance.PURPOSE_USER,
+            sandbox_policy=None,
+            approval_mode=claude_options.APPROVAL_APPROVE_ALL,
+        )
+        result = asyncio.run(
+            runner._can_use_tool("Write", {"file_path": "/etc/passwd"}, None)
+        )
+        self.assertIsInstance(result, PermissionResultDeny)
+
+
+class ClaudeFilesystemSettingsGatingTests(TestCase):
+    """Visible sessions load repo/user ``.claude`` settings (CLAUDE.md memory,
+    project MCP) except under read-only, where repo hooks could bypass the
+    sandbox. Hidden runs never load them."""
+
+    def _setting_sources(
+        self, *, purpose: str, sandbox_policy: str | None
+    ) -> Any:
+        import io
+
+        from hitch.main.management.commands import claude_worker
+
+        instance = CodexInstance(
+            thread_id="t",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_RUNNING,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            purpose=purpose,
+        )
+        runner = claude_worker._TurnRunner(
+            instance=instance,
+            events_file=io.StringIO(),
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=sandbox_policy,
+            approval_mode=None,
+            web_search_mode=None,
+            plan_mode=False,
+        )
+        return runner._build_options().setting_sources
+
+    def test_workspace_write_visible_loads_settings(self) -> None:
+        self.assertEqual(
+            self._setting_sources(
+                purpose=CodexInstance.PURPOSE_USER,
+                sandbox_policy=claude_options.SANDBOX_WORKSPACE_WRITE,
+            ),
+            ["user", "project", "local"],
+        )
+
+    def test_default_sandbox_visible_loads_settings(self) -> None:
+        # Empty sandbox normalizes to workspace-write for a visible session, so
+        # CLAUDE.md memory still loads in the normal dev mode.
+        self.assertEqual(
+            self._setting_sources(
+                purpose=CodexInstance.PURPOSE_USER, sandbox_policy=None
+            ),
+            ["user", "project", "local"],
+        )
+
+    def test_danger_full_access_visible_loads_settings(self) -> None:
+        self.assertEqual(
+            self._setting_sources(
+                purpose=CodexInstance.PURPOSE_USER,
+                sandbox_policy=claude_options.SANDBOX_DANGER_FULL_ACCESS,
+            ),
+            ["user", "project", "local"],
+        )
+
+    def test_read_only_visible_blocks_settings(self) -> None:
+        self.assertEqual(
+            self._setting_sources(
+                purpose=CodexInstance.PURPOSE_USER,
+                sandbox_policy=claude_options.SANDBOX_READ_ONLY,
+            ),
+            [],
+        )
+
+    def test_hidden_run_blocks_settings(self) -> None:
+        self.assertEqual(
+            self._setting_sources(
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                sandbox_policy=claude_options.SANDBOX_WORKSPACE_WRITE,
+            ),
+            [],
+        )
+
+
 class ClaudePlanModeStateTests(TestCase):
     """Claude sessions have no rollout collaboration mode, so plan-mode state
     must come from the transcript -- not a sticky per-turn ``plan_mode`` flag

@@ -250,11 +250,11 @@ def build_options(
         mcp_servers=mcp_servers,
         # Load user/project/local settings so CLAUDE.md memory and project MCP
         # config apply, matching how a developer's own ``claude`` runs behave.
-        # Hidden system-agent runs (QA/spec/autonomous) disable this: a repo
-        # ``.claude/settings*.json`` can register shell *hooks* that run in the
-        # SDK outside ``can_use_tool``, so an untrusted repo could execute
-        # commands during a read-only/propose-only hidden run despite the tool
-        # gating. Those runs get no filesystem settings at all.
+        # The caller disables this for hidden system-agent runs *and* for visible
+        # read-only sessions: a repo ``.claude/settings*.json`` can register shell
+        # *hooks* that run in the SDK outside ``can_use_tool``, so an untrusted
+        # repo could execute commands despite the tool gating / read-only sandbox.
+        # Those runs get no filesystem settings at all.
         setting_sources=(
             ["user", "project", "local"] if load_filesystem_settings else []
         ),
