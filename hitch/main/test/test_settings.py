@@ -50,6 +50,40 @@ class DatabaseSettingsTests(SimpleTestCase):
         self.assertIn("PRAGMA journal_mode=WAL", init_command)
         self.assertIn("PRAGMA synchronous=NORMAL", init_command)
         self.assertIn("PRAGMA busy_timeout=60000", init_command)
+        # Larger cache + mmap keep write transactions short so contended
+        # writers release the single WAL write lock sooner.
+        self.assertIn("PRAGMA cache_size=-65536", init_command)
+        self.assertIn("PRAGMA mmap_size=268435456", init_command)
+        # Django runs each ';'-separated statement on its own, so a stray
+        # empty fragment would silently no-op; guard the list stays clean.
+        statements = [stmt.strip() for stmt in init_command.split(";")]
+        self.assertTrue(all(statements), init_command)
+
+
+class StageCacheLockToleranceTests(SimpleTestCase):
+    def test_best_effort_stage_cache_swallows_locked_database(self) -> None:
+        """The session-detail render persists the derived-stage cache; a
+        contended write lock must be skipped rather than 500 the page."""
+        from django.db import OperationalError
+
+        with patch(
+            "hitch.main.views._update_cached_stage",
+            side_effect=OperationalError("database is locked"),
+        ):
+            # Must not raise: a locked cache write is skipped, not surfaced.
+            views._update_cached_stage_best_effort("thread-1", MagicMock(), 123)
+
+    def test_best_effort_stage_cache_reraises_other_errors(self) -> None:
+        from django.db import OperationalError
+
+        with (
+            patch(
+                "hitch.main.views._update_cached_stage",
+                side_effect=OperationalError("no such table: main_sessionmetadata"),
+            ),
+            self.assertRaises(OperationalError),
+        ):
+            views._update_cached_stage_best_effort("thread-1", MagicMock(), 123)
 
 
 class CodingAgentsTests(SimpleTestCase):
