@@ -1535,8 +1535,9 @@ class ClaudeSandboxDefaultTests(TestCase):
 
 class ClaudeFilesystemSettingsGatingTests(TestCase):
     """Visible sessions load repo/user ``.claude`` settings (CLAUDE.md memory,
-    project MCP) except under read-only, where repo hooks could bypass the
-    sandbox. Hidden runs never load them."""
+    project MCP) under every sandbox -- a visible session is the user's own repo,
+    the same trust boundary their local ``claude`` honors. Hidden runs (which may
+    target untrusted repos) never load them."""
 
     def _setting_sources(
         self, *, purpose: str, sandbox_policy: str | None
@@ -1567,42 +1568,20 @@ class ClaudeFilesystemSettingsGatingTests(TestCase):
         )
         return runner._build_options().setting_sources
 
-    def test_workspace_write_visible_loads_settings(self) -> None:
-        self.assertEqual(
-            self._setting_sources(
-                purpose=CodexInstance.PURPOSE_USER,
-                sandbox_policy=claude_options.SANDBOX_WORKSPACE_WRITE,
-            ),
-            ["user", "project", "local"],
-        )
-
-    def test_default_sandbox_visible_loads_settings(self) -> None:
-        # Empty sandbox normalizes to workspace-write for a visible session, so
-        # CLAUDE.md memory still loads in the normal dev mode.
-        self.assertEqual(
-            self._setting_sources(
-                purpose=CodexInstance.PURPOSE_USER, sandbox_policy=None
-            ),
-            ["user", "project", "local"],
-        )
-
-    def test_danger_full_access_visible_loads_settings(self) -> None:
-        self.assertEqual(
-            self._setting_sources(
-                purpose=CodexInstance.PURPOSE_USER,
-                sandbox_policy=claude_options.SANDBOX_DANGER_FULL_ACCESS,
-            ),
-            ["user", "project", "local"],
-        )
-
-    def test_read_only_visible_blocks_settings(self) -> None:
-        self.assertEqual(
-            self._setting_sources(
-                purpose=CodexInstance.PURPOSE_USER,
-                sandbox_policy=claude_options.SANDBOX_READ_ONLY,
-            ),
-            [],
-        )
+    def test_visible_session_loads_settings_under_every_sandbox(self) -> None:
+        for sandbox in (
+            claude_options.SANDBOX_WORKSPACE_WRITE,
+            claude_options.SANDBOX_READ_ONLY,
+            claude_options.SANDBOX_DANGER_FULL_ACCESS,
+            None,
+        ):
+            self.assertEqual(
+                self._setting_sources(
+                    purpose=CodexInstance.PURPOSE_USER, sandbox_policy=sandbox
+                ),
+                ["user", "project", "local"],
+                sandbox,
+            )
 
     def test_hidden_run_blocks_settings(self) -> None:
         self.assertEqual(

@@ -345,18 +345,13 @@ class _TurnRunner:
             session_id=None if resume else instance.thread_id,
             mcp_server=mcp_server,
             can_use_tool=self._can_use_tool,
-            # Load repo/user ``.claude`` settings (CLAUDE.md memory, project MCP)
-            # only for a visible session that is not read-only. Those settings can
-            # register shell *hooks* that run in the SDK outside ``can_use_tool``,
-            # so an untrusted repo could execute commands before the gate applies.
-            # ``readOnly`` exists precisely to inspect an untrusted repo safely, so
-            # it never loads them; ``workspaceWrite``/``dangerFullAccess`` (active
-            # dev on a trusted repo) do, matching a developer's own ``claude``.
-            # Hidden system-agent runs never load them.
-            load_filesystem_settings=(
-                instance.purpose == CodexInstance.PURPOSE_USER
-                and self._sandbox_policy != claude_options.SANDBOX_READ_ONLY
-            ),
+            # Visible user sessions load repo/user ``.claude`` settings (CLAUDE.md
+            # memory, project MCP), matching a developer's own ``claude``. Those
+            # settings can register shell *hooks* that run outside ``can_use_tool``,
+            # but a visible session is the user's own trusted repo -- the same
+            # trust boundary their local ``claude`` already honors. Hidden
+            # system-agent runs (which may target untrusted repos) load nothing.
+            load_filesystem_settings=instance.purpose == CodexInstance.PURPOSE_USER,
         )
 
     def _turn_input(self) -> str | AsyncIterator[dict[str, Any]]:
