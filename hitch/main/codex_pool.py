@@ -39,6 +39,7 @@ from django.utils import timezone
 from openai_codex import AppServerConfig, Codex, TransportClosedError
 from openai_codex.generated.v2_all import ThreadSource, WebSearchMode
 
+from hitch.main import rate_limit
 from hitch.main.codex_tools import registered_dynamic_tool_specs
 from hitch.main.db import is_database_locked_error
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
@@ -134,22 +135,24 @@ def spawn_new_session(
         enable_memories=enable_memories,
         web_search_mode=web_search_mode,
     )
-    with open_codex(lambda: Codex(config=config)) as codex:
-        start_kwargs: dict[str, Any] = {
-            "cwd": cwd,
-            "developerInstructions": developer_instructions,
-            "model": model,
-        }
-        if base_instructions:
-            start_kwargs["baseInstructions"] = base_instructions
-        if thread_source is not None:
-            start_kwargs["threadSource"] = thread_source.value
-        if purpose == CodexInstance.PURPOSE_USER:
-            start_kwargs["dynamicTools"] = registered_dynamic_tool_specs()
+    start_kwargs: dict[str, Any] = {
+        "cwd": cwd,
+        "developerInstructions": developer_instructions,
+        "model": model,
+    }
+    if base_instructions:
+        start_kwargs["baseInstructions"] = base_instructions
+    if thread_source is not None:
+        start_kwargs["threadSource"] = thread_source.value
+    if purpose == CodexInstance.PURPOSE_USER:
+        start_kwargs["dynamicTools"] = registered_dynamic_tool_specs()
+    name_source = (
+        thread_name if thread_name is not None and thread_name.strip() else prompt
+    )
+
+    def _create_and_persist(codex: Codex) -> tuple[str, str | None]:
         response = codex._client.thread_start(start_kwargs)
         thread = response.thread
-        thread_id = thread.id
-        thread_path = _thread_path_value(thread)
         # ``thread/start`` only creates the thread in the app-server's
         # in-memory map; the rollout file on disk is not written until
         # something triggers a metadata persist. Without this step, the
@@ -163,12 +166,19 @@ def spawn_new_session(
         # once the first turn streams in, so this is usually invisible in
         # the UI. Callers can pass ``thread_name`` when the prompt starts
         # with generic instructions and a better task title is known.
-        name_source = (
-            thread_name
-            if thread_name is not None and thread_name.strip()
-            else prompt
-        )
-        codex._client.thread_set_name(thread_id, _initial_thread_name(name_source))
+        codex._client.thread_set_name(thread.id, _initial_thread_name(name_source))
+        return thread.id, _thread_path_value(thread)
+
+    # ``thread_set_name`` triggers the CODEX_HOME state-DB persist, whose
+    # one-time migration path has no SQLITE_BUSY retry; a lock there kills the
+    # app-server mid-operation as a ``TransportClosedError`` that ``open_codex``
+    # (construction-only retry) never sees. Retrying the whole open+create here
+    # is safe even though ``thread_start`` is not idempotent: that failure means
+    # the app-server exited *before* the thread was persisted to disk, so the
+    # discarded in-memory thread leaves nothing behind to duplicate.
+    thread_id, thread_path = run_codex_op_with_retry(
+        lambda: Codex(config=config), _create_and_persist
+    )
     instance = _spawn_worker(
         thread_id=thread_id,
         cwd=cwd,
@@ -216,17 +226,24 @@ def create_session_thread(
         enable_memories=enable_memories,
         web_search_mode=web_search_mode,
     )
-    with open_codex(lambda: Codex(config=config)) as codex:
-        start_kwargs: dict[str, Any] = {
-            "cwd": cwd,
-            "developer_instructions": developer_instructions,
-            "model": model,
-        }
-        if base_instructions:
-            start_kwargs["base_instructions"] = base_instructions
+    start_kwargs: dict[str, Any] = {
+        "cwd": cwd,
+        "developer_instructions": developer_instructions,
+        "model": model,
+    }
+    if base_instructions:
+        start_kwargs["base_instructions"] = base_instructions
+
+    def _create_and_persist(codex: Codex) -> str:
         thread = codex.thread_start(**start_kwargs)
         codex._client.thread_set_name(thread.id, _initial_thread_name(name))
         return thread.id
+
+    # See ``spawn_new_session``: retry the open+create when the ``thread_set_name``
+    # persist races the CODEX_HOME state-DB migration. Safe to retry despite the
+    # non-idempotent ``thread_start`` because a locked persist exits the
+    # app-server before anything reaches disk.
+    return run_codex_op_with_retry(lambda: Codex(config=config), _create_and_persist)
 
 
 # Upper bound for the auto-derived thread name. Matches the
@@ -972,6 +989,34 @@ def reconcile_dead() -> int:
     return updated
 
 
+# Floor on how often the request/SSE-path debounce lets the global sweep run.
+# Short enough that a crashed worker still clears within a couple seconds, long
+# enough that a burst of concurrent page loads / SSE reconnects collapses to one
+# sweep instead of one per request.
+_RECONCILE_DEAD_MIN_INTERVAL = timedelta(seconds=2)
+
+
+def reconcile_dead_if_due() -> int:
+    """Debounced ``reconcile_dead`` for the request and SSE paths.
+
+    Every major GET view and every SSE (re)connect ran the full
+    ``reconcile_dead`` sweep, so N concurrent browser tabs produced N concurrent
+    full-table sweeps all contending for SQLite's single write lock. Gating the
+    sweep through ``rate_limit.claim`` collapses that to at most one sweep per
+    ``_RECONCILE_DEAD_MIN_INTERVAL`` across the whole app; skipped callers rely
+    on the next due request and the 60s workflow-maintenance scheduler (which
+    still calls ``reconcile_dead`` directly) to clear dead workers. Tests run the
+    sweep unconditionally so existing per-request reconcile assertions hold.
+    """
+    if getattr(settings, "TESTING", False):
+        return reconcile_dead()
+    if rate_limit.claim(
+        "reconcile_dead", min_interval=_RECONCILE_DEAD_MIN_INTERVAL
+    ):
+        return reconcile_dead()
+    return 0
+
+
 def reconcile_dead_for_workflow(
     workflow_id: int, *, main_thread_id: str | None = None
 ) -> int:
@@ -1430,6 +1475,71 @@ def open_codex(factory: Callable[[], Codex]) -> Generator[Codex]:
     codex = _start_codex_with_retry(factory)
     with codex as entered:
         yield entered
+
+
+@contextlib.contextmanager
+def open_codex_resumed(
+    factory: Callable[[], Codex],
+    *,
+    thread_id: str,
+    resume_kwargs: dict[str, Any] | None = None,
+    configure: Callable[[Codex], None] | None = None,
+) -> Generator[tuple[Codex, Any]]:
+    """Open an app-server, run ``configure`` then ``thread_resume``, retrying a
+    locked CODEX_HOME state DB across the whole sequence, and yield the live
+    ``(codex, thread)`` so the caller can start a (non-idempotent) turn.
+
+    ``open_codex`` only retries *construction*. But the state-DB
+    migration/backfill path (no SQLITE_BUSY retry, openai/codex#20213) is also
+    reached lazily by ``thread_resume`` -- resuming a thread another worker
+    persisted migrates its rows -- and a lock there exits the app-server
+    mid-resume as a ``TransportClosedError`` the construction-only retry never
+    sees. This retries construction+configure+resume together. ``thread_resume``
+    is idempotent, so re-running it is safe. ``configure`` runs once per attempt
+    against the attempt's fresh server (e.g. to install approval/notification
+    handlers); a retried attempt discards its server, so any helper threads
+    ``configure`` starts must tolerate that server closing under them (the
+    worker's goal forwarder exits cleanly when its source transport closes).
+    """
+    resume_kwargs = resume_kwargs or {}
+    last_error: TransportClosedError | None = None
+    for attempt in range(_APPSERVER_START_MAX_ATTEMPTS):
+        codex = _start_codex_with_retry(factory)
+        entered = codex.__enter__()
+        try:
+            if configure is not None:
+                configure(entered)
+            thread = entered.thread_resume(thread_id, **resume_kwargs)
+        except TransportClosedError as exc:
+            codex.__exit__(type(exc), exc, exc.__traceback__)
+            if not is_database_locked_error(exc):
+                raise
+            last_error = exc
+            logger.warning(
+                "Codex app-server state DB locked during resume (attempt %s/%s)",
+                attempt + 1,
+                _APPSERVER_START_MAX_ATTEMPTS,
+            )
+            if attempt + 1 < _APPSERVER_START_MAX_ATTEMPTS:
+                time.sleep(
+                    min(
+                        _APPSERVER_START_BACKOFF_BASE_SECONDS * (2**attempt),
+                        _APPSERVER_START_BACKOFF_MAX_SECONDS,
+                    )
+                )
+            continue
+        except BaseException as exc:
+            codex.__exit__(type(exc), exc, exc.__traceback__)
+            raise
+        try:
+            yield entered, thread
+        except BaseException as exc:
+            codex.__exit__(type(exc), exc, exc.__traceback__)
+            raise
+        codex.__exit__(None, None, None)
+        return
+    assert last_error is not None
+    raise last_error
 
 
 # The Django web process used to open (and so re-init the CODEX_HOME state DB

@@ -83,7 +83,7 @@ from hitch.main.codex_pool import (
     cleanup_requested_input_images_for,
     control_path_for,
     discard_input_attachment_paths,
-    open_codex,
+    open_codex_resumed,
     resolve_dangling_requests_for_instance,
 )
 from hitch.main.codex_tools import (
@@ -450,34 +450,48 @@ def _run_turn(
     steer_forwarder: _SteerControlForwarder | None = None
     notification_order: NotificationOrdering = _fallback_notification_order
     control_path = control_path_for(instance)
+    resume_kwargs: dict[str, Any] = {}
+    if instance.base_instructions:
+        resume_kwargs["base_instructions"] = instance.base_instructions
+    if instance.developer_instructions:
+        resume_kwargs["developer_instructions"] = instance.developer_instructions
+
+    def _configure(codex: Codex) -> None:
+        # Runs once per app-server open attempt (``open_codex_resumed`` retries
+        # the whole open+configure+resume when the resume races the CODEX_HOME
+        # state-DB migration). All three steps are safe to redo against a fresh
+        # server: the first two only mutate the client, and a goal forwarder
+        # left over from a discarded attempt exits cleanly once its transport
+        # closes.
+        nonlocal notification_order, goal_forwarder
+        notification_order = _install_notification_sequencer(codex)
+        # The Codex top-level class instantiates its own AppServerClient
+        # without an ``approval_handler`` argument, so the only way to wire
+        # an interactive callback is to swap the bound method on the client
+        # after construction. The SDK's default handler unconditionally
+        # rubber-stamps, so we always install our own — either
+        # the interactive one that opens an ``ApprovalRequest`` row, or
+        # (only under ``approve_all``) a rubber-stamp that uses the
+        # current ``accept`` wire value.
+        codex._client._approval_handler = _make_approval_handler(
+            instance=instance,
+            write_event=_write_event,
+            approval_mode=approval_mode,
+        )
+        goal_forwarder = _start_goal_event_forwarder(
+            codex._client,
+            thread_id=instance.thread_id,
+            write_notification=_write_notification,
+            discard_notification=_discard_notification,
+        )
+
     try:
-        with open_codex(lambda: Codex(config=config)) as codex:
-            notification_order = _install_notification_sequencer(codex)
-            # The Codex top-level class instantiates its own AppServerClient
-            # without an ``approval_handler`` argument, so the only way to wire
-            # an interactive callback is to swap the bound method on the client
-            # after construction. The SDK's default handler unconditionally
-            # rubber-stamps, so we always install our own — either
-            # the interactive one that opens an ``ApprovalRequest`` row, or
-            # (only under ``approve_all``) a rubber-stamp that uses the
-            # current ``accept`` wire value.
-            codex._client._approval_handler = _make_approval_handler(
-                instance=instance,
-                write_event=_write_event,
-                approval_mode=approval_mode,
-            )
-            goal_forwarder = _start_goal_event_forwarder(
-                codex._client,
-                thread_id=instance.thread_id,
-                write_notification=_write_notification,
-                discard_notification=_discard_notification,
-            )
-            resume_kwargs: dict[str, Any] = {}
-            if instance.base_instructions:
-                resume_kwargs["base_instructions"] = instance.base_instructions
-            if instance.developer_instructions:
-                resume_kwargs["developer_instructions"] = instance.developer_instructions
-            thread = codex.thread_resume(instance.thread_id, **resume_kwargs)
+        with open_codex_resumed(
+            lambda: Codex(config=config),
+            thread_id=instance.thread_id,
+            resume_kwargs=resume_kwargs,
+            configure=_configure,
+        ) as (codex, thread):
             turn = _start_turn(
                 codex,
                 thread,

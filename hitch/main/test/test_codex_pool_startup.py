@@ -2,7 +2,7 @@ from collections.abc import Callable
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 from openai_codex import TransportClosedError
 
 from hitch.main import codex_pool
@@ -184,3 +184,121 @@ class RunCodexOpWithRetryTests(SimpleTestCase):
         self.assertEqual(
             operation.call_count, codex_pool._APPSERVER_START_MAX_ATTEMPTS
         )
+
+
+class _ResumableCodex(_FakeCodex):
+    """``_FakeCodex`` plus a ``thread_resume`` that can fail a set number of
+    times before returning a sentinel thread, used to drive
+    ``open_codex_resumed``'s open+configure+resume retry loop."""
+
+    def __init__(self, fail_times: int = 0, error: Exception | None = None) -> None:
+        super().__init__()
+        self._fail_times = fail_times
+        self._error = error or TransportClosedError(_LOCKED)
+        self.resume_calls = 0
+
+    def thread_resume(self, _thread_id: str, **_kwargs: object) -> object:
+        self.resume_calls += 1
+        if self.resume_calls <= self._fail_times:
+            raise self._error
+        return ("thread", _thread_id)
+
+
+class OpenCodexResumedTests(SimpleTestCase):
+    def test_yields_resumed_thread_and_closes_on_exit(self) -> None:
+        codex = _ResumableCodex()
+        configured: list[object] = []
+        with codex_pool.open_codex_resumed(
+            cast("Callable[[], Any]", lambda: codex),
+            thread_id="t1",
+            configure=configured.append,
+        ) as (opened, thread):
+            self.assertIs(opened, codex)
+            self.assertEqual(thread, ("thread", "t1"))
+            self.assertEqual(configured, [codex])
+            self.assertFalse(codex.closed)
+        self.assertTrue(codex.closed)
+
+    def test_retries_locked_resume_with_fresh_server(self) -> None:
+        servers: list[_ResumableCodex] = []
+
+        def factory() -> _ResumableCodex:
+            # The first server loses the migration race and exits on resume; the
+            # next attempt opens a fresh server whose resume succeeds.
+            server = _ResumableCodex(fail_times=1 if not servers else 0)
+            servers.append(server)
+            return server
+
+        configured: list[object] = []
+        with (
+            patch("hitch.main.codex_pool.time.sleep") as mock_sleep,
+            codex_pool.open_codex_resumed(
+                cast("Callable[[], Any]", factory),
+                thread_id="t1",
+                configure=configured.append,
+            ) as (opened, thread),
+        ):
+            self.assertEqual(thread, ("thread", "t1"))
+
+        # First server failed its resume and was closed; second succeeded.
+        self.assertEqual(len(servers), 2)
+        self.assertTrue(servers[0].closed)
+        self.assertIs(opened, servers[1])
+        # configure runs once per attempt against that attempt's server.
+        self.assertEqual(configured, servers)
+        self.assertEqual(mock_sleep.call_count, 1)
+
+    def test_non_locked_resume_error_is_not_retried(self) -> None:
+        codex = _ResumableCodex(fail_times=1, error=TransportClosedError("crash"))
+        with (
+            patch("hitch.main.codex_pool.time.sleep"),
+            self.assertRaises(TransportClosedError),
+            codex_pool.open_codex_resumed(
+                cast("Callable[[], Any]", lambda: codex), thread_id="t1"
+            ),
+        ):
+            pass
+        self.assertEqual(codex.resume_calls, 1)
+        self.assertTrue(codex.closed)
+
+    def test_caller_exception_closes_server(self) -> None:
+        codex = _ResumableCodex()
+        with (
+            self.assertRaises(ValueError),
+            codex_pool.open_codex_resumed(
+                cast("Callable[[], Any]", lambda: codex), thread_id="t1"
+            ),
+        ):
+            raise ValueError("boom")
+        self.assertTrue(codex.closed)
+
+
+class ReconcileDeadIfDueTests(SimpleTestCase):
+    @override_settings(TESTING=False)
+    def test_runs_sweep_when_claim_wins(self) -> None:
+        with (
+            patch("hitch.main.codex_pool.reconcile_dead", return_value=3) as sweep,
+            patch("hitch.main.codex_pool.rate_limit.claim", return_value=True) as claim,
+        ):
+            self.assertEqual(codex_pool.reconcile_dead_if_due(), 3)
+        sweep.assert_called_once_with()
+        claim.assert_called_once()
+
+    @override_settings(TESTING=False)
+    def test_skips_sweep_when_claim_loses(self) -> None:
+        with (
+            patch("hitch.main.codex_pool.reconcile_dead") as sweep,
+            patch("hitch.main.codex_pool.rate_limit.claim", return_value=False),
+        ):
+            self.assertEqual(codex_pool.reconcile_dead_if_due(), 0)
+        sweep.assert_not_called()
+
+    @override_settings(TESTING=True)
+    def test_always_sweeps_under_testing(self) -> None:
+        with (
+            patch("hitch.main.codex_pool.reconcile_dead", return_value=1) as sweep,
+            patch("hitch.main.codex_pool.rate_limit.claim") as claim,
+        ):
+            self.assertEqual(codex_pool.reconcile_dead_if_due(), 1)
+        sweep.assert_called_once_with()
+        claim.assert_not_called()
