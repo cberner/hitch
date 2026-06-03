@@ -6857,13 +6857,16 @@ def _usage_token_cache_state(
     if not metadata.thread_id:
         return _UsageTokenCacheState(refresh_pending=False, cache_usable=False)
     if not metadata.codex_path:
+        # A Claude thread has no rollout path; its cache row (``rollout_path ==
+        # ""``) is the authoritative accumulated usage and cannot be repaired
+        # from a file. Treat a usable one as current -- not a path-repair
+        # candidate -- so ``/usage`` and ``/profile`` stop reporting it as
+        # refresh-pending and the refresh worker stops probing the Codex
+        # app-server with a local Claude UUID.
+        cache_usable = _claude_usage_cache_is_authoritative(cache)
         return _UsageTokenCacheState(
-            refresh_pending=True,
-            cache_usable=(
-                cache is not None
-                and cache.rollout_path == ""
-                and _cached_token_usage_logic_is_current(cache)
-            ),
+            refresh_pending=not cache_usable,
+            cache_usable=cache_usable,
         )
     if cache is None:
         return _UsageTokenCacheState(refresh_pending=True, cache_usable=False)
@@ -6955,11 +6958,24 @@ def _usage_token_refresh_needs_path_repair(
     ) is None
 
 
+def _claude_usage_cache_is_authoritative(
+    cache: ArchivedSessionTokenUsage | None,
+) -> bool:
+    """Whether a cache row is a usable Claude-written row (no rollout to repair)."""
+    return (
+        cache is not None
+        and cache.rollout_path == ""
+        and _cached_token_usage_logic_is_current(cache)
+    )
+
+
 def _usage_token_refresh_needed(
     metadata: _UsageTokenRefreshSource, cache: ArchivedSessionTokenUsage | None
 ) -> bool:
     if not metadata.codex_path:
-        return True
+        # A Claude row (rollout_path == "") is authoritative and unrepairable, so
+        # it never needs a refresh; only a genuinely empty/uncached row does.
+        return not _claude_usage_cache_is_authoritative(cache)
     rollout_state = _rollout_file_state_from_value(metadata.codex_path)
     if rollout_state is None:
         return True
@@ -10003,6 +10019,16 @@ def _rename_codex_thread_from_proposal(
     title = _proposed_session_thread_title(proposed_session)
     if not title:
         return False
+    # Claude candidate threads are local-only -- there is no Codex app-server
+    # thread to ``thread_set_name``, and the visible title lives in the
+    # session-index cache. Apply it directly; routing through the Codex rename
+    # would raise and leave the accepted session showing its hidden candidate
+    # title instead of the proposal title.
+    if _session_is_claude(session_metadata.thread_id):
+        _apply_proposed_session_title_to_session_metadata(
+            proposed_session, session_metadata
+        )
+        return True
     try:
         with codex_pool.borrow_codex(
             Codex, enable_memories=settings.enable_memories

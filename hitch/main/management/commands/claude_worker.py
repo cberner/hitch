@@ -47,7 +47,7 @@ from django.utils import timezone
 from hitch.main import claude_options, claude_translate, claude_usage
 from hitch.main.claude_tools import PROPOSE_SESSION_TOOL_NAME, build_hitch_mcp_server
 from hitch.main.codex_pool import (
-    cleanup_requested_input_images_for,
+    cleanup_input_images_for,
     control_path_for,
 )
 from hitch.main.management.commands.codex_worker import (
@@ -175,7 +175,11 @@ class Command(BaseCommand):
             instance.error = repr(exc)
             instance.save(update_fields=["status", "ended_at", "error"])
             _notify_system_agents(instance)
-            cleanup_requested_input_images_for(instance)
+            # Claude inlines uploaded images as base64 into the query and the
+            # transcript keeps only ``[image]`` markers, so no resume needs the
+            # saved files -- clean them unconditionally once the turn consumed
+            # them (Codex defers this because its rollout references the paths).
+            cleanup_input_images_for(instance)
             raise
 
         instance.ended_at = timezone.now()
@@ -193,7 +197,11 @@ class Command(BaseCommand):
         instance.save(update_fields=update_fields)
         _record_token_usage(instance, runner)
         _notify_system_agents(instance)
-        cleanup_requested_input_images_for(instance)
+        # Claude images are inlined into the query, not referenced on resume, so
+        # the turn end is the cleanup boundary -- delete them unconditionally
+        # rather than only when a supersede flagged it (which ordinary uploads
+        # never do, leaking the private temp files indefinitely).
+        cleanup_input_images_for(instance)
 
 
 class _TurnRunner:
@@ -410,7 +418,16 @@ class _TurnRunner:
             return claude_options.deny_result(
                 "Hidden runs cannot prompt the user for input."
             )
-        if self._approval_mode == claude_options.APPROVAL_DENY_ALL:
+        # ``ExitPlanMode`` is the plan-review boundary: leaving plan mode is a
+        # decision for the user, not an escalation, so a visible session always
+        # reaches the interactive approval below regardless of approval mode --
+        # ``deny_all`` must not trap the turn in plan mode, and ``approve_all``
+        # must not skip the review. Like ``AskUserQuestion`` this precedes the
+        # deny-all check; hidden runs have no plan UI, so it is declined there.
+        if tool_name == _EXIT_PLAN_MODE_TOOL:
+            if self._instance.purpose != CodexInstance.PURPOSE_USER:
+                return claude_options.deny_result("Hidden runs cannot leave plan mode.")
+        elif self._approval_mode == claude_options.APPROVAL_DENY_ALL:
             return claude_options.deny_result("Denied by Hitch approval policy.")
         # ``workspaceWrite`` confines edits to the repo, but ``SandboxSettings``
         # only sandboxes bash -- the SDK's Write/Edit tools are not -- so enforce

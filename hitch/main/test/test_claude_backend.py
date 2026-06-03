@@ -1145,6 +1145,43 @@ class PlanModeApprovalTests(TestCase):
         mock_create.assert_not_called()
         self.assertIsInstance(result, PermissionResultAllow)
 
+    def test_exit_plan_mode_is_reviewed_even_under_deny_all(self) -> None:
+        # ``deny_all`` denies escalations, but leaving plan mode is the user's
+        # call -- it must reach the interactive approval, not be denied (which
+        # would trap the turn in plan mode).
+        import asyncio
+
+        from hitch.main.management.commands import claude_worker
+        from hitch.main.models import ApprovalRequest
+
+        runner = self._runner()
+        runner._approval_mode = claude_options.APPROVAL_DENY_ALL
+        with (
+            patch.object(
+                claude_worker, "_create_pending_approval", return_value=12
+            ) as mock_create,
+            patch.object(
+                claude_worker,
+                "_wait_for_decision",
+                return_value=ApprovalRequest.DECISION_ACCEPT,
+            ),
+        ):
+            result = asyncio.run(
+                runner._can_use_tool("ExitPlanMode", {"plan": "p"}, None)
+            )
+        mock_create.assert_called_once()
+        self.assertIsInstance(result, PermissionResultAllow)
+
+    def test_hidden_run_cannot_leave_plan_mode(self) -> None:
+        import asyncio
+
+        from claude_agent_sdk import PermissionResultDeny
+
+        runner = self._runner()
+        runner._instance.purpose = CodexInstance.PURPOSE_SYSTEM_AGENT
+        result = asyncio.run(runner._can_use_tool("ExitPlanMode", {"plan": "p"}, None))
+        self.assertIsInstance(result, PermissionResultDeny)
+
 
 class PowerShellGatingTests(TestCase):
     """``PowerShell`` runs host commands natively, so it is gated like Bash."""
@@ -1202,6 +1239,142 @@ class ClaudeArchiveUsageTests(TestCase):
             self.assertIsNotNone(row, archived)
             assert row is not None
             self.assertEqual(row.input_tokens, 500)
+
+
+class ClaudeCandidateRenameTests(TestCase):
+    """Accepting a Claude candidate proposal applies the title locally; there is
+    no Codex app-server thread to ``thread_set_name``."""
+
+    def test_claude_candidate_title_applied_without_codex(self) -> None:
+        from types import SimpleNamespace
+
+        from hitch.main import views
+
+        CodexInstance.objects.create(
+            thread_id="thread-claude-cand",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+        proposed = SimpleNamespace(title="Proposal Title")
+        metadata = SimpleNamespace(thread_id="thread-claude-cand")
+        with (
+            patch("hitch.main.views.Codex") as mock_codex,
+            patch("hitch.main.views.session_index.update_cached_name") as mock_name,
+        ):
+            result = views._rename_codex_thread_from_proposal(
+                proposed_session=cast(Any, proposed),
+                session_metadata=cast(Any, metadata),
+                settings=cast(Any, SimpleNamespace(enable_memories=False)),
+            )
+        self.assertTrue(result)
+        mock_codex.assert_not_called()
+        mock_name.assert_called_once_with("thread-claude-cand", "Proposal Title")
+
+
+class ClaudeUsageRefreshTests(TestCase):
+    """An authoritative Claude usage cache (no rollout) is never a refresh/repair
+    candidate, so /usage and /profile stop probing the Codex app-server for it."""
+
+    def _claude_cache(self) -> Any:
+        from hitch.main import models
+        from hitch.main.models import ArchivedSessionTokenUsage
+
+        return ArchivedSessionTokenUsage(
+            thread_id="thread-claude-usage",
+            rollout_path="",
+            input_tokens=100,
+            usage_logic_version=models.TOKEN_USAGE_LOGIC_VERSION,
+        )
+
+    def _metadata(self) -> Any:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            thread_id="thread-claude-usage",
+            codex_path="",
+            usage_last_checked_at=None,
+        )
+
+    def test_authoritative_cache_is_not_refresh_pending(self) -> None:
+        from hitch.main import views
+
+        state = views._usage_token_cache_state(self._metadata(), self._claude_cache())
+        self.assertFalse(state.refresh_pending)
+        self.assertTrue(state.cache_usable)
+
+    def test_authoritative_cache_does_not_need_refresh(self) -> None:
+        from hitch.main import views
+
+        self.assertFalse(
+            views._usage_token_refresh_needed(self._metadata(), self._claude_cache())
+        )
+
+    def test_missing_cache_still_needs_refresh(self) -> None:
+        from hitch.main import views
+
+        self.assertTrue(views._usage_token_refresh_needed(self._metadata(), None))
+
+
+class ClaudeImageCleanupTests(TestCase):
+    """Claude inlines uploaded images as base64, so the worker cleans them up at
+    turn end unconditionally rather than only when a supersede flagged it."""
+
+    def test_worker_clears_images_even_without_cleanup_flag(self) -> None:
+        from django.test import override_settings
+
+        from hitch.main import codex_pool
+        from hitch.main.management.commands import claude_worker
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            override_settings(CODEX_EVENTS_DIR=tmp),
+        ):
+            attachments = codex_pool.input_attachments_dir()
+            attachments.mkdir(parents=True, exist_ok=True)
+            image = attachments / "shot.png"
+            image.write_bytes(b"img")
+            events_path = Path(tmp) / "events.jsonl"
+            instance = CodexInstance.objects.create(
+                thread_id="thread-img",
+                cwd=tmp,
+                prompt="look",
+                events_path=str(events_path),
+                pid=0,
+                status=CodexInstance.STATUS_RUNNING,
+                backend=CodexInstance.BACKEND_CLAUDE,
+                purpose=CodexInstance.PURPOSE_USER,
+                input_image_paths=[str(image)],
+                input_attachment_paths=[str(image)],
+                # Ordinary uploads start with this False -- the bug was that
+                # cleanup then never ran.
+                input_attachment_cleanup_requested=False,
+            )
+            fake = _FakeClient([_assistant(TextBlock(text="ok")), _result()])
+
+            def _factory(*, options: Any) -> _FakeClient:
+                fake.options = options
+                return fake
+
+            with (
+                patch.object(claude_worker, "ClaudeSDKClient", _factory),
+                patch.object(claude_worker, "_apply_worker_oom_score_adjust"),
+                patch("hitch.main.management.commands.claude_worker.signal.signal"),
+                patch.object(claude_worker, "_build_query_input", return_value="look"),
+            ):
+                claude_worker.Command().handle(
+                    instance_id=instance.pk,
+                    model=None,
+                    reasoning_effort=None,
+                    sandbox_policy=None,
+                    approval_mode=None,
+                    web_search_mode=None,
+                    plan_mode=False,
+                )
+            self.assertFalse(image.exists())
 
 
 class ClaudePlanModeStateTests(TestCase):
