@@ -3041,11 +3041,10 @@ def _session_list_page_from_codex_or_warm_index(
     project_visibility: SessionProjectVisibility | None,
     system_only: bool,
 ) -> SessionListPage:
-    config = codex_pool.app_server_config(
-        enable_memories=current_settings.enable_memories
-    )
     try:
-        with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
+        with codex_pool.borrow_codex(
+            Codex, enable_memories=current_settings.enable_memories
+        ) as codex:
             return _session_list_page(
                 codex,
                 request,
@@ -5533,8 +5532,9 @@ def _refresh_usage_session_index_best_effort(
         )
         if not refresh_active and not refresh_archived:
             return
-        config = codex_pool.app_server_config(enable_memories=enable_memories)
-        with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
+        with codex_pool.borrow_codex(
+            Codex, enable_memories=enable_memories
+        ) as codex:
             session_index.refresh_from_codex(
                 codex,
                 projects=list(Project.objects.all()),
@@ -5801,15 +5801,9 @@ def _refresh_usage_token_cache_best_effort(
                         rollout_state = _rollout_file_state_from_value(path)
                         if rollout_state is None:
                             if codex is None:
-                                config = codex_pool.app_server_config(
-                                    enable_memories=False
-                                )
-                                # enter_context invokes the factory synchronously
-                                # in this iteration, so the loop-variable capture
-                                # B023 warns about cannot actually go stale here.
                                 codex = stack.enter_context(
-                                    codex_pool.open_codex(
-                                        lambda: Codex(config=config)  # noqa: B023
+                                    codex_pool.borrow_codex(
+                                        Codex, enable_memories=False
                                     )
                                 )
                             if projects is None:
@@ -6450,9 +6444,10 @@ def _developer_instructions_for_project(
 
 def _associate_existing_sessions_with_project(project: Project, request: HttpRequest) -> None:
     settings = _stored_settings(request)
-    config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
     try:
-        with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
+        with codex_pool.borrow_codex(
+            Codex, enable_memories=settings.enable_memories
+        ) as codex:
             threads = _all_threads(codex)
             try:
                 threads.extend(_all_threads(codex, archived=True))
@@ -7518,8 +7513,7 @@ def _new_session_post_settings(request: HttpRequest) -> ResolvedSettings:
         if models_data:
             return _resolved_settings(request, models_data)
 
-    config = codex_pool.app_server_config(enable_memories=enable_memories)
-    with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
+    with codex_pool.borrow_codex(Codex, enable_memories=enable_memories) as codex:
         models_data = list(codex.models().data)
     _store_models_cache(enable_memories=enable_memories, models_data=models_data)
     return _resolved_settings(request, models_data)
@@ -7567,8 +7561,9 @@ def _refresh_models_cache_best_effort(*, enable_memories: bool) -> None:
     models_data: list[Any] = []
     try:
         close_old_connections()
-        config = codex_pool.app_server_config(enable_memories=enable_memories)
-        with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
+        with codex_pool.borrow_codex(
+            Codex, enable_memories=enable_memories
+        ) as codex:
             models_data = list(codex.models().data)
         refreshed = True
     except Exception:
@@ -7654,8 +7649,9 @@ def _refresh_rate_limits_cache_best_effort(*, enable_memories: bool) -> None:
         # the cross-process guard the per-process TTL cannot provide.
         if rate_limit.claim(_RATE_LIMITS_RATE_LIMIT_KEY):
             close_old_connections()
-            config = codex_pool.app_server_config(enable_memories=enable_memories)
-            with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
+            with codex_pool.borrow_codex(
+                Codex, enable_memories=enable_memories
+            ) as codex:
                 rate_limits = _fetch_rate_limits(codex)
             fetched = True
     except Exception:
@@ -7861,10 +7857,9 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         if cache_has_value:
             _schedule_models_refresh(enable_memories=enable_memories_value)
         else:
-            config = codex_pool.app_server_config(
-                enable_memories=enable_memories_value
-            )
-            with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
+            with codex_pool.borrow_codex(
+                Codex, enable_memories=enable_memories_value
+            ) as codex:
                 models_data = list(codex.models().data)
         compat_error = _validate_settings_against_models(model, effort, models_data)
         if compat_error:
@@ -8263,8 +8258,9 @@ def _rename_codex_thread_from_proposal(
     if not title:
         return False
     try:
-        config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
-        with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
+        with codex_pool.borrow_codex(
+            Codex, enable_memories=settings.enable_memories
+        ) as codex:
             codex._client.thread_set_name(session_metadata.thread_id, title)
     except Exception:
         logger.exception(
@@ -8359,8 +8355,9 @@ def set_session_name(request: HttpRequest, session_id: str) -> HttpResponse:
     if len(name) > _NAME_MAX_LEN:
         return HttpResponseBadRequest("name is too long")
     settings = _stored_settings(request)
-    config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
-    with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
+    with codex_pool.borrow_codex(
+        Codex, enable_memories=settings.enable_memories
+    ) as codex:
         codex._client.thread_set_name(session_id, name)
     session_index.update_cached_name(session_id, name)
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
@@ -8376,8 +8373,9 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
     if archived not in {"true", "false"}:
         return HttpResponseBadRequest("archived must be true or false")
     settings = _stored_settings(request)
-    config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
-    with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
+    with codex_pool.borrow_codex(
+        Codex, enable_memories=settings.enable_memories
+    ) as codex:
         if archived == "true":
             codex.thread_archive(session_id)
         else:
@@ -8673,8 +8671,9 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         # ``Thread.cwd`` is an ``AbsolutePathBuf`` pydantic RootModel, so unwrap
         # ``.root`` to get the underlying string the worker subprocess expects;
         # also accept a plain str so a future SDK schema change does not break us.
-        config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
-        with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
+        with codex_pool.borrow_codex(
+            Codex, enable_memories=settings.enable_memories
+        ) as codex:
             resumed = codex._client.thread_resume(session_id)
             thread = resumed.thread
             thread_entries = list(_entries_for(thread))
