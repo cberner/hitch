@@ -56,6 +56,15 @@ DEMO_REGISTRATION_TRANSITIONS: Final[dict[str, frozenset[str]]] = {
         }
     ),
 }
+# Upstream demo containers are user code that can hang on connect or while
+# producing the response status/headers. A finite timeout keeps a bad container
+# from pinning a Django request thread forever (TimeoutError is an OSError
+# subclass, so it surfaces through the existing 502 handling for the buffered
+# path). The streaming path (_stream_upstream) instead retries on a read
+# timeout so a legitimate streaming/SSE response that idles past this between
+# chunks is not aborted after its headers have been sent.
+DEMO_PROXY_TIMEOUT_SECONDS: Final = 30
+
 HOP_BY_HOP_HEADERS: Final = {
     "connection",
     "keep-alive",
@@ -603,7 +612,9 @@ def proxy_demo_request(
     upstream_path = _upstream_path(path, request.META.get("QUERY_STRING", ""))
     method = request.method or "GET"
     body = request.body if method not in {"GET", "HEAD"} else None
-    connection = http.client.HTTPConnection(demo.host, demo.port, timeout=None)
+    connection = http.client.HTTPConnection(
+        demo.host, demo.port, timeout=DEMO_PROXY_TIMEOUT_SECONDS
+    )
     try:
         connection.request(
             method,
@@ -650,6 +661,12 @@ def proxy_demo_request(
             response[key] = value
         return response
 
+    # The connect/response-start timeout above must not abort the streaming
+    # body: a legitimate streaming or SSE response can idle well past it between
+    # chunks. _stream_upstream tolerates read timeouts (retries the read) rather
+    # than letting one bubble out after headers are sent. Handling it in the
+    # generator is robust to the will_close case, where getresponse() has already
+    # detached connection.sock (None) and the live socket lives on upstream.fp.
     stream_response = StreamingHttpResponse(
         _stream_upstream(upstream, connection),
         status=upstream.status,
@@ -1206,7 +1223,15 @@ def _stream_upstream(
 ) -> Iterator[bytes]:
     try:
         while True:
-            chunk = upstream.read(64 * 1024)
+            try:
+                chunk = upstream.read(64 * 1024)
+            except TimeoutError:
+                # The connect-phase socket timeout also covers body reads, but a
+                # streaming/SSE response may legitimately idle between chunks.
+                # Keep waiting instead of aborting the response after its headers
+                # have already been sent; a genuinely dead upstream surfaces as a
+                # different OSError (or EOF) and still ends the stream.
+                continue
             if not chunk:
                 break
             yield chunk
