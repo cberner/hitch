@@ -367,7 +367,19 @@ class SessionMetadata(models.Model):
 
     class Meta:
         indexes = [
-            models.Index(fields=["project", "-updated_at"]),
+            # The global session list (``indexed_sessions``) orders the whole
+            # table by ``-codex_updated_at, -id`` with no project filter; this
+            # composite lets SQLite satisfy that ordering from the index instead
+            # of a full-table filesort that grows with every Codex thread. The
+            # leading column also covers the ``codex_updated_at__isnull`` filter.
+            models.Index(
+                fields=["-codex_updated_at", "-id"],
+                name="main_sessio_codex_updated_idx",
+            ),
+            # Project-scoped, archive-filtered session list (see views). The
+            # former ``["project", "-updated_at"]`` index was dropped: it sorted
+            # on the local bookkeeping ``updated_at`` that no query orders by, so
+            # it only added write amplification.
             models.Index(
                 fields=["project", "codex_archived", "-codex_updated_at"],
                 name="main_sessio_project_18730c_idx",
