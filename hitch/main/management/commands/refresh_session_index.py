@@ -30,7 +30,7 @@ class Command(BaseCommand):
     def handle(self, *args: Any, **options: Any) -> None:
         projects = list(Project.objects.all())
         config = codex_pool.app_server_config(enable_memories=False)
-        with Codex(config=config) as codex:
+        with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
             result = session_index.refresh_from_codex(
                 codex,
                 projects=projects,
