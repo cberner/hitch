@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import sys
@@ -30,6 +31,32 @@ class SessionStateRefreshResult(NamedTuple):
     synced: int
     failed: bool
     pr_stages_refreshed: int
+
+
+class _SchedulerCodex:
+    """Holds one long-lived Codex app-server reused across scheduler ticks.
+
+    Owned by the single scheduler thread, so it needs no locking. Reusing one
+    app-server means the Codex state DB under CODEX_HOME is initialized once for
+    the process lifetime instead of on every 60s tick -- those per-tick inits
+    were what raced user-initiated app-server startups and surfaced as
+    "database is locked". ``reset`` drops a dead/failed app-server so the next
+    ``get`` reconnects.
+    """
+
+    def __init__(self) -> None:
+        self._codex: Codex | None = None
+
+    def get(self) -> Codex:
+        if self._codex is None:
+            self._codex = codex_pool.start_codex(codex_pool.app_server_config())
+        return self._codex
+
+    def reset(self) -> None:
+        codex, self._codex = self._codex, None
+        if codex is not None:
+            with contextlib.suppress(Exception):
+                codex.close()
 
 
 def start_auto_proposal_scheduler() -> bool:
@@ -68,16 +95,24 @@ def _auto_proposal_scheduler_enabled() -> bool:
 
 def _auto_proposal_scheduler_loop() -> None:
     stop = threading.Event()
-    while True:
-        _run_auto_proposal_scheduler_tick()
-        stop.wait(_AUTO_PROPOSAL_SCHEDULER_INTERVAL_SECONDS)
+    # Reused across ticks so the periodic state refresh doesn't spawn (and
+    # re-init the Codex state DB for) a fresh app-server every 60 seconds.
+    scheduler_codex = _SchedulerCodex()
+    try:
+        while True:
+            _run_auto_proposal_scheduler_tick(scheduler_codex)
+            stop.wait(_AUTO_PROPOSAL_SCHEDULER_INTERVAL_SECONDS)
+    finally:
+        scheduler_codex.reset()
 
 
-def _run_auto_proposal_scheduler_tick() -> None:
+def _run_auto_proposal_scheduler_tick(
+    scheduler_codex: _SchedulerCodex | None = None,
+) -> None:
     close_old_connections()
     try:
         codex_pool.reconcile_dead()
-        _refresh_unarchived_session_state_best_effort()
+        _refresh_unarchived_session_state_best_effort(scheduler_codex)
         started = system_agents.maybe_start_auto_proposal_workflows()
         if started:
             logger.info("started %s auto-proposal workflow(s)", started)
@@ -87,22 +122,37 @@ def _run_auto_proposal_scheduler_tick() -> None:
         close_old_connections()
 
 
-def _refresh_unarchived_session_state_best_effort() -> SessionStateRefreshResult | None:
+def _refresh_unarchived_session_state_best_effort(
+    scheduler_codex: _SchedulerCodex | None = None,
+) -> SessionStateRefreshResult | None:
     try:
-        return refresh_unarchived_session_state()
+        codex = scheduler_codex.get() if scheduler_codex is not None else None
+        result = refresh_unarchived_session_state(codex)
+        # A failed metadata refresh may mean the reused app-server died; drop it
+        # so the next tick reconnects rather than reusing a dead transport.
+        if scheduler_codex is not None and result.failed:
+            scheduler_codex.reset()
+        return result
     except Exception:
+        if scheduler_codex is not None:
+            scheduler_codex.reset()
         logger.exception("failed to refresh unarchived session state")
         return None
 
 
-def refresh_unarchived_session_state() -> SessionStateRefreshResult:
-    """Refresh active Codex session metadata and GitHub-derived PR stages."""
+def refresh_unarchived_session_state(
+    codex: Codex | None = None,
+) -> SessionStateRefreshResult:
+    """Refresh active Codex session metadata and GitHub-derived PR stages.
+
+    ``codex`` lets the scheduler pass a long-lived app-server it reuses across
+    ticks; when omitted a short-lived one is opened just for this call.
+    """
     codex_synced = 0
     codex_failed = False
     try:
-        config = codex_pool.app_server_config()
         projects = list(Project.objects.all())
-        with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
+        if codex is not None:
             codex_result = session_index.refresh_from_codex(
                 codex,
                 projects=projects,
@@ -110,6 +160,16 @@ def refresh_unarchived_session_state() -> SessionStateRefreshResult:
                 include_archived=False,
                 max_pages=None,
             )
+        else:
+            config = codex_pool.app_server_config()
+            with codex_pool.open_codex(lambda: Codex(config=config)) as opened:
+                codex_result = session_index.refresh_from_codex(
+                    opened,
+                    projects=projects,
+                    include_active=True,
+                    include_archived=False,
+                    max_pages=None,
+                )
         codex_synced = codex_result.synced
         codex_failed = codex_result.failed
     except Exception:

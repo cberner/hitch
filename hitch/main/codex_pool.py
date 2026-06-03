@@ -1403,6 +1403,17 @@ def _start_codex_with_retry(factory: Callable[[], Codex]) -> Codex:
     raise last_error
 
 
+def start_codex(config: AppServerConfig) -> Codex:
+    """Construct a long-lived Codex app-server with ``open_codex``'s lock+retry.
+
+    For callers that own and reuse one app-server across many operations (e.g.
+    the background scheduler) rather than opening a fresh one per use; the
+    caller is responsible for ``close()``. Reusing a single app-server keeps its
+    state DB initialized once instead of racing a new init on every operation.
+    """
+    return _start_codex_with_retry(lambda: Codex(config=config))
+
+
 @contextlib.contextmanager
 def open_codex(factory: Callable[[], Codex]) -> Generator[Codex]:
     """Open a Codex app-server, tolerating a contended state-DB init.

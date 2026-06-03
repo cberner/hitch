@@ -52,7 +52,7 @@ class AutoProposalSchedulerTests(SimpleTestCase):
         auto_proposals._run_auto_proposal_scheduler_tick()
 
         mock_reconcile_dead.assert_called_once_with()
-        mock_refresh.assert_called_once_with()
+        mock_refresh.assert_called_once_with(None)
         mock_start.assert_called_once_with()
 
     @patch("hitch.main.auto_proposals.logger.exception")
@@ -202,6 +202,94 @@ class UnarchivedSessionStateRefreshTests(TestCase):
         mock_log_exception.assert_called_once_with(
             "failed to refresh active Codex session metadata"
         )
+
+
+class SchedulerCodexReuseTests(SimpleTestCase):
+    @patch("hitch.main.auto_proposals.codex_pool.app_server_config")
+    @patch("hitch.main.auto_proposals.codex_pool.start_codex")
+    def test_get_reuses_one_app_server(
+        self, mock_start: MagicMock, mock_config: MagicMock
+    ) -> None:
+        codex = MagicMock()
+        mock_start.return_value = codex
+        holder = auto_proposals._SchedulerCodex()
+
+        first = holder.get()
+        second = holder.get()
+
+        self.assertIs(first, codex)
+        self.assertIs(second, codex)
+        mock_start.assert_called_once_with(mock_config.return_value)
+
+    @patch("hitch.main.auto_proposals.codex_pool.app_server_config")
+    @patch("hitch.main.auto_proposals.codex_pool.start_codex")
+    def test_reset_closes_and_reconnects(
+        self, mock_start: MagicMock, _mock_config: MagicMock
+    ) -> None:
+        first_codex, second_codex = MagicMock(), MagicMock()
+        mock_start.side_effect = [first_codex, second_codex]
+        holder = auto_proposals._SchedulerCodex()
+
+        self.assertIs(holder.get(), first_codex)
+        holder.reset()
+        first_codex.close.assert_called_once_with()
+        self.assertIs(holder.get(), second_codex)
+        self.assertEqual(mock_start.call_count, 2)
+
+    @patch("hitch.main.auto_proposals.refresh_unarchived_session_state")
+    @patch("hitch.main.auto_proposals.codex_pool.app_server_config")
+    @patch("hitch.main.auto_proposals.codex_pool.start_codex")
+    def test_best_effort_reuses_held_codex_across_ticks(
+        self,
+        mock_start: MagicMock,
+        _mock_config: MagicMock,
+        mock_refresh: MagicMock,
+    ) -> None:
+        codex = MagicMock()
+        mock_start.return_value = codex
+        mock_refresh.return_value = auto_proposals.SessionStateRefreshResult(
+            synced=0, failed=False, pr_stages_refreshed=0
+        )
+        holder = auto_proposals._SchedulerCodex()
+
+        auto_proposals._refresh_unarchived_session_state_best_effort(holder)
+        auto_proposals._refresh_unarchived_session_state_best_effort(holder)
+
+        # One app-server initialized once, reused for both ticks.
+        self.assertEqual(mock_start.call_count, 1)
+        self.assertEqual(mock_refresh.call_count, 2)
+        mock_refresh.assert_called_with(codex)
+
+    @patch("hitch.main.auto_proposals.refresh_unarchived_session_state")
+    @patch("hitch.main.auto_proposals.codex_pool.app_server_config")
+    @patch("hitch.main.auto_proposals.codex_pool.start_codex")
+    def test_best_effort_resets_codex_on_failure(
+        self,
+        mock_start: MagicMock,
+        _mock_config: MagicMock,
+        mock_refresh: MagicMock,
+    ) -> None:
+        first_codex, second_codex = MagicMock(), MagicMock()
+        mock_start.side_effect = [first_codex, second_codex]
+        mock_refresh.side_effect = [
+            auto_proposals.SessionStateRefreshResult(
+                synced=0, failed=True, pr_stages_refreshed=0
+            ),
+            auto_proposals.SessionStateRefreshResult(
+                synced=0, failed=False, pr_stages_refreshed=0
+            ),
+        ]
+        holder = auto_proposals._SchedulerCodex()
+
+        auto_proposals._refresh_unarchived_session_state_best_effort(holder)
+        # A failed refresh drops the (possibly dead) app-server...
+        first_codex.close.assert_called_once_with()
+        auto_proposals._refresh_unarchived_session_state_best_effort(holder)
+
+        # ...so the next tick reconnects with a fresh one.
+        self.assertEqual(mock_start.call_count, 2)
+        self.assertEqual(mock_refresh.call_args_list[0].args, (first_codex,))
+        self.assertEqual(mock_refresh.call_args_list[1].args, (second_codex,))
 
 
 class MainConfigTests(SimpleTestCase):
