@@ -8978,12 +8978,13 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 )
             spawn_kwargs["model"] = collaboration_model
             spawn_kwargs["collaboration_mode"] = collaboration_mode
+        # The should-run classifier runs inside the workflow on a background
+        # thread, so sending a message never blocks on it.
         if (
             settings.spec_critic_enabled
             and not input_image_paths
             and not plan_mode
             and not collaboration_mode
-            and system_agents.spec_critic_should_run(prompt, cwd=cwd)
         ):
             workflow_model = (
                 _string_value(getattr(resumed, "model", None)) or settings.model
@@ -10407,14 +10408,15 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         spawn_kwargs["auto_qa_enabled"] = True
     if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
         spawn_kwargs["qa_panel_enabled"] = True
-    # Proposed sessions already represent reviewed work for the user to start;
-    # do not add another synchronous Spec Critic preflight to that hot path.
+    # Proposed sessions already represent reviewed work for the user to start, so
+    # they bypass Spec Critic entirely. For everything else the should-run
+    # classifier runs inside the workflow on a background thread, so creating a
+    # new session never blocks on that LLM call.
     if (
         proposed_session is None
         and settings.spec_critic_enabled
         and not input_image_paths
         and not plan_mode
-        and system_agents.spec_critic_should_run(prompt, cwd=session_cwd)
     ):
         spec_create_thread_kwargs: dict[str, Any] = {
             "cwd": session_cwd,

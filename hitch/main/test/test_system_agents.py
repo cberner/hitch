@@ -90,6 +90,15 @@ def _instance(
     )
 
 
+def _synchronous_thread(
+    *, target: Any, args: tuple[Any, ...] = (), **_kwargs: Any
+) -> MagicMock:
+    """Stand-in for threading.Thread that runs the target inline on start()."""
+    thread = MagicMock()
+    thread.start.side_effect = lambda: target(*args)
+    return thread
+
+
 def _events_file(test: TestCase, payload: dict[str, object]) -> str:
     with tempfile.NamedTemporaryFile(mode="w", delete=False) as fh:
         fh.write(
@@ -711,9 +720,11 @@ class SpecCriticWorkflowTests(TestCase):
         thread.turn.assert_called_once()
         self.assertEqual(thread.turn.call_args.kwargs["model"], "gpt-5-mini")
 
+    @patch("hitch.main.system_agents.spec_critic_should_run", return_value=True)
+    @patch("hitch.main.system_agents.threading.Thread", side_effect=_synchronous_thread)
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_spec_critic_starts_hidden_specialized_agents(
-        self, mock_spawn: MagicMock
+        self, mock_spawn: MagicMock, mock_thread: MagicMock, mock_should_run: MagicMock
     ) -> None:
         def _spawn(**kwargs: Any) -> CodexInstance:
             return _instance(
@@ -725,6 +736,7 @@ class SpecCriticWorkflowTests(TestCase):
 
         mock_spawn.side_effect = _spawn
 
+        # The background classifier runs inline here and routes to analysis.
         workflow = system_agents.start_spec_critic_workflow(
             main_thread_id="main-thread",
             cwd="/repo",
@@ -743,6 +755,7 @@ class SpecCriticWorkflowTests(TestCase):
             auto_merge_branch="release",
         )
 
+        workflow.refresh_from_db()
         self.assertEqual(workflow.kind, system_agents.SPEC_CRITIC_WORKFLOW_KIND)
         self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_ANALYZING)
         self.assertEqual(workflow.state["web_search_mode"], "cached")
@@ -773,9 +786,394 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("ambiguity and risk agent", prompts)
         self.assertIn("acceptance and test strategist", prompts)
 
+    @patch("hitch.main.system_agents.threading.Thread")
+    def test_spec_critic_workflow_runs_classifier_in_background(
+        self, mock_thread: MagicMock
+    ) -> None:
+        workflow = system_agents.start_spec_critic_workflow(
+            main_thread_id="main-thread",
+            cwd="/repo",
+            prompt="Improve onboarding",
+            sandbox_policy=None,
+            approval_mode="auto_review",
+        )
+
+        # The workflow opens in the classifying step and hands the LLM call to a
+        # background thread instead of blocking the caller.
+        self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_CLASSIFYING)
+        mock_thread.assert_called_once()
+        self.assertEqual(
+            mock_thread.call_args.kwargs["target"],
+            system_agents._run_spec_critic_classification,
+        )
+        self.assertEqual(mock_thread.call_args.kwargs["args"], (workflow.pk,))
+        self.assertTrue(mock_thread.call_args.kwargs["daemon"])
+        mock_thread.return_value.start.assert_called_once_with()
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.system_agents.spec_critic_should_run", return_value=True)
+    def test_spec_critic_classification_advances_to_analysis_when_needed(
+        self, mock_should_run: MagicMock, mock_spawn: MagicMock
+    ) -> None:
+        def _spawn(**kwargs: Any) -> CodexInstance:
+            return _instance(
+                thread_id=f"{kwargs['agent_kind']}-thread",
+                purpose=kwargs["purpose"],
+                status=CodexInstance.STATUS_RUNNING,
+                agent_kind=kwargs["agent_kind"],
+            )
+
+        mock_spawn.side_effect = _spawn
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.SPEC_CRITIC_WORKFLOW_KIND,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_SPEC_CRITIC_CLASSIFYING,
+            state={"original_prompt": "Improve onboarding"},
+        )
+
+        system_agents._run_spec_critic_classification(workflow.pk)
+
+        mock_should_run.assert_called_once_with("Improve onboarding", cwd="/repo")
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_ANALYZING)
+        self.assertEqual(mock_spawn.call_count, 3)
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.system_agents.spec_critic_should_run", return_value=False)
+    def test_spec_critic_classification_skips_to_original_prompt(
+        self, mock_should_run: MagicMock, mock_spawn_turn: MagicMock
+    ) -> None:
+        mock_spawn_turn.return_value = _instance(
+            thread_id="main-thread",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.SPEC_CRITIC_WORKFLOW_KIND,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_SPEC_CRITIC_CLASSIFYING,
+            state={
+                "original_prompt": "Change the checkbox label to 'Open PR automatically'.",
+                "next_user_message_index": 3,
+                "auto_pr_enabled": True,
+            },
+        )
+
+        system_agents._run_spec_critic_classification(workflow.pk)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(
+            workflow.step, system_agents.STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED
+        )
+        self.assertTrue(workflow.state["skipped_classification"])
+        mock_spawn_turn.assert_called_once()
+        kwargs = mock_spawn_turn.call_args.kwargs
+        self.assertEqual(kwargs["thread_id"], "main-thread")
+        # The original prompt runs verbatim, with no synthesized-brief wrapper.
+        self.assertEqual(
+            kwargs["prompt"],
+            "Change the checkbox label to 'Open PR automatically'.",
+        )
+        self.assertNotIn("Spec Critic brief", kwargs["prompt"])
+        self.assertEqual(kwargs["user_message_index"], 3)
+        self.assertTrue(kwargs["auto_pr_enabled"])
+
+    @patch("hitch.main.system_agents._start_spec_critic_classification")
+    def test_reconcile_rearms_stale_spec_critic_classification(
+        self, mock_start: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.SPEC_CRITIC_WORKFLOW_KIND,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_SPEC_CRITIC_CLASSIFYING,
+            state={"original_prompt": "Improve onboarding"},
+        )
+        # Age the row past the stale window (bypasses auto_now on save).
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=datetime.now(UTC) - timedelta(minutes=6)
+        )
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id="main-thread"
+        )
+
+        self.assertEqual(reconciled, 1)
+        mock_start.assert_called_once()
+        # The re-arm bumped updated_at, so a follow-up reconcile is a no-op
+        # until this fresh attempt has had its own stale window.
+        mock_start.reset_mock()
+        system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id="main-thread"
+        )
+        mock_start.assert_not_called()
+
+    @patch("hitch.main.system_agents._start_spec_critic_classification")
+    def test_reconcile_leaves_fresh_spec_critic_classification_alone(
+        self, mock_start: MagicMock
+    ) -> None:
+        SystemWorkflow.objects.create(
+            kind=system_agents.SPEC_CRITIC_WORKFLOW_KIND,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_SPEC_CRITIC_CLASSIFYING,
+            state={"original_prompt": "Improve onboarding"},
+        )
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id="main-thread"
+        )
+
+        self.assertEqual(reconciled, 0)
+        mock_start.assert_not_called()
+
+    def _classifying_workflow(self, **state: Any) -> SystemWorkflow:
+        return SystemWorkflow.objects.create(
+            kind=system_agents.SPEC_CRITIC_WORKFLOW_KIND,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_SPEC_CRITIC_CLASSIFYING,
+            state={"original_prompt": "Improve onboarding", **state},
+        )
+
+    def _aged_workflow(self, *, step: str, **state: Any) -> SystemWorkflow:
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.SPEC_CRITIC_WORKFLOW_KIND,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=step,
+            state={"original_prompt": "Improve onboarding", **state},
+        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=datetime.now(UTC) - timedelta(minutes=6)
+        )
+        return workflow
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_reconcile_respawns_analysis_when_orphaned_without_runs(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        def _spawn(**kwargs: Any) -> CodexInstance:
+            return _instance(
+                thread_id=f"{kwargs['agent_kind']}-thread",
+                purpose=kwargs["purpose"],
+                status=CodexInstance.STATUS_RUNNING,
+                agent_kind=kwargs["agent_kind"],
+            )
+
+        mock_spawn.side_effect = _spawn
+        self._aged_workflow(step=system_agents.STEP_SPEC_CRITIC_ANALYZING)
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id="main-thread"
+        )
+
+        self.assertEqual(reconciled, 1)
+        self.assertEqual(mock_spawn.call_count, 3)
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_reconcile_leaves_analysis_with_runs_to_instance_reconciler(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = self._aged_workflow(step=system_agents.STEP_SPEC_CRITIC_ANALYZING)
+        instance = _instance(
+            thread_id="req-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind=system_agents.SPEC_REQUIREMENTS_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.SPEC_REQUIREMENTS_AGENT_KIND,
+            thread_id=instance.thread_id,
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        system_agents.reconcile_terminal_workflow_instances(main_thread_id="main-thread")
+
+        # An existing run means the analysis agents were spawned; re-spawning
+        # would duplicate them, so the stale recoverer must leave it alone.
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_reconcile_finalizes_skip_when_turn_never_spawned(
+        self, mock_spawn_turn: MagicMock
+    ) -> None:
+        mock_spawn_turn.return_value = _instance(status=CodexInstance.STATUS_RUNNING)
+        workflow = self._aged_workflow(
+            step=system_agents.STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED,
+            next_user_message_index=0,
+            skipped_classification=True,
+        )
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id="main-thread"
+        )
+
+        self.assertEqual(reconciled, 1)
+        mock_spawn_turn.assert_called_once()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_reconcile_finalizes_skip_without_double_spawning_turn(
+        self, mock_spawn_turn: MagicMock
+    ) -> None:
+        workflow = self._aged_workflow(
+            step=system_agents.STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED,
+            next_user_message_index=2,
+            skipped_classification=True,
+        )
+        # The turn was already spawned before the restart killed the thread.
+        _instance(thread_id="main-thread", user_message_index=2)
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id="main-thread"
+        )
+
+        self.assertEqual(reconciled, 1)
+        mock_spawn_turn.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch(
+        "hitch.main.system_agents.spec_critic_should_run",
+        side_effect=RuntimeError("boom"),
+    )
+    def test_classification_skips_when_classifier_raises(
+        self, mock_should_run: MagicMock, mock_spawn_turn: MagicMock
+    ) -> None:
+        mock_spawn_turn.return_value = _instance(status=CodexInstance.STATUS_RUNNING)
+        workflow = self._classifying_workflow()
+
+        system_agents._run_spec_critic_classification(workflow.pk)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        mock_spawn_turn.assert_called_once()
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.system_agents.spec_critic_should_run")
+    def test_classification_ignores_workflow_no_longer_classifying(
+        self, mock_should_run: MagicMock, mock_spawn_turn: MagicMock
+    ) -> None:
+        workflow = self._classifying_workflow()
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            step=system_agents.STEP_SPEC_CRITIC_ANALYZING
+        )
+
+        system_agents._run_spec_critic_classification(workflow.pk)
+
+        mock_should_run.assert_not_called()
+        mock_spawn_turn.assert_not_called()
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_skip_blocks_workflow_when_implementation_turn_fails(
+        self, mock_spawn_turn: MagicMock
+    ) -> None:
+        mock_spawn_turn.side_effect = RuntimeError("no worker")
+        workflow = self._classifying_workflow()
+
+        system_agents._skip_spec_critic_and_implement(workflow)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_skip_noop_when_no_longer_classifying(
+        self, mock_spawn_turn: MagicMock
+    ) -> None:
+        workflow = self._classifying_workflow()
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            step=system_agents.STEP_SPEC_CRITIC_ANALYZING
+        )
+
+        system_agents._skip_spec_critic_and_implement(workflow)
+
+        mock_spawn_turn.assert_not_called()
+
+    @patch("hitch.main.system_agents._skip_spec_critic_and_implement")
+    @patch("hitch.main.system_agents.spec_critic_should_run", return_value=False)
+    def test_run_classification_swallows_unexpected_routing_errors(
+        self, mock_should_run: MagicMock, mock_skip: MagicMock
+    ) -> None:
+        mock_skip.side_effect = RuntimeError("db gone")
+        workflow = self._classifying_workflow()
+
+        # Must not raise out of the daemon thread.
+        system_agents._run_spec_critic_classification(workflow.pk)
+
+        mock_skip.assert_called_once()
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_advance_to_analysis_noop_when_already_advanced(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = self._classifying_workflow()
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            step=system_agents.STEP_SPEC_CRITIC_ANALYZING
+        )
+
+        system_agents._advance_spec_critic_to_analysis(workflow)
+
+        mock_spawn.assert_not_called()
+
+    @patch(
+        "hitch.main.system_agents.codex_pool.spawn_new_session",
+        side_effect=RuntimeError("no worker"),
+    )
+    def test_begin_analysis_blocks_when_agents_fail_to_start(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = self._classifying_workflow()
+
+        system_agents._begin_spec_critic_analysis(workflow)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch(
+        "hitch.main.system_agents.threading.Thread",
+        side_effect=RuntimeError("no thread"),
+    )
+    def test_start_classification_runs_analysis_inline_when_thread_fails(
+        self, mock_thread: MagicMock, mock_spawn: MagicMock
+    ) -> None:
+        def _spawn(**kwargs: Any) -> CodexInstance:
+            return _instance(
+                thread_id=f"{kwargs['agent_kind']}-thread",
+                purpose=kwargs["purpose"],
+                status=CodexInstance.STATUS_RUNNING,
+                agent_kind=kwargs["agent_kind"],
+            )
+
+        mock_spawn.side_effect = _spawn
+        workflow = self._classifying_workflow()
+
+        system_agents._start_spec_critic_classification(workflow)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_ANALYZING)
+        self.assertEqual(mock_spawn.call_count, 3)
+
+    @patch("hitch.main.system_agents.spec_critic_should_run", return_value=True)
+    @patch("hitch.main.system_agents.threading.Thread", side_effect=_synchronous_thread)
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_spec_critic_gates_on_required_clarification(
-        self, mock_spawn: MagicMock
+        self, mock_spawn: MagicMock, mock_thread: MagicMock, mock_should_run: MagicMock
     ) -> None:
         def _spawn(**kwargs: Any) -> CodexInstance:
             return _instance(
@@ -786,6 +1184,7 @@ class SpecCriticWorkflowTests(TestCase):
             )
 
         mock_spawn.side_effect = _spawn
+        # The background classifier runs inline here and routes to analysis.
         workflow = system_agents.start_spec_critic_workflow(
             main_thread_id="main-thread",
             cwd="/repo",

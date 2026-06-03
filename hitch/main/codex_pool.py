@@ -226,16 +226,22 @@ def create_session_thread(
         enable_memories=enable_memories,
         web_search_mode=web_search_mode,
     )
+    # Use the low-level client (like spawn_new_session) so this visible session
+    # can register Hitch dynamic tools. These threads are real user sessions the
+    # user drives directly, so they need the same tools (e.g.
+    # hitch.propose_session) an ordinary spawn_new_session session gets.
     start_kwargs: dict[str, Any] = {
         "cwd": cwd,
-        "developer_instructions": developer_instructions,
+        "developerInstructions": developer_instructions,
         "model": model,
+        "dynamicTools": registered_dynamic_tool_specs(),
     }
     if base_instructions:
-        start_kwargs["base_instructions"] = base_instructions
+        start_kwargs["baseInstructions"] = base_instructions
 
     def _create_and_persist(codex: Codex) -> str:
-        thread = codex.thread_start(**start_kwargs)
+        response = codex._client.thread_start(start_kwargs)
+        thread = response.thread
         codex._client.thread_set_name(thread.id, _initial_thread_name(name))
         return thread.id
 
