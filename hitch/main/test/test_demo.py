@@ -476,6 +476,35 @@ class DemoProxyTests(TestCase):
                 self.assertIn(b"demo target unavailable", response.content)
                 conn.close.assert_called_once()
 
+    @patch("hitch.main.demo.http.client.HTTPConnection")
+    def test_streaming_body_tolerates_read_timeouts(
+        self, mock_connection: MagicMock
+    ) -> None:
+        # A read timeout on an idle-but-open streaming/SSE response must not
+        # abort the response after headers are sent; _stream_upstream retries the
+        # read instead. This holds even when getresponse() has detached
+        # connection.sock (the will_close case), so the guard cannot depend on it.
+        conn = mock_connection.return_value
+        conn.sock = None
+        upstream = conn.getresponse.return_value
+        upstream.getheader.side_effect = lambda name, default="": {
+            "Content-Type": "application/octet-stream"
+        }.get(name, default)
+        upstream.status = 200
+        upstream.read.side_effect = [TimeoutError("idle"), b"chunk", b""]
+        request = RequestFactory().get("/sessions/thread-1/demo/download.bin")
+
+        response = demo.proxy_demo_request(
+            request,
+            "thread-1",
+            "download.bin",
+            path_prefix="/sessions/thread-1/demo/",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        # The body flows through after the idle interval is retried.
+        self.assertEqual(_response_body(response), b"chunk")
+
     def test_localhost_demo_url_uses_isolated_demo_host_for_loopback(self) -> None:
         request = RequestFactory().get("/", headers={"host": "127.0.0.1:8000"})
 
