@@ -12267,6 +12267,121 @@ class SendMessageViewTests(TestCase):
             ),
         )
 
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_idle_follow_up_resumes_from_disk_without_app_server(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        # An idle follow-up reads cwd/entries/plan-state from SessionMetadata +
+        # the rollout file instead of a live thread_resume (which the detached
+        # worker repeats moments later), so no app-server is opened here.
+        rollout_path = self._make_rollout(
+            [
+                _rollout_line(
+                    "event_msg", {"type": "user_message", "message": "Hi"}
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Done."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+        SessionMetadata.objects.create(
+            thread_id="abc", cwd="/repo", codex_path=str(rollout_path)
+        )
+        CodexInstance.objects.create(
+            pid=1,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="prior turn",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            model="gpt-5.4",
+        )
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self._assert_follow_up_spawn(mock_spawn)
+        # The disk path never constructs a live app-server.
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_disk_resume_plan_turn_recovers_thread_model(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        # A plan turn on the disk path for a thread Hitch never recorded a model
+        # for (no CodexInstance) must recover the thread's actual model via a
+        # one-off live resume -- preferring it over the catalog default -- rather
+        # than 400 "requires a model" or sending the wrong model.
+        def _clear_models_cache() -> None:
+            with views._MODELS_REFRESH_LOCK:
+                views._MODELS_CACHE_VALUE = {}
+                views._MODELS_CACHE_FETCHED_AT = {}
+                views._MODELS_REFRESH_IN_FLIGHT = set()
+
+        _clear_models_cache()
+        self.addCleanup(_clear_models_cache)
+        rollout_path = self._make_rollout(
+            [
+                _rollout_line("event_msg", {"type": "user_message", "message": "Hi"}),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Done."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+        SessionMetadata.objects.create(
+            thread_id="abc", cwd="/repo", codex_path=str(rollout_path)
+        )
+        # The live resume reports the thread's real model ("gpt-5"); the catalog
+        # default ("gpt-default") must not win over it.
+        self._patch_codex(
+            mock_codex,
+            model="gpt-5",
+            models=[_make_model("gpt-default", is_default=True)],
+        )
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={
+                "prompt": "make a plan",
+                "plan_mode": "true",
+                "plan_mode_explicit": "true",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self._assert_follow_up_spawn(
+            mock_spawn, prompt="make a plan", model="gpt-5", plan_mode=True
+        )
+        # The model-sensitive turn recovered the thread model via a live resume.
+        mock_codex.assert_called()
+
     @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
     @patch("hitch.main.views.discover_repos")
