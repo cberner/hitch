@@ -25,12 +25,23 @@ PLAN = SessionStage("plan", "Plan", "active")
 IMPLEMENTATION = SessionStage("implementation", "Implementation", "active")
 QA = SessionStage("qa", "QA", "active")
 PR = SessionStage("pr", "PR", "active")
+WAITING_FOR_USER = SessionStage("waiting_for_user", "Waiting for User", "warning")
 BLOCKED = SessionStage("blocked", "Blocked", "warning")
 DONE_MERGED = SessionStage("done_merged", "Done: Merged", "done")
 DONE_CLOSED = SessionStage("done_closed", "Done: Closed", "done")
 _STAGES_BY_KEY = {
     stage.key: stage
-    for stage in (NEW, PLAN, IMPLEMENTATION, QA, PR, BLOCKED, DONE_MERGED, DONE_CLOSED)
+    for stage in (
+        NEW,
+        PLAN,
+        IMPLEMENTATION,
+        QA,
+        PR,
+        WAITING_FOR_USER,
+        BLOCKED,
+        DONE_MERGED,
+        DONE_CLOSED,
+    )
 }
 
 _STAGE_BY_WORKFLOW_STEP = {
@@ -59,6 +70,7 @@ def derive_stage(
     entries: Iterable[Mapping[str, Any]] = (),
     active_instance: CodexInstance | None = None,
     workflow: SystemWorkflow | None = None,
+    awaiting_user_input: bool = False,
     pr_snapshot: Mapping[str, Any] | None = None,
     workflow_pr_snapshot: Mapping[str, Any] | None = None,
 ) -> SessionStage:
@@ -67,6 +79,9 @@ def derive_stage(
         log_pr_snapshot=pr_snapshot,
         workflow_pr_snapshot=workflow_pr_snapshot,
     )
+
+    if awaiting_user_input:
+        return WAITING_FOR_USER
 
     if workflow is not None and workflow.status == SystemWorkflow.STATUS_RUNNING:
         running_pr_snapshot = (

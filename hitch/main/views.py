@@ -2407,8 +2407,9 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
     thread_ids = [
         session["id"] for session in sessions if isinstance(session.get("id"), str)
     ]
-    workflows_by_thread_id = _latest_pr_workflows_by_thread_id(thread_ids)
+    workflows_by_thread_id = _latest_stage_workflows_by_thread_id(thread_ids)
     active_instances_by_thread_id = _active_instances_by_thread_id(thread_ids)
+    waiting_thread_ids = _thread_ids_waiting_for_user_input(thread_ids)
     pr_stage_refreshes_remaining = _SESSION_LIST_PR_STAGE_REFRESH_LIMIT
     for session in sessions:
         session_id = session.get("id")
@@ -2417,8 +2418,14 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         rollout_state = _rollout_file_state_from_value(session.get("codex_path"))
         workflow = workflows_by_thread_id.get(session_id)
         active_instance = active_instances_by_thread_id.get(session_id)
+        awaiting_user_input = session_id in waiting_thread_ids
         cached_stage = _cached_stage_for_session_row(session, rollout_state)
-        if active_instance is None and workflow is None and cached_stage is not None:
+        if (
+            active_instance is None
+            and workflow is None
+            and not awaiting_user_input
+            and cached_stage is not None
+        ):
             assert rollout_state is not None
             stage, pr_snapshot, pr_stage_refreshes_remaining = (
                 _stage_from_cached_session_row(
@@ -2445,6 +2452,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         if (
             active_instance is None
             and stage_workflow is None
+            and not awaiting_user_input
             and cached_stage is not None
         ):
             assert rollout_state is not None
@@ -2496,6 +2504,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             entries=entries,
             active_instance=active_instance,
             workflow=stage_workflow,
+            awaiting_user_input=awaiting_user_input,
             pr_snapshot=log_pr_snapshot,
             workflow_pr_snapshot=workflow_pr_snapshot,
         )
@@ -2514,7 +2523,11 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         # worker/workflow goes away without rewriting the rollout, the cached
         # row would still satisfy the read guard and resurrect the stale active
         # badge. Persist only when no such owner contributed to the stage.
-        if active_instance is None and stage_workflow is None:
+        if (
+            active_instance is None
+            and stage_workflow is None
+            and not awaiting_user_input
+        ):
             _update_cached_stage_best_effort(
                 session_id,
                 stage,
@@ -2603,7 +2616,7 @@ def _pr_number_from_snapshot(snapshot: Mapping[str, Any] | None) -> int | None:
     return identity[1] if identity is not None else None
 
 
-def _latest_pr_workflows_by_thread_id(
+def _latest_stage_workflows_by_thread_id(
     thread_ids: Iterable[str],
 ) -> dict[str, SystemWorkflow]:
     ids = [thread_id for thread_id in dict.fromkeys(thread_ids) if thread_id]
@@ -2611,8 +2624,11 @@ def _latest_pr_workflows_by_thread_id(
         return {}
     workflows = (
         SystemWorkflow.objects.filter(
-            kind=SystemWorkflow.KIND_PR_QA,
             main_thread_id__in=ids,
+        )
+        .filter(
+            Q(kind=SystemWorkflow.KIND_PR_QA)
+            | Q(status=SystemWorkflow.STATUS_RUNNING)
         )
         .order_by("main_thread_id", "-updated_at", "-pk")
     )
@@ -2620,6 +2636,33 @@ def _latest_pr_workflows_by_thread_id(
     for workflow in workflows:
         by_thread_id.setdefault(workflow.main_thread_id, workflow)
     return by_thread_id
+
+
+def _thread_ids_waiting_for_user_input(thread_ids: Iterable[str]) -> set[str]:
+    ids = [thread_id for thread_id in dict.fromkeys(thread_ids) if thread_id]
+    if not ids:
+        return set()
+    active_statuses = (CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING)
+    direct_thread_ids = UserInputRequest.objects.filter(
+        response__isnull=True,
+        instance__thread_id__in=ids,
+        instance__status__in=active_statuses,
+    ).values_list("instance__thread_id", flat=True)
+    workflow_thread_ids = UserInputRequest.objects.filter(
+        response__isnull=True,
+        instance__system_agent_runs__workflow__main_thread_id__in=ids,
+        instance__system_agent_runs__workflow__status=SystemWorkflow.STATUS_RUNNING,
+    ).values_list(
+        "instance__system_agent_runs__workflow__main_thread_id", flat=True
+    )
+    waiting_thread_ids: set[str] = set()
+    for thread_id in direct_thread_ids:
+        if isinstance(thread_id, str) and thread_id:
+            waiting_thread_ids.add(thread_id)
+    for thread_id in workflow_thread_ids:
+        if isinstance(thread_id, str) and thread_id:
+            waiting_thread_ids.add(thread_id)
+    return waiting_thread_ids
 
 
 def _active_instances_by_thread_id(
@@ -3967,6 +4010,9 @@ def _render_session_detail(
             if rollout_data is not None
             else _pr_observation_result_for_thread(thread)
         )
+        awaiting_user_input = session_id in _thread_ids_waiting_for_user_input(
+            [session_id]
+        )
         main_updated_at = getattr(thread, "updated_at", None)
         stage_workflow = _workflow_after_main_lifecycle(
             stage_workflow, pr_observation, main_updated_at=main_updated_at
@@ -4016,6 +4062,7 @@ def _render_session_detail(
             entries=entries,
             active_instance=active_instance,
             workflow=stage_workflow,
+            awaiting_user_input=awaiting_user_input,
             pr_snapshot=log_pr_snapshot,
             workflow_pr_snapshot=workflow_pr_snapshot,
         )
@@ -4029,6 +4076,7 @@ def _render_session_detail(
             active_instance is None
             and stage_workflow is None
             and stage_pr_workflow is None
+            and not awaiting_user_input
         ):
             # Best-effort like the session-list path: this runs while rendering
             # the session detail page, so a contended write lock must skip the
@@ -4203,10 +4251,14 @@ def _render_session_detail(
 
 def _thread_resume_missing_or_invalid(exc: InvalidRequestError) -> bool:
     message = exc.message.lower()
-    return "invalid thread id" in message or bool(
-        re.search(
-            r"\bthread(?:\s+id)?(?:\s+\S+)?\s+not found\b",
-            message,
+    return (
+        "invalid thread id" in message
+        or "invalid session id" in message
+        or bool(
+            re.search(
+                r"\bthread(?:\s+id)?(?:\s+\S+)?\s+not found\b",
+                message,
+            )
         )
     )
 
