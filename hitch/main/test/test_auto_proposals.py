@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 from django.test import SimpleTestCase, TestCase, override_settings
 
 import hitch.main as main_app
-from hitch.main import auto_proposals
+from hitch.main import auto_proposals, workflow_maintenance
 from hitch.main.apps import MainConfig
 from hitch.main.models import SessionMetadata
 
@@ -75,6 +75,65 @@ class AutoProposalSchedulerTests(SimpleTestCase):
         mock_log_exception.assert_called_once_with(
             "failed to run auto-proposal scheduler tick"
         )
+
+
+class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
+    @override_settings(TESTING=True)
+    @patch.dict(os.environ, {}, clear=True)
+    @patch.object(sys, "argv", ["manage.py", "runserver", "--noreload"])
+    def test_scheduler_disabled_during_tests_by_default(self) -> None:
+        self.assertFalse(
+            workflow_maintenance._workflow_maintenance_scheduler_enabled()
+        )
+
+    @override_settings(TESTING=False)
+    @patch.dict(os.environ, {"RUN_MAIN": "true"}, clear=True)
+    @patch.object(sys, "argv", ["manage.py", "runserver"])
+    def test_scheduler_enabled_in_runserver_child(self) -> None:
+        self.assertTrue(
+            workflow_maintenance._workflow_maintenance_scheduler_enabled()
+        )
+
+    @override_settings(TESTING=False)
+    @patch.dict(os.environ, {}, clear=True)
+    @patch.object(sys, "argv", ["manage.py", "migrate"])
+    def test_scheduler_disabled_for_management_commands(self) -> None:
+        self.assertFalse(
+            workflow_maintenance._workflow_maintenance_scheduler_enabled()
+        )
+
+    @override_settings(TESTING=False)
+    @patch.dict(os.environ, {}, clear=True)
+    @patch.object(sys, "argv", ["gunicorn", "hitch.wsgi:application"])
+    def test_scheduler_enabled_for_wsgi_server_process(self) -> None:
+        self.assertTrue(
+            workflow_maintenance._workflow_maintenance_scheduler_enabled()
+        )
+
+    @override_settings(TESTING=False)
+    @patch.dict(
+        os.environ,
+        {"HITCH_AUTO_PROPOSAL_SCHEDULER": "0", "RUN_MAIN": "true"},
+        clear=True,
+    )
+    @patch.object(sys, "argv", ["manage.py", "runserver"])
+    def test_scheduler_does_not_follow_auto_proposal_env(self) -> None:
+        self.assertTrue(
+            workflow_maintenance._workflow_maintenance_scheduler_enabled()
+        )
+
+    @patch(
+        "hitch.main.workflow_maintenance.system_agents.refresh_due_pr_monitor_backoffs",
+        return_value=2,
+    )
+    @patch("hitch.main.workflow_maintenance.codex_pool.reconcile_dead")
+    def test_scheduler_tick_reconciles_and_refreshes_pr_monitor_backoffs(
+        self, mock_reconcile_dead: MagicMock, mock_refresh: MagicMock
+    ) -> None:
+        workflow_maintenance._run_workflow_maintenance_scheduler_tick()
+
+        mock_reconcile_dead.assert_called_once_with()
+        mock_refresh.assert_called_once_with()
 
 
 class UnarchivedSessionStateRefreshTests(TestCase):
@@ -146,10 +205,14 @@ class UnarchivedSessionStateRefreshTests(TestCase):
 
 
 class MainConfigTests(SimpleTestCase):
+    @patch("hitch.main.workflow_maintenance.start_workflow_maintenance_scheduler")
     @patch("hitch.main.auto_proposals.start_auto_proposal_scheduler")
-    def test_ready_starts_auto_proposal_scheduler(self, mock_start: MagicMock) -> None:
+    def test_ready_starts_schedulers(
+        self, mock_auto_start: MagicMock, mock_workflow_start: MagicMock
+    ) -> None:
         config = MainConfig("hitch.main", main_app)
 
         config.ready()
 
-        mock_start.assert_called_once_with()
+        mock_workflow_start.assert_called_once_with()
+        mock_auto_start.assert_called_once_with()

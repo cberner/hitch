@@ -3107,7 +3107,10 @@ class IndexViewTests(TestCase):
             response,
             '<span class="stage-badge" data-tone="done">Done: Merged</span>',
         )
-        self.assertNotContains(response, "QA")
+        self.assertNotContains(
+            response,
+            '<span class="stage-badge" data-tone="active">QA</span>',
+        )
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 

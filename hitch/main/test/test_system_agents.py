@@ -5256,10 +5256,12 @@ class SpecCriticWorkflowTests(TestCase):
     def test_pending_only_gates_do_not_consume_remediation_iteration(
         self, mock_spawn: MagicMock, _mock_observe: MagicMock
     ) -> None:
+        cwd = tempfile.TemporaryDirectory()
+        self.addCleanup(cwd.cleanup)
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
             main_thread_id="main-thread",
-            cwd="/repo",
+            cwd=cwd.name,
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_PR_MONITORING,
             iteration=3,
@@ -5305,10 +5307,284 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
         self.assertEqual(workflow.iteration, 3)
         self.assertEqual(workflow.state[system_agents._PR_PENDING_CHECKS_STATE_KEY], 1)
+        self.assertIn(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, workflow.state)
+        backoff = workflow.state[system_agents._PR_MONITOR_BACKOFF_STATE_KEY]
+        self.assertEqual(backoff["reason"], "pending_gates")
         self.assertEqual(
-            mock_spawn.call_args.kwargs["agent_kind"],
-            system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            backoff["delay_seconds"],
+            system_agents._PR_MONITOR_PENDING_POLL_MIN_SECONDS,
         )
+        mock_spawn.assert_not_called()
+        _mock_observe.assert_called_once()
+
+    @patch(
+        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation(
+            {
+                "review_signal": "approved",
+                "unresolved_thread_count": 0,
+                "ci_status": "success",
+            }
+        ),
+    )
+    def test_due_pr_monitor_backoff_polls_github_without_spawning_monitor(
+        self, mock_observe: MagicMock
+    ) -> None:
+        now = int(datetime.now(UTC).timestamp())
+        with tempfile.TemporaryDirectory() as cwd:
+            workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="main-thread",
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_RUNNING,
+                step=system_agents.STEP_PR_MONITORING,
+                state={
+                    system_agents._PR_HANDOFF_STATE_KEY: {
+                        "url": "https://github.com/cberner/hitch/pull/169",
+                        "repository_full_name": "cberner/hitch",
+                        "pr_number": 169,
+                        "state": "open",
+                    },
+                    system_agents._PR_PENDING_CHECKS_STATE_KEY: 1,
+                    system_agents._PR_MONITOR_BACKOFF_STATE_KEY: {
+                        "reason": "pending_gates",
+                        "scheduled_at": now - 301,
+                        "next_attempt_at": now - 1,
+                        "delay_seconds": 300,
+                    },
+                },
+            )
+
+            refreshed = system_agents.refresh_due_pr_monitor_backoffs()
+
+        self.assertEqual(refreshed, 1)
+        mock_observe.assert_called_once()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
+        self.assertNotIn(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, workflow.state)
+        self.assertFalse(
+            SystemAgentRun.objects.filter(
+                workflow=workflow,
+                agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            ).exists()
+        )
+
+    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
+    def test_future_pr_monitor_backoff_does_not_poll_github(
+        self, mock_observe: MagicMock
+    ) -> None:
+        now = int(datetime.now(UTC).timestamp())
+        with tempfile.TemporaryDirectory() as cwd:
+            SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="main-thread",
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_RUNNING,
+                step=system_agents.STEP_PR_MONITORING,
+                state={
+                    system_agents._PR_HANDOFF_STATE_KEY: {
+                        "url": "https://github.com/cberner/hitch/pull/169",
+                        "repository_full_name": "cberner/hitch",
+                        "pr_number": 169,
+                        "state": "open",
+                    },
+                    system_agents._PR_MONITOR_BACKOFF_STATE_KEY: {
+                        "reason": "pending_gates",
+                        "scheduled_at": now,
+                        "next_attempt_at": now + 60,
+                        "delay_seconds": 300,
+                    },
+                },
+            )
+
+            refreshed = system_agents.refresh_due_pr_monitor_backoffs()
+
+        self.assertEqual(refreshed, 0)
+        mock_observe.assert_not_called()
+
+    @patch(
+        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation(
+            {
+                "review_signal": "approved",
+                "unresolved_thread_count": 0,
+                "ci_status": "success",
+            }
+        ),
+    )
+    def test_due_pr_monitor_backoff_claim_prevents_duplicate_poll(
+        self, mock_observe: MagicMock
+    ) -> None:
+        observation = _gh_monitor_observation(
+            {
+                "review_signal": "approved",
+                "unresolved_thread_count": 0,
+                "ci_status": "success",
+            }
+        )
+
+        def observe_once(_workflow: SystemWorkflow) -> dict[str, object]:
+            self.assertEqual(system_agents.refresh_due_pr_monitor_backoffs(), 0)
+            return observation
+
+        mock_observe.side_effect = observe_once
+        now = int(datetime.now(UTC).timestamp())
+        with tempfile.TemporaryDirectory() as cwd:
+            workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="main-thread",
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_RUNNING,
+                step=system_agents.STEP_PR_MONITORING,
+                state={
+                    system_agents._PR_HANDOFF_STATE_KEY: {
+                        "url": "https://github.com/cberner/hitch/pull/169",
+                        "repository_full_name": "cberner/hitch",
+                        "pr_number": 169,
+                        "state": "open",
+                    },
+                    system_agents._PR_PENDING_CHECKS_STATE_KEY: 1,
+                    system_agents._PR_MONITOR_BACKOFF_STATE_KEY: {
+                        "reason": "pending_gates",
+                        "scheduled_at": now - 301,
+                        "next_attempt_at": now - 1,
+                        "delay_seconds": 300,
+                    },
+                },
+            )
+
+            refreshed = system_agents.refresh_due_pr_monitor_backoffs()
+
+        self.assertEqual(refreshed, 1)
+        mock_observe.assert_called_once()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
+        self.assertNotIn(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, workflow.state)
+
+    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
+    def test_reconcile_does_not_poll_due_pr_monitor_backoff(
+        self, mock_observe: MagicMock
+    ) -> None:
+        now = int(datetime.now(UTC).timestamp())
+        with tempfile.TemporaryDirectory() as cwd:
+            workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="main-thread",
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_RUNNING,
+                step=system_agents.STEP_PR_MONITORING,
+                state={
+                    system_agents._PR_HANDOFF_STATE_KEY: {
+                        "url": "https://github.com/cberner/hitch/pull/169",
+                        "repository_full_name": "cberner/hitch",
+                        "pr_number": 169,
+                        "state": "open",
+                    },
+                    system_agents._PR_PENDING_CHECKS_STATE_KEY: 1,
+                    system_agents._PR_MONITOR_BACKOFF_STATE_KEY: {
+                        "reason": "pending_gates",
+                        "scheduled_at": now - 301,
+                        "next_attempt_at": now - 1,
+                        "delay_seconds": 300,
+                    },
+                },
+            )
+
+            active = system_agents.active_workflow_for_thread("main-thread")
+
+        self.assertEqual(active, workflow)
+        mock_observe.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+        backoff = workflow.state[system_agents._PR_MONITOR_BACKOFF_STATE_KEY]
+        self.assertNotIn("claim_token", backoff)
+
+    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_missing_cwd_pr_monitor_backoff_blocks_after_retry_limit(
+        self, mock_spawn: MagicMock, mock_observe: MagicMock
+    ) -> None:
+        now = int(datetime.now(UTC).timestamp())
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/tmp/hitch-missing-pr-monitor-cwd",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            max_iterations=1,
+            state={
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": "https://github.com/cberner/hitch/pull/169",
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 169,
+                    "state": "open",
+                },
+                system_agents._PR_MONITOR_BACKOFF_STATE_KEY: {
+                    "reason": "pending_gates",
+                    "scheduled_at": now - 301,
+                    "next_attempt_at": now - 1,
+                    "delay_seconds": 300,
+                },
+            },
+        )
+
+        refreshed = system_agents.refresh_due_pr_monitor_backoffs()
+
+        self.assertEqual(refreshed, 1)
+        mock_observe.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        self.assertIn("workflow cwd is missing", workflow.state["error"])
+        self.assertNotIn(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, workflow.state)
+        mock_spawn.assert_called_once()
+
+    @patch(
+        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        side_effect=system_agents._GhPrOpenError("auth failed"),
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_gh_error_pr_monitor_backoff_blocks_after_retry_limit(
+        self, mock_spawn: MagicMock, mock_observe: MagicMock
+    ) -> None:
+        now = int(datetime.now(UTC).timestamp())
+        with tempfile.TemporaryDirectory() as cwd:
+            workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="main-thread",
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_RUNNING,
+                step=system_agents.STEP_PR_MONITORING,
+                max_iterations=1,
+                state={
+                    system_agents._PR_HANDOFF_STATE_KEY: {
+                        "url": "https://github.com/cberner/hitch/pull/169",
+                        "repository_full_name": "cberner/hitch",
+                        "pr_number": 169,
+                        "state": "open",
+                    },
+                    system_agents._PR_MONITOR_BACKOFF_STATE_KEY: {
+                        "reason": "pending_gates",
+                        "scheduled_at": now - 301,
+                        "next_attempt_at": now - 1,
+                        "delay_seconds": 300,
+                    },
+                },
+            )
+
+            refreshed = system_agents.refresh_due_pr_monitor_backoffs()
+
+        self.assertEqual(refreshed, 1)
+        mock_observe.assert_called_once()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        self.assertIn("auth failed", workflow.state["error"])
+        self.assertNotIn(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, workflow.state)
+        mock_spawn.assert_called_once()
 
     @patch("hitch.main.system_agents._surface_workflow_failure")
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
@@ -5628,6 +5904,45 @@ class SpecCriticWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         mock_spawn.assert_not_called()
+
+    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_stop_active_workflow_blocks_pr_monitor_backoff_without_hidden_run(
+        self, mock_spawn: MagicMock, mock_observe: MagicMock
+    ) -> None:
+        now = int(datetime.now(UTC).timestamp())
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": "https://github.com/cberner/hitch/pull/169",
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 169,
+                    "state": "open",
+                },
+                system_agents._PR_MONITOR_BACKOFF_STATE_KEY: {
+                    "reason": "pending_gates",
+                    "scheduled_at": now,
+                    "next_attempt_at": now + 300,
+                    "delay_seconds": 300,
+                },
+            },
+        )
+
+        stopped = system_agents.stop_active_workflow("main-thread")
+
+        self.assertTrue(stopped)
+        mock_observe.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        self.assertEqual(workflow.state["error"], "QA workflow stopped by user")
+        self.assertNotIn(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, workflow.state)
+        mock_spawn.assert_called_once()
 
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
     def test_active_workflow_reconciles_terminal_hidden_run(
