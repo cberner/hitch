@@ -4126,16 +4126,43 @@
                     const options = Array.isArray(question.options) ? question.options : [];
                     const optionRow = document.createElement("div");
                     optionRow.className = "input-options";
+                    const multiSelect = question.multi_select === true;
                     const buttons = [];
-                    const setAnswer = (value, selected) => {
+                    const selectedLabels = new Set();
+                    let otherText = "";
+                    // The answer is the chosen option labels (plus any free-text
+                    // "Other") joined by ", " -- one value for single select, the
+                    // accumulated set for multi-select.
+                    const syncAnswer = () => {
+                        const parts = Array.from(selectedLabels);
+                        if (inputAnswerPresent(otherText)) parts.push(otherText.trim());
+                        const value = parts.join(", ");
                         if (inputAnswerPresent(value)) {
                             answers[qid] = value;
                         } else {
                             delete answers[qid];
                         }
-                        for (const btn of buttons) btn.setAttribute("aria-pressed", "false");
-                        if (selected) selected.setAttribute("aria-pressed", "true");
                         refreshSubmitState();
+                    };
+                    let other;
+                    const chooseSingle = (label, btn) => {
+                        selectedLabels.clear();
+                        if (inputAnswerPresent(label)) selectedLabels.add(label);
+                        otherText = "";
+                        if (other) other.value = "";
+                        for (const b of buttons) b.setAttribute("aria-pressed", "false");
+                        if (btn) btn.setAttribute("aria-pressed", "true");
+                        syncAnswer();
+                    };
+                    const toggleMulti = (label, btn) => {
+                        if (selectedLabels.has(label)) {
+                            selectedLabels.delete(label);
+                            btn.setAttribute("aria-pressed", "false");
+                        } else {
+                            selectedLabels.add(label);
+                            btn.setAttribute("aria-pressed", "true");
+                        }
+                        syncAnswer();
                     };
                     for (const option of options) {
                         const label = typeof option.label === "string" ? option.label : "";
@@ -4156,21 +4183,33 @@
                             descriptionNode.textContent = description;
                             btn.appendChild(descriptionNode);
                         }
-                        btn.addEventListener("click", () => setAnswer(label, btn));
+                        btn.addEventListener("click", () => {
+                            if (multiSelect) toggleMulti(label, btn);
+                            else chooseSingle(label, btn);
+                        });
                         optionRow.appendChild(btn);
                         buttons.push(btn);
                     }
-                    const other = document.createElement("input");
+                    other = document.createElement("input");
                     other.type = "text";
                     other.className = "input-other";
                     other.placeholder = "Other";
                     other.setAttribute("aria-label", "Other answer for " + qid);
-                    other.addEventListener("focus", () => setAnswer(other.value, null));
-                    other.addEventListener("input", () => setAnswer(other.value, null));
+                    const onOther = () => {
+                        otherText = other.value;
+                        // For single select, free text replaces a button choice.
+                        if (!multiSelect && inputAnswerPresent(otherText)) {
+                            selectedLabels.clear();
+                            for (const b of buttons) b.setAttribute("aria-pressed", "false");
+                        }
+                        syncAnswer();
+                    };
+                    other.addEventListener("focus", onOther);
+                    other.addEventListener("input", onOther);
                     optionRow.appendChild(other);
-                    if (buttons.length && !requiresExplicitChoice) {
+                    if (buttons.length && !requiresExplicitChoice && !multiSelect) {
                         const firstLabel = buttons[0].querySelector(".input-option-label");
-                        setAnswer(firstLabel ? firstLabel.textContent || "" : "", buttons[0]);
+                        chooseSingle(firstLabel ? firstLabel.textContent || "" : "", buttons[0]);
                     }
                     qbox.appendChild(optionRow);
                     box.appendChild(qbox);

@@ -5593,23 +5593,16 @@ def _local_session_cwd(session_id: str) -> str:
     return metadata.cwd if metadata is not None else ""
 
 
-def _start_claude_qa_workflow(
-    *,
-    session_id: str,
-    qa_activation: bool,
-    settings: SettingsValues,
-    input_image_paths: list[str],
-) -> HttpResponse:
-    """Start a PR/QA workflow on an existing Claude session (manual /qa or /pr).
+def _claude_workflow_common(
+    session_id: str, settings: SettingsValues
+) -> tuple[str, str, str] | HttpResponse:
+    """Resolve ``(cwd, model, developer_instructions)`` for a Claude follow-up
+    workflow, or an error response.
 
-    The Claude analog of the Codex follow-up activation: the workflow records the
-    thread's (Claude) backend and spawns its sub-agents and the PR-prompt turn as
-    Claude workers; the PR itself is opened by hitch via ``gh``. cwd and per-turn
-    settings come from local rows since the thread has no Codex rollout to resume.
+    Claude threads have no Codex rollout, so these come from local rows: the
+    session cwd (validated against the allowlist) and the thread's prior Claude
+    model (preferred when the settings cookie holds a Codex id).
     """
-    # ``/qa`` and ``/pr`` carry no image attachments (rejected earlier), so the
-    # saved temp copies are not needed.
-    _cleanup_saved_input_images(input_image_paths)
     cwd = _local_session_cwd(session_id)
     if not cwd:
         return HttpResponseBadRequest("session has no cwd")
@@ -5630,7 +5623,31 @@ def _start_claude_qa_workflow(
         else _developer_instructions_for_project(
             settings, _project_for_cwd(cwd, list(Project.objects.all()))
         )
-    )
+    ) or ""
+    return cwd, model, developer_instructions
+
+
+def _start_claude_qa_workflow(
+    *,
+    session_id: str,
+    qa_activation: bool,
+    settings: SettingsValues,
+    input_image_paths: list[str],
+) -> HttpResponse:
+    """Start a PR/QA workflow on an existing Claude session (manual /qa or /pr).
+
+    The Claude analog of the Codex follow-up activation: the workflow records the
+    thread's (Claude) backend and spawns its sub-agents and the PR-prompt turn as
+    Claude workers; the PR itself is opened by hitch via ``gh``. cwd and per-turn
+    settings come from local rows since the thread has no Codex rollout to resume.
+    """
+    # ``/qa`` and ``/pr`` carry no image attachments (rejected earlier), so the
+    # saved temp copies are not needed.
+    _cleanup_saved_input_images(input_image_paths)
+    common = _claude_workflow_common(session_id, settings)
+    if isinstance(common, HttpResponse):
+        return common
+    cwd, model, developer_instructions = common
     auto_merge_to_local_branch, auto_merge_branch = (
         _auto_merge_to_local_branch_for_session(session_id)
     )
@@ -5658,6 +5675,63 @@ def _start_claude_qa_workflow(
     if auto_merge_to_local_branch and auto_merge_branch:
         workflow_kwargs["auto_merge_branch"] = auto_merge_branch
     system_agents.start_pr_qa_workflow(**workflow_kwargs)
+    return redirect("session", session_id=session_id)
+
+
+def _start_claude_spec_critic_follow_up(
+    *,
+    session_id: str,
+    prompt: str,
+    settings: SettingsValues,
+    input_image_paths: list[str],
+) -> HttpResponse:
+    """Run the Spec Critic preflight on an existing Claude session follow-up.
+
+    Mirrors the Codex follow-up preflight on the local Claude thread: the hidden
+    analysis/synthesizer agents run as Claude workers, then the implementation
+    turn spawns on the same thread carrying the session's Auto-PR/Auto-QA config.
+    """
+    common = _claude_workflow_common(session_id, settings)
+    if isinstance(common, HttpResponse):
+        _cleanup_saved_input_images(input_image_paths)
+        return common
+    cwd, model, developer_instructions = common
+    auto_pr_enabled = _auto_pr_enabled_for_session(session_id)
+    auto_qa_enabled = (
+        False if auto_pr_enabled else _auto_qa_enabled_for_session(session_id)
+    )
+    auto_merge_to_local_branch, auto_merge_branch = (
+        _auto_merge_to_local_branch_for_session(session_id)
+        if auto_qa_enabled
+        else (False, "")
+    )
+    spec_workflow_kwargs: dict[str, Any] = {
+        "main_thread_id": session_id,
+        "cwd": cwd,
+        "prompt": prompt,
+        "sandbox_policy": _effective_sandbox_policy(settings) or None,
+        "approval_mode": _effective_approval_mode(settings),
+        "model": model,
+        "reasoning_effort": settings.reasoning_effort or None,
+        "developer_instructions": developer_instructions or None,
+        "enable_memories": settings.enable_memories,
+        "initial_user_message_index": _claude_user_message_index(session_id),
+        "auto_pr_enabled": auto_pr_enabled,
+        "auto_qa_enabled": auto_qa_enabled,
+    }
+    web_search_mode = _valid_web_search_mode_or_default(settings.web_search_mode)
+    if web_search_mode:
+        spec_workflow_kwargs["web_search_mode"] = web_search_mode
+    base_instructions = _base_instructions_for_settings(settings)
+    if base_instructions:
+        spec_workflow_kwargs["base_instructions"] = base_instructions
+    if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
+        spec_workflow_kwargs["qa_panel_enabled"] = True
+    if auto_merge_to_local_branch and auto_merge_branch:
+        spec_workflow_kwargs["auto_merge_to_local_branch"] = True
+        spec_workflow_kwargs["auto_merge_branch"] = auto_merge_branch
+    _cleanup_saved_input_images(input_image_paths)
+    system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
     return redirect("session", session_id=session_id)
 
 
@@ -5723,21 +5797,29 @@ def _send_claude_follow_up(
         spawn_kwargs["web_search_mode"] = web_search_mode
     if previous_instance is None and developer_instructions:
         spawn_kwargs["developer_instructions"] = developer_instructions
-    # Carry the session's Auto-QA configuration onto every follow-up turn.
-    # ``_maybe_start_auto_review_workflow`` fires off the completed instance's
-    # ``auto_qa_enabled`` flag, so without this a Claude session would only run
-    # QA after its initial turn and silently skip it on every follow-up. Auto-PR
-    # stays off for Claude (no GitHub PR-open path), and plan turns never
+    # Carry the session's Auto-PR/Auto-QA configuration onto every follow-up
+    # turn. ``on_codex_instance_finished`` fires off the completed instance's
+    # ``auto_pr_enabled``/``auto_qa_enabled`` flags, so without this a Claude
+    # session would only auto-review/open-a-PR after its initial turn and skip it
+    # on every follow-up. Auto-PR supersedes Auto-QA, and plan turns never
     # auto-review.
-    auto_qa_enabled = not plan_mode and _auto_qa_enabled_for_session(session_id)
-    if auto_qa_enabled:
-        auto_merge_to_local_branch, auto_merge_branch = (
-            _auto_merge_to_local_branch_for_session(session_id)
-        )
-        spawn_kwargs["auto_qa_enabled"] = True
+    auto_pr_enabled = not plan_mode and _auto_pr_enabled_for_session(session_id)
+    auto_qa_enabled = (
+        not plan_mode
+        and not auto_pr_enabled
+        and _auto_qa_enabled_for_session(session_id)
+    )
+    if auto_pr_enabled or auto_qa_enabled:
         spawn_kwargs["user_message_index"] = _claude_user_message_index(session_id)
         if settings.qa_panel_enabled:
             spawn_kwargs["qa_panel_enabled"] = True
+    if auto_pr_enabled:
+        spawn_kwargs["auto_pr_enabled"] = True
+    elif auto_qa_enabled:
+        spawn_kwargs["auto_qa_enabled"] = True
+        auto_merge_to_local_branch, auto_merge_branch = (
+            _auto_merge_to_local_branch_for_session(session_id)
+        )
         if auto_merge_to_local_branch:
             spawn_kwargs["auto_merge_to_local_branch"] = True
             spawn_kwargs["auto_merge_branch"] = auto_merge_branch
@@ -10329,6 +10411,18 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 return _start_claude_qa_workflow(
                     session_id=session_id,
                     qa_activation=qa_activation,
+                    settings=settings,
+                    input_image_paths=input_image_paths,
+                )
+            if (
+                settings.spec_critic_enabled
+                and not plan_mode
+                and not input_image_paths
+                and system_agents.spec_critic_should_run(prompt)
+            ):
+                return _start_claude_spec_critic_follow_up(
+                    session_id=session_id,
+                    prompt=prompt,
                     settings=settings,
                     input_image_paths=input_image_paths,
                 )

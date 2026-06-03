@@ -574,9 +574,10 @@ def _ask_user_question_params(tool_input: dict[str, Any]) -> list[dict[str, Any]
     """Map an ``AskUserQuestion`` tool input onto the ``input/requested`` schema.
 
     The browser input UI keys answers by a per-question ``id`` (which
-    ``AskUserQuestion`` does not provide) and renders ``options`` as single
-    select; a synthetic id is added per question and each option's
-    label/description is carried through.
+    ``AskUserQuestion`` does not provide), so a synthetic id is added per
+    question and each option's label/description is carried through. A
+    ``multiSelect`` question is rendered as multi-select; its chosen labels come
+    back as a comma-joined answer string.
     """
     raw_questions = tool_input.get("questions")
     if not isinstance(raw_questions, list):
@@ -605,6 +606,7 @@ def _ask_user_question_params(tool_input: dict[str, Any]) -> list[dict[str, Any]
                 "options": options,
                 # Clarifying questions need a real answer, so don't pre-select.
                 "requires_explicit_choice": True,
+                "multi_select": raw.get("multiSelect") is True,
             }
         )
     return questions

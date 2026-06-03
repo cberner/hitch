@@ -692,6 +692,24 @@ class AskUserQuestionTests(TestCase):
         self.assertEqual(question["header"], "Library")
         self.assertEqual([o["label"] for o in question["options"]], ["requests", "httpx"])
         self.assertTrue(question["requires_explicit_choice"])
+        self.assertFalse(question["multi_select"])
+
+    def test_params_mapping_carries_multi_select(self) -> None:
+        from hitch.main.management.commands import claude_worker
+
+        questions = claude_worker._ask_user_question_params(
+            {
+                "questions": [
+                    {
+                        "question": "Which features?",
+                        "header": "Features",
+                        "options": [{"label": "a"}, {"label": "b"}],
+                        "multiSelect": True,
+                    }
+                ]
+            }
+        )
+        self.assertTrue(questions[0]["multi_select"])
 
     def test_routes_to_input_request_and_returns_answers(self) -> None:
         import asyncio
@@ -1924,6 +1942,53 @@ class ClaudeFollowUpAutoQaTests(TestCase):
             )
         # /pr leaves open_pr_on_lgtm at its default (True) so hitch opens the PR.
         self.assertNotIn("open_pr_on_lgtm", mock_start.call_args.kwargs)
+
+    def test_follow_up_forwards_auto_pr(self) -> None:
+        from hitch.main import views
+        from hitch.main.models import SessionMetadata
+
+        self._claude_instance()
+        SessionMetadata.objects.filter(thread_id="claude-thread").update(
+            auto_pr_enabled=True, auto_qa_enabled=False
+        )
+        with (
+            patch.object(codex_pool, "spawn_turn") as mock_spawn,
+            patch.object(views, "_allowed_session_cwds", return_value={"/repo"}),
+            patch.object(views, "_claude_user_message_index", return_value=1),
+        ):
+            views._send_claude_follow_up(
+                session_id="claude-thread",
+                prompt="next",
+                plan_mode=False,
+                settings=self._settings(),
+                input_image_paths=[],
+            )
+        kwargs = mock_spawn.call_args.kwargs
+        # Auto-PR now rides every follow-up; it supersedes Auto-QA.
+        self.assertTrue(kwargs.get("auto_pr_enabled"))
+        self.assertNotIn("auto_qa_enabled", kwargs)
+
+    def test_spec_critic_runs_on_claude_follow_up(self) -> None:
+        from hitch.main import system_agents, views
+
+        self._claude_instance()
+        with (
+            patch.object(views, "_is_allowed_session_cwd", return_value=True),
+            patch.object(views, "_claude_user_message_index", return_value=2),
+            patch.object(system_agents, "start_spec_critic_workflow") as mock_start,
+        ):
+            response = views._start_claude_spec_critic_follow_up(
+                session_id="claude-thread",
+                prompt="add a parser feature",
+                settings=self._settings(model="claude-sonnet-4-6"),
+                input_image_paths=[],
+            )
+        self.assertEqual(response.status_code, 302)
+        kwargs = mock_start.call_args.kwargs
+        self.assertEqual(kwargs["main_thread_id"], "claude-thread")
+        self.assertEqual(kwargs["prompt"], "add a parser feature")
+        self.assertEqual(kwargs["model"], "claude-sonnet-4-6")
+        self.assertEqual(kwargs["initial_user_message_index"], 2)
 
 
 class CandidateThreadIndexTests(TestCase):
