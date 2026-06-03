@@ -6347,9 +6347,13 @@ def refreshed_pr_snapshot_for_stage(
 def _should_refresh_pr_handoff_for_stage(
     workflow: SystemWorkflow, handoff: dict[str, Any], *, force: bool
 ) -> bool:
-    if workflow.status != SystemWorkflow.STATUS_COMPLETED:
-        return False
-    if workflow.step != STEP_PR_READY:
+    if workflow.status == SystemWorkflow.STATUS_COMPLETED:
+        if workflow.step != STEP_PR_READY:
+            return False
+    elif workflow.status == SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED:
+        if workflow.step != STEP_MAX_ITERATIONS_REACHED:
+            return False
+    else:
         return False
     if _pr_handoff_is_terminal(handoff):
         return False
