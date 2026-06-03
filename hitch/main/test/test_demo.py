@@ -283,6 +283,9 @@ class DemoProxyTests(TestCase):
                 "Expect": "100-continue",
                 "Forwarded": "for=198.51.100.1",
                 "Host": "hitch.example.test",
+                "If-Modified-Since": "Wed, 21 Oct 2020 07:28:00 GMT",
+                "If-None-Match": '"stale-etag"',
+                "If-Range": '"range-validator"',
                 "Proxy-Connection": "keep-alive",
                 "Range": "bytes=0-5",
                 "X-Client-Only": "drop me",
@@ -312,6 +315,9 @@ class DemoProxyTests(TestCase):
         self.assertEqual(normalized["x-forwarded-prefix"], "/sessions/thread-1/demo")
         self.assertEqual(normalized["accept-language"], "en-US")
         self.assertEqual(normalized["range"], "bytes=0-5")
+        # If-Range stays paired with Range so the container can decide between a
+        # 206 and a full 200 against the rebuilt resource.
+        self.assertEqual(normalized["if-range"], '"range-validator"')
         for blocked in (
             "authorization",
             "connection",
@@ -319,12 +325,44 @@ class DemoProxyTests(TestCase):
             "cookie",
             "expect",
             "forwarded",
+            # Conditional validators must not reach the container, or a rebuilt
+            # demo could answer 304 and the browser would reuse a stale asset.
+            "if-modified-since",
+            "if-none-match",
             "proxy-connection",
             "x-client-only",
             "x-csrftoken",
             "x-forwarded-port",
         ):
             self.assertNotIn(blocked, normalized)
+
+    def test_proxy_keeps_write_preconditions_on_unsafe_methods(self) -> None:
+        # On unsafe methods the conditional headers are optimistic-concurrency
+        # preconditions, not cache validators (e.g. If-None-Match: * for
+        # create-if-absent), so they must reach the container intact.
+        request = RequestFactory().put(
+            "/sessions/thread-1/demo/resource",
+            headers={
+                "Host": "hitch.example.test",
+                "If-Match": '"v1"',
+                "If-None-Match": "*",
+                "If-Unmodified-Since": "Wed, 21 Oct 2020 07:28:00 GMT",
+            },
+        )
+        target = SessionDemo(host="127.0.0.1", port=12345)
+
+        headers = demo._proxy_request_headers(
+            request,
+            target,
+            path_prefix="/sessions/thread-1/demo/",
+        )
+        normalized = {key.lower(): value for key, value in headers.items()}
+
+        self.assertEqual(normalized["if-match"], '"v1"')
+        self.assertEqual(normalized["if-none-match"], "*")
+        self.assertEqual(
+            normalized["if-unmodified-since"], "Wed, 21 Oct 2020 07:28:00 GMT"
+        )
 
     def test_proxy_drops_response_headers_with_embedded_crlf(self) -> None:
         # Obsolete header line folding / header injection from a misbehaving demo
@@ -347,6 +385,35 @@ class DemoProxyTests(TestCase):
         self.assertEqual(headers.get("X-Good"), "fine")
         self.assertNotIn("X-Folded", headers)
         self.assertNotIn("X-Bare-CR", headers)
+
+    def test_proxy_replaces_cache_freshness_headers_but_keeps_validators(self) -> None:
+        # The demo proxy URL is stable across rebuilds, so the container's
+        # cache-freshness directives must be dropped and replaced with no-store.
+        # ETag/Last-Modified are representation validators an app may need, and
+        # no-store plus stripped request revalidators stop them from triggering a
+        # stale 304, so they are preserved.
+        upstream = MagicMock(spec=http.client.HTTPResponse)
+        upstream.getheaders.return_value = [
+            ("Content-Type", "text/html"),
+            ("Cache-Control", "max-age=31536000, immutable"),
+            ("ETag", '"abc123"'),
+            ("Expires", "Wed, 21 Oct 2099 07:28:00 GMT"),
+            ("Last-Modified", "Wed, 21 Oct 2020 07:28:00 GMT"),
+            ("Pragma", "cache"),
+        ]
+
+        headers = demo._proxy_response_headers(
+            upstream,
+            "/sessions/thread-1/demo/",
+            upstream_netloc="127.0.0.1:12345",
+        )
+
+        self.assertEqual(headers.get("Cache-Control"), "no-store")
+        for absent in ("Expires", "Pragma"):
+            self.assertNotIn(absent, headers)
+        self.assertEqual(headers.get("ETag"), '"abc123"')
+        self.assertEqual(headers.get("Last-Modified"), "Wed, 21 Oct 2020 07:28:00 GMT")
+        self.assertEqual(headers.get("Content-Type"), "text/html")
 
     def test_rewrite_body_preserves_protocol_relative_urls_and_rewrites_srcset(self) -> None:
         body = (
