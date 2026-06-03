@@ -527,17 +527,17 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(metadata.codex_path, str(rollout_path))
         mock_codex.assert_not_called()
 
-    def test_session_detail_rollout_recovery_ignores_prefix_thread_id_match(
+    def test_session_detail_rollout_recovery_ignores_hyphenated_suffix_match(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as codex_home:
             _write_codex_home_rollout(
                 codex_home,
-                "recovered-thread-extra",
+                "xyz-abc-def",
                 ["not the requested thread"],
             )
             metadata = SessionMetadata.objects.create(
-                thread_id="recovered-thread",
+                thread_id="abc-def",
                 cwd="/repo",
                 codex_path="",
                 codex_created_at=datetime(2025, 1, 5, tzinfo=UTC),
@@ -545,7 +545,7 @@ class SessionDetailFastPathTests(TestCase):
             )
 
             with patch.dict(os.environ, {"CODEX_HOME": codex_home}):
-                recovered = views._session_detail_metadata("recovered-thread")
+                recovered = views._session_detail_metadata("abc-def")
 
         self.assertEqual(recovered, metadata)
         metadata.refresh_from_db()

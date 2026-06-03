@@ -436,6 +436,9 @@ _ARCHIVED_SESSIONS_DIR = "archived_sessions"
 # the false-positive case where a user's CODEX_HOME unrelatedly traverses an
 # ``archived_sessions`` parent.
 _ARCHIVED_SESSIONS_ANCESTOR_DEPTH = 5
+_ROLLOUT_FILENAME_RE = re.compile(
+    r"^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(?P<thread_id>.+)\.jsonl$"
+)
 _INPUT_IMAGE_FIELD = "input_images"
 _INPUT_IMAGE_MAX_COUNT = 4
 _INPUT_IMAGE_MAX_BYTES = 20 * 1024 * 1024
@@ -4610,9 +4613,8 @@ def _stored_rollout_path_for_thread(session_id: str) -> Path | None:
 
 
 def _rollout_filename_matches_thread_id(path: Path, session_id: str) -> bool:
-    return path.name.startswith("rollout-") and path.name.endswith(
-        f"-{session_id}.jsonl"
-    )
+    match = _ROLLOUT_FILENAME_RE.fullmatch(path.name)
+    return match is not None and match.group("thread_id") == session_id
 
 
 def _metadata_resume_for_inactive_session(
