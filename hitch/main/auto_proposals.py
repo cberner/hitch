@@ -19,6 +19,11 @@ from hitch.main.models import Project
 logger = logging.getLogger(__name__)
 
 _AUTO_PROPOSAL_SCHEDULER_INTERVAL_SECONDS = 60
+# Cap GitHub-backed PR-stage refreshes per tick: each due session shells out to
+# `gh pr view` (seconds each), so an unbounded sweep would let one tick run for
+# minutes and stall the rest of the scheduler. Leftover rows converge on later
+# 60s ticks, matching the workflow-maintenance scheduler's PR-stage cap.
+_PR_STAGE_REFRESH_LIMIT_PER_TICK = 5
 _SCHEDULER_ENV = "HITCH_AUTO_PROPOSAL_SCHEDULER"
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
@@ -175,7 +180,9 @@ def refresh_unarchived_session_state(
     except Exception:
         codex_failed = True
         logger.exception("failed to refresh active Codex session metadata")
-    pr_stages_refreshed = system_agents.refresh_unarchived_session_pr_stages()
+    pr_stages_refreshed = system_agents.refresh_unarchived_session_pr_stages(
+        limit=_PR_STAGE_REFRESH_LIMIT_PER_TICK
+    )
     return SessionStateRefreshResult(
         synced=codex_synced,
         failed=codex_failed,

@@ -21,6 +21,9 @@ _WORKFLOW_MAINTENANCE_INTERVAL_SECONDS = 60
 # next reconcile by minutes and revive the stale-running-badge problem. The
 # leftover rows converge on later ticks (and on demand from the request path).
 _PR_STAGE_REFRESH_LIMIT_PER_TICK = 5
+# Same rationale for the PR-monitor backoff sweep: each due monitor shells out to
+# gh, so cap how many one tick polls and let the rest converge on later ticks.
+_PR_MONITOR_BACKOFF_LIMIT_PER_TICK = 5
 _SCHEDULER_ENV = "HITCH_WORKFLOW_MAINTENANCE_SCHEDULER"
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
@@ -79,7 +82,9 @@ def _run_workflow_maintenance_scheduler_tick() -> None:
     close_old_connections()
     try:
         codex_pool.reconcile_dead()
-        refreshed = system_agents.refresh_due_pr_monitor_backoffs()
+        refreshed = system_agents.refresh_due_pr_monitor_backoffs(
+            limit=_PR_MONITOR_BACKOFF_LIMIT_PER_TICK
+        )
         if refreshed:
             logger.info("refreshed %s PR monitor backoff workflow(s)", refreshed)
         # Converge GitHub-backed PR stages in the background. This scheduler
