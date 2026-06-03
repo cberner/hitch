@@ -396,6 +396,25 @@ class SessionIndexSyncState(models.Model):
         return f"SessionIndexSyncState(source={self.source})"
 
 
+class RefreshThrottle(models.Model):
+    """Central debounce ledger: the last time any path pinged an external resource.
+
+    Backs ``hitch.main.rate_limit``. Keys are opaque strings naming "the same
+    thing" -- a GitHub PR (its URL) or the Codex account rate-limit endpoint --
+    so the floor on how often that resource is hit is shared across web renders,
+    both background schedulers, and detached worker subprocesses. Module-level
+    in-memory caches cannot coordinate across processes; this table can.
+    """
+
+    key = models.CharField(max_length=255, unique=True)
+    attempted_at = models.DateTimeField(db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @override
+    def __str__(self) -> str:
+        return f"RefreshThrottle(key={self.key})"
+
+
 class SessionDemo(models.Model):
     """Active web demo target for a Codex session."""
 

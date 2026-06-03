@@ -1,0 +1,29 @@
+<script>
+(function () {
+    // When a stage badge shows its "refreshing" sweep, the authoritative stage
+    // is being fetched off-request (see _schedule_pr_stage_refresh). Reload once
+    // shortly to pick up the persisted result. Only fires while the tab is
+    // visible; otherwise it waits until the tab is shown again. The refreshing
+    // flag is only set for inactive PR-stage sessions, so this never interrupts
+    // a live worker stream.
+    if (!document.querySelector('.stage-badge[data-refreshing="true"]')) {
+        return;
+    }
+    var done = false;
+    function reloadOnce() {
+        if (done) {
+            return;
+        }
+        if (document.visibilityState === "visible") {
+            done = true;
+            window.location.reload();
+        }
+    }
+    window.setTimeout(function () {
+        reloadOnce();
+        if (!done) {
+            document.addEventListener("visibilitychange", reloadOnce);
+        }
+    }, 7000);
+})();
+</script>

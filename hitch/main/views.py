@@ -57,6 +57,7 @@ from hitch.main import (
     codex_pool,
     coding_agents,
     demo,
+    rate_limit,
     rollout,
     session_index,
     session_stage,
@@ -105,13 +106,22 @@ _RATE_LIMITS_REFRESH_IN_FLIGHT = False
 _RATE_LIMITS_CACHE_VALUE: dict[str, Any] | None = None
 _RATE_LIMITS_CACHE_HAS_VALUE = False
 _RATE_LIMITS_CACHE_FETCHED_AT: datetime | None = None
-_RATE_LIMITS_CACHE_TTL = timedelta(seconds=30)
+# The account rate-limit endpoint is a real OpenAI ping; honour the central
+# debounce floor rather than re-hitting it every render.
+_RATE_LIMITS_CACHE_TTL = rate_limit.DEFAULT_MIN_INTERVAL
+_RATE_LIMITS_RATE_LIMIT_KEY = "codex:account-rate-limits"
 _MODELS_REFRESH_LOCK = threading.Lock()
 _MODELS_REFRESH_IN_FLIGHT: set[bool] = set()
 _MODELS_CACHE_VALUE: dict[bool, list[Any]] = {}
 _MODELS_CACHE_FETCHED_AT: dict[bool, datetime] = {}
 _MODELS_CACHE_TTL = timedelta(minutes=5)
 _SESSION_LIST_PR_STAGE_REFRESH_LIMIT = 1
+# Sessions whose gh-backed PR stage is being refreshed in a background thread,
+# so concurrent renders in this process do not spawn duplicate workers. The
+# per-PR global floor lives in the DB via ``rate_limit``; this set only avoids
+# redundant threads within one process.
+_PR_STAGE_REFRESH_INFLIGHT_LOCK = threading.Lock()
+_PR_STAGE_REFRESH_INFLIGHT: set[str] = set()
 
 
 class SettingsValues(NamedTuple):
@@ -2403,6 +2413,89 @@ def _session_row_for_thread(
     return row
 
 
+def _schedule_pr_stage_refresh(session_id: str) -> None:
+    """Refresh a session's gh-backed PR stage off the request path.
+
+    The render serves the last-known stage immediately and flags it as
+    refreshing; this performs the actual ``gh`` call and persists the result so a
+    later render (nudged by the refreshing flag) shows it. Runs synchronously
+    under TESTING for deterministic tests. De-duplicated per session within the
+    process by an in-flight set, and per PR across the whole app by the
+    ``rate_limit`` claim inside the system-agent refreshers.
+    """
+    if getattr(django_settings, "TESTING", False):
+        _refresh_session_pr_stage(session_id)
+        return
+    with _PR_STAGE_REFRESH_INFLIGHT_LOCK:
+        if session_id in _PR_STAGE_REFRESH_INFLIGHT:
+            return
+        _PR_STAGE_REFRESH_INFLIGHT.add(session_id)
+    try:
+        threading.Thread(
+            target=_pr_stage_refresh_worker,
+            args=(session_id,),
+            name="pr-stage-refresh",
+            daemon=True,
+        ).start()
+    except Exception:
+        with _PR_STAGE_REFRESH_INFLIGHT_LOCK:
+            _PR_STAGE_REFRESH_INFLIGHT.discard(session_id)
+        logger.exception("failed to start PR stage refresh thread")
+
+
+def _pr_stage_refresh_worker(session_id: str) -> None:
+    close_old_connections()
+    try:
+        _refresh_session_pr_stage(session_id)
+    except Exception:
+        logger.exception("background PR stage refresh failed for %s", session_id)
+    finally:
+        close_old_connections()
+        with _PR_STAGE_REFRESH_INFLIGHT_LOCK:
+            _PR_STAGE_REFRESH_INFLIGHT.discard(session_id)
+
+
+def _refresh_session_pr_stage(session_id: str) -> None:
+    """Perform the gh-backed PR stage refresh for one session and persist it.
+
+    Mirrors the refresh the list/detail render used to do inline: the workflow
+    handoff path persists onto the ``SystemWorkflow``, the log-snapshot path
+    re-derives and updates the cached ``derived_stage``. The gh call is gated by
+    the per-PR global ``rate_limit`` claim inside the refreshers, so this is a
+    cheap no-op when the same PR was refreshed elsewhere recently.
+    """
+    metadata = SessionMetadata.objects.filter(thread_id=session_id).first()
+    rollout_state = _rollout_file_state_from_value(
+        metadata.codex_path if metadata is not None else None
+    )
+    rollout_path = rollout_state.path if rollout_state is not None else None
+    pr_observation = _pr_observation_result_for_rollout_path(rollout_path)
+    main_updated_at = metadata.codex_updated_at if metadata is not None else None
+    stage_pr_workflow = _workflow_after_main_lifecycle(
+        _latest_pr_workflow_for_thread(session_id),
+        pr_observation,
+        main_updated_at=main_updated_at,
+    )
+    if stage_pr_workflow is not None:
+        system_agents.refreshed_pr_handoff_for_stage(stage_pr_workflow)
+        return
+    snapshot = pr_observation.snapshot
+    if metadata is None or snapshot is None or rollout_state is None:
+        return
+    if not system_agents.pr_snapshot_stage_refresh_due(
+        cwd=metadata.cwd,
+        snapshot=snapshot,
+        attempted_at=metadata.derived_stage_pr_refresh_attempted_at,
+    ):
+        return
+    _mark_cached_pr_stage_refresh_attempt(session_id)
+    refreshed = system_agents.refreshed_pr_snapshot_for_stage(
+        cwd=metadata.cwd, snapshot=snapshot
+    )
+    stage = session_stage.derive_stage(pr_snapshot=refreshed)
+    _update_cached_stage_best_effort(session_id, stage, rollout_state.mtime_ns)
+
+
 def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
     thread_ids = [
         session["id"] for session in sessions if isinstance(session.get("id"), str)
@@ -2427,7 +2520,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             and cached_stage is not None
         ):
             assert rollout_state is not None
-            stage, pr_snapshot, pr_stage_refreshes_remaining = (
+            stage, pr_snapshot, pr_stage_refreshes_remaining, refreshing = (
                 _stage_from_cached_session_row(
                     session_id,
                     session,
@@ -2437,7 +2530,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
                 )
             )
             session["stage"] = _session_list_stage_context(
-                stage, pr_snapshot=pr_snapshot
+                stage, pr_snapshot=pr_snapshot, refreshing=refreshing
             )
             continue
         rollout_path = rollout_state.path if rollout_state is not None else None
@@ -2456,7 +2549,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             and cached_stage is not None
         ):
             assert rollout_state is not None
-            stage, pr_snapshot, pr_stage_refreshes_remaining = (
+            stage, pr_snapshot, pr_stage_refreshes_remaining, refreshing = (
                 _stage_from_cached_session_row(
                     session_id,
                     session,
@@ -2466,24 +2559,23 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
                 )
             )
             session["stage"] = _session_list_stage_context(
-                stage, pr_snapshot=pr_snapshot
+                stage, pr_snapshot=pr_snapshot, refreshing=refreshing
             )
             continue
         log_pr_snapshot = pr_observation.snapshot
+        # Serve the last-known PR stage now; when a gh refresh is due, flag the
+        # badge as refreshing and do the actual refresh off-request so the page
+        # is not blocked on a ``gh`` call (the result lands on a later render).
+        workflow_pr_snapshot = system_agents.pr_handoff_for_workflow(stage_workflow)
+        # Only the PR stage gets the refreshing badge: an active worker or a
+        # waiting-for-input row shows its own stage, and flagging that refreshing
+        # would schedule a needless worker and reload.
+        pr_stage_displayed = active_instance is None and not awaiting_user_input
+        refreshing = pr_stage_displayed and system_agents.pr_handoff_stage_refresh_due(
+            stage_workflow
+        )
         if (
-            pr_stage_refreshes_remaining > 0
-            and system_agents.pr_handoff_stage_refresh_due(stage_workflow)
-        ):
-            workflow_pr_snapshot = system_agents.refreshed_pr_handoff_for_stage(
-                stage_workflow
-            )
-            pr_stage_refreshes_remaining -= 1
-        else:
-            workflow_pr_snapshot = system_agents.pr_handoff_for_workflow(
-                stage_workflow
-            )
-        if (
-            pr_stage_refreshes_remaining > 0
+            pr_stage_displayed
             and stage_workflow is None
             and log_pr_snapshot is not None
             and system_agents.pr_snapshot_stage_refresh_due(
@@ -2494,11 +2586,9 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
                 ),
             )
         ):
-            _mark_cached_pr_stage_refresh_attempt(session_id)
-            log_pr_snapshot = system_agents.refreshed_pr_snapshot_for_stage(
-                cwd=_string_value(session.get("cwd")),
-                snapshot=log_pr_snapshot,
-            )
+            refreshing = True
+        if refreshing and pr_stage_refreshes_remaining > 0:
+            _schedule_pr_stage_refresh(session_id)
             pr_stage_refreshes_remaining -= 1
         stage = session_stage.derive_stage(
             entries=entries,
@@ -2515,6 +2605,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
                 log_pr_snapshot=log_pr_snapshot,
                 workflow_pr_snapshot=workflow_pr_snapshot,
             ),
+            refreshing=refreshing,
         )
         # The stage cache is keyed only on the rollout file's mtime, so it may
         # only hold stages that are a pure function of the rollout. A stage that
@@ -2523,10 +2614,13 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         # worker/workflow goes away without rewriting the rollout, the cached
         # row would still satisfy the read guard and resurrect the stale active
         # badge. Persist only when no such owner contributed to the stage.
+        # Skip while refreshing: the snapshot is known-stale and the background
+        # refresh will write the authoritative stage.
         if (
             active_instance is None
             and stage_workflow is None
             and not awaiting_user_input
+            and not refreshing
         ):
             _update_cached_stage_best_effort(
                 session_id,
@@ -2542,37 +2636,24 @@ def _stage_from_cached_session_row(
     rollout_state: _RolloutFileState,
     cached_stage: session_stage.SessionStage,
     pr_stage_refreshes_remaining: int,
-) -> tuple[session_stage.SessionStage, Mapping[str, Any] | None, int]:
+) -> tuple[session_stage.SessionStage, Mapping[str, Any] | None, int, bool]:
     pr_snapshot = None
     stage = cached_stage
+    refreshing = False
     if cached_stage.key == session_stage.PR.key:
         pr_snapshot = _pr_snapshot_for_rollout_path(rollout_state.path)
-        if pr_snapshot is not None:
-            refresh_pr_snapshot = (
-                pr_stage_refreshes_remaining > 0
-                and system_agents.pr_snapshot_stage_refresh_due(
-                    cwd=_string_value(session.get("cwd")),
-                    snapshot=pr_snapshot,
-                    attempted_at=_datetime_value(
-                        session.get("stage_pr_refresh_attempted_at")
-                    ),
-                )
-            )
-            if refresh_pr_snapshot:
-                _mark_cached_pr_stage_refresh_attempt(session_id)
-                pr_snapshot = system_agents.refreshed_pr_snapshot_for_stage(
-                    cwd=_string_value(session.get("cwd")),
-                    snapshot=pr_snapshot,
-                )
+        if pr_snapshot is not None and system_agents.pr_snapshot_stage_refresh_due(
+            cwd=_string_value(session.get("cwd")),
+            snapshot=pr_snapshot,
+            attempted_at=_datetime_value(session.get("stage_pr_refresh_attempted_at")),
+        ):
+            # Serve the cached stage now and refresh off-request; the result is
+            # persisted to the stage cache for a later render to read back.
+            refreshing = True
+            if pr_stage_refreshes_remaining > 0:
+                _schedule_pr_stage_refresh(session_id)
                 pr_stage_refreshes_remaining -= 1
-            stage = session_stage.derive_stage(pr_snapshot=pr_snapshot)
-            if stage.key != cached_stage.key:
-                _update_cached_stage_best_effort(
-                    session_id,
-                    stage,
-                    rollout_state.mtime_ns,
-                )
-    return stage, pr_snapshot, pr_stage_refreshes_remaining
+    return stage, pr_snapshot, pr_stage_refreshes_remaining, refreshing
 
 
 def _session_list_pr_snapshot_for_stage(
@@ -2596,8 +2677,11 @@ def _session_list_stage_context(
     stage: session_stage.SessionStage,
     *,
     pr_snapshot: Mapping[str, Any] | None = None,
-) -> dict[str, str]:
-    context = stage.as_context()
+    refreshing: bool = False,
+) -> dict[str, Any]:
+    context: dict[str, Any] = dict(stage.as_context())
+    if refreshing:
+        context["refreshing"] = True
     if stage.key != session_stage.PR.key:
         return context
     pr_number = _pr_number_from_snapshot(pr_snapshot)
@@ -4003,7 +4087,7 @@ def _render_session_detail(
         and active_system_workflow.kind == SystemWorkflow.KIND_PR_QA
         else latest_pr_workflow
     )
-    stage_context: dict[str, str] | None = None
+    stage_context: dict[str, Any] | None = None
     if not read_only:
         pr_observation = (
             rollout_data.pr_observation
@@ -4020,18 +4104,23 @@ def _render_session_detail(
         stage_pr_workflow = _workflow_after_main_lifecycle(
             stage_pr_workflow, pr_observation, main_updated_at=main_updated_at
         )
-        # Refresh the PR stage off gh only when the TTL/backoff window allows
-        # (force=False). A forced refresh here shells out to ``gh pr view``
-        # synchronously on *every* detail render, which dominated page latency;
-        # the throttle keyed on the workflow/metadata attempt timestamps caps
-        # this to one gh call per session per refresh window, matching the
-        # session-list path.
-        workflow_pr_snapshot = system_agents.refreshed_pr_handoff_for_stage(
-            stage_pr_workflow,
+        # Serve the last-known PR stage now and refresh off-request when due.
+        # A synchronous ``gh pr view`` here shelled out on every detail render
+        # (up to a 5s timeout) and dominated page latency; instead the badge is
+        # flagged as refreshing and the actual gh call runs in the background,
+        # persisting the result for a later render to read back.
+        workflow_pr_snapshot = system_agents.pr_handoff_for_workflow(stage_pr_workflow)
+        # Only flag refreshing when the PR stage is the one actually displayed.
+        # An active worker or a waiting-for-input session shows its own stage, so
+        # marking that live badge refreshing would let the reload script tear
+        # down the running EventSource transcript.
+        pr_stage_displayed = active_instance is None and not awaiting_user_input
+        stage_refreshing = pr_stage_displayed and system_agents.pr_handoff_stage_refresh_due(
+            stage_pr_workflow
         )
         log_pr_snapshot = pr_observation.snapshot
         if (
-            active_instance is None
+            pr_stage_displayed
             and stage_pr_workflow is None
             and log_pr_snapshot is not None
         ):
@@ -4049,12 +4138,9 @@ def _render_session_detail(
                     else None
                 ),
             ):
-                if metadata is not None:
-                    _mark_cached_pr_stage_refresh_attempt(session_id)
-                log_pr_snapshot = system_agents.refreshed_pr_snapshot_for_stage(
-                    cwd=detail_cwd,
-                    snapshot=log_pr_snapshot,
-                )
+                stage_refreshing = True
+        if stage_refreshing:
+            _schedule_pr_stage_refresh(session_id)
         if not pr_url:
             pr_url = (
                 _string_value(workflow_pr_snapshot.get("url"))
@@ -4069,6 +4155,23 @@ def _render_session_detail(
             pr_snapshot=log_pr_snapshot,
             workflow_pr_snapshot=workflow_pr_snapshot,
         )
+        # A background PR refresh persists a terminal stage to the mtime-keyed
+        # cache, but the detail render otherwise re-derives from the (still-open)
+        # rollout. Prefer the cached terminal stage when it matches the current
+        # rollout so the async result surfaces on reload instead of reverting to
+        # the open-PR badge while the gh refresh stays throttled.
+        if (
+            stage.key == session_stage.PR.key
+            and metadata is not None
+            and metadata.derived_stage_source_mtime_ns == stage_cache_mtime_ns
+        ):
+            cached_terminal = session_stage.stage_for_key(metadata.derived_stage)
+            if cached_terminal is not None and cached_terminal.key in (
+                session_stage.DONE_MERGED.key,
+                session_stage.DONE_CLOSED.key,
+            ):
+                stage = cached_terminal
+                stage_refreshing = False
         # Only persist a rollout-derived stage; see _attach_session_stage_context
         # for why active-instance/workflow-forced stages must not enter the
         # mtime-keyed cache. The post-lifecycle ``stage_workflow``/
@@ -4080,12 +4183,15 @@ def _render_session_detail(
             and stage_workflow is None
             and stage_pr_workflow is None
             and not awaiting_user_input
+            and not stage_refreshing
         ):
             # Best-effort like the session-list path: this runs while rendering
             # the session detail page, so a contended write lock must skip the
             # cache refresh rather than 500 the page (the next render retries).
             _update_cached_stage_best_effort(session_id, stage, stage_cache_mtime_ns)
-        stage_context = stage.as_context()
+        stage_context = dict(stage.as_context())
+        if stage_refreshing:
+            stage_context["refreshing"] = True
     show_active_worker_transcript = _show_active_worker_transcript(active_instance)
     active_demo_worker = (
         active_instance is not None and active_instance.agent_kind == demo.DEMO_AGENT_KIND
@@ -7527,20 +7633,33 @@ def _refresh_rate_limits_cache_best_effort(*, enable_memories: bool) -> None:
     global _RATE_LIMITS_CACHE_VALUE
     global _RATE_LIMITS_REFRESH_IN_FLIGHT
     rate_limits: dict[str, Any] | None = None
+    fetched = False
     try:
-        close_old_connections()
-        config = codex_pool.app_server_config(enable_memories=enable_memories)
-        with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
-            rate_limits = _fetch_rate_limits(codex)
+        # Hit OpenAI for the account rate limits only when the central, app-wide
+        # debounce floor allows; otherwise serve the last cached value. This is
+        # the cross-process guard the per-process TTL cannot provide.
+        if rate_limit.claim(_RATE_LIMITS_RATE_LIMIT_KEY):
+            close_old_connections()
+            config = codex_pool.app_server_config(enable_memories=enable_memories)
+            with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
+                rate_limits = _fetch_rate_limits(codex)
+            fetched = True
     except Exception:
         logger.exception("failed to refresh rate limits cache")
     finally:
         close_old_connections()
         with _RATE_LIMITS_REFRESH_LOCK:
-            if rate_limits is not None or not _RATE_LIMITS_CACHE_HAS_VALUE:
+            if fetched and (rate_limits is not None or not _RATE_LIMITS_CACHE_HAS_VALUE):
                 _RATE_LIMITS_CACHE_VALUE = rate_limits
                 _RATE_LIMITS_CACHE_HAS_VALUE = True
-            _RATE_LIMITS_CACHE_FETCHED_AT = timezone.now()
+            # Advance the local TTL when we fetched, or when we already have a
+            # value to keep serving -- then this process backs off and trusts the
+            # global owner. A still-cold process whose claim was denied must NOT
+            # back off, or it would hide the rate-limit section for the full TTL
+            # without ever populating its own cache; leave it due so it retries
+            # and wins a claim shortly.
+            if fetched or _RATE_LIMITS_CACHE_HAS_VALUE:
+                _RATE_LIMITS_CACHE_FETCHED_AT = timezone.now()
             _RATE_LIMITS_REFRESH_IN_FLIGHT = False
 
 

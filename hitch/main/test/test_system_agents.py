@@ -19,7 +19,7 @@ from openai_codex.generated.v2_all import (
     TurnStatus,
 )
 
-from hitch.main import demo, streaming, system_agents
+from hitch.main import demo, rate_limit, streaming, system_agents
 from hitch.main.local_merges import (
     AutoMergeReviewPatch,
     LocalBranchMergeError,
@@ -499,6 +499,58 @@ class SessionPrStageRefreshTests(TestCase):
         latest_workflow.refresh_from_db()
         self.assertEqual(superseded_workflow.step, system_agents.STEP_PR_READY)
         self.assertEqual(latest_workflow.step, system_agents.STEP_QA_APPROVED)
+
+    def test_stage_refresh_due_respects_global_debounce(self) -> None:
+        # The stage-refresh predicate the render/worker consult must close once
+        # the same PR was refreshed within the global window, so a denied claim
+        # cannot leave the UI looping (re-flagging refreshing and reloading).
+        snapshot = {
+            "url": "https://github.com/cberner/hitch/pull/55",
+            "repository_full_name": "cberner/hitch",
+            "pr_number": 55,
+            "state": "open",
+        }
+        with tempfile.TemporaryDirectory() as cwd:
+            self.assertTrue(
+                system_agents.pr_snapshot_stage_refresh_due(
+                    cwd=cwd, snapshot=snapshot, attempted_at=None
+                )
+            )
+            rate_limit.claim(system_agents._pr_stage_rate_limit_key(snapshot))
+            self.assertFalse(
+                system_agents.pr_snapshot_stage_refresh_due(
+                    cwd=cwd, snapshot=snapshot, attempted_at=None
+                )
+            )
+            # A forced refresh ignores the global window.
+            self.assertTrue(
+                system_agents.pr_snapshot_stage_refresh_due(
+                    cwd=cwd, snapshot=snapshot, attempted_at=None, force=True
+                )
+            )
+
+    @patch("hitch.main.system_agents._gh_pr_view")
+    def test_pr_snapshot_refresh_is_globally_debounced_per_pr(
+        self, mock_gh_pr_view: MagicMock
+    ) -> None:
+        # Two refreshes for the same PR within the window hit gh once: the
+        # central per-PR claim is what makes the debounce global across paths.
+        snapshot = {
+            "url": "https://github.com/cberner/hitch/pull/7",
+            "repository_full_name": "cberner/hitch",
+            "pr_number": 7,
+            "state": "open",
+        }
+        mock_gh_pr_view.return_value = dict(snapshot)
+        with tempfile.TemporaryDirectory() as cwd:
+            system_agents.refreshed_pr_snapshot_for_stage(cwd=cwd, snapshot=snapshot)
+            system_agents.refreshed_pr_snapshot_for_stage(cwd=cwd, snapshot=snapshot)
+            self.assertEqual(mock_gh_pr_view.call_count, 1)
+            # A forced refresh bypasses the debounce.
+            system_agents.refreshed_pr_snapshot_for_stage(
+                cwd=cwd, snapshot=snapshot, force=True
+            )
+            self.assertEqual(mock_gh_pr_view.call_count, 2)
 
 
 class SpecCriticWorkflowTests(TestCase):

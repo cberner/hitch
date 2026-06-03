@@ -312,6 +312,33 @@
             color: var(--status-warn-fg);
             background: var(--status-warn-bg);
         }
+        /* A moving highlight sweeps the badge while the stage is refreshing off
+           a stale value; the page is nudged to reload once the refresh lands. */
+        .stage-badge[data-refreshing="true"] {
+            position: relative;
+            overflow: hidden;
+        }
+        .stage-badge[data-refreshing="true"]::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            border-radius: inherit;
+            background: linear-gradient(
+                100deg,
+                transparent 30%,
+                color-mix(in srgb, var(--accent) 35%, transparent) 50%,
+                transparent 70%
+            );
+            transform: translateX(-100%);
+            animation: stage-badge-sweep 1.4s ease-in-out infinite;
+            pointer-events: none;
+        }
+        @keyframes stage-badge-sweep {
+            to { transform: translateX(100%); }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .stage-badge[data-refreshing="true"]::after { animation: none; }
+        }
         .meta code {
             background: var(--surface-2);
             color: var(--text);
@@ -2114,7 +2141,7 @@
             </div>
             {% endif %}
             <p class="meta">
-                {% if session_stage %}<span class="meta-item"><span class="meta-label">stage</span><span class="stage-badge" data-tone="{{ session_stage.tone }}">{{ session_stage.label }}</span></span>{% endif %}
+                {% if session_stage %}<span class="meta-item"><span class="meta-label">stage</span><span class="stage-badge" data-tone="{{ session_stage.tone }}"{% if session_stage.refreshing %} data-refreshing="true"{% endif %}>{{ session_stage.label }}</span></span>{% endif %}
                 <span class="meta-item"><span class="meta-label">id</span><code>{{ thread.id }}</code></span>
                 <span class="meta-item"><span class="meta-label">cwd</span><code>{{ thread.cwd }}</code></span>
                 <span class="meta-item"><span class="meta-label">updated</span><time data-ts="{{ thread.updated_at }}">{{ thread.updated_at }}</time></span>
@@ -4312,5 +4339,6 @@
             connect();
         })();
     </script>
+    {% include "_stage_refresh_script.html" %}
 </body>
 </html>

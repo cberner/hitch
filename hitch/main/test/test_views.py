@@ -981,19 +981,33 @@ class SessionDetailFastPathTests(TestCase):
             "merged_at": "2026-06-02T08:26:51Z",
         }
 
+        # First load serves the last-known (open) PR stage with the refreshing
+        # highlight and runs the gh refresh off-request (synchronous under
+        # TESTING), which persists the terminal stage onto the workflow.
         response = self.client.get(
             reverse("session", kwargs={"session_id": "ready-pr-merged-detail"})
         )
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(
-            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+            response,
+            '<span class="stage-badge" data-tone="active" data-refreshing="true">PR</span>',
         )
         workflow.refresh_from_db()
         self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
         self.assertTrue(workflow.state["pr_handoff"]["merged"])
         mock_gh_pr_view.assert_called_once()
         mock_codex.assert_not_called()
+
+        # The next load reflects the refreshed terminal stage without hitting gh
+        # again -- the same PR is debounced.
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "ready-pr-merged-detail"})
+        )
+        self.assertContains(
+            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+        )
+        mock_gh_pr_view.assert_called_once()
 
     @patch("hitch.main.system_agents._gh_pr_view")
     @patch("hitch.main.views._start_models_refresh_thread")
@@ -1061,19 +1075,33 @@ class SessionDetailFastPathTests(TestCase):
             "merged_at": "2026-06-02T08:26:51Z",
         }
 
+        # First load serves the cached (open) PR stage with the refreshing
+        # highlight and runs the gh refresh off-request, persisting the terminal
+        # stage to the mtime-keyed cache.
         response = self.client.get(
             reverse("session", kwargs={"session_id": "cached-pr-merged-detail"})
         )
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(
-            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+            response,
+            '<span class="stage-badge" data-tone="active" data-refreshing="true">PR</span>',
         )
         metadata.refresh_from_db()
         self.assertEqual(metadata.derived_stage, "done_merged")
         self.assertIsNotNone(metadata.derived_stage_pr_refresh_attempted_at)
         mock_gh_pr_view.assert_called_once()
         mock_codex.assert_not_called()
+
+        # The next load surfaces the cached terminal stage without hitting gh
+        # again, even though the rollout still shows the PR open.
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "cached-pr-merged-detail"})
+        )
+        self.assertContains(
+            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+        )
+        mock_gh_pr_view.assert_called_once()
 
     @patch("hitch.main.views._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
@@ -1236,6 +1264,88 @@ class SessionDetailFastPathTests(TestCase):
         metadata.refresh_from_db()
         self.assertEqual(metadata.derived_stage, "")
         self.assertEqual(metadata.derived_stage_source_mtime_ns, 0)
+
+    @patch("hitch.main.views._schedule_pr_stage_refresh")
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_active_session_detail_does_not_flag_pr_workflow_refreshing(
+        self,
+        mock_codex: MagicMock,
+        _start_models_refresh: MagicMock,
+        mock_schedule: MagicMock,
+    ) -> None:
+        # A live worker shows its own Implementation stage even when an older
+        # completed PR workflow is due for a gh refresh. Flagging that live badge
+        # refreshing would let the reload script tear down the EventSource
+        # transcript mid-turn, so the PR refresh must stay dormant here.
+        pr_url = "https://github.com/cberner/hitch/pull/77"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Keep going"},
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="active-with-pr-workflow",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Active with PR workflow",
+            codex_preview="Keep going",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+        handoff = {
+            "url": pr_url,
+            "repository_full_name": "cberner/hitch",
+            "pr_number": 77,
+            "state": "open",
+        }
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="active-with-pr-workflow",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_READY,
+            state={"pr_handoff": handoff, "hitch_pr_handoff": handoff},
+        )
+        # Keep the completed PR workflow alive through the main-lifecycle check.
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=now + timedelta(minutes=1)
+        )
+        CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="active-with-pr-workflow",
+            cwd="/repo",
+            prompt="Keep going",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=_session(
+                "active-with-pr-workflow",
+                name="Active with PR workflow",
+                path=str(rollout_path),
+            )
+        )
+
+        with patch("hitch.main.codex_pool.worker_is_alive", return_value=True):
+            response = self.client.get(
+                reverse("session", kwargs={"session_id": "active-with-pr-workflow"})
+            )
+
+        self.assertEqual(response.status_code, 200)
+        # The plain (non-refreshing) active badge -- the refreshing variant would
+        # carry data-refreshing between the tone and the '>'.
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active">Implementation</span>',
+        )
+        mock_schedule.assert_not_called()
 
     @patch("hitch.main.views._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
@@ -2211,12 +2321,15 @@ class IndexViewTests(TestCase):
             "merged_at": "2026-06-02T08:26:51Z",
         }
 
+        # First load serves the cached (open) PR badge with the refreshing
+        # highlight and refreshes off-request, persisting the terminal stage.
         response = self.client.get(reverse("index"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Cached PR merged")
         self.assertContains(
-            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+            response,
+            '<span class="stage-badge" data-tone="active" data-refreshing="true">PR #94</span>',
         )
         metadata.refresh_from_db()
         self.assertEqual(metadata.derived_stage, "done_merged")
@@ -2224,6 +2337,13 @@ class IndexViewTests(TestCase):
         mock_gh_pr_view.assert_called_once()
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
+
+        # The next load reads the refreshed terminal stage from cache, no gh.
+        response = self.client.get(reverse("index"))
+        self.assertContains(
+            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+        )
+        mock_gh_pr_view.assert_called_once()
 
     @patch("hitch.main.system_agents._gh_pr_view")
     @patch("hitch.main.views.discover_repos")
@@ -2321,12 +2441,16 @@ class IndexViewTests(TestCase):
             "merged_at": "2026-06-02T08:26:51Z",
         }
 
+        # First load serves the open PR badge with the refreshing highlight and
+        # refreshes the snapshot off-request; the stale workflow is stripped by
+        # the main-lifecycle check so the refresh lands on the stage cache only.
         response = self.client.get(reverse("index"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Uncached PR merged")
         self.assertContains(
-            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+            response,
+            '<span class="stage-badge" data-tone="active" data-refreshing="true">PR #94</span>',
         )
         metadata.refresh_from_db()
         self.assertEqual(metadata.derived_stage, "done_merged")
@@ -2336,6 +2460,13 @@ class IndexViewTests(TestCase):
         mock_gh_pr_view.assert_called_once()
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
+
+        # The next load reads the refreshed terminal stage from cache, no gh.
+        response = self.client.get(reverse("index"))
+        self.assertContains(
+            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+        )
+        mock_gh_pr_view.assert_called_once()
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -3265,12 +3396,15 @@ class IndexViewTests(TestCase):
             "merged_at": "2026-06-02T08:26:51Z",
         }
 
+        # First load serves the open PR badge with the refreshing highlight and
+        # refreshes off-request, persisting the terminal stage on the workflow.
         response = self.client.get(reverse("index"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Ready PR merged list")
         self.assertContains(
-            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+            response,
+            '<span class="stage-badge" data-tone="active" data-refreshing="true">PR #344</span>',
         )
         workflow.refresh_from_db()
         self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
@@ -3278,6 +3412,14 @@ class IndexViewTests(TestCase):
         mock_gh_pr_view.assert_called_once()
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
+
+        # The next load derives the terminal stage from the closed workflow, no
+        # gh call (the same PR is debounced).
+        response = self.client.get(reverse("index"))
+        self.assertContains(
+            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+        )
+        mock_gh_pr_view.assert_called_once()
 
     @patch("hitch.main.system_agents._gh_pr_view")
     @patch("hitch.main.views.discover_repos")
@@ -3371,16 +3513,15 @@ class IndexViewTests(TestCase):
 
         mock_gh_pr_view.side_effect = merged_pr_for_selector
 
+        # Both PR stages are due, but a single render schedules at most one
+        # off-request refresh, so only one gh call happens and exactly one
+        # workflow advances to its terminal stage this render.
         response = self.client.get(reverse("index"))
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Ready PR refresh cap 0")
         self.assertContains(response, "Ready PR refresh cap 1")
-        self.assertContains(
-            response,
-            '<span class="stage-badge" data-tone="done">Done: Merged</span>',
-            count=1,
-        )
+        self.assertContains(response, 'data-refreshing="true"')
         steps = list(
             SystemWorkflow.objects.order_by("main_thread_id").values_list(
                 "step", flat=True
@@ -3391,6 +3532,14 @@ class IndexViewTests(TestCase):
         mock_gh_pr_view.assert_called_once()
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
+
+        # A second render refreshes the remaining due PR (one more gh call).
+        self.client.get(reverse("index"))
+        steps = list(
+            SystemWorkflow.objects.values_list("step", flat=True)
+        )
+        self.assertEqual(steps.count(system_agents.STEP_PR_CLOSED), 2)
+        self.assertEqual(mock_gh_pr_view.call_count, 2)
 
     @patch("hitch.main.system_agents.logger")
     @patch("hitch.main.system_agents._gh_pr_view")
@@ -17393,3 +17542,31 @@ class ResetStaleStageCacheMigrationTests(TransactionTestCase):
         empty = SessionMetadata.objects.get(thread_id="already-empty")
         self.assertEqual(empty.derived_stage, "")
         self.assertEqual(empty.derived_stage_source_mtime_ns, 0)
+
+
+class PrStageRefreshSchedulingTests(TestCase):
+    @override
+    def tearDown(self) -> None:
+        # The threaded path adds to a module-level in-flight set; keep tests
+        # isolated by clearing it.
+        with views._PR_STAGE_REFRESH_INFLIGHT_LOCK:
+            views._PR_STAGE_REFRESH_INFLIGHT.clear()
+
+    @patch("hitch.main.views._refresh_session_pr_stage")
+    def test_schedule_runs_inline_under_testing(
+        self, mock_refresh: MagicMock
+    ) -> None:
+        views._schedule_pr_stage_refresh("sess-1")
+        mock_refresh.assert_called_once_with("sess-1")
+
+    @patch("hitch.main.views._refresh_session_pr_stage")
+    @patch("hitch.main.views.threading.Thread")
+    def test_schedule_spawns_one_thread_per_session_off_request(
+        self, mock_thread: MagicMock, _mock_refresh: MagicMock
+    ) -> None:
+        with self.settings(TESTING=False):
+            views._schedule_pr_stage_refresh("sess-x")
+            # A concurrent render for the same session does not spawn a duplicate.
+            views._schedule_pr_stage_refresh("sess-x")
+        mock_thread.assert_called_once()
+        mock_thread.return_value.start.assert_called_once()

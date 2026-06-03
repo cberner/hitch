@@ -1,0 +1,87 @@
+"""Tests for the central, process-global refresh debounce."""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta
+from typing import override
+
+from django.test import TestCase
+from django.utils import timezone
+
+from hitch.main import rate_limit
+from hitch.main.models import RefreshThrottle
+
+
+class RateLimitTests(TestCase):
+    @override
+    def setUp(self) -> None:
+        self.now = datetime(2026, 6, 3, 12, 0, 0, tzinfo=timezone.get_current_timezone())
+
+    def test_default_min_interval_is_two_minutes(self) -> None:
+        self.assertEqual(rate_limit.DEFAULT_MIN_INTERVAL, timedelta(minutes=2))
+
+    def test_first_claim_wins_and_records_attempt(self) -> None:
+        self.assertTrue(rate_limit.claim("gh:pr-view:x", now=self.now))
+        row = RefreshThrottle.objects.get(key="gh:pr-view:x")
+        self.assertEqual(row.attempted_at, self.now)
+
+    def test_second_claim_within_window_loses(self) -> None:
+        self.assertTrue(rate_limit.claim("k", now=self.now))
+        self.assertFalse(
+            rate_limit.claim("k", now=self.now + timedelta(seconds=119))
+        )
+        # The losing claim must not advance the recorded attempt.
+        self.assertEqual(RefreshThrottle.objects.get(key="k").attempted_at, self.now)
+
+    def test_claim_succeeds_again_after_window(self) -> None:
+        self.assertTrue(rate_limit.claim("k", now=self.now))
+        later = self.now + timedelta(minutes=2)
+        self.assertTrue(rate_limit.claim("k", now=later))
+        self.assertEqual(RefreshThrottle.objects.get(key="k").attempted_at, later)
+
+    def test_only_one_concurrent_claimer_wins_for_same_key(self) -> None:
+        # Simulates two independent code paths (e.g. list + detail render, or two
+        # sessions on the same PR) racing for the same resource: exactly one wins.
+        results = [
+            rate_limit.claim("shared", now=self.now),
+            rate_limit.claim("shared", now=self.now),
+        ]
+        self.assertEqual(results.count(True), 1)
+
+    def test_distinct_keys_are_independent(self) -> None:
+        self.assertTrue(rate_limit.claim("a", now=self.now))
+        self.assertTrue(rate_limit.claim("b", now=self.now))
+
+    def test_custom_min_interval(self) -> None:
+        self.assertTrue(
+            rate_limit.claim("k", min_interval=timedelta(seconds=10), now=self.now)
+        )
+        self.assertFalse(
+            rate_limit.claim(
+                "k",
+                min_interval=timedelta(seconds=10),
+                now=self.now + timedelta(seconds=9),
+            )
+        )
+        self.assertTrue(
+            rate_limit.claim(
+                "k",
+                min_interval=timedelta(seconds=10),
+                now=self.now + timedelta(seconds=10),
+            )
+        )
+
+    def test_due_does_not_record_an_attempt(self) -> None:
+        self.assertTrue(rate_limit.due("k", now=self.now))
+        self.assertFalse(RefreshThrottle.objects.filter(key="k").exists())
+        # A claim is still available because `due` recorded nothing.
+        self.assertTrue(rate_limit.claim("k", now=self.now))
+
+    def test_due_reflects_recent_attempt(self) -> None:
+        rate_limit.claim("k", now=self.now)
+        self.assertFalse(rate_limit.due("k", now=self.now + timedelta(seconds=30)))
+        self.assertTrue(rate_limit.due("k", now=self.now + timedelta(minutes=2)))
+
+    def test_mark_blocks_a_following_claim(self) -> None:
+        rate_limit.mark("k", now=self.now)
+        self.assertFalse(rate_limit.claim("k", now=self.now + timedelta(seconds=30)))
