@@ -1,7 +1,7 @@
 from django.test import SimpleTestCase
 
 from hitch.main import session_stage, system_agents
-from hitch.main.models import SystemWorkflow
+from hitch.main.models import CodexInstance, SystemWorkflow
 
 
 class SessionStageTests(SimpleTestCase):
@@ -42,6 +42,30 @@ class SessionStageTests(SimpleTestCase):
         )
 
         self.assertEqual(stage, session_stage.PLAN)
+
+    def test_pending_user_input_overrides_running_stage(self) -> None:
+        active = CodexInstance(plan_mode=False)
+
+        stage = session_stage.derive_stage(
+            active_instance=active,
+            awaiting_user_input=True,
+        )
+
+        self.assertEqual(stage, session_stage.WAITING_FOR_USER)
+
+    def test_pending_user_input_overrides_running_system_workflow(self) -> None:
+        workflow = SystemWorkflow(
+            kind=system_agents.SPEC_CRITIC_WORKFLOW_KIND,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_SPEC_CRITIC_CLARIFYING,
+        )
+
+        stage = session_stage.derive_stage(
+            workflow=workflow,
+            awaiting_user_input=True,
+        )
+
+        self.assertEqual(stage, session_stage.WAITING_FOR_USER)
 
     def test_trailing_commentary_after_plan_stays_plan_stage(self) -> None:
         # The session-list stage runs against raw, un-collapsed rollout

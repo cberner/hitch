@@ -2562,6 +2562,86 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cached_session_list_flags_pending_spec_critic_input(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Build this feature."},
+                ),
+            ],
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        metadata = SessionMetadata.objects.create(
+            thread_id="needs-input",
+            cwd="/repo",
+            codex_display_title="Needs input",
+            codex_preview="Build this feature.",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+            derived_stage="implementation",
+            derived_stage_source_mtime_ns=rollout_path.stat().st_mtime_ns,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.SPEC_CRITIC_WORKFLOW_KIND,
+            main_thread_id="needs-input",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_SPEC_CRITIC_CLARIFYING,
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="spec-hidden",
+            cwd="/repo",
+            prompt="Clarify",
+            events_path="/tmp/spec-events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.SPEC_RISK_AGENT_KIND,
+            display_author=system_agents.SPEC_CRITIC_DISPLAY_AUTHOR,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.SPEC_RISK_AGENT_KIND,
+            thread_id="spec-hidden",
+            instance=instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+        )
+        UserInputRequest.objects.create(
+            instance=instance,
+            method=system_agents.SPEC_CRITIC_CLARIFICATION_METHOD,
+            params={"questions": []},
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Needs input")
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="warning">Waiting for User</span>',
+        )
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.derived_stage, "implementation")
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
     @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
