@@ -53,6 +53,7 @@ from hitch.main.codex_pool import (
 )
 from hitch.main.management.commands.codex_worker import (
     _apply_worker_oom_score_adjust,
+    _commit_terminal_status,
     _create_pending_approval,
     _create_pending_user_input,
     _notify_system_agents,
@@ -174,7 +175,11 @@ class Command(BaseCommand):
             instance.status = CodexInstance.STATUS_FAILED
             instance.ended_at = timezone.now()
             instance.error = repr(exc)
-            instance.save(update_fields=["status", "ended_at", "error"])
+            # Guarded ``UPDATE ... WHERE status IN (starting, running)`` (not an
+            # unconditional save): if the parent already forced this row terminal
+            # (a Stop via ``_mark_failed``/a reconcile sweep) while we were
+            # draining, adopt its state rather than clobbering it.
+            _commit_terminal_status(instance)
             # A crash after ``approval/requested``/``input/requested`` but before
             # the wait path recorded a decision leaves dangling ApprovalRequest/
             # UserInputRequest rows. Without this the session keeps rendering an
@@ -190,10 +195,13 @@ class Command(BaseCommand):
             raise
 
         instance.ended_at = timezone.now()
-        update_fields = ["status", "ended_at", "error"]
         if runner.session_id and runner.session_id != instance.claude_session_id:
             instance.claude_session_id = runner.session_id
-            update_fields.append("claude_session_id")
+            # The resume id is not part of the terminal-status race, so persist it
+            # directly -- it should survive even if the parent already forced the
+            # row terminal (where the guarded status commit below adopts the
+            # parent's state instead of writing ours).
+            instance.save(update_fields=["claude_session_id"])
         if runner.failed or not runner.saw_result:
             # A stream that closes without a ResultMessage is a truncated/aborted
             # turn, not a success -- mark it failed rather than silently completed.
@@ -201,7 +209,12 @@ class Command(BaseCommand):
             instance.error = runner.error or "claude turn ended without a result"
         else:
             instance.status = CodexInstance.STATUS_COMPLETED
-        instance.save(update_fields=update_fields)
+        # Guarded commit (see the exception path): an unconditional save here would
+        # resurrect a parent-failed row as COMPLETED, silently dropping the user's
+        # Stop. ``_commit_terminal_status`` only writes while the row is still
+        # starting/running and otherwise refreshes ``instance`` to the parent's
+        # terminal state.
+        _commit_terminal_status(instance)
         if instance.status == CodexInstance.STATUS_FAILED:
             # As in the exception path, a failed turn must not leave an approval/
             # input card live for a worker that is gone -- close out any rows the
@@ -236,14 +249,21 @@ class _TurnRunner:
         self._model = model
         self._reasoning_effort = reasoning_effort
         self._sandbox_policy = sandbox_policy
-        # A visible session with an empty/"Codex default" sandbox made no explicit
-        # choice. Codex's app-server defaults that to workspace-write; mirror it so
-        # the session is never left fully unconfined -- otherwise ``approve_all``
-        # would auto-allow Bash/file edits with no cwd guard and no bash sandbox,
-        # i.e. ``dangerFullAccess`` the user never selected. Hidden runs keep their
-        # explicit sandbox (and are pinned to auto_review, never approve_all), so
-        # the unconfined-default concern does not apply to them.
-        if not self._sandbox_policy and instance.purpose == CodexInstance.PURPOSE_USER:
+        # A session with an empty/"Codex default" sandbox made no explicit choice.
+        # Codex's app-server defaults that to workspace-write; mirror it so the
+        # session is never left fully unconfined -- otherwise ``approve_all`` would
+        # auto-allow Bash/file edits with no cwd guard and no bash sandbox, i.e.
+        # ``dangerFullAccess`` the user never selected. This covers visible user
+        # turns *and* system-feedback turns (QA/Spec feedback continued in the
+        # user's session): both can carry ``approve_all`` inherited from the user's
+        # settings and neither hits the hidden system-agent guard, so a feedback
+        # turn would otherwise auto-run unsandboxed host actions on prompt-derived
+        # input. Hidden system-agent runs keep their explicit sandbox (and are
+        # pinned to auto_review, never approve_all), so the concern is moot there.
+        if not self._sandbox_policy and instance.purpose in (
+            CodexInstance.PURPOSE_USER,
+            CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+        ):
             self._sandbox_policy = claude_options.SANDBOX_WORKSPACE_WRITE
         # The demo is a trusted, opt-in Hitch flow ("Start demo") that brings up a
         # container via host podman/shell. A read-only sandbox would disallow Bash
@@ -288,14 +308,16 @@ class _TurnRunner:
         async with ClaudeSDKClient(options=options) as client:
             self._client = client
             # A Stop that arrived before the loop handlers were installed set the
-            # module flag. Don't start the turn at all: submitting the query and
-            # relying on the scheduled interrupt races -- the interrupt can run
-            # before any query is active, so the stopped turn would start anyway.
-            # Bail out instead (a pre-loop Steer needs no replay either: its prompt
-            # is in the control file, but with the turn stopped there is nothing to
-            # steer into). The empty turn ends without a result and is reconciled
-            # as a stopped turn by ``handle``.
-            if _PENDING_SIGTERM:
+            # module flag; one that landed during ``__aenter__`` (before
+            # ``self._client`` was set) latched ``_cancelled`` via ``_on_sigterm``.
+            # Either way, don't start the turn: submitting the query and relying on
+            # the scheduled interrupt races -- the interrupt can run before any
+            # query is active, so the stopped turn would start anyway. Bail out
+            # instead (a pre-loop Steer needs no replay either: its prompt is in the
+            # control file, but with the turn stopped there is nothing to steer
+            # into). The empty turn ends without a result and is reconciled as a
+            # stopped turn by ``handle``.
+            if _PENDING_SIGTERM or self._cancelled:
                 self._cancelled = True
                 request_cancel()
                 return
@@ -627,7 +649,7 @@ class _TurnRunner:
     def _on_sigterm(self) -> None:
         # A first Stop click sends SIGTERM: interrupt gracefully. A second click
         # escalates to SIGKILL (no handler), tearing the worker down.
-        if self._cancelled or self._client is None:
+        if self._cancelled:
             return
         self._cancelled = True
         # ``can_use_tool`` may be blocked in ``_wait_for_decision`` (a worker
@@ -635,6 +657,14 @@ class _TurnRunner:
         # flag, so set it -- otherwise the approval sits until its timeout and the
         # interrupt below never runs because the turn is parked on the callback.
         request_cancel()
+        if self._client is None:
+            # Stop landed after the loop handlers were installed but before
+            # ``ClaudeSDKClient.__aenter__`` finished assigning ``self._client``.
+            # Latch the cancellation rather than dropping it: ``run`` checks
+            # ``_cancelled`` before submitting the initial query, so the turn
+            # bails out instead of starting and ignoring the Stop until a later
+            # click escalates to SIGKILL.
+            return
         asyncio.create_task(self._interrupt())
 
     async def _interrupt(self) -> None:

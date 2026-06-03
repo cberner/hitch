@@ -20,7 +20,7 @@ from claude_agent_sdk import (
     ToolUseBlock,
     UserMessage,
 )
-from django.test import TestCase, override_settings
+from django.test import TestCase, TransactionTestCase, override_settings
 
 from hitch.main import claude_options, claude_translate, codex_pool, coding_agents
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
@@ -1527,6 +1527,144 @@ class ClaudeDanglingRequestCleanupTests(TestCase):
             self.assertEqual(approval.decision, ApprovalRequest.DECISION_ACCEPT)
 
 
+class ClaudeStopLatchTests(TestCase):
+    """A Stop (SIGTERM) landing after the loop handlers are installed but before
+    ``ClaudeSDKClient`` finishes connecting must latch the cancellation, not drop
+    it -- otherwise the turn starts and the Stop is ignored until a second click."""
+
+    def _runner(self) -> Any:
+        import io
+
+        from hitch.main.management.commands import claude_worker
+
+        instance = CodexInstance(
+            thread_id="t",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_RUNNING,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            # System-agent purpose keeps ``_build_options`` from building the
+            # in-process MCP server, which is irrelevant to the latch.
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        )
+        return claude_worker._TurnRunner(
+            instance=instance,
+            events_file=io.StringIO(),
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode=None,
+            web_search_mode=None,
+            plan_mode=False,
+        )
+
+    def test_sigterm_before_client_ready_latches_cancel(self) -> None:
+        from hitch.main.management.commands import claude_worker
+
+        runner = self._runner()
+        self.assertIsNone(runner._client)
+        # No event loop / no client: the handler must not try to schedule an
+        # interrupt, only latch the flags.
+        with patch.object(claude_worker, "request_cancel") as mock_cancel:
+            runner._on_sigterm()
+        self.assertTrue(runner._cancelled)
+        mock_cancel.assert_called_once()
+
+    def test_run_bails_without_query_when_cancelled(self) -> None:
+        import asyncio
+
+        from hitch.main.management.commands import claude_worker
+
+        runner = self._runner()
+        fake = _FakeClient([_assistant(TextBlock(text="hi")), _result()])
+
+        def _factory(*, options: Any) -> _FakeClient:
+            fake.options = options
+            return fake
+
+        with (
+            patch.object(claude_worker, "ClaudeSDKClient", _factory),
+            patch.object(claude_worker, "request_cancel"),
+        ):
+            # Simulate the latch set by ``_on_sigterm`` during ``__aenter__``.
+            runner._cancelled = True
+            asyncio.run(runner.run())
+        # The query was never submitted, so the stopped turn never started.
+        self.assertEqual(fake.queries, [])
+
+
+class ClaudeTerminalStatusRaceTests(TransactionTestCase):
+    """If the parent forced the row terminal (a Stop via ``_mark_failed`` or a
+    reconcile sweep) while the worker was still draining, the worker's
+    end-of-turn commit must adopt that state, not resurrect the row.
+
+    Uses ``TransactionTestCase`` so the mid-turn flip (run on a worker thread via
+    ``asyncio.to_thread``, with its own DB connection) commits without deadlocking
+    against an enclosing test transaction."""
+
+    def test_parent_failure_is_not_resurrected_to_completed(self) -> None:
+        import asyncio
+
+        from hitch.main.management.commands import claude_worker
+
+        with tempfile.TemporaryDirectory() as tmp:
+            events_path = Path(tmp) / "events.jsonl"
+            instance = CodexInstance.objects.create(
+                thread_id="thread-race",
+                cwd=tmp,
+                prompt="do it",
+                events_path=str(events_path),
+                pid=0,
+                status=CodexInstance.STATUS_RUNNING,
+                backend=CodexInstance.BACKEND_CLAUDE,
+                purpose=CodexInstance.PURPOSE_USER,
+            )
+            instance_pk = instance.pk
+
+            def _force_failed() -> None:
+                CodexInstance.objects.filter(pk=instance_pk).update(
+                    status=CodexInstance.STATUS_FAILED,
+                    error="stopped by parent",
+                )
+
+            class _ParentStopsMidTurn(_FakeClient):
+                @override
+                async def query(self, prompt: str) -> None:
+                    await super().query(prompt)
+                    # Parent flips the row terminal after the worker set RUNNING
+                    # at start but before its own end-of-turn commit.
+                    await asyncio.to_thread(_force_failed)
+
+            fake = _ParentStopsMidTurn([_assistant(TextBlock(text="ok")), _result()])
+
+            def _factory(*, options: Any) -> _FakeClient:
+                fake.options = options
+                return fake
+
+            with (
+                patch.object(claude_worker, "ClaudeSDKClient", _factory),
+                patch.object(claude_worker, "_apply_worker_oom_score_adjust"),
+                patch("hitch.main.management.commands.claude_worker.signal.signal"),
+                patch.object(claude_worker, "_build_query_input", return_value="do it"),
+            ):
+                claude_worker.Command().handle(
+                    instance_id=instance_pk,
+                    model=None,
+                    reasoning_effort=None,
+                    sandbox_policy=None,
+                    approval_mode=None,
+                    web_search_mode=None,
+                    plan_mode=False,
+                )
+            instance.refresh_from_db()
+            # Even though the turn itself "succeeded", the parent's terminal
+            # FAILED state is preserved -- not clobbered with COMPLETED.
+            self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+            self.assertEqual(instance.error, "stopped by parent")
+
+
 class ClaudeWorkflowBaseInstructionsTests(TestCase):
     """A Claude QA/PR/Spec-Critic workflow never carries Codex base instructions,
     even when the global provider was switched back to Codex."""
@@ -1664,6 +1802,43 @@ class ClaudeSandboxDefaultTests(TestCase):
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT, sandbox_policy=None
         )
         self.assertIsNone(runner._sandbox_policy)
+
+    def test_system_feedback_turn_defaults_to_workspace_write(self) -> None:
+        # Feedback turns (QA/Spec feedback continued in the user's session) can
+        # inherit approve_all but skip the hidden system-agent guard, so they need
+        # the same safe default as user turns -- otherwise prompt-derived feedback
+        # could auto-run unsandboxed host actions.
+        runner = self._runner(
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK, sandbox_policy=None
+        )
+        self.assertEqual(
+            runner._sandbox_policy, claude_options.SANDBOX_WORKSPACE_WRITE
+        )
+
+    def test_system_feedback_approve_all_confines_edits(self) -> None:
+        import asyncio
+
+        from claude_agent_sdk import PermissionResultDeny
+
+        runner = self._runner(
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            sandbox_policy=None,
+            approval_mode=claude_options.APPROVAL_APPROVE_ALL,
+        )
+        result = asyncio.run(
+            runner._can_use_tool("Write", {"file_path": "/etc/passwd"}, None)
+        )
+        self.assertIsInstance(result, PermissionResultDeny)
+
+    def test_system_feedback_keeps_explicit_sandbox(self) -> None:
+        # An explicit read-only choice on the originating session must survive.
+        runner = self._runner(
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            sandbox_policy=claude_options.SANDBOX_READ_ONLY,
+        )
+        self.assertEqual(
+            runner._sandbox_policy, claude_options.SANDBOX_READ_ONLY
+        )
 
     def test_approve_all_default_sandbox_confines_edits(self) -> None:
         import asyncio
