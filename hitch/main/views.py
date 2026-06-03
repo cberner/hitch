@@ -27,7 +27,7 @@ from django.core import signing
 from django.core.exceptions import SuspiciousOperation
 from django.core.files.uploadedfile import UploadedFile
 from django.core.files.uploadhandler import FileUploadHandler
-from django.db import IntegrityError, OperationalError, close_old_connections, transaction
+from django.db import IntegrityError, close_old_connections, transaction
 from django.db.models import Exists, OuterRef, Q, QuerySet
 from django.http import (
     Http404,
@@ -63,6 +63,7 @@ from hitch.main import (
     streaming,
     system_agents,
 )
+from hitch.main.db import run_ignoring_database_locks
 from hitch.main.diffs import build_worktree_diff
 from hitch.main.formatting import looks_like_markdown, render_markdown
 from hitch.main.local_merges import local_branch_names
@@ -2671,28 +2672,19 @@ def _update_cached_stage(
 def _update_cached_stage_best_effort(
     session_id: str, stage: session_stage.SessionStage, source_mtime_ns: int
 ) -> None:
-    try:
-        _update_cached_stage(session_id, stage, source_mtime_ns)
-    except OperationalError as exc:
-        if not _is_database_locked_error(exc):
-            raise
-        logger.warning("skipping session stage cache update because database is locked")
+    run_ignoring_database_locks(
+        lambda: _update_cached_stage(session_id, stage, source_mtime_ns),
+        description="session stage cache update",
+    )
 
 
 def _mark_cached_pr_stage_refresh_attempt(session_id: str) -> None:
-    try:
-        SessionMetadata.objects.filter(thread_id=session_id).update(
+    run_ignoring_database_locks(
+        lambda: SessionMetadata.objects.filter(thread_id=session_id).update(
             derived_stage_pr_refresh_attempted_at=timezone.now()
-        )
-    except OperationalError as exc:
-        if not _is_database_locked_error(exc):
-            raise
-        logger.warning("skipping PR stage refresh backoff because database is locked")
-
-
-def _is_database_locked_error(exc: BaseException) -> bool:
-    message = " ".join(str(arg) for arg in exc.args).lower()
-    return "database is locked" in message or "database table is locked" in message
+        ),
+        description="PR stage refresh backoff",
+    )
 
 
 def _latest_pr_workflow_for_thread(session_id: str) -> SystemWorkflow | None:
@@ -4038,7 +4030,10 @@ def _render_session_detail(
             and stage_workflow is None
             and stage_pr_workflow is None
         ):
-            _update_cached_stage(session_id, stage, stage_cache_mtime_ns)
+            # Best-effort like the session-list path: this runs while rendering
+            # the session detail page, so a contended write lock must skip the
+            # cache refresh rather than 500 the page (the next render retries).
+            _update_cached_stage_best_effort(session_id, stage, stage_cache_mtime_ns)
         stage_context = stage.as_context()
     show_active_worker_transcript = _show_active_worker_transcript(active_instance)
     active_demo_worker = (

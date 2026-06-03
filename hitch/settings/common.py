@@ -80,10 +80,19 @@ DATABASES = {
             # update state rows. WAL keeps readers from blocking writers, and
             # IMMEDIATE transactions avoid SQLite's lock-upgrade failure mode
             # when workflow code reads state and then writes inside atomic().
+            # A single global write lock still serializes writers, so the
+            # larger page cache and memory-mapped reads exist to keep each
+            # write transaction short: fewer page faults under the lock means
+            # writers release it sooner, so contended writers are far less
+            # likely to exhaust busy_timeout and raise "database is locked".
+            # Django splits init_command on ';' and runs each statement
+            # separately, so every PRAGMA below is applied per connection.
             "init_command": (
                 "PRAGMA journal_mode=WAL;"
                 "PRAGMA synchronous=NORMAL;"
-                "PRAGMA busy_timeout=60000"
+                "PRAGMA busy_timeout=60000;"
+                "PRAGMA cache_size=-65536;"
+                "PRAGMA mmap_size=268435456"
             ),
             "timeout": 60,
             "transaction_mode": "IMMEDIATE",

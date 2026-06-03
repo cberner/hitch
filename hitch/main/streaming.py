@@ -28,6 +28,7 @@ from typing import Any
 from django.db import close_old_connections
 
 from hitch.main import codex_events, codex_pool, system_agents
+from hitch.main.db import run_ignoring_database_locks
 from hitch.main.models import (
     CodexInstance,
     SessionDemo,
@@ -570,7 +571,16 @@ def _running_system_workflow(
     workflow_id: int,
 ) -> SystemWorkflow | None:
     try:
-        system_agents.reconcile_terminal_workflow_instances(workflow_id=workflow_id)
+        # The reconcile write runs on every heartbeat tick of every open
+        # workflow SSE stream; a transient lock must skip this tick (the next
+        # one retries) rather than abort the generator and drop the stream. The
+        # status read below is a WAL reader and never contends for the lock.
+        run_ignoring_database_locks(
+            lambda: system_agents.reconcile_terminal_workflow_instances(
+                workflow_id=workflow_id
+            ),
+            description="system workflow instance reconcile",
+        )
         return SystemWorkflow.objects.filter(
             pk=workflow_id,
             main_thread_id=session_id,
@@ -645,8 +655,13 @@ def _reconcile_dead_for_workflow(
     workflow_id: int, *, main_thread_id: str | None
 ) -> None:
     try:
-        codex_pool.reconcile_dead_for_workflow(
-            workflow_id, main_thread_id=main_thread_id
+        # Runs each heartbeat tick of an open workflow stream; skip a contended
+        # tick rather than tear down the SSE generator. The next tick retries.
+        run_ignoring_database_locks(
+            lambda: codex_pool.reconcile_dead_for_workflow(
+                workflow_id, main_thread_id=main_thread_id
+            ),
+            description="workflow dead-worker reconcile",
         )
     finally:
         close_old_connections()
