@@ -4395,6 +4395,15 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(pr["ci_status"], "pending")
         self.assertEqual(pr["failing_jobs"], [])
         self.assertEqual(pr["pending_jobs"], [])
+        # Every monitor poll (gh pr view + paginated GraphQL) must use the
+        # bounded timeout so a slow GitHub can't stall the background tick for
+        # the 120s create default per call.
+        self.assertEqual(mock_run.call_count, 3)
+        for call in mock_run.call_args_list:
+            self.assertEqual(
+                call.kwargs["timeout"],
+                system_agents._GH_PR_MONITOR_TIMEOUT_SECONDS,
+            )
 
     def test_pr_monitor_truncated_status_check_page_remains_pending(self) -> None:
         pr: dict[str, object] = {}
