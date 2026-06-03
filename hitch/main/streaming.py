@@ -248,15 +248,26 @@ def system_workflow_stream(
         if _latest_id_for_thread(session_id) != baseline_id:
             yield _end_frame("active")
             return
-        _reconcile_dead_for_workflow(workflow_id, main_thread_id=session_id)
-        workflow = _running_system_workflow(session_id, workflow_id)
+        # The dead-worker and terminal-workflow reconciles are write-capable and
+        # ran on every 1s poll tick of every open workflow stream -- a steady
+        # write-lock storm proportional to open streams. Cheap WAL reads
+        # (``_latest_id_for_thread`` above, the status read below) stay per-tick
+        # for snappy "active worker spawned"/"workflow ended" detection, but the
+        # reconciles only need the slower heartbeat cadence (the 60s scheduler is
+        # the authoritative reconcile path regardless).
+        reconcile_due = time.monotonic() - last_heartbeat >= _HEARTBEAT_INTERVAL
+        if reconcile_due:
+            _reconcile_dead_for_workflow(workflow_id, main_thread_id=session_id)
+        workflow = _running_system_workflow(
+            session_id, workflow_id, reconcile=reconcile_due
+        )
         if workflow is None:
             yield _end_frame("workflow")
             return
         yield from _workflow_input_request_frames(workflow.pk, seen_inputs)
         if time.monotonic() > deadline:
             return
-        if time.monotonic() - last_heartbeat >= _HEARTBEAT_INTERVAL:
+        if reconcile_due:
             yield _heartbeat_frame(
                 working=True,
                 status_text=system_workflow_status_text(workflow),
@@ -569,18 +580,23 @@ def _format_compact_token_amount(value: int, scale: int) -> str:
 def _running_system_workflow(
     session_id: str,
     workflow_id: int,
+    *,
+    reconcile: bool = True,
 ) -> SystemWorkflow | None:
     try:
-        # The reconcile write runs on every heartbeat tick of every open
-        # workflow SSE stream; a transient lock must skip this tick (the next
-        # one retries) rather than abort the generator and drop the stream. The
-        # status read below is a WAL reader and never contends for the lock.
-        run_ignoring_database_locks(
-            lambda: system_agents.reconcile_terminal_workflow_instances(
-                workflow_id=workflow_id
-            ),
-            description="system workflow instance reconcile",
-        )
+        # The reconcile write runs on the heartbeat tick of every open workflow
+        # SSE stream; a transient lock must skip this tick (the next one retries)
+        # rather than abort the generator and drop the stream. ``reconcile`` is
+        # False on the faster intermediate poll ticks so the write-capable sweep
+        # stays on the heartbeat cadence. The status read below is a WAL reader
+        # and never contends for the lock, so it runs every tick.
+        if reconcile:
+            run_ignoring_database_locks(
+                lambda: system_agents.reconcile_terminal_workflow_instances(
+                    workflow_id=workflow_id
+                ),
+                description="system workflow instance reconcile",
+            )
         return SystemWorkflow.objects.filter(
             pk=workflow_id,
             main_thread_id=session_id,
