@@ -229,6 +229,9 @@ class ClaudeOptionsTests(TestCase):
         # ``Monitor`` runs a background script under Bash rules; gate it too so
         # ``approve_all`` cannot run commands despite the read-only sandbox.
         self.assertIn("Monitor", disallowed)
+        # ``PowerShell`` runs host commands natively (Windows / opt-in env var);
+        # it must be blocked like Bash so read-only stays authoritative.
+        self.assertIn("PowerShell", disallowed)
 
     def test_web_search_disabled_blocks_tool(self) -> None:
         allowed, disallowed = claude_options.resolve_tool_lists(
@@ -1076,6 +1079,131 @@ class DemoSandboxOverrideTests(TestCase):
         )
 
 
+class PlanModeApprovalTests(TestCase):
+    """``ExitPlanMode`` is the plan-approval boundary, so it must always reach the
+    interactive approval flow -- never be auto-approved by ``approve_all``."""
+
+    def _runner(self) -> Any:
+        import io
+
+        from hitch.main.management.commands import claude_worker
+
+        instance = CodexInstance(
+            thread_id="t",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_RUNNING,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            purpose=CodexInstance.PURPOSE_USER,
+        )
+        return claude_worker._TurnRunner(
+            instance=instance,
+            events_file=io.StringIO(),
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode=claude_options.APPROVAL_APPROVE_ALL,
+            web_search_mode=None,
+            plan_mode=True,
+        )
+
+    def test_exit_plan_mode_is_reviewed_even_under_approve_all(self) -> None:
+        import asyncio
+
+        from hitch.main.management.commands import claude_worker
+        from hitch.main.models import ApprovalRequest
+
+        runner = self._runner()
+        with (
+            patch.object(
+                claude_worker, "_create_pending_approval", return_value=11
+            ) as mock_create,
+            patch.object(
+                claude_worker,
+                "_wait_for_decision",
+                return_value=ApprovalRequest.DECISION_ACCEPT,
+            ) as mock_wait,
+        ):
+            result = asyncio.run(
+                runner._can_use_tool("ExitPlanMode", {"plan": "do it"}, None)
+            )
+        # It went through the interactive approval flow, not the auto-allow.
+        mock_create.assert_called_once()
+        mock_wait.assert_called_once()
+        self.assertIsInstance(result, PermissionResultAllow)
+
+    def test_other_tools_still_auto_approved_under_approve_all(self) -> None:
+        import asyncio
+
+        from hitch.main.management.commands import claude_worker
+
+        runner = self._runner()
+        with patch.object(claude_worker, "_create_pending_approval") as mock_create:
+            result = asyncio.run(runner._can_use_tool("Bash", {"command": "ls"}, None))
+        mock_create.assert_not_called()
+        self.assertIsInstance(result, PermissionResultAllow)
+
+
+class PowerShellGatingTests(TestCase):
+    """``PowerShell`` runs host commands natively, so it is gated like Bash."""
+
+    def test_powershell_uses_command_approval_method(self) -> None:
+        from hitch.main.management.commands import claude_worker
+
+        self.assertEqual(
+            claude_worker._approval_method("PowerShell"),
+            claude_worker._COMMAND_APPROVAL_METHOD,
+        )
+
+    def test_read_only_denies_powershell_via_disallow_list(self) -> None:
+        _allowed, disallowed = claude_options.resolve_tool_lists(
+            sandbox_policy=claude_options.SANDBOX_READ_ONLY, web_search_mode=None
+        )
+        self.assertIn("PowerShell", disallowed)
+
+
+class ClaudeArchiveUsageTests(TestCase):
+    """Claude's token-usage cache row is authoritative (no rollout to recompute
+    from), so archiving/unarchiving must not delete it the way it does for Codex."""
+
+    def test_archiving_claude_session_preserves_token_usage(self) -> None:
+        from django.urls import reverse
+
+        from hitch.main import models
+        from hitch.main.models import ArchivedSessionTokenUsage
+
+        CodexInstance.objects.create(
+            thread_id="thread-arch",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="thread-arch",
+            rollout_path="",
+            input_tokens=500,
+            output_tokens=120,
+            usage_logic_version=models.TOKEN_USAGE_LOGIC_VERSION,
+        )
+        for archived in ("true", "false"):
+            response = self.client.post(
+                reverse("set_session_archived", kwargs={"session_id": "thread-arch"}),
+                {"archived": archived},
+            )
+            self.assertIn(response.status_code, (200, 204, 302))
+            row = ArchivedSessionTokenUsage.objects.filter(
+                thread_id="thread-arch"
+            ).first()
+            self.assertIsNotNone(row, archived)
+            assert row is not None
+            self.assertEqual(row.input_tokens, 500)
+
+
 class ClaudePlanModeStateTests(TestCase):
     """Claude sessions have no rollout collaboration mode, so plan-mode state
     must come from the transcript -- not a sticky per-turn ``plan_mode`` flag
@@ -1800,10 +1928,10 @@ class WorkerTurnTests(TestCase):
         runner, _written = self._run(messages)
         self.assertTrue(runner.failed)
 
-    def test_pre_loop_sigterm_is_reconciled_once_client_connects(self) -> None:
+    def test_pre_loop_sigterm_skips_the_turn(self) -> None:
         # A Stop that landed before the loop installed its handlers (recorded by
-        # the protective handler) is honored as soon as the client exists, rather
-        # than letting the turn run on.
+        # the protective handler) must abort the turn before it starts -- the
+        # query is never submitted, so a stopped turn cannot start anyway.
         import asyncio
 
         from hitch.main.management.commands import claude_worker
@@ -1846,7 +1974,10 @@ class WorkerTurnTests(TestCase):
                     asyncio.run(runner.run())
             finally:
                 claude_worker._PENDING_SIGTERM = False
-        self.assertTrue(fake.interrupted)
+        # The turn never started: no query was submitted and no result was seen,
+        # so ``handle`` reconciles it as a stopped (failed) turn.
+        self.assertEqual(fake.queries, [])
+        self.assertFalse(runner.saw_result)
         self.assertTrue(runner._cancelled)
 
     def test_pre_loop_handlers_record_signals(self) -> None:

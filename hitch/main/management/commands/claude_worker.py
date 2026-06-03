@@ -76,6 +76,17 @@ _FILE_APPROVAL_METHOD = "item/fileChange/requestApproval"
 # ungated tool here would bypass Hitch's approval modes.
 _TOOL_APPROVAL_METHOD = "item/tool/requestApproval"
 _FILE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+# Tools that run host commands natively. ``Bash`` is always present; ``PowerShell``
+# appears on Windows or when ``CLAUDE_CODE_USE_POWERSHELL_TOOL=1``. Both must be
+# gated as command execution (and blocked by the read-only sandbox) -- otherwise
+# ``PowerShell`` could run commands under ``approve_all`` despite a read-only
+# session, since it is not in the auto-approved read-only tool list.
+_COMMAND_TOOLS = frozenset({"Bash", "PowerShell"})
+# Plan mode's approval boundary: the model calls ``ExitPlanMode`` to present its
+# plan and leave plan mode. It is deliberately kept out of ``allowed_tools`` so it
+# always reaches ``can_use_tool`` -- and must never be auto-approved (even under
+# ``approve_all``), so the user explicitly reviews the plan before edits begin.
+_EXIT_PLAN_MODE_TOOL = "ExitPlanMode"
 # The SDK's ``AskUserQuestion`` tool (common in plan mode) reaches the same
 # ``can_use_tool`` callback. Rather than a bare allow/deny, it is routed to the
 # structured-input handoff (``UserInputRequest`` + the ``input/requested`` UI
@@ -248,11 +259,17 @@ class _TurnRunner:
         async with ClaudeSDKClient(options=options) as client:
             self._client = client
             # A Stop that arrived before the loop handlers were installed set the
-            # module flag; honor it now that the client exists rather than letting
-            # the turn run on. (A pre-loop Steer needs no replay: its prompt is in
-            # the control file, which the drain loop reads from offset 0.)
+            # module flag. Don't start the turn at all: submitting the query and
+            # relying on the scheduled interrupt races -- the interrupt can run
+            # before any query is active, so the stopped turn would start anyway.
+            # Bail out instead (a pre-loop Steer needs no replay either: its prompt
+            # is in the control file, but with the turn stopped there is nothing to
+            # steer into). The empty turn ends without a result and is reconciled
+            # as a stopped turn by ``handle``.
             if _PENDING_SIGTERM:
-                self._on_sigterm()
+                self._cancelled = True
+                request_cancel()
+                return
             await client.query(self._turn_input())
             steer_task = asyncio.create_task(self._forward_steer_requests())
             try:
@@ -451,17 +468,25 @@ class _TurnRunner:
                 claude_options.SANDBOX_WORKSPACE_WRITE,
                 claude_options.SANDBOX_DANGER_FULL_ACCESS,
             )
-            if writes_allowed and (tool_name == "Bash" or tool_name in _FILE_TOOLS):
+            if writes_allowed and (
+                tool_name in _COMMAND_TOOLS or tool_name in _FILE_TOOLS
+            ):
                 return claude_options.allow_result()
             return claude_options.deny_result(
                 "Hidden system-agent runs may only auto-run built-in Bash/file "
                 "tools under a write sandbox."
             )
-        if self._approval_mode == claude_options.APPROVAL_APPROVE_ALL:
+        if (
+            self._approval_mode == claude_options.APPROVAL_APPROVE_ALL
+            and tool_name != _EXIT_PLAN_MODE_TOOL
+        ):
             # ``approve_all`` auto-approves without prompting. It only reaches the
             # callback for a confining sandbox (``dangerFullAccess`` maps to
             # ``bypassPermissions`` and skips it); the cwd guard above already
-            # bounded file edits, so the rest just proceeds.
+            # bounded file edits, so the rest just proceeds. ``ExitPlanMode`` is
+            # excluded: leaving plan mode is the one boundary ``/plan`` must always
+            # surface for explicit review, so it falls through to the interactive
+            # approval below even under ``approve_all``.
             return claude_options.allow_result()
         params = _approval_params(method, tool_name, tool_input)
         request_id = await asyncio.to_thread(
@@ -627,7 +652,7 @@ def _is_external_mcp_tool(tool_name: str) -> bool:
 
 
 def _approval_method(tool_name: str) -> str:
-    if tool_name == "Bash":
+    if tool_name in _COMMAND_TOOLS:
         return _COMMAND_APPROVAL_METHOD
     if tool_name in _FILE_TOOLS:
         return _FILE_APPROVAL_METHOD

@@ -10121,7 +10121,8 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
     if archived not in {"true", "false"}:
         return HttpResponseBadRequest("archived must be true or false")
     # Claude threads have no app-server thread; update the local cache directly.
-    if not _session_is_claude(session_id):
+    is_claude = _session_is_claude(session_id)
+    if not is_claude:
         settings = _stored_settings(request)
         with codex_pool.borrow_codex(
             Codex, enable_memories=settings.enable_memories
@@ -10137,8 +10138,12 @@ def set_session_archived(request: HttpRequest, session_id: str) -> HttpResponse:
     # the archive bit flips, which invalidates *this* thread's cached usage
     # row. Other threads' caches still match their rollouts, so leave them
     # alone — a blanket wipe forces /profile and /usage to re-parse every
-    # archived rollout file the next time they render.
-    ArchivedSessionTokenUsage.objects.filter(thread_id=session_id).delete()
+    # archived rollout file the next time they render. Claude has no rollout to
+    # re-parse: its cache row (``rollout_path == ""``) is the *authoritative*
+    # accumulated usage, so dropping it would permanently lose the thread's
+    # totals — keep it.
+    if not is_claude:
+        ArchivedSessionTokenUsage.objects.filter(thread_id=session_id).delete()
     if request.headers.get("X-Requested-With") == "XMLHttpRequest":
         return HttpResponse(status=204)
     if request.POST.get("next", "").strip() == "index":

@@ -81,6 +81,9 @@ _WEB_FETCH_TOOL = "WebFetch"
 _BASH_TOOL = "Bash"
 # Runs a background script under Bash permission rules; gated with Bash.
 _MONITOR_TOOL = "Monitor"
+# Runs host commands natively (Windows, or ``CLAUDE_CODE_USE_POWERSHELL_TOOL=1``);
+# gated like Bash so a read-only sandbox blocks command execution either way.
+_POWERSHELL_TOOL = "PowerShell"
 
 # Codex sandbox policy strings (cookie/CLI values) -> behaviour.
 SANDBOX_READ_ONLY = "readOnly"
@@ -161,12 +164,13 @@ def resolve_tool_lists(
         # Block file-edit tools AND command-capable tools: a shell command can
         # mutate the workspace just as a write tool can, so a read-only session
         # must deny them regardless of the approval mode. ``Monitor`` runs a
-        # background script under Bash permission rules, so it is gated too --
-        # otherwise ``approve_all`` (bypassPermissions) would let it run commands
-        # despite the read-only sandbox.
+        # background script under Bash permission rules, and ``PowerShell`` runs
+        # host commands natively, so both are gated too -- otherwise ``approve_all``
+        # would let them run commands despite the read-only sandbox.
         disallowed.extend(WRITE_TOOLS)
         disallowed.append(_BASH_TOOL)
         disallowed.append(_MONITOR_TOOL)
+        disallowed.append(_POWERSHELL_TOOL)
         allowed = [tool for tool in allowed if tool != _BASH_TOOL]
     return allowed, disallowed
 
