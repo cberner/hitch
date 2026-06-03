@@ -1,0 +1,161 @@
+import fcntl
+import os
+import tempfile
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, cast
+from unittest.mock import MagicMock, patch
+
+from django.test import SimpleTestCase
+from openai_codex import TransportClosedError
+
+from hitch.main import codex_pool
+
+_LOCKED = "app-server closed stdout. stderr_tail=... (code: 5) database is locked"
+
+
+def _noop_lock() -> MagicMock:
+    """A context manager stand-in for ``_appserver_init_lock`` that does nothing."""
+    cm = MagicMock()
+    cm.__enter__.return_value = None
+    cm.__exit__.return_value = False
+    return cm
+
+
+class _FakeCodex:
+    """Minimal stand-in matching ``Codex``'s ``__enter__`` (returns self) and
+    ``__exit__`` (closes) so ``open_codex`` can be exercised without a real
+    app-server subprocess."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def __enter__(self) -> "_FakeCodex":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class StartCodexWithRetryTests(SimpleTestCase):
+    def test_returns_immediately_on_clean_start(self) -> None:
+        sentinel = object()
+        factory = MagicMock(return_value=sentinel)
+        with (
+            patch("hitch.main.codex_pool._appserver_init_lock", _noop_lock),
+            patch("hitch.main.codex_pool.time.sleep") as mock_sleep,
+        ):
+            result = codex_pool._start_codex_with_retry(factory)
+
+        self.assertIs(result, sentinel)
+        self.assertEqual(factory.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    def test_retries_locked_state_db_then_succeeds(self) -> None:
+        sentinel = object()
+        factory = MagicMock(
+            side_effect=[
+                TransportClosedError(_LOCKED),
+                TransportClosedError(_LOCKED),
+                sentinel,
+            ]
+        )
+        with (
+            patch("hitch.main.codex_pool._appserver_init_lock", _noop_lock),
+            patch("hitch.main.codex_pool.time.sleep") as mock_sleep,
+        ):
+            result = codex_pool._start_codex_with_retry(factory)
+
+        self.assertIs(result, sentinel)
+        self.assertEqual(factory.call_count, 3)
+        # Backoff slept once per failed attempt, never after the success.
+        self.assertEqual(mock_sleep.call_count, 2)
+
+    def test_non_locked_transport_error_is_not_retried(self) -> None:
+        boom = TransportClosedError("app-server closed stdout. stderr_tail=segfault")
+        factory = MagicMock(side_effect=boom)
+        with (
+            patch("hitch.main.codex_pool._appserver_init_lock", _noop_lock),
+            patch("hitch.main.codex_pool.time.sleep"),
+            self.assertRaises(TransportClosedError),
+        ):
+            codex_pool._start_codex_with_retry(factory)
+
+        self.assertEqual(factory.call_count, 1)
+
+    def test_reraises_after_exhausting_attempts(self) -> None:
+        factory = MagicMock(side_effect=TransportClosedError(_LOCKED))
+        with (
+            patch("hitch.main.codex_pool._appserver_init_lock", _noop_lock),
+            patch("hitch.main.codex_pool.time.sleep"),
+            self.assertRaises(TransportClosedError),
+        ):
+            codex_pool._start_codex_with_retry(factory)
+
+        self.assertEqual(
+            factory.call_count, codex_pool._APPSERVER_START_MAX_ATTEMPTS
+        )
+
+
+class OpenCodexTests(SimpleTestCase):
+    def test_yields_entered_codex_and_closes_on_exit(self) -> None:
+        codex = _FakeCodex()
+        factory = cast("Callable[[], Any]", lambda: codex)
+        with patch("hitch.main.codex_pool._appserver_init_lock", _noop_lock):
+            with codex_pool.open_codex(factory) as opened:
+                self.assertIs(opened, codex)
+                self.assertFalse(codex.closed)
+            self.assertTrue(codex.closed)
+
+
+class AppServerInitLockTests(SimpleTestCase):
+    def test_creates_and_releases_lockfile_in_codex_home(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as home,
+            patch.dict(os.environ, {"CODEX_HOME": home}),
+        ):
+            lock_path = Path(home) / codex_pool._APPSERVER_INIT_LOCK_NAME
+            with codex_pool._appserver_init_lock():
+                self.assertTrue(lock_path.exists())
+            # A fresh exclusive acquisition succeeds once the block released.
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
+    def test_proceeds_unlocked_when_already_held(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as home,
+            patch.dict(os.environ, {"CODEX_HOME": home}),
+        ):
+            lock_path = Path(home) / codex_pool._APPSERVER_INIT_LOCK_NAME
+            holder = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                entered = False
+                with (
+                    patch.object(
+                        codex_pool, "_APPSERVER_INIT_LOCK_WAIT_SECONDS", 0.0
+                    ),
+                    codex_pool._appserver_init_lock(),
+                ):
+                    # Falls through without the lock rather than blocking.
+                    entered = True
+                self.assertTrue(entered)
+            finally:
+                fcntl.flock(holder, fcntl.LOCK_UN)
+                os.close(holder)
+
+    def test_falls_back_to_no_lock_when_home_unavailable(self) -> None:
+        with patch(
+            "hitch.main.codex_pool._appserver_init_lock_path", return_value=None
+        ):
+            entered = False
+            with codex_pool._appserver_init_lock():
+                entered = True
+            self.assertTrue(entered)

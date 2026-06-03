@@ -83,6 +83,7 @@ from hitch.main.codex_pool import (
     cleanup_requested_input_images_for,
     control_path_for,
     discard_input_attachment_paths,
+    open_codex,
     resolve_dangling_requests_for_instance,
 )
 from hitch.main.codex_tools import (
@@ -450,7 +451,7 @@ def _run_turn(
     notification_order: NotificationOrdering = _fallback_notification_order
     control_path = control_path_for(instance)
     try:
-        with Codex(config=config) as codex:
+        with open_codex(lambda: Codex(config=config)) as codex:
             notification_order = _install_notification_sequencer(codex)
             # The Codex top-level class instantiates its own AppServerClient
             # without an ``approval_handler`` argument, so the only way to wire

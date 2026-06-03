@@ -1003,7 +1003,7 @@ def _auto_proposals_paused_by_usage_quota_throttled() -> bool:
 def _auto_proposals_paused_by_usage_quota() -> bool:
     try:
         config = codex_pool.app_server_config()
-        with Codex(config=config) as codex:
+        with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
             response = codex._client.request(
                 "account/rateLimits/read",
                 None,
@@ -1472,7 +1472,7 @@ def _classify_spec_critic_prompt_with_codex(
 ) -> bool | None:
     try:
         config = codex_pool.app_server_config(enable_memories=False)
-        with Codex(config=config) as codex:
+        with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
             model = _smallest_available_codex_model(list(codex.models().data))
             thread = codex.thread_start(
                 cwd=cwd or os.getcwd(),

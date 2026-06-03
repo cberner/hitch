@@ -14,6 +14,8 @@ re-implementing Django bootstrap.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -23,7 +25,8 @@ import subprocess
 import sys
 import tempfile
 import threading
-from collections.abc import Iterable
+import time
+from collections.abc import Callable, Generator, Iterable
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
@@ -32,10 +35,11 @@ from typing import Any, cast
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
-from openai_codex import AppServerConfig, Codex
+from openai_codex import AppServerConfig, Codex, TransportClosedError
 from openai_codex.generated.v2_all import ThreadSource, WebSearchMode
 
 from hitch.main.codex_tools import registered_dynamic_tool_specs
+from hitch.main.db import is_database_locked_error
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
 
 logger = logging.getLogger(__name__)
@@ -126,7 +130,7 @@ def spawn_new_session(
         enable_memories=enable_memories,
         web_search_mode=web_search_mode,
     )
-    with Codex(config=config) as codex:
+    with open_codex(lambda: Codex(config=config)) as codex:
         start_kwargs: dict[str, Any] = {
             "cwd": cwd,
             "developerInstructions": developer_instructions,
@@ -203,7 +207,7 @@ def create_session_thread(
         enable_memories=enable_memories,
         web_search_mode=web_search_mode,
     )
-    with Codex(config=config) as codex:
+    with open_codex(lambda: Codex(config=config)) as codex:
         start_kwargs: dict[str, Any] = {
             "cwd": cwd,
             "developer_instructions": developer_instructions,
@@ -1276,6 +1280,142 @@ def app_server_config(
     if web_search_mode:
         overrides.append(f"web_search={json.dumps(web_search_mode)}")
     return AppServerConfig(codex_bin=_codex_bin(), config_overrides=tuple(overrides))
+
+
+# Every ``Codex(config=config)`` spawns a ``codex app-server`` subprocess that
+# initializes the Codex Rust runtime's own SQLite state database under
+# ``$CODEX_HOME`` -- separate from Hitch's Django DB. That state DB hardcodes a
+# 5s busy_timeout, and its init/migration/backfill path has no SQLITE_BUSY
+# retry (openai/codex#20213). Hitch opens app-servers concurrently from request
+# handlers, detached workers, and the background scheduler against one shared
+# CODEX_HOME, so two startups can race the state-DB init: the loser exits with
+# "database is locked", which the SDK surfaces as a TransportClosedError whose
+# stderr tail carries that message.
+#
+# We can't raise the Rust busy_timeout (it isn't configurable), so we serialize
+# startup with a cross-process file lock in CODEX_HOME and retry as a safety
+# net for an init that still races an already-running app-server's writes.
+_APPSERVER_INIT_LOCK_NAME = ".hitch-appserver-init.lock"
+# Best-effort cap on how long to wait for the init lock before proceeding
+# anyway. A stuck holder (e.g. a slow first-run migration) must never turn this
+# lock into a worse stall than the contention it guards against.
+_APPSERVER_INIT_LOCK_WAIT_SECONDS = 30.0
+_APPSERVER_INIT_LOCK_POLL_INTERVAL = 0.05
+_APPSERVER_START_MAX_ATTEMPTS = 6
+_APPSERVER_START_BACKOFF_BASE_SECONDS = 0.2
+_APPSERVER_START_BACKOFF_MAX_SECONDS = 2.0
+
+
+def _codex_home() -> Path:
+    """Resolve the directory the codex app-server keeps its state DB in.
+
+    Mirrors codex's own resolution: ``$CODEX_HOME`` when set, else ``~/.codex``.
+    """
+    return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+
+
+def _appserver_init_lock_path() -> Path | None:
+    home = _codex_home()
+    try:
+        home.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.warning("could not ensure CODEX_HOME %s for app-server init lock", home)
+        return None
+    return home / _APPSERVER_INIT_LOCK_NAME
+
+
+@contextlib.contextmanager
+def _appserver_init_lock() -> Generator[None]:
+    """Serialize Codex app-server state-DB initialization across processes.
+
+    Best-effort: if the lock can't be created or acquired within the wait
+    budget, proceed unlocked and rely on the construction retry. The lock is an
+    advisory ``flock`` keyed on the open file description, so it serializes both
+    threads in this process and separate worker/scheduler processes.
+    """
+    path = _appserver_init_lock_path()
+    if path is None:
+        yield
+        return
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        logger.warning("could not open app-server init lock %s", path)
+        yield
+        return
+    acquired = False
+    deadline = time.monotonic() + _APPSERVER_INIT_LOCK_WAIT_SECONDS
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    logger.warning(
+                        "proceeding without app-server init lock after %ss",
+                        _APPSERVER_INIT_LOCK_WAIT_SECONDS,
+                    )
+                    break
+                time.sleep(_APPSERVER_INIT_LOCK_POLL_INTERVAL)
+        yield
+    finally:
+        if acquired:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _start_codex_with_retry(factory: Callable[[], Codex]) -> Codex:
+    """Call ``factory`` to construct a ``Codex``, retrying a locked init.
+
+    ``factory`` is a zero-arg closure (typically ``lambda: Codex(config=...)``)
+    so the call site keeps referencing its own module-local ``Codex`` symbol --
+    important both for clarity and so tests that patch ``<module>.Codex`` still
+    intercept construction. Only a ``TransportClosedError`` carrying the state
+    DB's "database is locked" message is retried; any other startup failure
+    propagates immediately. The init lock is held only around each construction
+    attempt, never the returned session, so a long-running turn does not block
+    other startups.
+    """
+    last_error: TransportClosedError | None = None
+    for attempt in range(_APPSERVER_START_MAX_ATTEMPTS):
+        try:
+            with _appserver_init_lock():
+                return factory()
+        except TransportClosedError as exc:
+            if not is_database_locked_error(exc):
+                raise
+            last_error = exc
+            logger.warning(
+                "Codex app-server state DB locked on start (attempt %s/%s)",
+                attempt + 1,
+                _APPSERVER_START_MAX_ATTEMPTS,
+            )
+        if attempt + 1 < _APPSERVER_START_MAX_ATTEMPTS:
+            backoff = min(
+                _APPSERVER_START_BACKOFF_BASE_SECONDS * (2**attempt),
+                _APPSERVER_START_BACKOFF_MAX_SECONDS,
+            )
+            time.sleep(backoff)
+    assert last_error is not None
+    raise last_error
+
+
+@contextlib.contextmanager
+def open_codex(factory: Callable[[], Codex]) -> Generator[Codex]:
+    """Open a Codex app-server, tolerating a contended state-DB init.
+
+    Replaces ``with Codex(config=config) as codex`` with
+    ``with open_codex(lambda: Codex(config=config)) as codex``: startup is
+    serialized and retried against the shared CODEX_HOME state DB lock (see
+    ``_start_codex_with_retry``), then the constructed session's own
+    ``__enter__``/``__exit__`` run as usual so it is closed on exit.
+    """
+    codex = _start_codex_with_retry(factory)
+    with codex as entered:
+        yield entered
 
 
 def _normalized_input_image_paths(input_image_paths: Any) -> list[str]:

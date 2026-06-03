@@ -102,7 +102,7 @@ def refresh_unarchived_session_state() -> SessionStateRefreshResult:
     try:
         config = codex_pool.app_server_config()
         projects = list(Project.objects.all())
-        with Codex(config=config) as codex:
+        with codex_pool.open_codex(lambda: Codex(config=config)) as codex:
             codex_result = session_index.refresh_from_codex(
                 codex,
                 projects=projects,
