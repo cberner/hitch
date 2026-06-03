@@ -30,7 +30,7 @@ from collections.abc import Callable, Generator, Iterable
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypeVar, cast
 
 from django.conf import settings
 from django.db import transaction
@@ -43,6 +43,8 @@ from hitch.main.db import is_database_locked_error
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 _TRACKED_WORKER_PROCS: dict[int, tuple[int, subprocess.Popen[bytes]]] = {}
 _REAPED_WORKERS: set[tuple[int, int]] = set()
@@ -1390,6 +1392,51 @@ def _start_codex_with_retry(factory: Callable[[], Codex]) -> Codex:
             last_error = exc
             logger.warning(
                 "Codex app-server state DB locked on start (attempt %s/%s)",
+                attempt + 1,
+                _APPSERVER_START_MAX_ATTEMPTS,
+            )
+        if attempt + 1 < _APPSERVER_START_MAX_ATTEMPTS:
+            backoff = min(
+                _APPSERVER_START_BACKOFF_BASE_SECONDS * (2**attempt),
+                _APPSERVER_START_BACKOFF_MAX_SECONDS,
+            )
+            time.sleep(backoff)
+    assert last_error is not None
+    raise last_error
+
+
+def run_codex_op_with_retry(
+    factory: Callable[[], Codex],
+    operation: Callable[[Codex], T],
+) -> T:
+    """Open a fresh app-server, run ``operation`` against it, and retry the whole
+    open+operation when a contended CODEX_HOME state DB surfaces.
+
+    ``_start_codex_with_retry`` only guards *construction*. But the Codex
+    runtime's state-DB migration/backfill path (no SQLITE_BUSY retry,
+    openai/codex#20213) is also reached lazily by operations like
+    ``thread_resume`` -- resuming a thread persisted by another worker migrates
+    that thread's rows -- and a lock there *exits the app-server mid-operation*,
+    surfacing as a ``TransportClosedError`` the construction-only retry never
+    sees. Because the server is gone, recovery means reconstructing it, so the
+    retry boundary has to wrap the open and the operation together; a fresh
+    ``open_codex`` runs on each attempt. ``operation`` must therefore be
+    idempotent (it may run more than once) -- safe for reads like
+    ``thread_resume``/``thread_list``, not for turn starts. Non-locked errors
+    (including ``Http404`` the operation may raise) propagate immediately; the
+    same bounded backoff as startup caps the retries.
+    """
+    last_error: TransportClosedError | None = None
+    for attempt in range(_APPSERVER_START_MAX_ATTEMPTS):
+        try:
+            with open_codex(factory) as codex:
+                return operation(codex)
+        except TransportClosedError as exc:
+            if not is_database_locked_error(exc):
+                raise
+            last_error = exc
+            logger.warning(
+                "Codex app-server state DB locked during operation (attempt %s/%s)",
                 attempt + 1,
                 _APPSERVER_START_MAX_ATTEMPTS,
             )
