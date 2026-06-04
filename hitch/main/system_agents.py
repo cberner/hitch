@@ -4260,13 +4260,24 @@ def _authoritative_pr_monitor_result(
         "feedback": gh_feedback or parsed["feedback"],
         "blockers": gh_blockers
         or (parsed_blockers if monitor_feedback_is_current else []),
+        _PR_MONITOR_FEEDBACK_OBSERVATION_KEY: _monitor_feedback_observation(
+            monitor_observation
+        ),
     }
     if parsed_feedback and monitor_feedback_is_current and not gh_blockers:
         result["monitor_feedback"] = parsed_feedback
-        result[_PR_MONITOR_FEEDBACK_OBSERVATION_KEY] = (
-            _monitor_feedback_observation(monitor_observation)
-        )
+    elif not monitor_feedback_is_current and _gh_observation_has_monitor_text(
+        gh_observation
+    ):
+        result[_PR_MONITOR_REINTERPRETATION_REQUIRED_KEY] = True
     return result
+
+
+def _gh_observation_has_monitor_text(gh_observation: dict[str, Any]) -> bool:
+    return bool(
+        _string_from_any(gh_observation.get("feedback"))
+        or _string_list(gh_observation.get("blockers"))
+    )
 
 
 def _monitor_feedback_observation(gh_observation: dict[str, Any]) -> dict[str, Any]:
@@ -4277,11 +4288,16 @@ def _monitor_feedback_observation(gh_observation: dict[str, Any]) -> dict[str, A
 
 
 def _monitor_observation_matches_current(
-    monitor_observation: dict[str, Any], gh_observation: dict[str, Any]
+    monitor_observation: dict[str, Any],
+    gh_observation: dict[str, Any],
+    *,
+    require_feedback: bool = True,
 ) -> bool:
     monitor_feedback = _string_from_any(monitor_observation.get("feedback"))
     current_feedback = _string_from_any(gh_observation.get("feedback"))
-    if not monitor_feedback or monitor_feedback != current_feedback:
+    if require_feedback and not monitor_feedback:
+        return False
+    if monitor_feedback != current_feedback:
         return False
     monitor_pr = _compact_pr_handoff(monitor_observation.get("pr"))
     current_pr = _compact_pr_handoff(gh_observation.get("pr"))
@@ -4502,23 +4518,35 @@ def _carry_current_monitor_feedback(
             _PR_MONITOR_REINTERPRETATION_REQUIRED_KEY: True,
         }
     monitor_feedback = previous_monitor.get("monitor_feedback")
+    monitor_blockers = _string_list(previous_monitor.get("blockers"))
     monitor_observation = previous_monitor.get(_PR_MONITOR_FEEDBACK_OBSERVATION_KEY)
     if (
-        not isinstance(monitor_feedback, str)
-        or not monitor_feedback.strip()
-        or not isinstance(monitor_observation, dict)
+        isinstance(monitor_observation, dict)
+        and not _monitor_observation_matches_current(
+            monitor_observation,
+            gh_observation,
+            require_feedback=False,
+        )
+        and _gh_observation_has_monitor_text(gh_observation)
     ):
-        return parsed
-    if not _monitor_observation_matches_current(monitor_observation, gh_observation):
         return {
             **parsed,
             _PR_MONITOR_REINTERPRETATION_REQUIRED_KEY: True,
         }
-    return {
+    if (
+        not monitor_blockers
+        or not isinstance(monitor_observation, dict)
+        or not _monitor_observation_matches_current(monitor_observation, gh_observation)
+    ):
+        return parsed
+    result = {
         **parsed,
-        "monitor_feedback": monitor_feedback.strip(),
+        "blockers": monitor_blockers,
         _PR_MONITOR_FEEDBACK_OBSERVATION_KEY: monitor_observation,
     }
+    if isinstance(monitor_feedback, str) and monitor_feedback.strip():
+        result["monitor_feedback"] = monitor_feedback.strip()
+    return result
 
 
 def _pr_monitor_reinterpretation_required(parsed: dict[str, Any]) -> bool:
@@ -5870,7 +5898,9 @@ def _pr_followup_monitor_prompt(
         'object is merged or closed; otherwise use "blocked" as the schema '
         "placeholder. Put a concise human summary in `summary`, and put any "
         "actionable comment or CI-failure details the coding agent should address "
-        "in `feedback`."
+        "in `feedback`. Use `blockers` as the explicit action signal: add one "
+        "short blocker for each actionable item, and leave `blockers` empty when "
+        "there is nothing for the coding agent to fix."
     )
 
 
@@ -8002,13 +8032,13 @@ def _pr_monitor_feedback(parsed: dict[str, Any]) -> str:
 
 
 def _pr_monitor_actionable_feedback(parsed: dict[str, Any]) -> str:
+    blockers = _string_list(parsed.get("blockers"))
+    if not blockers:
+        return ""
     feedback = parsed.get("monitor_feedback")
     if isinstance(feedback, str) and feedback.strip():
         return feedback.strip()
-    blockers = _string_list(parsed.get("blockers"))
-    if blockers:
-        return "\n".join(f"- {blocker}" for blocker in blockers)
-    return ""
+    return "\n".join(f"- {blocker}" for blocker in blockers)
 
 
 def _format_pr_handoff(handoff: dict[str, Any]) -> str:
