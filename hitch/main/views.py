@@ -5579,8 +5579,7 @@ def _schedule_session_index_refresh(
 
 def _usage_session_index_refresh_needed(*, archived: bool) -> bool:
     return (
-        not session_index.is_complete(archived=archived)
-        or session_index.has_pending_pages(archived=archived)
+        session_index.has_pending_pages(archived=archived)
         or session_index.should_refresh(archived=archived)
     )
 
@@ -5630,6 +5629,8 @@ def _refresh_usage_session_index_best_effort(
             # Web-triggered catch-up must not ask Codex to scan rollouts: on a
             # large CODEX_HOME that backfill can hold Codex's SQLite writer lock
             # long enough to make detached workers exhaust their startup retry.
+            # Since state-only data may exclude rollout-only sessions, this
+            # warms rows without claiming source coverage is complete.
             session_index.refresh_from_codex(
                 codex,
                 projects=list(Project.objects.all()),
@@ -5637,6 +5638,7 @@ def _refresh_usage_session_index_best_effort(
                 include_archived=refresh_archived,
                 use_state_db_only=True,
                 max_pages=None,
+                allow_completion=False,
             )
     except Exception:
         logger.exception("failed to refresh usage session index")

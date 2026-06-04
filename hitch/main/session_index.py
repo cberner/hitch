@@ -114,6 +114,7 @@ def refresh_from_codex(
     include_archived: bool = False,
     use_state_db_only: bool = True,
     max_pages: int | None = 1,
+    allow_completion: bool = True,
 ) -> RefreshResult:
     synced = 0
     failed = False
@@ -136,10 +137,10 @@ def refresh_from_codex(
             synced += source_result.synced
             mark_synced(
                 archived=archived,
-                complete=source_result.complete,
+                complete=source_result.complete and allow_completion,
                 next_cursor=source_result.next_cursor,
             )
-            if source_result.complete and not use_state_db_only:
+            if source_result.complete and allow_completion and not use_state_db_only:
                 _invalidate_absent_source_rows(
                     archived=archived,
                     seen_thread_ids=source_result.seen_thread_ids,
