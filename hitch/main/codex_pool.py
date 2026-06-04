@@ -996,6 +996,15 @@ def reconcile_dead() -> int:
     return updated
 
 
+# Grace after a worker commits its terminal status before the orphan reaper may
+# kill it. ``codex_worker`` runs ``_notify_system_agents`` (which can spawn
+# follow-up turns) and input-image cleanup *after* the terminal commit, so a
+# still-live terminal worker inside this window is finishing those hooks rather
+# than leaked. Generous so even a slow hook (e.g. spawning a follow-up workflow)
+# completes; a genuinely leaked worker is still reaped one grace later.
+_ORPHAN_REAP_GRACE = timedelta(seconds=60)
+
+
 def _iter_running_worker_pids(
     *,
     proc_root: Path = Path("/proc"),
@@ -1041,6 +1050,18 @@ def _iter_running_worker_pids(
         yield pid, instance_id
 
 
+def _is_tracked_worker(pid: int) -> bool:
+    """Whether ``pid`` is a worker this process spawned and still supervises.
+
+    ``reconcile_dead`` calls ``_reap_finished_workers`` first, which drops every
+    tracked worker that has *exited*, so a pid still tracked here is alive and
+    mid-shutdown -- its tracker (``_wait_for_tracked_worker``) reaps it when it
+    exits -- rather than leaked.
+    """
+    with _TRACKED_WORKER_PROCS_LOCK:
+        return pid in _TRACKED_WORKER_PROCS
+
+
 def reconcile_orphaned_workers() -> int:
     """Kill leaked worker processes whose instance is no longer expected to run.
 
@@ -1053,33 +1074,52 @@ def reconcile_orphaned_workers() -> int:
     takes its app-server child down with it (the app-server inherits the worker's
     session, so ``killpg``/``systemctl kill --kill-whom=all`` reaches it).
 
-    The expected set spans *all* instance purposes -- user sessions, system-agent
-    sessions, and workflow turns -- so a legitimately running system-session
-    worker is never reaped. We only ever kill on a positive DB answer: if the
-    expected set cannot be read, nothing is killed.
+    A still-running worker is spared in three cases, so a turn that is genuinely
+    in progress or just finishing is never killed:
+
+    * its instance is still ``starting``/``running`` (spanning *all* purposes --
+      user, system-agent, and workflow turns -- so a system-session worker is
+      never reaped);
+    * its instance reached a terminal status within ``_ORPHAN_REAP_GRACE``:
+      ``codex_worker`` commits the terminal status *before* running
+      ``_notify_system_agents`` (which can spawn follow-up turns) and input-image
+      cleanup, so a terminal-but-live worker inside that window is finishing
+      hooks, not leaked;
+    * this process is still supervising it (``_is_tracked_worker``).
+
+    We only ever kill on a positive DB answer: if the rows cannot be read,
+    nothing is killed.
     """
     running = list(_iter_running_worker_pids())
     if not running:
         return 0
     instance_ids = {instance_id for _, instance_id in running}
     try:
-        expected = set(
-            CodexInstance.objects.filter(
-                pk__in=instance_ids,
-                status__in=(
-                    CodexInstance.STATUS_STARTING,
-                    CodexInstance.STATUS_RUNNING,
-                ),
-            ).values_list("pk", flat=True)
-        )
+        rows = {
+            pk: (status, ended_at)
+            for pk, status, ended_at in CodexInstance.objects.filter(
+                pk__in=instance_ids
+            ).values_list("pk", "status", "ended_at")
+        }
     except Exception:
         # Never kill on incomplete information: if the DB read fails (e.g. it is
         # momentarily locked) we cannot tell which workers are still expected.
-        logger.exception("could not read expected workers; skipping orphan reap")
+        logger.exception("could not read worker rows; skipping orphan reap")
         return 0
+    now = timezone.now()
     killed = 0
     for pid, instance_id in running:
-        if instance_id in expected:
+        row = rows.get(instance_id)
+        if row is not None:
+            status, ended_at = row
+            if status in (
+                CodexInstance.STATUS_STARTING,
+                CodexInstance.STATUS_RUNNING,
+            ):
+                continue
+            if ended_at is not None and ended_at > now - _ORPHAN_REAP_GRACE:
+                continue
+        if _is_tracked_worker(pid):
             continue
         if _kill_orphaned_worker(pid, instance_id):
             killed += 1
