@@ -2351,6 +2351,106 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(codex_pool.latest_id_for_thread("t-id"), second.pk)
 
 
+class ReconcileOrphanedWorkersTests(TestCase):
+    def _make(
+        self,
+        *,
+        pid: int = 1,
+        status: str = CodexInstance.STATUS_RUNNING,
+        purpose: str = CodexInstance.PURPOSE_USER,
+    ) -> CodexInstance:
+        return CodexInstance.objects.create(
+            pid=pid,
+            thread_id="t",
+            cwd="/r",
+            events_path="/dev/null",
+            status=status,
+            purpose=purpose,
+        )
+
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_kills_worker_whose_instance_is_terminal(
+        self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
+    ) -> None:
+        done = self._make(pid=5001, status=CodexInstance.STATUS_COMPLETED)
+        mock_iter.return_value = [(5001, done.pk)]
+
+        killed = codex_pool.reconcile_orphaned_workers()
+
+        self.assertEqual(killed, 1)
+        mock_killpg.assert_called_once_with(5001, signal.SIGKILL)
+
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_kills_worker_with_no_instance_row(
+        self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
+    ) -> None:
+        mock_iter.return_value = [(5002, 999999)]
+
+        killed = codex_pool.reconcile_orphaned_workers()
+
+        self.assertEqual(killed, 1)
+        mock_killpg.assert_called_once_with(5002, signal.SIGKILL)
+
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_spares_running_user_and_system_workers(
+        self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
+    ) -> None:
+        user = self._make(pid=5003, status=CodexInstance.STATUS_RUNNING)
+        starting = self._make(pid=5004, status=CodexInstance.STATUS_STARTING)
+        # A running system-agent worker is expected too and must never be reaped.
+        system = self._make(
+            pid=5005,
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        )
+        mock_iter.return_value = [
+            (5003, user.pk),
+            (5004, starting.pk),
+            (5005, system.pk),
+        ]
+
+        killed = codex_pool.reconcile_orphaned_workers()
+
+        self.assertEqual(killed, 0)
+        mock_killpg.assert_not_called()
+
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_reaps_only_the_orphan_among_a_mix(
+        self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
+    ) -> None:
+        live = self._make(pid=5006, status=CodexInstance.STATUS_RUNNING)
+        leaked = self._make(pid=5007, status=CodexInstance.STATUS_FAILED)
+        mock_iter.return_value = [(5006, live.pk), (5007, leaked.pk)]
+
+        killed = codex_pool.reconcile_orphaned_workers()
+
+        self.assertEqual(killed, 1)
+        mock_killpg.assert_called_once_with(5007, signal.SIGKILL)
+
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=False)
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_does_not_kill_when_identity_recheck_fails(
+        self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
+    ) -> None:
+        # The pid was recycled between the /proc scan and the kill: never signal.
+        done = self._make(pid=5008, status=CodexInstance.STATUS_COMPLETED)
+        mock_iter.return_value = [(5008, done.pk)]
+
+        killed = codex_pool.reconcile_orphaned_workers()
+
+        self.assertEqual(killed, 0)
+        mock_killpg.assert_not_called()
+
+
 class InterruptActiveTests(TestCase):
     def _make(
         self,
