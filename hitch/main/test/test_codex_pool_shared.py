@@ -425,3 +425,36 @@ class CodexPoolKeepaliveTests(SimpleTestCase):
         ):
             # Must not raise: a failed probe is logged and retried next tick.
             codex_pool._codex_pool_keepalive_tick()
+
+    @override_settings(TESTING=False)
+    def test_tick_warms_every_used_key(self) -> None:
+        # A memories-enabled session uses a distinct pool key; once seen, the
+        # keepalive must keep it warm too, not just the default key.
+        mem_key = codex_pool._pool_key(enable_memories=True, web_search_mode=None)
+        codex_pool._SHARED_POOL._seen_keys.add(mem_key)
+        built: list[_ProbeCodex] = []
+
+        def codex_class(**_kwargs: Any) -> _ProbeCodex:
+            codex = _ProbeCodex()
+            built.append(codex)
+            return codex
+
+        with mock.patch.object(codex_pool, "Codex", codex_class):
+            codex_pool._codex_pool_keepalive_tick()
+
+        # One probe for the default key and one for the memories-enabled key.
+        self.assertEqual(len(built), 2)
+        self.assertTrue(all(c.thread_list_calls for c in built))
+
+
+class SharedPoolSeenKeyTests(SimpleTestCase):
+    def test_warm_target_keys_includes_default_and_seen(self) -> None:
+        pool = codex_pool._SharedCodexPool()
+        default = codex_pool._pool_key(enable_memories=False, web_search_mode=None)
+        # Empty pool still warms the default key so a fresh process keeps one warm.
+        self.assertEqual(pool.warm_target_keys(), [default])
+
+        mem_key = codex_pool._pool_key(enable_memories=True, web_search_mode=None)
+        pool.checkout_warm_only(mem_key)  # records the key without constructing
+        self.assertIn(mem_key, pool.warm_target_keys())
+        self.assertIn(default, pool.warm_target_keys())
