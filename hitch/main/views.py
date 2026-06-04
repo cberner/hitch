@@ -35,6 +35,7 @@ from django.http import (
     HttpRequest,
     HttpResponse,
     HttpResponseBadRequest,
+    HttpResponseForbidden,
     StreamingHttpResponse,
 )
 from django.shortcuts import redirect, render
@@ -4555,11 +4556,28 @@ def profile(request: HttpRequest) -> HttpResponse:
             "profile_name": profile_name,
             "profile_status": "Signed in" if user is not None else "Signed out",
             "logout_url": reverse("logout") if user is not None else "",
+            "nuke_codex_url": reverse("nuke_codex") if user is not None else "",
+            "nuked_count": _parse_nuked_count(request.GET.get("nuked")),
             **usage_context.template_context,
         },
     )
     _apply_cookie_updates(response, usage_context.cookie_updates)
     return response
+
+
+def _parse_nuked_count(raw: str | None) -> int | None:
+    """Parse the ``?nuked=N`` confirmation count the nuke action redirects with.
+
+    Returns ``None`` (render no confirmation) for a missing or malformed value
+    so a hand-edited URL cannot inject arbitrary text into the page.
+    """
+    if raw is None:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value >= 0 else None
 
 
 def _profile_usage_context(request: HttpRequest) -> UsageContext:
@@ -4588,6 +4606,20 @@ def logout(request: HttpRequest) -> HttpResponse:
     if values is not None:
         _apply_cookie_updates(response, _settings_cookie_updates(values))
     return response
+
+
+@require_http_methods(["POST"])
+def nuke_codex(request: HttpRequest) -> HttpResponse:
+    """SIGKILL every Codex app-server Hitch started, then return to the profile.
+
+    Manual cleanup for leaked app-servers contending on the shared CODEX_HOME
+    state-DB lock. The killed count is round-tripped through a query param so
+    the profile page can confirm the outcome.
+    """
+    if _authenticated_user(request) is None:
+        return HttpResponseForbidden("authentication required")
+    killed = codex_pool.nuke_codex_app_servers()
+    return redirect(f"{reverse('profile')}?nuked={killed}")
 
 
 def _thread_is_archived(thread: Any) -> bool:

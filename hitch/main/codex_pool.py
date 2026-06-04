@@ -1221,6 +1221,86 @@ def _kill_orphaned_worker(pid: int, instance_id: int) -> bool:
         return False
 
 
+def _iter_codex_app_server_pids(
+    *, proc_root: Path = Path("/proc"), codex_bin: str | None = None
+) -> Iterable[int]:
+    """Yield pids of ``codex app-server`` processes this deployment started.
+
+    Hitch only ever runs Codex through the SDK's stdio app-server, launched as
+    ``<codex_bin> [--config ...] app-server --listen stdio://`` (see
+    ``openai_codex.client``). We match that exact invocation -- so an
+    interactive ``codex`` TUI a developer runs by hand never matches -- and pin
+    ``argv[0]`` to this deployment's resolved ``codex`` binary so a second
+    checkout's app-servers under the same user are left alone. Linux-only; on a
+    host without ``/proc`` it yields nothing.
+
+    Discovery is process-based (a /proc scan), not DB-based, on purpose: a
+    leaked app-server -- one whose worker died without reaping it, or whose
+    CodexInstance row is already terminal or gone -- is exactly what this is
+    meant to find, and it has no live DB row to locate it by.
+    """
+    if not proc_root.exists():
+        return
+    target_bin = codex_bin if codex_bin is not None else _codex_bin()
+    target = target_bin.encode() if target_bin else None
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        parts = [part for part in cmdline.split(b"\0") if part]
+        if not parts:
+            continue
+        if b"app-server" not in parts or b"stdio://" not in parts:
+            continue
+        if target is not None:
+            if parts[0] != target:
+                continue
+        elif os.path.basename(parts[0].decode("utf-8", errors="replace")) != "codex":
+            # No resolvable deployment binary to pin against; fall back to the
+            # basename so a renamed/wrapped ``codex`` on PATH is still matched.
+            continue
+        try:
+            yield int(entry.name)
+        except ValueError:
+            continue
+
+
+def nuke_codex_app_servers() -> int:
+    """SIGKILL every ``codex app-server`` process this deployment started.
+
+    A manual escape hatch (surfaced on the profile page) for when app-servers
+    have leaked: each one holds a connection to the shared CODEX_HOME state DB
+    and contends on its single writer lock, so a pile of orphans surfaces as
+    "database is locked" on every new turn. ``reconcile_orphaned_workers``
+    handles the common case, but it only reaps app-servers reachable from a
+    known worker row; this sweeps live processes directly so it also kills the
+    truly orphaned ones.
+
+    Each app-server is signaled individually with ``os.kill`` rather than
+    ``killpg``: the SDK spawns it sharing its parent's process group (the
+    detached worker, or the Django process itself for synchronous opens), so a
+    group kill could take down the parent. Returns the number of processes
+    signaled.
+    """
+    killed = 0
+    for pid in list(_iter_codex_app_server_pids()):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            # Exited between the scan and the signal -- nothing to kill.
+            continue
+        except OSError:
+            logger.warning("failed to SIGKILL codex app-server pid %s", pid)
+            continue
+        killed += 1
+    if killed:
+        logger.warning("nuked %s codex app-server process(es)", killed)
+    return killed
+
+
 def _reaped_turn_lost_auto_review(instance: CodexInstance) -> bool:
     """Whether a reaped COMPLETED turn's auto-PR/QA follow-up was lost.
 

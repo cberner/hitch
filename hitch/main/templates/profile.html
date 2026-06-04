@@ -198,6 +198,31 @@
             display: flex;
             justify-content: flex-end;
         }
+        .danger-zone {
+            border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+            border-radius: var(--radius-sm);
+            background: color-mix(in srgb, var(--danger) 6%, transparent);
+            padding: 0.85rem 1rem;
+        }
+        .danger-zone .section-label {
+            color: var(--danger);
+        }
+        .danger-zone-help {
+            margin: 0.35rem 0 0;
+            color: var(--text-muted);
+            font-size: 0.86rem;
+        }
+        .danger-zone-result {
+            margin: 0.6rem 0 0;
+            color: var(--text);
+            font-size: 0.86rem;
+            font-weight: 600;
+        }
+        .danger-zone-form {
+            margin: 0.75rem 0 0;
+            display: flex;
+            justify-content: flex-start;
+        }
         @media (max-width: 480px) {
             .topbar-inner { padding: 0.7rem 1rem; }
             .topbar-actions {
@@ -250,6 +275,23 @@
         {% include "_usage_sections.html" %}
         {% if user.is_authenticated %}
         <div class="profile-footer">
+            <section class="danger-zone" aria-labelledby="danger-zone-title">
+                <p class="section-label" id="danger-zone-title">Danger zone</p>
+                <p class="danger-zone-help">
+                    Force-kill every Codex app server Hitch started, including any that
+                    leaked. Running turns will be terminated.
+                </p>
+                {% if nuked_count is not None %}
+                <p class="danger-zone-result" role="status">
+                    Killed {{ nuked_count }} Codex app server{{ nuked_count|pluralize }}.
+                </p>
+                {% endif %}
+                <form class="danger-zone-form" method="post" action="{{ nuke_codex_url }}"
+                      onsubmit="return confirm('Force-kill all Codex app servers Hitch started?');">
+                    {% csrf_token %}
+                    <button class="button danger" type="submit">Nuke Codex instances</button>
+                </form>
+            </section>
             <form class="profile-logout-form" method="post" action="{{ logout_url }}">
                 {% csrf_token %}
                 <button class="button danger" type="submit">Log out</button>

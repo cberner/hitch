@@ -2906,6 +2906,119 @@ class IterRunningWorkerPidsTests(SimpleTestCase):
         )
 
 
+class IterCodexAppServerPidsTests(SimpleTestCase):
+    _BIN = "/usr/local/bin/codex"
+
+    def _write_cmdline(self, proc_root: Path, pid: int, argv: list[bytes]) -> None:
+        pid_dir = proc_root / str(pid)
+        pid_dir.mkdir()
+        (pid_dir / "cmdline").write_bytes(b"\0".join(argv) + b"\0")
+
+    def test_matches_our_app_server_and_scopes_out_others(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            # Our app-server, as the SDK launches it.
+            self._write_cmdline(
+                proc_root,
+                100,
+                [
+                    self._BIN.encode(),
+                    b"--config",
+                    b"features.memories=false",
+                    b"app-server",
+                    b"--listen",
+                    b"stdio://",
+                ],
+            )
+            # A different codex binary (another deployment / install) -- ignored.
+            self._write_cmdline(
+                proc_root,
+                101,
+                [b"/opt/other/codex", b"app-server", b"--listen", b"stdio://"],
+            )
+            # An interactive codex TUI -- no app-server stdio markers, ignored.
+            self._write_cmdline(proc_root, 102, [self._BIN.encode(), b"chat"])
+            # Unrelated process.
+            self._write_cmdline(proc_root, 103, [b"bash", b"-l"])
+            # Non-pid entry and an unreadable pid dir are skipped, not fatal.
+            (proc_root / "not-a-pid").mkdir()
+            (proc_root / "104").mkdir()
+
+            found = sorted(
+                codex_pool._iter_codex_app_server_pids(
+                    proc_root=proc_root, codex_bin=self._BIN
+                )
+            )
+
+        self.assertEqual(found, [100])
+
+    def test_falls_back_to_basename_without_resolvable_binary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            self._write_cmdline(
+                proc_root,
+                200,
+                [b"/any/path/codex", b"app-server", b"--listen", b"stdio://"],
+            )
+            self._write_cmdline(
+                proc_root,
+                201,
+                [b"/any/path/not-codex", b"app-server", b"--listen", b"stdio://"],
+            )
+
+            with patch("hitch.main.codex_pool._codex_bin", return_value=None):
+                found = sorted(
+                    codex_pool._iter_codex_app_server_pids(proc_root=proc_root)
+                )
+
+        self.assertEqual(found, [200])
+
+    def test_no_proc_root_yields_nothing(self) -> None:
+        missing = Path(tempfile.gettempdir()) / "definitely-not-here-67890"
+        self.assertEqual(
+            list(
+                codex_pool._iter_codex_app_server_pids(
+                    proc_root=missing, codex_bin=self._BIN
+                )
+            ),
+            [],
+        )
+
+
+class NukeCodexAppServersTests(SimpleTestCase):
+    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.codex_pool._iter_codex_app_server_pids")
+    def test_sigkills_each_app_server(
+        self, mock_iter: MagicMock, mock_kill: MagicMock
+    ) -> None:
+        mock_iter.return_value = iter([111, 222])
+
+        killed = codex_pool.nuke_codex_app_servers()
+
+        self.assertEqual(killed, 2)
+        mock_kill.assert_any_call(111, signal.SIGKILL)
+        mock_kill.assert_any_call(222, signal.SIGKILL)
+
+    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.codex_pool._iter_codex_app_server_pids")
+    def test_already_gone_pid_is_not_counted(
+        self, mock_iter: MagicMock, mock_kill: MagicMock
+    ) -> None:
+        mock_iter.return_value = iter([111, 222])
+        mock_kill.side_effect = [ProcessLookupError, None]
+
+        self.assertEqual(codex_pool.nuke_codex_app_servers(), 1)
+
+    @patch("hitch.main.codex_pool.os.kill", side_effect=PermissionError)
+    @patch("hitch.main.codex_pool._iter_codex_app_server_pids")
+    def test_unsignalable_pid_is_skipped(
+        self, mock_iter: MagicMock, _mock_kill: MagicMock
+    ) -> None:
+        mock_iter.return_value = iter([333])
+
+        self.assertEqual(codex_pool.nuke_codex_app_servers(), 0)
+
+
 class InterruptActiveTests(TestCase):
     def _make(
         self,
