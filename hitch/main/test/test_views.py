@@ -5713,12 +5713,13 @@ class IndexViewTests(TestCase):
     def test_untracked_system_session_resume_error_is_not_404(
         self, mock_codex: MagicMock
     ) -> None:
+        session_id = "00000000-0000-0000-0000-000000000001"
         client = _setup_codex(mock_codex)
         client._client.thread_resume.side_effect = AppServerError("app server down")
 
         with self.assertRaises(AppServerError):
             self.client.get(
-                reverse("system_session", kwargs={"session_id": "orphan-system"})
+                reverse("system_session", kwargs={"session_id": session_id})
             )
 
     @patch("hitch.main.views.Codex")
@@ -5737,9 +5738,26 @@ class IndexViewTests(TestCase):
         self.assertEqual(response.status_code, 404)
 
     @patch("hitch.main.views.Codex")
+    def test_untracked_system_session_invalid_session_id_is_404(
+        self, mock_codex: MagicMock
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client._client.thread_resume.side_effect = InvalidRequestError(
+            -32600,
+            "invalid session id: invalid character: expected an optional prefix",
+        )
+
+        response = self.client.get(
+            reverse("system_session", kwargs={"session_id": "orphan-system"})
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    @patch("hitch.main.views.Codex")
     def test_untracked_system_session_non_thread_invalid_request_is_not_404(
         self, mock_codex: MagicMock
     ) -> None:
+        session_id = "00000000-0000-0000-0000-000000000001"
         client = _setup_codex(mock_codex)
         client._client.thread_resume.side_effect = InvalidRequestError(
             -32600, "model provider not found"
@@ -5747,7 +5765,7 @@ class IndexViewTests(TestCase):
 
         with self.assertRaises(InvalidRequestError):
             self.client.get(
-                reverse("system_session", kwargs={"session_id": "orphan-system"})
+                reverse("system_session", kwargs={"session_id": session_id})
             )
 
     @patch("hitch.main.system_agents.accepted_visible_system_thread_ids")
@@ -10059,6 +10077,76 @@ class NewSessionViewTests(TestCase):
         self.assertIsNone(proposal.accepted_session)
         # The losing accept must not have adopted the candidate as a live session.
         self.assertTrue(candidate.is_hidden_system_session)
+        mock_turn.assert_not_called()
+
+    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    def test_candidate_accept_claims_before_spawning_turn(
+        self,
+        mock_turn: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_managed_worktrees: MagicMock,
+    ) -> None:
+        # Starting the candidate turn is an external side effect. Hitch must win
+        # the proposal acceptance before this point, otherwise a concurrent
+        # inbox reject can clean up the candidate worktree after a worker has
+        # already been spawned against it.
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
+        _setup_codex(mock_codex, models=[])
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+            is_hidden_system_session=True,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            title="Add parser coverage",
+        )
+
+        def reject_from_stale_inbox(*_args: Any, **_kwargs: Any) -> None:
+            applied = ProposedSession.objects.filter(
+                pk=proposal.pk,
+                outcome_status=ProposedSession.OUTCOME_UNSET,
+            ).update(
+                outcome_status=ProposedSession.OUTCOME_REJECTED,
+                outcome_notes="Resolved from another tab.",
+            )
+            self.assertEqual(applied, 0)
+
+        mock_turn.side_effect = reject_from_stale_inbox
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Go ahead and implement this proposed session.",
+                "cwd": self.REPO,
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.headers["Location"],
+            reverse("session", kwargs={"session_id": "candidate-thread"}),
+        )
+        mock_turn.assert_called_once()
+        proposal.refresh_from_db()
+        candidate.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
+        self.assertEqual(proposal.accepted_session, candidate)
+        self.assertFalse(candidate.is_hidden_system_session)
 
     @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
@@ -10150,6 +10238,62 @@ class NewSessionViewTests(TestCase):
                 self.assertEqual(proposal.accepted_session, candidate)
                 self.assertFalse(candidate.auto_pr_enabled)
                 self.assertFalse(candidate.auto_qa_enabled)
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    def test_candidate_worktree_qa_start_failure_resets_accept_claim(
+        self,
+        mock_turn: MagicMock,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_managed_worktrees: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_managed_worktrees.return_value = [Path("/repo-worktree")]
+        codex = _setup_codex(mock_codex, models=[])
+        codex._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(turns=[])
+        )
+        mock_start_workflow.side_effect = RuntimeError("workflow failed")
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+            is_hidden_system_session=True,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            title="Add parser coverage",
+        )
+
+        with self.assertRaises(RuntimeError):
+            self.client.post(
+                reverse("new_session"),
+                data={
+                    "prompt": "/qa",
+                    "cwd": self.REPO,
+                    "proposed_session": str(proposal.pk),
+                },
+            )
+
+        mock_start_workflow.assert_called_once()
+        mock_turn.assert_not_called()
+        proposal.refresh_from_db()
+        candidate.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertIsNone(proposal.accepted_session)
+        self.assertTrue(candidate.is_hidden_system_session)
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.discover_managed_worktrees")
