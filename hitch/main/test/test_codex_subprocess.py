@@ -2395,6 +2395,35 @@ class ReconcileOrphanedWorkersTests(TestCase):
         self.assertEqual(killed, 1)
         mock_killpg.assert_called_once_with(5002, signal.SIGKILL)
 
+    @patch("hitch.main.codex_pool._force_kill_instance")
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._pid_is_our_worker")
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_kills_scoped_worker_with_no_instance_row(
+        self,
+        mock_iter: MagicMock,
+        mock_identity: MagicMock,
+        mock_killpg: MagicMock,
+        mock_force_kill: MagicMock,
+    ) -> None:
+        # Row gone (reset DB) but a scoped worker is still alive: it is not a
+        # session leader, so the killpg path would skip it. Reap it through its
+        # derived scope instead so its app-server / DB lock is released.
+        mock_identity.side_effect = (
+            lambda pid, iid, require_session_leader=True: not require_session_leader
+        )
+        mock_iter.return_value = [(5002, 999999)]
+
+        killed = codex_pool.reconcile_orphaned_workers()
+
+        self.assertEqual(killed, 1)
+        mock_killpg.assert_not_called()
+        mock_force_kill.assert_called_once()
+        target = mock_force_kill.call_args.args[0]
+        self.assertEqual(
+            target.systemd_scope_unit, codex_pool._scope_unit_for_instance(999999)
+        )
+
     @patch("hitch.main.codex_pool.os.killpg")
     @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.codex_pool._iter_running_worker_pids")
@@ -2641,6 +2670,32 @@ class FinalizeReapedInstanceTests(TestCase):
         codex_pool._finalize_reaped_instance(failed.pk)
 
         mock_resolve.assert_called_once_with(failed.pk)
+
+    @patch("hitch.main.codex_pool.cleanup_requested_input_images_for")
+    @patch("hitch.main.codex_pool._notify_system_agents_if_needed")
+    def test_routes_finish_hooks_for_reaped_terminal_turn(
+        self, mock_notify: MagicMock, mock_cleanup: MagicMock
+    ) -> None:
+        # A reaped demo/system-agent (or workflow) turn relies on the same
+        # idempotent finish routing as a row that died after saving terminal
+        # status; without it the SessionDemo/SystemAgentRun follow-up strands.
+        agent = self._make(
+            status=CodexInstance.STATUS_COMPLETED,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        )
+
+        codex_pool._finalize_reaped_instance(agent.pk)
+
+        self.assertEqual(mock_notify.call_args.args[0].pk, agent.pk)
+        self.assertEqual(mock_cleanup.call_args.args[0].pk, agent.pk)
+
+    def test_non_terminal_instance_is_a_noop(self) -> None:
+        running = self._make(status=CodexInstance.STATUS_RUNNING, auto_pr_enabled=True)
+
+        codex_pool._finalize_reaped_instance(running.pk)
+
+        running.refresh_from_db()
+        self.assertEqual(running.status, CodexInstance.STATUS_RUNNING)
 
     @patch(
         "hitch.main.system_agents.auto_review_intentionally_skipped",
