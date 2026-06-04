@@ -46,6 +46,7 @@ def _instance(
     events_path: str = "/dev/null",
     status: str = CodexInstance.STATUS_COMPLETED,
     agent_kind: str = "",
+    display_author: str = "",
     auto_pr_enabled: bool = False,
     auto_qa_enabled: bool = False,
     qa_panel_enabled: bool = False,
@@ -85,6 +86,7 @@ def _instance(
         purpose=purpose,
         workflow_id=workflow_id,
         agent_kind=agent_kind,
+        display_author=display_author,
         user_message_index=user_message_index,
         error=error,
     )
@@ -6877,6 +6879,265 @@ class SpecCriticWorkflowTests(TestCase):
                 mock_spawn_turn.assert_called_once()
                 mock_spawn_qa.assert_not_called()
                 mock_spawn_monitor.assert_not_called()
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_dead_qa_feedback_worker_is_retried_once(
+        self, mock_spawn_turn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_FEEDBACK_RUNNING,
+            state={"next_user_message_index": 2},
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_FAILED,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+            error="worker process exited before reporting completion",
+            user_message_index=1,
+        )
+
+        handled = system_agents.on_codex_instance_finished(instance)
+
+        self.assertTrue(handled)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_FEEDBACK_RUNNING)
+        self.assertEqual(workflow.state["next_user_message_index"], 3)
+        self.assertEqual(
+            workflow.state[system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY],
+            {"qa_feedback": 1},
+        )
+        self.assertNotIn("failure_surfaced", workflow.state)
+        mock_spawn_turn.assert_called_once()
+        kwargs = mock_spawn_turn.call_args.kwargs
+        self.assertEqual(kwargs["thread_id"], "main-thread")
+        self.assertEqual(kwargs["prompt"], "prompt")
+        self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_SYSTEM_FEEDBACK)
+        self.assertEqual(kwargs["agent_kind"], system_agents.PR_QA_AGENT_KIND)
+        self.assertEqual(kwargs["display_author"], system_agents.QA_DISPLAY_AUTHOR)
+        self.assertEqual(kwargs["user_message_index"], 2)
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_dead_qa_feedback_worker_blocks_after_retry_budget(
+        self, mock_spawn_turn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_FEEDBACK_RUNNING,
+            state={
+                "next_user_message_index": 2,
+                system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {
+                    "qa_feedback": 1
+                },
+            },
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_FAILED,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            error="worker process exited before reporting completion",
+            user_message_index=1,
+        )
+
+        handled = system_agents.on_codex_instance_finished(instance)
+
+        self.assertTrue(handled)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        self.assertEqual(
+            workflow.state["error"],
+            "QA feedback worker failed: worker process exited before reporting completion",
+        )
+        self.assertTrue(workflow.state["failure_surfaced"])
+        mock_spawn_turn.assert_called_once()
+        self.assertIn(
+            "Hitch QA agent could not complete the PR workflow",
+            mock_spawn_turn.call_args.kwargs["prompt"],
+        )
+
+    @patch("hitch.main.system_agents._spawn_pr_qa_run")
+    def test_completed_qa_feedback_clears_dead_worker_retry_state(
+        self, mock_spawn_qa: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_FEEDBACK_RUNNING,
+            state={
+                "next_user_message_index": 2,
+                system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {
+                    "qa_feedback": 1
+                },
+            },
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_COMPLETED,
+            user_message_index=1,
+        )
+
+        handled = system_agents.on_codex_instance_finished(instance)
+
+        self.assertTrue(handled)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_QA_RUNNING)
+        self.assertNotIn(
+            system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY, workflow.state
+        )
+        mock_spawn_qa.assert_called_once_with(workflow)
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_dead_pr_feedback_worker_is_retried_once(
+        self, mock_spawn_turn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_FEEDBACK_RUNNING,
+            state={"next_user_message_index": 2},
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_FAILED,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            error="worker process exited before reporting completion",
+            user_message_index=1,
+        )
+
+        handled = system_agents.on_codex_instance_finished(instance)
+
+        self.assertTrue(handled)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_FEEDBACK_RUNNING)
+        self.assertEqual(workflow.state["next_user_message_index"], 3)
+        self.assertEqual(
+            workflow.state[system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY],
+            {"pr_feedback": 1},
+        )
+        self.assertNotIn("failure_surfaced", workflow.state)
+        mock_spawn_turn.assert_called_once()
+        kwargs = mock_spawn_turn.call_args.kwargs
+        self.assertEqual(kwargs["thread_id"], "main-thread")
+        self.assertEqual(kwargs["prompt"], "prompt")
+        self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_SYSTEM_FEEDBACK)
+        self.assertEqual(
+            kwargs["agent_kind"], system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND
+        )
+        self.assertEqual(
+            kwargs["display_author"], system_agents.PR_MONITOR_DISPLAY_AUTHOR
+        )
+        self.assertEqual(kwargs["user_message_index"], 2)
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_dead_pr_feedback_worker_blocks_after_retry_budget(
+        self, mock_spawn_turn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_FEEDBACK_RUNNING,
+            state={
+                "next_user_message_index": 2,
+                system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {
+                    "pr_feedback": 1
+                },
+            },
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_FAILED,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            error="worker process exited before reporting completion",
+            user_message_index=1,
+        )
+
+        handled = system_agents.on_codex_instance_finished(instance)
+
+        self.assertTrue(handled)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        self.assertEqual(
+            workflow.state["error"],
+            "PR feedback worker failed: worker process exited before reporting completion",
+        )
+        self.assertTrue(workflow.state["failure_surfaced"])
+        mock_spawn_turn.assert_called_once()
+        self.assertIn(
+            "Hitch QA agent could not complete the PR workflow",
+            mock_spawn_turn.call_args.kwargs["prompt"],
+        )
+
+    @patch("hitch.main.system_agents._spawn_pr_followup_monitor_run")
+    @patch(
+        "hitch.main.system_agents._open_or_find_pr_with_gh_cli",
+        return_value={
+            "url": "https://github.com/cberner/hitch/pull/169",
+            "repository_full_name": "cberner/hitch",
+            "pr_number": 169,
+            "state": "open",
+        },
+    )
+    def test_completed_pr_feedback_clears_dead_worker_retry_state(
+        self, _mock_open_pr: MagicMock, mock_spawn_monitor: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_FEEDBACK_RUNNING,
+            state={
+                "next_user_message_index": 2,
+                system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {
+                    "pr_feedback": 1
+                },
+            },
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_COMPLETED,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            user_message_index=1,
+        )
+
+        handled = system_agents.on_codex_instance_finished(instance)
+
+        self.assertTrue(handled)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+        self.assertNotIn(
+            system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY, workflow.state
+        )
+        mock_spawn_monitor.assert_called_once()
 
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
     @patch("hitch.main.system_agents.codex_pool.interrupt_instance", return_value=None)
