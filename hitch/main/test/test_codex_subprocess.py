@@ -2679,6 +2679,25 @@ class FinalizeReapedInstanceTests(TestCase):
         self.assertEqual(done.status, CodexInstance.STATUS_COMPLETED)
         self.assertEqual(done.error, "")
 
+    @patch(
+        "hitch.main.system_agents.auto_review_intentionally_skipped",
+        side_effect=RuntimeError("boom"),
+    )
+    def test_completed_auto_pr_preserved_when_intent_check_errors(
+        self, _mock_skipped: MagicMock
+    ) -> None:
+        # If we cannot determine auto-review intent, bias against a false
+        # failure and leave the completed turn intact.
+        done = self._make(
+            status=CodexInstance.STATUS_COMPLETED, auto_pr_enabled=True
+        )
+
+        codex_pool._finalize_reaped_instance(done.pk)
+
+        done.refresh_from_db()
+        self.assertEqual(done.status, CodexInstance.STATUS_COMPLETED)
+        self.assertEqual(done.error, "")
+
     def test_completed_without_auto_review_is_untouched(self) -> None:
         done = self._make(status=CodexInstance.STATUS_COMPLETED)
 
