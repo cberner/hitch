@@ -311,6 +311,80 @@ class AuthViewTests(TestCase):
         mock_usage_context.assert_called_once()
 
 
+class NukeCodexViewTests(TestCase):
+    @patch("hitch.main.views.Codex")
+    def test_profile_renders_nuke_button_for_authenticated_user(
+        self, mock_codex: MagicMock
+    ) -> None:
+        self.client.force_login(_make_user())
+        _setup_codex(mock_codex)
+
+        response = self.client.get(reverse("profile"))
+
+        self.assertContains(response, f'action="{reverse("nuke_codex")}"')
+        self.assertContains(response, ">Nuke Codex instances</button>")
+        # No confirmation line until the action has run.
+        self.assertNotContains(response, "Killed ")
+
+    @patch("hitch.main.views.Codex")
+    def test_profile_hides_nuke_button_for_anonymous_user(
+        self, mock_codex: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex)
+
+        response = self.client.get(reverse("profile"))
+
+        self.assertNotContains(response, "Nuke Codex instances")
+
+    @patch("hitch.main.views.Codex")
+    def test_profile_shows_killed_count_after_nuke(
+        self, mock_codex: MagicMock
+    ) -> None:
+        self.client.force_login(_make_user())
+        _setup_codex(mock_codex)
+
+        response = self.client.get(reverse("profile"), {"nuked": "1"})
+
+        self.assertContains(response, "Killed 1 Codex app server.")
+
+    @patch("hitch.main.views.Codex")
+    def test_profile_ignores_malformed_nuked_param(
+        self, mock_codex: MagicMock
+    ) -> None:
+        self.client.force_login(_make_user())
+        _setup_codex(mock_codex)
+
+        response = self.client.get(reverse("profile"), {"nuked": "lots"})
+
+        self.assertNotContains(response, "Killed ")
+
+    @patch("hitch.main.views.codex_pool.nuke_codex_app_servers", return_value=3)
+    def test_nuke_kills_app_servers_and_redirects_with_count(
+        self, mock_nuke: MagicMock
+    ) -> None:
+        self.client.force_login(_make_user())
+
+        response = self.client.post(reverse("nuke_codex"))
+
+        mock_nuke.assert_called_once_with()
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], f"{reverse('profile')}?nuked=3")
+
+    @patch("hitch.main.views.codex_pool.nuke_codex_app_servers")
+    def test_nuke_requires_authentication(self, mock_nuke: MagicMock) -> None:
+        response = self.client.post(reverse("nuke_codex"))
+
+        self.assertEqual(response.status_code, 403)
+        mock_nuke.assert_not_called()
+
+    def test_nuke_rejects_get(self) -> None:
+        self.client.force_login(_make_user())
+
+        response = self.client.get(reverse("nuke_codex"))
+
+        self.assertEqual(response.status_code, 405)
+
+
 class AuthenticatedSettingsTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
