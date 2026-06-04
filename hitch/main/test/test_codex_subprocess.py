@@ -14,7 +14,7 @@ import threading
 import time
 import unittest
 from collections.abc import Callable, Iterator
-from datetime import timedelta
+from datetime import datetime, timedelta
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -2452,10 +2452,12 @@ class ReconcileOrphanedWorkersTests(TestCase):
 
     @patch("hitch.main.codex_pool._force_kill_instance")
     @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.codex_pool._iter_running_worker_pids")
     def test_scoped_worker_killed_via_force_kill_instance(
         self,
         mock_iter: MagicMock,
+        mock_identity: MagicMock,
         mock_killpg: MagicMock,
         mock_force_kill: MagicMock,
     ) -> None:
@@ -2467,7 +2469,9 @@ class ReconcileOrphanedWorkersTests(TestCase):
         killed = codex_pool.reconcile_orphaned_workers()
 
         self.assertEqual(killed, 1)
-        # Scoped workers are killed through systemctl, not a raw killpg.
+        # Scoped workers are killed through systemctl, not a raw killpg -- but
+        # only after reverifying the scanned pid belongs to this deployment.
+        mock_identity.assert_called_once_with(5009, scoped.pk, require_session_leader=False)
         mock_force_kill.assert_called_once()
         mock_killpg.assert_not_called()
 
@@ -2583,60 +2587,96 @@ class ReconcileOrphanedWorkersTests(TestCase):
         self.assertEqual(killed, 0)
         mock_killpg.assert_not_called()
 
-    @patch("hitch.main.codex_pool._route_reaped_worker_finish")
+    @patch("hitch.main.codex_pool._finalize_reaped_instance")
     @patch("hitch.main.codex_pool.os.killpg")
     @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.codex_pool._iter_running_worker_pids")
-    def test_routes_finish_hooks_after_reaping(
+    def test_finalizes_each_reaped_instance(
         self,
         mock_iter: MagicMock,
         _mock_identity: MagicMock,
         _mock_killpg: MagicMock,
-        mock_route: MagicMock,
+        mock_finalize: MagicMock,
     ) -> None:
-        # A reaped worker may have died before its finish routing; recover it so
-        # an auto-PR/QA trigger is not lost.
         done = self._make(pid=5016, status=CodexInstance.STATUS_COMPLETED)
         mock_iter.return_value = [(5016, done.pk)]
 
         codex_pool.reconcile_orphaned_workers()
 
-        mock_route.assert_called_once_with(done.pk)
+        mock_finalize.assert_called_once_with(done.pk)
 
 
-class RouteReapedWorkerFinishTests(TestCase):
-    def _make(self, *, status: str) -> CodexInstance:
+class FinalizeReapedInstanceTests(TestCase):
+    def _make(
+        self,
+        *,
+        status: str,
+        auto_pr_enabled: bool = False,
+        auto_qa_enabled: bool = False,
+        auto_pr_triggered_at: datetime | None = None,
+        plan_mode: bool = False,
+        workflow_id: int | None = None,
+        purpose: str = CodexInstance.PURPOSE_USER,
+    ) -> CodexInstance:
         return CodexInstance.objects.create(
             pid=1,
             thread_id="t",
             cwd="/r",
             events_path="/dev/null",
             status=status,
-            purpose=CodexInstance.PURPOSE_USER,
+            purpose=purpose,
+            auto_pr_enabled=auto_pr_enabled,
+            auto_qa_enabled=auto_qa_enabled,
+            auto_pr_triggered_at=auto_pr_triggered_at,
+            plan_mode=plan_mode,
+            workflow_id=workflow_id,
         )
 
-    @patch("hitch.main.demo.on_codex_instance_finished")
-    @patch("hitch.main.system_agents.on_codex_instance_finished", return_value=False)
-    def test_routes_a_terminal_instance(
-        self, mock_sa: MagicMock, mock_demo: MagicMock
+    @patch("hitch.main.codex_pool._resolve_dangling_requests")
+    def test_failed_turn_resolves_dangling_requests(
+        self, mock_resolve: MagicMock
     ) -> None:
+        failed = self._make(status=CodexInstance.STATUS_FAILED)
+
+        codex_pool._finalize_reaped_instance(failed.pk)
+
+        mock_resolve.assert_called_once_with(failed.pk)
+
+    def test_completed_auto_pr_not_fired_is_marked_failed(self) -> None:
+        done = self._make(
+            status=CodexInstance.STATUS_COMPLETED, auto_pr_enabled=True
+        )
+
+        codex_pool._finalize_reaped_instance(done.pk)
+
+        done.refresh_from_db()
+        self.assertEqual(done.status, CodexInstance.STATUS_FAILED)
+        self.assertIn("auto-PR", done.error)
+        self.assertIn("retry", done.error)
+
+    def test_completed_without_auto_review_is_untouched(self) -> None:
         done = self._make(status=CodexInstance.STATUS_COMPLETED)
 
-        codex_pool._route_reaped_worker_finish(done.pk)
+        codex_pool._finalize_reaped_instance(done.pk)
 
-        mock_sa.assert_called_once()
-        self.assertEqual(mock_sa.call_args.args[0].pk, done.pk)
-        mock_demo.assert_called_once()
+        done.refresh_from_db()
+        self.assertEqual(done.status, CodexInstance.STATUS_COMPLETED)
+        self.assertEqual(done.error, "")
 
-    @patch("hitch.main.demo.on_codex_instance_finished")
-    @patch("hitch.main.system_agents.on_codex_instance_finished")
-    def test_skips_missing_instance(
-        self, mock_sa: MagicMock, mock_demo: MagicMock
-    ) -> None:
-        codex_pool._route_reaped_worker_finish(999999)
+    def test_completed_auto_pr_already_fired_is_untouched(self) -> None:
+        done = self._make(
+            status=CodexInstance.STATUS_COMPLETED,
+            auto_pr_enabled=True,
+            auto_pr_triggered_at=timezone.now(),
+        )
 
-        mock_sa.assert_not_called()
-        mock_demo.assert_not_called()
+        codex_pool._finalize_reaped_instance(done.pk)
+
+        done.refresh_from_db()
+        self.assertEqual(done.status, CodexInstance.STATUS_COMPLETED)
+
+    def test_missing_instance_is_a_noop(self) -> None:
+        codex_pool._finalize_reaped_instance(999999)  # must not raise
 
 
 class IterRunningWorkerPidsTests(SimpleTestCase):

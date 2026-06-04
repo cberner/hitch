@@ -1151,11 +1151,10 @@ def reconcile_orphaned_workers() -> int:
                 continue
         if _kill_orphaned_worker(pid, instance_id):
             killed += 1
-            # The worker may have been wedged before reaching its post-terminal
-            # hooks, so recover the finish routing now that the lock is freed --
-            # otherwise a completed user turn's auto-PR/QA trigger (and system-
-            # agent/demo follow-ups) would be silently dropped. Idempotent.
-            _route_reaped_worker_finish(instance_id)
+            # The worker was killed before its own post-terminal cleanup, so
+            # cancel a failed turn's dangling prompts and surface a completed
+            # turn whose auto-PR/QA follow-up was dropped.
+            _finalize_reaped_instance(instance_id)
     if killed:
         logger.warning("reaped %s orphaned codex worker process(es)", killed)
     return killed
@@ -1169,6 +1168,13 @@ def _kill_orphaned_worker(pid: int, instance_id: int) -> bool:
     except Exception:
         logger.exception("could not load instance %s for orphan reap", instance_id)
     if instance is not None and instance.systemd_scope_unit:
+        # The scope unit name (``hitch-codex-worker-<id>.scope``) is not
+        # deployment-unique, so ``systemctl kill <unit>`` could hit another
+        # checkout's reused unit if our scoped worker exited since the scan.
+        # Reverify the scanned pid is still our deployment's worker for this
+        # instance (scoped workers are not session leaders) before signaling.
+        if not _pid_is_our_worker(pid, instance_id, require_session_leader=False):
+            return False
         try:
             _force_kill_instance(instance)
             return True
@@ -1195,48 +1201,62 @@ def _kill_orphaned_worker(pid: int, instance_id: int) -> bool:
         return False
 
 
-def _route_reaped_worker_finish(instance_id: int) -> None:
-    """Run a reaped terminal worker's finish routing on its behalf.
+def _reaped_turn_lost_auto_review(instance: CodexInstance) -> bool:
+    """Whether a reaped COMPLETED turn's auto-PR/QA follow-up was lost.
 
-    Mirrors ``codex_worker._notify_system_agents``: route the terminal instance
-    through the system agents and the demo workflow so follow-up work the killed
-    worker never reached is still triggered -- notably a plain user turn's
-    auto-PR/QA workflow, which ``_reconcile_terminal_workflow_instances`` does not
-    cover. ``on_codex_instance_finished`` is idempotent (auto_pr/auto_qa trigger
-    claim + workflow route claim), so a worker that already routed is a no-op.
-    Only terminal rows are routed; anything else is left alone.
+    The worker fires the auto-review workflow from ``_notify_system_agents``
+    *after* committing the terminal status, claiming ``auto_pr_triggered_at`` /
+    ``auto_qa_triggered_at`` as it does. A reaped COMPLETED user turn with the
+    automation enabled but neither field set was killed before it could fire --
+    and unlike workflow-owned rows there is no later reconcile that recovers it.
+    """
+    return (
+        instance.status == CodexInstance.STATUS_COMPLETED
+        and instance.purpose == CodexInstance.PURPOSE_USER
+        and instance.workflow_id is None
+        and not instance.plan_mode
+        and (instance.auto_pr_enabled or instance.auto_qa_enabled)
+        and instance.auto_pr_triggered_at is None
+        and instance.auto_qa_triggered_at is None
+    )
+
+
+def _finalize_reaped_instance(instance_id: int) -> None:
+    """Clean up after force-killing a reaped worker so its turn isn't left in a
+    silently-broken state.
+
+    Two cases the killed worker never got to handle itself:
+
+    * a ``FAILED`` turn: ``codex_worker`` cancels its dangling approval/input
+      prompts before exiting, and reaped terminal rows never pass through
+      ``_mark_dead_instances_failed`` (which does the same), so otherwise the UI
+      keeps actionable cards no worker can answer;
+    * a ``COMPLETED`` turn whose auto-PR/QA never fired (``_reaped_turn_lost_
+      auto_review``): surface it as a failed turn with a retry hint so the user
+      sees the dropped follow-up instead of a silent success.
     """
     try:
         instance = CodexInstance.objects.filter(pk=instance_id).first()
     except Exception:
-        logger.exception("could not load reaped instance %s for finish routing", instance_id)
+        logger.exception("could not load reaped instance %s for finalize", instance_id)
         return
-    if instance is None or instance.status not in (
-        CodexInstance.STATUS_COMPLETED,
-        CodexInstance.STATUS_FAILED,
-    ):
+    if instance is None:
         return
-    handled = False
-    try:
-        from hitch.main import system_agents
-
-        handled = system_agents.on_codex_instance_finished(instance)
-    except Exception:
-        logger.exception(
-            "failed to route reaped worker %s to system agents", instance_id
+    if instance.status == CodexInstance.STATUS_FAILED:
+        _resolve_dangling_requests(instance.pk)
+        return
+    if _reaped_turn_lost_auto_review(instance):
+        automation = "auto-PR" if instance.auto_pr_enabled else "auto-QA"
+        CodexInstance.objects.filter(
+            pk=instance_id, status=CodexInstance.STATUS_COMPLETED
+        ).update(
+            status=CodexInstance.STATUS_FAILED,
+            error=(
+                f"This turn finished, but its {automation} workflow could not "
+                "start because the worker had to be terminated while holding the "
+                "Codex database lock. Send the message again to retry."
+            ),
         )
-    try:
-        from hitch.main import demo
-
-        if (
-            handled
-            and instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
-            and instance.agent_kind == demo.DEMO_AGENT_KIND
-        ):
-            return
-        demo.on_codex_instance_finished(instance)
-    except Exception:
-        logger.exception("failed to route reaped worker %s to demo workflow", instance_id)
 
 
 # Floor on how often the request/SSE-path debounce lets the global sweep run.
