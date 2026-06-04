@@ -921,6 +921,16 @@ def _pid_is_instance_worker(instance: CodexInstance) -> bool:
     return _pid_is_our_worker(instance.pid, instance.pk)
 
 
+def _our_manage_py() -> str:
+    """This deployment's ``manage.py`` path, matching ``_worker_argv``.
+
+    Built with ``os.path`` rather than ``pathlib.Path`` so the value is
+    unaffected by code (and tests) that patch ``codex_pool.Path`` to feed a fake
+    ``/proc`` cmdline through ``_pid_is_our_worker``.
+    """
+    return os.path.join(str(settings.BASE_DIR), "manage.py")
+
+
 def _pid_is_our_worker(
     pid: int, instance_id: int, *, require_session_leader: bool = True
 ) -> bool:
@@ -969,6 +979,12 @@ def _pid_is_our_worker(
         return False
     parts = cmdline.split(b"\0")
     if b"codex_worker" not in parts:
+        return False
+    # Require this deployment's manage.py too: a recycled pid could belong to a
+    # second Hitch checkout's codex_worker carrying the same generic marker and
+    # even the same instance id, and signaling it would kill the other
+    # deployment's process group.
+    if _our_manage_py().encode() not in parts:
         return False
     try:
         idx = parts.index(b"--instance-id")
@@ -1025,7 +1041,7 @@ def _iter_running_worker_pids(
     """
     if not proc_root.exists():
         return
-    marker = (manage_py or str(Path(settings.BASE_DIR) / "manage.py")).encode()
+    marker = (manage_py or _our_manage_py()).encode()
     for entry in proc_root.iterdir():
         if not entry.name.isdigit():
             continue
@@ -1135,6 +1151,11 @@ def reconcile_orphaned_workers() -> int:
                 continue
         if _kill_orphaned_worker(pid, instance_id):
             killed += 1
+            # The worker may have been wedged before reaching its post-terminal
+            # hooks, so recover the finish routing now that the lock is freed --
+            # otherwise a completed user turn's auto-PR/QA trigger (and system-
+            # agent/demo follow-ups) would be silently dropped. Idempotent.
+            _route_reaped_worker_finish(instance_id)
     if killed:
         logger.warning("reaped %s orphaned codex worker process(es)", killed)
     return killed
@@ -1172,6 +1193,50 @@ def _kill_orphaned_worker(pid: int, instance_id: int) -> bool:
             "failed to kill orphaned worker pid %s (instance %s)", pid, instance_id
         )
         return False
+
+
+def _route_reaped_worker_finish(instance_id: int) -> None:
+    """Run a reaped terminal worker's finish routing on its behalf.
+
+    Mirrors ``codex_worker._notify_system_agents``: route the terminal instance
+    through the system agents and the demo workflow so follow-up work the killed
+    worker never reached is still triggered -- notably a plain user turn's
+    auto-PR/QA workflow, which ``_reconcile_terminal_workflow_instances`` does not
+    cover. ``on_codex_instance_finished`` is idempotent (auto_pr/auto_qa trigger
+    claim + workflow route claim), so a worker that already routed is a no-op.
+    Only terminal rows are routed; anything else is left alone.
+    """
+    try:
+        instance = CodexInstance.objects.filter(pk=instance_id).first()
+    except Exception:
+        logger.exception("could not load reaped instance %s for finish routing", instance_id)
+        return
+    if instance is None or instance.status not in (
+        CodexInstance.STATUS_COMPLETED,
+        CodexInstance.STATUS_FAILED,
+    ):
+        return
+    handled = False
+    try:
+        from hitch.main import system_agents
+
+        handled = system_agents.on_codex_instance_finished(instance)
+    except Exception:
+        logger.exception(
+            "failed to route reaped worker %s to system agents", instance_id
+        )
+    try:
+        from hitch.main import demo
+
+        if (
+            handled
+            and instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
+            and instance.agent_kind == demo.DEMO_AGENT_KIND
+        ):
+            return
+        demo.on_codex_instance_finished(instance)
+    except Exception:
+        logger.exception("failed to route reaped worker %s to demo workflow", instance_id)
 
 
 # Floor on how often the request/SSE-path debounce lets the global sweep run.
@@ -1841,21 +1906,33 @@ class _SharedCodexPool:
         self._idle: dict[_ConfigKey, deque[Codex]] = {}
         self._in_use = 0
         self._max = max_size
-        # Config keys ever borrowed, so the keepalive knows which keys to keep
-        # warm -- a memories-enabled session uses a different key than the
-        # default, and would otherwise cold-open on its first render after idle.
-        self._seen_keys: set[_ConfigKey] = set()
+        # Config keys borrowed recently, in LRU order (oldest first), so the
+        # keepalive knows which keys to keep warm -- a memories-enabled session
+        # uses a different key than the default and would otherwise cold-open on
+        # its first render after idle. A dict is used as an ordered set.
+        self._seen_keys: dict[_ConfigKey, None] = {}
+
+    def _note_key(self, key: _ConfigKey) -> None:
+        """Record ``key`` as most-recently used. Caller holds ``self._lock``."""
+        self._seen_keys.pop(key, None)
+        self._seen_keys[key] = None
 
     def _total_warm(self) -> int:
         return self._in_use + sum(len(idle) for idle in self._idle.values())
 
     def warm_target_keys(self) -> list[_ConfigKey]:
-        """Keys the keepalive should keep warm: every key borrowed so far, plus
-        the default key so a fresh process always keeps one server warm."""
+        """Keys the keepalive should keep warm, capped at pool capacity.
+
+        Warming more keys than the pool can hold (``_max``) would have each tick
+        cold-open the keys that the previous tick evicted -- reintroducing the
+        init churn the keepalive exists to avoid. So return the default key
+        (always kept warm) plus the most-recently-used other keys, up to ``_max``
+        total.
+        """
+        default = _pool_key(enable_memories=False, web_search_mode=None)
         with self._lock:
-            keys = set(self._seen_keys)
-        keys.add(_pool_key(enable_memories=False, web_search_mode=None))
-        return sorted(keys, key=lambda k: (k[0], k[1] or ""))
+            recent = [k for k in reversed(self._seen_keys) if k != default]
+        return [default, *recent[: max(self._max - 1, 0)]]
 
     def _pop_idle_other_key(self, key: _ConfigKey) -> Codex | None:
         """Pop the oldest idle server belonging to a different config key."""
@@ -1867,7 +1944,7 @@ class _SharedCodexPool:
     def checkout(self, key: _ConfigKey, factory: Callable[[], Codex]) -> Codex:
         dead: list[Codex] = []
         with self._lock:
-            self._seen_keys.add(key)
+            self._note_key(key)
             idle = self._idle.get(key)
             reused: Codex | None = None
             while idle:
@@ -1903,7 +1980,7 @@ class _SharedCodexPool:
         dead: list[Codex] = []
         reused: Codex | None = None
         with self._lock:
-            self._seen_keys.add(key)
+            self._note_key(key)
             idle = self._idle.get(key)
             while idle:
                 candidate = idle.pop()
@@ -1965,6 +2042,25 @@ def _shared_pool_enabled() -> bool:
 _KEEPALIVE_INTERVAL_SECONDS = 30
 _keepalive_lock = threading.Lock()
 _keepalive_started = False
+# Process names under which the shared pool (and so the keepalive) is in use.
+_SERVER_PROCESS_COMMANDS = frozenset({"gunicorn", "uvicorn", "daphne", "uwsgi"})
+
+
+def _codex_pool_keepalive_enabled() -> bool:
+    """Whether this process serves requests (and so uses the shared pool).
+
+    Independent of the background schedulers: the keepalive must run wherever the
+    request-path pool is enabled, even on a server that disabled the maintenance
+    scheduler (e.g. ``HITCH_WORKFLOW_MAINTENANCE_SCHEDULER=0`` because maintenance
+    runs elsewhere). Mirrors the schedulers' "real server process" gate so it
+    never starts under management commands, migrations, or tests.
+    """
+    if getattr(settings, "TESTING", False):
+        return False
+    argv = sys.argv[1:]
+    if argv and argv[0] == "runserver":
+        return os.environ.get("RUN_MAIN") == "true" or "--noreload" in argv
+    return os.path.basename(sys.argv[0]) in _SERVER_PROCESS_COMMANDS
 
 
 def start_codex_pool_keepalive() -> bool:
@@ -1976,12 +2072,12 @@ def start_codex_pool_keepalive() -> bool:
     makes the first request -- and the session-detail resume -- cold-open and
     race the per-turn worker on the CODEX_HOME init write, which is the
     "database is locked" users hit first thing in the morning. This periodically
-    borrows the default config key and runs one cheap read, so an initialized
+    borrows each used config key and runs one cheap read, so an initialized
     server is already warm when the user returns and a dead one is rebuilt
     *before* they hit it rather than on their request.
     """
     global _keepalive_started
-    if getattr(settings, "TESTING", False):
+    if not _codex_pool_keepalive_enabled():
         return False
     with _keepalive_lock:
         if _keepalive_started:
@@ -2673,7 +2769,7 @@ def _worker_argv(
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
 ) -> list[str]:
-    manage_py = str(Path(settings.BASE_DIR) / "manage.py")
+    manage_py = _our_manage_py()
     argv = [
         sys.executable,
         manage_py,

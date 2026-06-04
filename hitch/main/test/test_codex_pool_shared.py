@@ -410,11 +410,15 @@ class CodexPoolKeepaliveTests(SimpleTestCase):
     def test_disabled_under_testing(self) -> None:
         self.assertFalse(codex_pool.start_codex_pool_keepalive())
 
-    @override_settings(TESTING=False)
     def test_starts_one_daemon_thread(self) -> None:
         self.addCleanup(setattr, codex_pool, "_keepalive_started", False)
         codex_pool._keepalive_started = False
-        with mock.patch("hitch.main.codex_pool.threading.Thread") as thread_cls:
+        with (
+            mock.patch.object(
+                codex_pool, "_codex_pool_keepalive_enabled", return_value=True
+            ),
+            mock.patch("hitch.main.codex_pool.threading.Thread") as thread_cls,
+        ):
             started = codex_pool.start_codex_pool_keepalive()
             # Idempotent: a second call does not start another thread.
             again = codex_pool.start_codex_pool_keepalive()
@@ -423,6 +427,18 @@ class CodexPoolKeepaliveTests(SimpleTestCase):
         self.assertFalse(again)
         thread_cls.assert_called_once()
         thread_cls.return_value.start.assert_called_once_with()
+
+    @override_settings(TESTING=False)
+    def test_keepalive_enabled_only_for_server_processes(self) -> None:
+        with mock.patch("hitch.main.codex_pool.sys.argv", ["manage.py", "test"]):
+            self.assertFalse(codex_pool._codex_pool_keepalive_enabled())
+        with mock.patch("hitch.main.codex_pool.sys.argv", ["gunicorn", "hitch.wsgi"]):
+            self.assertTrue(codex_pool._codex_pool_keepalive_enabled())
+        with mock.patch(
+            "hitch.main.codex_pool.sys.argv",
+            ["manage.py", "runserver", "--noreload"],
+        ):
+            self.assertTrue(codex_pool._codex_pool_keepalive_enabled())
 
     @override_settings(TESTING=False)
     def test_tick_warms_and_probes_a_server(self) -> None:
@@ -462,7 +478,7 @@ class CodexPoolKeepaliveTests(SimpleTestCase):
         # A memories-enabled session uses a distinct pool key; once seen, the
         # keepalive must keep it warm too, not just the default key.
         mem_key = codex_pool._pool_key(enable_memories=True, web_search_mode=None)
-        codex_pool._SHARED_POOL._seen_keys.add(mem_key)
+        codex_pool._SHARED_POOL.checkout_warm_only(mem_key)  # records the key
         built: list[_ProbeCodex] = []
 
         def codex_class(**_kwargs: Any) -> _ProbeCodex:
@@ -489,3 +505,18 @@ class SharedPoolSeenKeyTests(SimpleTestCase):
         pool.checkout_warm_only(mem_key)  # records the key without constructing
         self.assertIn(mem_key, pool.warm_target_keys())
         self.assertIn(default, pool.warm_target_keys())
+
+    def test_warm_target_keys_capped_at_pool_capacity(self) -> None:
+        pool = codex_pool._SharedCodexPool(max_size=2)
+        default = codex_pool._pool_key(enable_memories=False, web_search_mode=None)
+        # More distinct keys than the pool can hold; warming them all would just
+        # evict each other and cold-open every tick.
+        for mode in ("a", "b", "c", "d"):
+            pool.checkout_warm_only((True, mode))
+
+        targets = pool.warm_target_keys()
+
+        self.assertEqual(len(targets), 2)  # == max_size
+        self.assertIn(default, targets)
+        # Keeps the most-recently-used non-default key, not the oldest.
+        self.assertIn((True, "d"), targets)
