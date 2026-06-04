@@ -48,6 +48,29 @@ class SessionIndexRefreshTests(TestCase):
             "/root/.codex/sessions/rollout-local-thread.jsonl",
         )
 
+    def test_update_cached_archived_sets_and_clears_archived_at(self) -> None:
+        now = datetime.now(UTC)
+        SessionMetadata.objects.create(
+            thread_id="archive-toggle",
+            cwd="/repo",
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+            codex_archived=False,
+        )
+
+        session_index.update_cached_archived("archive-toggle", archived=True)
+
+        metadata = SessionMetadata.objects.get(thread_id="archive-toggle")
+        self.assertTrue(metadata.codex_archived)
+        self.assertIsNotNone(metadata.codex_archived_at)
+
+        session_index.update_cached_archived("archive-toggle", archived=False)
+
+        metadata.refresh_from_db()
+        self.assertFalse(metadata.codex_archived)
+        self.assertIsNone(metadata.codex_archived_at)
+
     def test_active_window_resumes_from_cursor_without_marking_synced(self) -> None:
         # A mid-list window (more pages remain) must page from start_cursor and
         # must NOT advance the request-path SessionIndexSyncState cursor.

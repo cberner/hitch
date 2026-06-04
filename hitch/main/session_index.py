@@ -228,6 +228,8 @@ def upsert_thread(thread: Any, *, projects: list[Project]) -> SessionMetadata | 
     if not isinstance(thread_id, str) or not thread_id:
         return None
     cwd = _thread_cwd(thread) or ""
+    archived = _thread_is_archived(thread)
+    existing = SessionMetadata.objects.filter(thread_id=thread_id).first()
     defaults = _codex_defaults(
         thread_id=thread_id,
         cwd=cwd,
@@ -235,11 +237,11 @@ def upsert_thread(thread: Any, *, projects: list[Project]) -> SessionMetadata | 
         preview=getattr(thread, "preview", None),
         created_at=_timestamp_to_datetime(getattr(thread, "created_at", None)),
         updated_at=_timestamp_to_datetime(getattr(thread, "updated_at", None)),
-        archived=_thread_is_archived(thread),
+        archived=archived,
         path=getattr(thread, "path", None),
         thread_source=_metadata_value(getattr(thread, "thread_source", None)),
+        existing=existing,
     )
-    existing = SessionMetadata.objects.filter(thread_id=thread_id).first()
     if existing is None:
         defaults["project"] = _project_for_cwd(cwd, projects)
         defaults["project_cleared"] = False
@@ -270,6 +272,7 @@ def upsert_local_session(
     is_hidden_system_session: bool = False,
 ) -> SessionMetadata:
     now = timezone.now()
+    existing = SessionMetadata.objects.filter(thread_id=thread_id).first()
     defaults = _codex_defaults(
         thread_id=thread_id,
         cwd=cwd,
@@ -280,6 +283,7 @@ def upsert_local_session(
         archived=archived,
         path=codex_path,
         thread_source="",
+        existing=existing,
     )
     if codex_path is None:
         defaults.pop("codex_path", None)
@@ -313,10 +317,13 @@ def update_cached_name(thread_id: str, name: str) -> None:
 
 
 def update_cached_archived(thread_id: str, *, archived: bool) -> None:
+    now = timezone.now()
+    archived_at = now if archived else None
     SessionMetadata.objects.filter(thread_id=thread_id).update(
         codex_archived=archived,
-        codex_updated_at=timezone.now(),
-        codex_last_synced_at=timezone.now(),
+        codex_archived_at=archived_at,
+        codex_updated_at=now,
+        codex_last_synced_at=now,
     )
 
 
@@ -480,10 +487,20 @@ def _codex_defaults(
     archived: bool,
     path: object,
     thread_source: str,
+    existing: SessionMetadata | None,
 ) -> dict[str, Any]:
     now = timezone.now()
     name_value = name.strip() if isinstance(name, str) else ""
     preview_value = preview if isinstance(preview, str) else ""
+    archived_at = None
+    if archived:
+        archived_at = (
+            existing.codex_archived_at
+            if existing is not None and existing.codex_archived
+            else None
+        )
+        if archived_at is None:
+            archived_at = now
     return {
         "cwd": cwd,
         "codex_display_title": display_title_for(
@@ -494,6 +511,7 @@ def _codex_defaults(
         "codex_created_at": created_at or updated_at or now,
         "codex_updated_at": updated_at or created_at or now,
         "codex_archived": archived,
+        "codex_archived_at": archived_at,
         "codex_path": path if isinstance(path, str) else "",
         "codex_thread_source": thread_source,
         "codex_last_synced_at": now,
