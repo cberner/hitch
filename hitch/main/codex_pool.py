@@ -990,9 +990,126 @@ def reconcile_dead() -> int:
     )
     updated = _mark_dead_instances_failed(pending)
     _reconcile_terminal_workflow_instances()
+    reconcile_orphaned_workers()
     retry_failed_input_image_cleanups()
     _prune_reaped_workers()
     return updated
+
+
+def _iter_running_worker_pids() -> Iterable[tuple[int, int]]:
+    """Yield ``(pid, instance_id)`` for every live ``codex_worker`` process.
+
+    Reads ``/proc/<pid>/cmdline`` for the same ``codex_worker --instance-id <pk>``
+    marker ``_pid_is_our_worker`` matches on. Linux-only (the deployment target);
+    on a host without ``/proc`` it yields nothing, so the orphan reap is simply a
+    no-op there rather than guessing.
+    """
+    proc_root = Path("/proc")
+    if not proc_root.exists():
+        return
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        parts = cmdline.split(b"\0")
+        if b"codex_worker" not in parts:
+            continue
+        try:
+            idx = parts.index(b"--instance-id")
+        except ValueError:
+            continue
+        if idx + 1 >= len(parts):
+            continue
+        try:
+            instance_id = int(parts[idx + 1])
+            pid = int(entry.name)
+        except ValueError:
+            continue
+        yield pid, instance_id
+
+
+def reconcile_orphaned_workers() -> int:
+    """Kill leaked worker processes whose instance is no longer expected to run.
+
+    ``reconcile_dead`` reconciles the DB->process direction (rows whose worker pid
+    is gone). This reconciles the reverse: a live ``codex_worker`` process whose
+    CodexInstance has reached a terminal status (or no longer exists) has leaked.
+    Until it exits it keeps a connection open to the shared CODEX_HOME state DB
+    and contends on its single writer lock, which surfaces as "database is locked"
+    for every other app-server start. Force-killing the worker's process group
+    takes its app-server child down with it (the app-server inherits the worker's
+    session, so ``killpg``/``systemctl kill --kill-whom=all`` reaches it).
+
+    The expected set spans *all* instance purposes -- user sessions, system-agent
+    sessions, and workflow turns -- so a legitimately running system-session
+    worker is never reaped. We only ever kill on a positive DB answer: if the
+    expected set cannot be read, nothing is killed.
+    """
+    running = list(_iter_running_worker_pids())
+    if not running:
+        return 0
+    instance_ids = {instance_id for _, instance_id in running}
+    try:
+        expected = set(
+            CodexInstance.objects.filter(
+                pk__in=instance_ids,
+                status__in=(
+                    CodexInstance.STATUS_STARTING,
+                    CodexInstance.STATUS_RUNNING,
+                ),
+            ).values_list("pk", flat=True)
+        )
+    except Exception:
+        # Never kill on incomplete information: if the DB read fails (e.g. it is
+        # momentarily locked) we cannot tell which workers are still expected.
+        logger.exception("could not read expected workers; skipping orphan reap")
+        return 0
+    killed = 0
+    for pid, instance_id in running:
+        if instance_id in expected:
+            continue
+        if _kill_orphaned_worker(pid, instance_id):
+            killed += 1
+    if killed:
+        logger.warning("reaped %s orphaned codex worker process(es)", killed)
+    return killed
+
+
+def _kill_orphaned_worker(pid: int, instance_id: int) -> bool:
+    """Force-kill a leaked worker (and its app-server child); report success."""
+    instance = None
+    try:
+        instance = CodexInstance.objects.filter(pk=instance_id).first()
+    except Exception:
+        logger.exception("could not load instance %s for orphan reap", instance_id)
+    if instance is not None and instance.systemd_scope_unit:
+        try:
+            _force_kill_instance(instance)
+            return True
+        except ProcessLookupError:
+            return False
+        except OSError:
+            logger.warning(
+                "failed to kill orphaned scoped worker for instance %s", instance_id
+            )
+            return False
+    # Re-verify identity right before signaling: the pid could have been recycled
+    # since the /proc scan, and we must never SIGKILL an unrelated process group.
+    if not _pid_is_our_worker(pid, instance_id):
+        return False
+    try:
+        os.killpg(pid, signal.SIGKILL)
+        return True
+    except ProcessLookupError:
+        return False
+    except OSError:
+        logger.warning(
+            "failed to kill orphaned worker pid %s (instance %s)", pid, instance_id
+        )
+        return False
 
 
 # Floor on how often the request/SSE-path debounce lets the global sweep run.
