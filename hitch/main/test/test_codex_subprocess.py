@@ -2472,6 +2472,60 @@ class ReconcileOrphanedWorkersTests(TestCase):
         mock_killpg.assert_not_called()
 
     @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_spares_terminal_worker_within_grace(
+        self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
+    ) -> None:
+        # Just reached a terminal status: the worker is still running its
+        # post-terminal hooks (notify system agents, image cleanup), so it must
+        # not be killed yet.
+        done = self._make(pid=5011, status=CodexInstance.STATUS_COMPLETED)
+        done.ended_at = timezone.now()
+        done.save(update_fields=["ended_at"])
+        mock_iter.return_value = [(5011, done.pk)]
+
+        killed = codex_pool.reconcile_orphaned_workers()
+
+        self.assertEqual(killed, 0)
+        mock_killpg.assert_not_called()
+
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_kills_terminal_worker_past_grace(
+        self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
+    ) -> None:
+        done = self._make(pid=5012, status=CodexInstance.STATUS_COMPLETED)
+        done.ended_at = timezone.now() - codex_pool._ORPHAN_REAP_GRACE - timedelta(
+            seconds=5
+        )
+        done.save(update_fields=["ended_at"])
+        mock_iter.return_value = [(5012, done.pk)]
+
+        killed = codex_pool.reconcile_orphaned_workers()
+
+        self.assertEqual(killed, 1)
+        mock_killpg.assert_called_once_with(5012, signal.SIGKILL)
+
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_spares_worker_this_process_still_supervises(
+        self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
+    ) -> None:
+        done = self._make(pid=5013, status=CodexInstance.STATUS_COMPLETED)
+        mock_iter.return_value = [(5013, done.pk)]
+        with codex_pool._TRACKED_WORKER_PROCS_LOCK:
+            codex_pool._TRACKED_WORKER_PROCS[5013] = (done.pk, cast(Any, MagicMock()))
+        self.addCleanup(_forget_worker_pid, 5013)
+
+        killed = codex_pool.reconcile_orphaned_workers()
+
+        self.assertEqual(killed, 0)
+        mock_killpg.assert_not_called()
+
+    @patch("hitch.main.codex_pool.os.killpg")
     @patch("hitch.main.codex_pool._iter_running_worker_pids")
     def test_kills_nothing_when_expected_set_unreadable(
         self, mock_iter: MagicMock, mock_killpg: MagicMock
@@ -2480,7 +2534,7 @@ class ReconcileOrphanedWorkersTests(TestCase):
         mock_iter.return_value = [(5010, done.pk)]
 
         with patch.object(
-            codex_pool.CodexInstance.objects,
+            CodexInstance.objects,
             "filter",
             side_effect=Exception("db down"),
         ):
