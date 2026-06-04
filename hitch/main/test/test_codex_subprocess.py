@@ -2425,6 +2425,211 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(codex_pool.latest_id_for_thread("t-id"), second.pk)
 
 
+class ReapScopeCgroupTests(TestCase):
+    def _make(self, *, systemd_scope_unit: str = "", pid: int = 7) -> CodexInstance:
+        return CodexInstance.objects.create(
+            pid=pid,
+            thread_id="t",
+            cwd="/r",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_FAILED,
+            systemd_scope_unit=systemd_scope_unit,
+        )
+
+    @patch("hitch.main.codex_pool._scope_has_live_worker", return_value=False)
+    @patch("hitch.main.codex_pool._force_kill_instance")
+    def test_kills_cgroup_of_scoped_worker(
+        self, mock_force_kill: MagicMock, _mock_live: MagicMock
+    ) -> None:
+        instance = self._make(systemd_scope_unit="hitch-codex-worker-7.scope")
+
+        codex_pool._reap_scope_cgroup(instance)
+
+        mock_force_kill.assert_called_once_with(instance)
+
+    @patch("hitch.main.codex_pool._force_kill_instance")
+    def test_skips_non_scoped_worker(self, mock_force_kill: MagicMock) -> None:
+        # A direct launch has no cgroup to sweep, and its already-dead pid must
+        # never be re-signaled (it may have been recycled).
+        codex_pool._reap_scope_cgroup(self._make(systemd_scope_unit=""))
+
+        mock_force_kill.assert_not_called()
+
+    @patch("hitch.main.codex_pool._scope_has_live_worker", return_value=True)
+    @patch("hitch.main.codex_pool._force_kill_instance")
+    def test_skips_scope_reused_by_a_live_worker(
+        self, mock_force_kill: MagicMock, _mock_live: MagicMock
+    ) -> None:
+        # Scope names are not deployment-unique. Our worker is already dead, so a
+        # live worker now in the scope means another checkout reused the name --
+        # signaling it would kill that launch, so skip.
+        instance = self._make(systemd_scope_unit="hitch-codex-worker-7.scope")
+
+        codex_pool._reap_scope_cgroup(instance)
+
+        mock_force_kill.assert_not_called()
+
+    @patch("hitch.main.codex_pool._scope_has_live_worker", return_value=False)
+    @patch("hitch.main.codex_pool._force_kill_instance")
+    def test_swallows_missing_scope(
+        self, mock_force_kill: MagicMock, _mock_live: MagicMock
+    ) -> None:
+        # An already empty/collected scope reports ProcessLookupError; that is the
+        # success case (nothing left to reap), not an error to propagate.
+        mock_force_kill.side_effect = ProcessLookupError
+        instance = self._make(systemd_scope_unit="hitch-codex-worker-7.scope")
+
+        codex_pool._reap_scope_cgroup(instance)  # must not raise
+
+    @patch("hitch.main.codex_pool._scope_has_live_worker", return_value=False)
+    @patch("hitch.main.codex_pool._force_kill_instance")
+    def test_swallows_kill_failure(
+        self, mock_force_kill: MagicMock, _mock_live: MagicMock
+    ) -> None:
+        mock_force_kill.side_effect = OSError("boom")
+        instance = self._make(systemd_scope_unit="hitch-codex-worker-7.scope")
+
+        codex_pool._reap_scope_cgroup(instance)  # best-effort: must not raise
+
+    @patch("hitch.main.codex_pool._scope_has_live_worker", return_value=False)
+    @patch("hitch.main.codex_pool._force_kill_instance")
+    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_reaps_dead_scoped_worker_cgroup(
+        self,
+        _mock_alive: MagicMock,
+        mock_force_kill: MagicMock,
+        _mock_live: MagicMock,
+    ) -> None:
+        # A wedged/OOM-killed scoped worker reaped by the reconcile sweep has its
+        # cgroup swept so a reparented grandchild can't keep holding memory.
+        scoped = CodexInstance.objects.create(
+            pid=10,
+            thread_id="t",
+            cwd="/r",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            systemd_scope_unit="hitch-codex-worker-10.scope",
+        )
+        direct = CodexInstance.objects.create(
+            pid=11,
+            thread_id="t",
+            cwd="/r",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+
+        codex_pool._mark_dead_instances_failed(
+            list(CodexInstance.objects.filter(pk__in=[scoped.pk, direct.pk]))
+        )
+
+        scoped.refresh_from_db()
+        self.assertEqual(scoped.status, CodexInstance.STATUS_FAILED)
+        # Only the scoped worker's cgroup is swept; the direct worker is skipped.
+        mock_force_kill.assert_called_once()
+        self.assertEqual(mock_force_kill.call_args.args[0].pk, scoped.pk)
+
+
+class ScopeHasLiveWorkerTests(SimpleTestCase):
+    def _proc(self, entries: dict[str, dict[str, bytes]]) -> MagicMock:
+        # Build a fake /proc whose iterdir yields entries; each entry exposes
+        # ``cmdline``/``cgroup`` files via the ``/`` operator.
+        def make_entry(name: str, files: dict[str, bytes]) -> MagicMock:
+            entry = MagicMock()
+            entry.name = name
+
+            def child(fname: str) -> MagicMock:
+                f = MagicMock()
+                if fname in files:
+                    f.read_bytes.return_value = files[fname]
+                else:
+                    f.read_bytes.side_effect = FileNotFoundError
+                return f
+
+            entry.__truediv__.side_effect = child
+            return entry
+
+        proc_root = MagicMock()
+        proc_root.exists.return_value = True
+        proc_root.iterdir.return_value = [
+            make_entry(name, files) for name, files in entries.items()
+        ]
+        return proc_root
+
+    def test_true_when_worker_runs_in_scope(self) -> None:
+        proc_root = self._proc(
+            {
+                "100": {
+                    "cmdline": b"python\x00manage.py\x00codex_worker\x00",
+                    "cgroup": b"0::/u.slice/hitch-codex-worker-7.scope\n",
+                },
+            }
+        )
+        self.assertTrue(
+            codex_pool._scope_has_live_worker(
+                "hitch-codex-worker-7.scope", proc_root=proc_root
+            )
+        )
+
+    def test_false_when_only_a_grandchild_runs_in_scope(self) -> None:
+        # A leaked ``cargo bench`` is not a codex_worker, so the scope is still
+        # ours to reap.
+        proc_root = self._proc(
+            {
+                "200": {
+                    "cmdline": b"cargo\x00bench\x00",
+                    "cgroup": b"0::/u.slice/hitch-codex-worker-7.scope\n",
+                },
+            }
+        )
+        self.assertFalse(
+            codex_pool._scope_has_live_worker(
+                "hitch-codex-worker-7.scope", proc_root=proc_root
+            )
+        )
+
+    def test_false_when_worker_is_in_a_different_scope(self) -> None:
+        proc_root = self._proc(
+            {
+                "300": {
+                    "cmdline": b"python\x00manage.py\x00codex_worker\x00",
+                    "cgroup": b"0::/u.slice/hitch-codex-worker-99.scope\n",
+                },
+            }
+        )
+        self.assertFalse(
+            codex_pool._scope_has_live_worker(
+                "hitch-codex-worker-7.scope", proc_root=proc_root
+            )
+        )
+
+    def test_false_without_proc(self) -> None:
+        proc_root = MagicMock()
+        proc_root.exists.return_value = False
+        self.assertFalse(
+            codex_pool._scope_has_live_worker(
+                "hitch-codex-worker-7.scope", proc_root=proc_root
+            )
+        )
+
+    def test_skips_non_numeric_and_unreadable_entries(self) -> None:
+        # Non-pid entries are ignored, and a pid whose cmdline or cgroup file
+        # vanishes mid-scan is skipped rather than raising.
+        proc_root = self._proc(
+            {
+                "cpuinfo": {},  # not a pid
+                "400": {},  # cmdline read fails
+                "500": {  # worker, but cgroup read fails
+                    "cmdline": b"python\x00manage.py\x00codex_worker\x00",
+                },
+            }
+        )
+        self.assertFalse(
+            codex_pool._scope_has_live_worker(
+                "hitch-codex-worker-7.scope", proc_root=proc_root
+            )
+        )
+
+
 class ReconcileOrphanedWorkersTests(TestCase):
     def _make(
         self,
