@@ -2583,6 +2583,61 @@ class ReconcileOrphanedWorkersTests(TestCase):
         self.assertEqual(killed, 0)
         mock_killpg.assert_not_called()
 
+    @patch("hitch.main.codex_pool._route_reaped_worker_finish")
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_routes_finish_hooks_after_reaping(
+        self,
+        mock_iter: MagicMock,
+        _mock_identity: MagicMock,
+        _mock_killpg: MagicMock,
+        mock_route: MagicMock,
+    ) -> None:
+        # A reaped worker may have died before its finish routing; recover it so
+        # an auto-PR/QA trigger is not lost.
+        done = self._make(pid=5016, status=CodexInstance.STATUS_COMPLETED)
+        mock_iter.return_value = [(5016, done.pk)]
+
+        codex_pool.reconcile_orphaned_workers()
+
+        mock_route.assert_called_once_with(done.pk)
+
+
+class RouteReapedWorkerFinishTests(TestCase):
+    def _make(self, *, status: str) -> CodexInstance:
+        return CodexInstance.objects.create(
+            pid=1,
+            thread_id="t",
+            cwd="/r",
+            events_path="/dev/null",
+            status=status,
+            purpose=CodexInstance.PURPOSE_USER,
+        )
+
+    @patch("hitch.main.demo.on_codex_instance_finished")
+    @patch("hitch.main.system_agents.on_codex_instance_finished", return_value=False)
+    def test_routes_a_terminal_instance(
+        self, mock_sa: MagicMock, mock_demo: MagicMock
+    ) -> None:
+        done = self._make(status=CodexInstance.STATUS_COMPLETED)
+
+        codex_pool._route_reaped_worker_finish(done.pk)
+
+        mock_sa.assert_called_once()
+        self.assertEqual(mock_sa.call_args.args[0].pk, done.pk)
+        mock_demo.assert_called_once()
+
+    @patch("hitch.main.demo.on_codex_instance_finished")
+    @patch("hitch.main.system_agents.on_codex_instance_finished")
+    def test_skips_missing_instance(
+        self, mock_sa: MagicMock, mock_demo: MagicMock
+    ) -> None:
+        codex_pool._route_reaped_worker_finish(999999)
+
+        mock_sa.assert_not_called()
+        mock_demo.assert_not_called()
+
 
 class IterRunningWorkerPidsTests(SimpleTestCase):
     def _write_cmdline(self, proc_root: Path, pid: int, argv: list[bytes]) -> None:
@@ -3824,13 +3879,30 @@ class PidIsOurWorkerTests(TestCase):
         self, mock_getsid: MagicMock, mock_path: MagicMock
     ) -> None:
         mock_getsid.return_value = 4321
+        marker = codex_pool._our_manage_py().encode()
         cmdline = (
-            b"/usr/bin/python\x00manage.py\x00codex_worker\x00"
+            b"/usr/bin/python\x00" + marker + b"\x00codex_worker\x00"
             b"--instance-id\x0042\x00"
         )
         mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.return_value = cmdline
 
         self.assertTrue(codex_pool._pid_is_our_worker(4321, 42))
+
+    @patch("hitch.main.codex_pool.Path")
+    @patch("hitch.main.codex_pool.os.getsid")
+    def test_rejects_when_cmdline_lacks_our_manage_py(
+        self, mock_getsid: MagicMock, mock_path: MagicMock
+    ) -> None:
+        # Another Hitch checkout under the same user: same codex_worker marker
+        # and even the same instance id, but a different manage.py path. Killing
+        # it would terminate the other deployment's process group.
+        mock_getsid.return_value = 4321
+        mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.return_value = (
+            b"/usr/bin/python\x00/other/hitch/manage.py\x00codex_worker\x00"
+            b"--instance-id\x0042\x00"
+        )
+
+        self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
 
     @patch("hitch.main.codex_pool.Path")
     @patch("hitch.main.codex_pool.os.getsid")
@@ -3855,8 +3927,9 @@ class PidIsOurWorkerTests(TestCase):
         # ``--instance-id`` today, but a malformed cmdline (truncated,
         # different worker variant) must not pass identity.
         mock_getsid.return_value = 4321
+        marker = codex_pool._our_manage_py().encode()
         mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.return_value = (
-            b"python\x00manage.py\x00codex_worker\x00"
+            b"python\x00" + marker + b"\x00codex_worker\x00"
         )
 
         self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
@@ -3869,8 +3942,9 @@ class PidIsOurWorkerTests(TestCase):
         # cmdline names a codex_worker but for a different instance —
         # another worker, not ours.
         mock_getsid.return_value = 4321
+        marker = codex_pool._our_manage_py().encode()
         mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.return_value = (
-            b"python\x00manage.py\x00codex_worker\x00--instance-id\x0099\x00"
+            b"python\x00" + marker + b"\x00codex_worker\x00--instance-id\x0099\x00"
         )
 
         self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
@@ -3889,7 +3963,11 @@ class PidIsOurWorkerTests(TestCase):
         self, mock_getsid: MagicMock, mock_path: MagicMock
     ) -> None:
         mock_getsid.return_value = 999
-        cmdline = b"/usr/bin/python\x00manage.py\x00codex_worker\x00--instance-id\x0042\x00"
+        marker = codex_pool._our_manage_py().encode()
+        cmdline = (
+            b"/usr/bin/python\x00" + marker + b"\x00codex_worker\x00"
+            b"--instance-id\x0042\x00"
+        )
         mock_path.return_value.__truediv__.return_value.__truediv__.return_value.read_bytes.return_value = cmdline
 
         self.assertTrue(
