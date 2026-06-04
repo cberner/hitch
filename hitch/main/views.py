@@ -5627,12 +5627,15 @@ def _refresh_usage_session_index_best_effort(
         with codex_pool.borrow_codex(
             Codex, enable_memories=enable_memories
         ) as codex:
+            # Web-triggered catch-up must not ask Codex to scan rollouts: on a
+            # large CODEX_HOME that backfill can hold Codex's SQLite writer lock
+            # long enough to make detached workers exhaust their startup retry.
             session_index.refresh_from_codex(
                 codex,
                 projects=list(Project.objects.all()),
                 include_active=refresh_active,
                 include_archived=refresh_archived,
-                use_state_db_only=False,
+                use_state_db_only=True,
                 max_pages=None,
             )
     except Exception:

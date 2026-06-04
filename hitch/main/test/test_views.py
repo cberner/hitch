@@ -4882,6 +4882,48 @@ class IndexViewTests(TestCase):
             session_index.indexed_sessions().filter(thread_id="fresh-active").exists()
         )
 
+    @patch("hitch.main.views.Codex")
+    def test_background_session_index_refresh_uses_state_db_only(
+        self, mock_codex: MagicMock
+    ) -> None:
+        active = _session("active", name="Active session")
+        archived = _session(
+            "archived",
+            name="Archived session",
+            path="/home/user/.codex/archived_sessions/archived.jsonl",
+        )
+        client = _setup_codex(
+            mock_codex,
+            threads=[active],
+            archived_threads=[archived],
+        )
+
+        views._refresh_usage_session_index_best_effort(
+            enable_memories=False,
+            include_active=True,
+            include_archived=True,
+        )
+
+        client.thread_list.assert_any_call(
+            limit=100,
+            sort_key=ThreadSortKey.updated_at,
+            sort_direction=SortDirection.desc,
+            use_state_db_only=True,
+        )
+        client.thread_list.assert_any_call(
+            limit=100,
+            sort_key=ThreadSortKey.updated_at,
+            sort_direction=SortDirection.desc,
+            archived=True,
+            use_state_db_only=True,
+        )
+        self.assertTrue(
+            all(
+                mock_call.kwargs["use_state_db_only"] is True
+                for mock_call in client.thread_list.call_args_list
+            )
+        )
+
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_complete_empty_session_index_serves_cached_empty_state(
