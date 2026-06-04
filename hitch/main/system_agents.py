@@ -158,6 +158,8 @@ _PR_HANDOFF_STATE_KEY = "pr_handoff"
 _PR_HITCH_HANDOFF_STATE_KEY = "hitch_pr_handoff"
 _PR_MONITOR_STATE_KEY = "last_pr_monitor"
 _PR_MONITOR_BACKOFF_STATE_KEY = "pr_monitor_backoff"
+_PR_MONITOR_FEEDBACK_OBSERVATION_KEY = "monitor_feedback_observation"
+_PR_MONITOR_REINTERPRETATION_REQUIRED_KEY = "monitor_reinterpretation_required"
 _PR_GATES_STATE_KEY = "pr_gates"
 _PR_PENDING_CHECKS_STATE_KEY = "pr_pending_checks"
 _WORKFLOW_TURN_DEATH_RETRY_STATE_KEY = "workflow_turn_death_retries"
@@ -4210,11 +4212,11 @@ def _handle_pr_followup_monitor_finished(
         )
         return
 
+    monitor_observation = _run_gh_observation_fallback(run)
     parsed = _authoritative_pr_monitor_result(
         parsed,
-        _refresh_pr_monitor_observation(
-            workflow, _run_gh_observation_fallback(run)
-        ),
+        _refresh_pr_monitor_observation(workflow, monitor_observation),
+        monitor_observation=monitor_observation,
     )
     run.status = SystemAgentRun.STATUS_COMPLETED
     run.output = parsed
@@ -4231,7 +4233,10 @@ def _run_gh_observation_fallback(run: SystemAgentRun) -> dict[str, Any]:
 
 
 def _authoritative_pr_monitor_result(
-    parsed: dict[str, Any], gh_observation: dict[str, Any]
+    parsed: dict[str, Any],
+    gh_observation: dict[str, Any],
+    *,
+    monitor_observation: dict[str, Any],
 ) -> dict[str, Any]:
     authoritative_pr = _compact_pr_handoff(gh_observation.get("pr"))
     monitor_pr = authoritative_pr or parsed["pr"]
@@ -4240,15 +4245,49 @@ def _authoritative_pr_monitor_result(
         monitor_status = (
             "terminal" if _pr_handoff_is_terminal(monitor_pr) else "blocked"
         )
+    parsed_feedback = _string_from_any(parsed.get("feedback"))
     gh_feedback = _string_from_any(gh_observation.get("feedback"))
     gh_blockers = _string_list(gh_observation.get("blockers"))
-    return {
+    parsed_blockers = _string_list(parsed.get("blockers"))
+    monitor_feedback_is_current = _monitor_observation_matches_current(
+        monitor_observation,
+        gh_observation,
+    )
+    result = {
         **parsed,
         "status": monitor_status,
         "pr": monitor_pr,
         "feedback": gh_feedback or parsed["feedback"],
-        "blockers": gh_blockers or parsed["blockers"],
+        "blockers": gh_blockers
+        or (parsed_blockers if monitor_feedback_is_current else []),
     }
+    if parsed_feedback and monitor_feedback_is_current and not gh_blockers:
+        result["monitor_feedback"] = parsed_feedback
+        result[_PR_MONITOR_FEEDBACK_OBSERVATION_KEY] = (
+            _monitor_feedback_observation(monitor_observation)
+        )
+    return result
+
+
+def _monitor_feedback_observation(gh_observation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "feedback": _string_from_any(gh_observation.get("feedback")),
+        "pr": _compact_pr_handoff(gh_observation.get("pr")),
+    }
+
+
+def _monitor_observation_matches_current(
+    monitor_observation: dict[str, Any], gh_observation: dict[str, Any]
+) -> bool:
+    monitor_feedback = _string_from_any(monitor_observation.get("feedback"))
+    current_feedback = _string_from_any(gh_observation.get("feedback"))
+    if not monitor_feedback or monitor_feedback != current_feedback:
+        return False
+    monitor_pr = _compact_pr_handoff(monitor_observation.get("pr"))
+    current_pr = _compact_pr_handoff(gh_observation.get("pr"))
+    if _pr_handoff_identity_changed(monitor_pr, current_pr):
+        return False
+    return not _pr_handoff_head_changed(monitor_pr, current_pr)
 
 
 def _pr_monitor_result_from_gh_observation(
@@ -4283,6 +4322,44 @@ def _advance_pr_workflow_from_monitor_result(
     gates = _evaluate_pr_gates(_pr_gate_observation_handoff(handoff, monitor_pr))
     workflow.state = {**workflow.state, _PR_GATES_STATE_KEY: gates}
     if _pr_gates_all_passed(gates):
+        if _pr_monitor_reinterpretation_required(parsed):
+            workflow.state = {**workflow.state, _PR_PENDING_CHECKS_STATE_KEY: 0}
+            workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
+            workflow.save(update_fields=["state", "updated_at"])
+            try:
+                _spawn_pr_followup_monitor_run(workflow)
+            except Exception as exc:
+                _block_workflow(
+                    workflow, f"failed to restart PR follow-up monitor: {exc!r}"
+                )
+            return
+        feedback = _pr_monitor_actionable_feedback(parsed)
+        if feedback:
+            if workflow.iteration >= workflow.max_iterations:
+                workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
+                workflow.status = SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED
+                workflow.step = STEP_MAX_ITERATIONS_REACHED
+                workflow.save(update_fields=["status", "step", "state", "updated_at"])
+                _surface_workflow_failure(
+                    workflow,
+                    (
+                        "PR follow-up monitor reached the maximum feedback loop count "
+                        "without reaching a clean PR state."
+                    ),
+                )
+                return
+            workflow.state = {**workflow.state, _PR_PENDING_CHECKS_STATE_KEY: 0}
+            workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
+            workflow.iteration += 1
+            workflow.step = STEP_PR_FEEDBACK_RUNNING
+            workflow.save(update_fields=["iteration", "step", "state", "updated_at"])
+            try:
+                _spawn_pr_followup_feedback_turn(workflow, feedback)
+            except Exception as exc:
+                _block_workflow(
+                    workflow, f"failed to start PR follow-up turn: {exc!r}"
+                )
+            return
         workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
         workflow.status = SystemWorkflow.STATUS_COMPLETED
         workflow.step = STEP_PR_READY
@@ -4399,11 +4476,53 @@ def refresh_due_pr_monitor_backoffs(
                 error=str(exc),
             )
             continue
+        result = _pr_monitor_result_from_gh_observation(observation)
+        result = _carry_current_monitor_feedback(
+            result,
+            claimed_workflow.state.get(_PR_MONITOR_STATE_KEY),
+            observation,
+        )
         _advance_claimed_pr_monitor_backoff(
             claimed_workflow,
-            _pr_monitor_result_from_gh_observation(observation),
+            result,
         )
     return refreshed
+
+
+def _carry_current_monitor_feedback(
+    parsed: dict[str, Any], previous_monitor: Any, gh_observation: dict[str, Any]
+) -> dict[str, Any]:
+    if _pr_monitor_actionable_feedback(parsed) or not isinstance(previous_monitor, dict):
+        return parsed
+    # A monitor summary is an interpretation of one gh observation. When that
+    # observation changes, require a fresh monitor before declaring the PR ready.
+    if previous_monitor.get(_PR_MONITOR_REINTERPRETATION_REQUIRED_KEY) is True:
+        return {
+            **parsed,
+            _PR_MONITOR_REINTERPRETATION_REQUIRED_KEY: True,
+        }
+    monitor_feedback = previous_monitor.get("monitor_feedback")
+    monitor_observation = previous_monitor.get(_PR_MONITOR_FEEDBACK_OBSERVATION_KEY)
+    if (
+        not isinstance(monitor_feedback, str)
+        or not monitor_feedback.strip()
+        or not isinstance(monitor_observation, dict)
+    ):
+        return parsed
+    if not _monitor_observation_matches_current(monitor_observation, gh_observation):
+        return {
+            **parsed,
+            _PR_MONITOR_REINTERPRETATION_REQUIRED_KEY: True,
+        }
+    return {
+        **parsed,
+        "monitor_feedback": monitor_feedback.strip(),
+        _PR_MONITOR_FEEDBACK_OBSERVATION_KEY: monitor_observation,
+    }
+
+
+def _pr_monitor_reinterpretation_required(parsed: dict[str, Any]) -> bool:
+    return parsed.get(_PR_MONITOR_REINTERPRETATION_REQUIRED_KEY) is True
 
 
 def _claim_due_pr_monitor_backoff(workflow: SystemWorkflow) -> SystemWorkflow | None:
@@ -7880,6 +7999,16 @@ def _pr_monitor_feedback(parsed: dict[str, Any]) -> str:
     if isinstance(summary, str) and summary.strip():
         return summary.strip()
     return "The PR monitor found blockers, but did not provide details."
+
+
+def _pr_monitor_actionable_feedback(parsed: dict[str, Any]) -> str:
+    feedback = parsed.get("monitor_feedback")
+    if isinstance(feedback, str) and feedback.strip():
+        return feedback.strip()
+    blockers = _string_list(parsed.get("blockers"))
+    if blockers:
+        return "\n".join(f"- {blocker}" for blocker in blockers)
+    return ""
 
 
 def _format_pr_handoff(handoff: dict[str, Any]) -> str:

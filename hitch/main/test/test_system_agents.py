@@ -5327,6 +5327,447 @@ class SpecCriticWorkflowTests(TestCase):
             self.assertIn("fresh requested changes body", prompt)
             self.assertNotIn("stale monitor feedback", prompt)
 
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_monitor_spawns_followup_for_actionable_feedback_when_gates_pass(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={
+                "web_search_mode": "cached",
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": "https://github.com/cberner/hitch/pull/169",
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 169,
+                    "head_sha": "abc123",
+                },
+            },
+        )
+        events_path = _events_file(
+            self,
+            {
+                "status": "blocked",
+                "summary": "PR gates pass, but Codecov needs follow-up.",
+                "feedback": "Codecov reports one changed line missing coverage.",
+                "pr": {
+                    "pr_number": 169,
+                    "mergeable": True,
+                    "draft": False,
+                    "review_signal": "thumbs_up",
+                    "unresolved_thread_count": 0,
+                    "ci_status": "success",
+                },
+                "blockers": [],
+            },
+        )
+        instance = _instance(
+            thread_id="monitor-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=events_path,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            thread_id="monitor-thread",
+            instance=instance,
+            input={
+                "gh_observation": _gh_monitor_observation(
+                    {
+                        "mergeable": True,
+                        "draft": False,
+                        "review_signal": "thumbs_up",
+                        "unresolved_thread_count": 0,
+                        "ci_status": "success",
+                    },
+                    feedback="Raw PR comments include Codecov output.",
+                )
+            },
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.step, system_agents.STEP_PR_FEEDBACK_RUNNING)
+        self.assertEqual(workflow.iteration, 1)
+        monitor = workflow.state[system_agents._PR_MONITOR_STATE_KEY]
+        self.assertEqual(
+            monitor["monitor_feedback"],
+            "Codecov reports one changed line missing coverage.",
+        )
+        self.assertEqual(workflow.state[system_agents._PR_PENDING_CHECKS_STATE_KEY], 0)
+        prompt = mock_spawn.call_args.kwargs["prompt"]
+        self.assertIn("Codecov reports one changed line missing coverage.", prompt)
+        self.assertNotIn("Raw PR comments include Codecov output.", prompt)
+
+    @patch(
+        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation(
+            {
+                "mergeable": True,
+                "draft": False,
+                "review_signal": "thumbs_up",
+                "unresolved_thread_count": 0,
+                "ci_status": "success",
+            },
+            feedback="Raw unrelated reviewer comment remains.",
+        ),
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_monitor_ignores_stale_feedback_when_refresh_has_unrelated_text(
+        self, mock_spawn: MagicMock, mock_observe: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as cwd:
+            workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="main-thread",
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_RUNNING,
+                step=system_agents.STEP_PR_MONITORING,
+                state={
+                    system_agents._PR_HANDOFF_STATE_KEY: {
+                        "url": "https://github.com/cberner/hitch/pull/169",
+                        "repository_full_name": "cberner/hitch",
+                        "pr_number": 169,
+                        "head_sha": "abc123",
+                    },
+                },
+            )
+            events_path = _events_file(
+                self,
+                {
+                    "status": "blocked",
+                    "summary": "Old PR comment needed follow-up.",
+                    "feedback": "Codecov used to report one missing coverage line.",
+                    "pr": {
+                        "pr_number": 169,
+                        "mergeable": True,
+                        "draft": False,
+                        "review_signal": "thumbs_up",
+                        "unresolved_thread_count": 0,
+                        "ci_status": "success",
+                    },
+                    "blockers": ["Codecov used to be missing coverage."],
+                },
+            )
+            instance = _instance(
+                thread_id="monitor-thread",
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                workflow_id=workflow.pk,
+                events_path=events_path,
+                agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            )
+            SystemAgentRun.objects.create(
+                workflow=workflow,
+                agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+                thread_id="monitor-thread",
+                instance=instance,
+                input={
+                    "gh_observation": _gh_monitor_observation(
+                        {
+                            "mergeable": True,
+                            "draft": False,
+                            "review_signal": "thumbs_up",
+                            "unresolved_thread_count": 0,
+                            "ci_status": "success",
+                        },
+                        feedback="Raw Codecov output was present before refresh.",
+                    )
+                },
+            )
+
+            system_agents.on_codex_instance_finished(instance)
+
+            workflow.refresh_from_db()
+            self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+            self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
+            monitor = workflow.state[system_agents._PR_MONITOR_STATE_KEY]
+            self.assertEqual(monitor["feedback"], "Raw unrelated reviewer comment remains.")
+            self.assertNotIn("monitor_feedback", monitor)
+            self.assertEqual(monitor["blockers"], [])
+            self.assertEqual(workflow.iteration, 0)
+            mock_spawn.assert_not_called()
+            mock_observe.assert_called_once_with(workflow)
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
+    def test_pending_backoff_preserves_current_monitor_feedback_until_gates_pass(
+        self, mock_observe: MagicMock, mock_spawn: MagicMock
+    ) -> None:
+        raw_feedback = "Raw PR comments include Codecov output."
+        parsed_feedback = "Codecov reports one changed line missing coverage."
+        pending_observation = _gh_monitor_observation(
+            {
+                "mergeable": True,
+                "draft": False,
+                "review_signal": "thumbs_up",
+                "unresolved_thread_count": 0,
+                "ci_status": "pending",
+            },
+            feedback=raw_feedback,
+        )
+        passing_observation = _gh_monitor_observation(
+            {
+                "mergeable": True,
+                "draft": False,
+                "review_signal": "thumbs_up",
+                "unresolved_thread_count": 0,
+                "ci_status": "success",
+            },
+            feedback=raw_feedback,
+        )
+        mock_observe.side_effect = [pending_observation, passing_observation]
+
+        with tempfile.TemporaryDirectory() as cwd:
+            workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="main-thread",
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_RUNNING,
+                step=system_agents.STEP_PR_MONITORING,
+                state={
+                    "web_search_mode": "cached",
+                    system_agents._PR_HANDOFF_STATE_KEY: {
+                        "url": "https://github.com/cberner/hitch/pull/169",
+                        "repository_full_name": "cberner/hitch",
+                        "pr_number": 169,
+                        "head_sha": "abc123",
+                    },
+                },
+            )
+            events_path = _events_file(
+                self,
+                {
+                    "status": "blocked",
+                    "summary": "CI is pending, but Codecov needs follow-up.",
+                    "feedback": parsed_feedback,
+                    "pr": {
+                        "pr_number": 169,
+                        "mergeable": True,
+                        "draft": False,
+                        "review_signal": "thumbs_up",
+                        "unresolved_thread_count": 0,
+                        "ci_status": "pending",
+                    },
+                    "blockers": [],
+                },
+            )
+            instance = _instance(
+                thread_id="monitor-thread",
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                workflow_id=workflow.pk,
+                events_path=events_path,
+                agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            )
+            SystemAgentRun.objects.create(
+                workflow=workflow,
+                agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+                thread_id="monitor-thread",
+                instance=instance,
+                input={"gh_observation": pending_observation},
+            )
+
+            system_agents.on_codex_instance_finished(instance)
+
+            workflow.refresh_from_db()
+            self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+            self.assertEqual(workflow.iteration, 0)
+            self.assertEqual(
+                workflow.state[system_agents._PR_PENDING_CHECKS_STATE_KEY], 1
+            )
+            monitor = workflow.state[system_agents._PR_MONITOR_STATE_KEY]
+            self.assertEqual(monitor["monitor_feedback"], parsed_feedback)
+            self.assertEqual(
+                monitor[system_agents._PR_MONITOR_FEEDBACK_OBSERVATION_KEY][
+                    "feedback"
+                ],
+                raw_feedback,
+            )
+
+            now = int(datetime.now(UTC).timestamp())
+            backoff = dict(workflow.state[system_agents._PR_MONITOR_BACKOFF_STATE_KEY])
+            backoff["scheduled_at"] = now - 301
+            backoff["next_attempt_at"] = now - 1
+            workflow.state = {
+                **workflow.state,
+                system_agents._PR_MONITOR_BACKOFF_STATE_KEY: backoff,
+            }
+            workflow.save(update_fields=["state", "updated_at"])
+
+            refreshed = system_agents.refresh_due_pr_monitor_backoffs(
+                workflow_id=workflow.pk
+            )
+
+            self.assertEqual(refreshed, 1)
+            workflow.refresh_from_db()
+            self.assertEqual(workflow.step, system_agents.STEP_PR_FEEDBACK_RUNNING)
+            self.assertEqual(workflow.iteration, 1)
+            self.assertEqual(
+                workflow.state[system_agents._PR_PENDING_CHECKS_STATE_KEY], 0
+            )
+            monitor = workflow.state[system_agents._PR_MONITOR_STATE_KEY]
+            self.assertEqual(monitor["monitor_feedback"], parsed_feedback)
+            self.assertNotIn(
+                system_agents._PR_MONITOR_BACKOFF_STATE_KEY, workflow.state
+            )
+            prompt = mock_spawn.call_args.kwargs["prompt"]
+            self.assertIn(parsed_feedback, prompt)
+            self.assertNotIn(raw_feedback, prompt)
+
+        self.assertEqual(mock_observe.call_count, 2)
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
+    def test_pending_backoff_reruns_monitor_when_feedback_observation_changes(
+        self,
+        mock_observe: MagicMock,
+        mock_spawn_session: MagicMock,
+        mock_spawn_turn: MagicMock,
+    ) -> None:
+        pending_feedback = (
+            "Raw PR comments include Codecov output.\n\n"
+            "Pending jobs: lint is still running."
+        )
+        passing_feedback = "Raw PR comments include Codecov output."
+        parsed_feedback = "Codecov reports one changed line missing coverage."
+        pending_observation = _gh_monitor_observation(
+            {
+                "mergeable": True,
+                "draft": False,
+                "review_signal": "thumbs_up",
+                "unresolved_thread_count": 0,
+                "ci_status": "pending",
+                "pending_jobs": [{"name": "lint", "status": "queued"}],
+            },
+            feedback=pending_feedback,
+        )
+        passing_observation = _gh_monitor_observation(
+            {
+                "mergeable": True,
+                "draft": False,
+                "review_signal": "thumbs_up",
+                "unresolved_thread_count": 0,
+                "ci_status": "success",
+                "pending_jobs": [],
+            },
+            feedback=passing_feedback,
+        )
+        mock_observe.side_effect = [
+            pending_observation,
+            passing_observation,
+            passing_observation,
+        ]
+
+        with tempfile.TemporaryDirectory() as cwd:
+            workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="main-thread",
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_RUNNING,
+                step=system_agents.STEP_PR_MONITORING,
+                state={
+                    "web_search_mode": "cached",
+                    system_agents._PR_HANDOFF_STATE_KEY: {
+                        "url": "https://github.com/cberner/hitch/pull/169",
+                        "repository_full_name": "cberner/hitch",
+                        "pr_number": 169,
+                        "head_sha": "abc123",
+                    },
+                },
+            )
+            events_path = _events_file(
+                self,
+                {
+                    "status": "blocked",
+                    "summary": "CI is pending, but Codecov needs follow-up.",
+                    "feedback": parsed_feedback,
+                    "pr": {
+                        "pr_number": 169,
+                        "mergeable": True,
+                        "draft": False,
+                        "review_signal": "thumbs_up",
+                        "unresolved_thread_count": 0,
+                        "ci_status": "pending",
+                    },
+                    "blockers": [],
+                },
+            )
+            instance = _instance(
+                thread_id="monitor-thread",
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                workflow_id=workflow.pk,
+                events_path=events_path,
+                agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            )
+            rerun_instance = _instance(
+                thread_id="rerun-monitor-thread",
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                workflow_id=workflow.pk,
+                agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            )
+            mock_spawn_session.return_value = rerun_instance
+            SystemAgentRun.objects.create(
+                workflow=workflow,
+                agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+                thread_id="monitor-thread",
+                instance=instance,
+                input={"gh_observation": pending_observation},
+            )
+
+            system_agents.on_codex_instance_finished(instance)
+
+            workflow.refresh_from_db()
+            self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+            self.assertEqual(
+                workflow.state[system_agents._PR_PENDING_CHECKS_STATE_KEY], 1
+            )
+
+            now = int(datetime.now(UTC).timestamp())
+            backoff = dict(workflow.state[system_agents._PR_MONITOR_BACKOFF_STATE_KEY])
+            backoff["scheduled_at"] = now - 301
+            backoff["next_attempt_at"] = now - 1
+            workflow.state = {
+                **workflow.state,
+                system_agents._PR_MONITOR_BACKOFF_STATE_KEY: backoff,
+            }
+            workflow.save(update_fields=["state", "updated_at"])
+
+            refreshed = system_agents.refresh_due_pr_monitor_backoffs(
+                workflow_id=workflow.pk
+            )
+
+            self.assertEqual(refreshed, 1)
+            workflow.refresh_from_db()
+            self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+            self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+            self.assertEqual(workflow.iteration, 0)
+            self.assertEqual(
+                workflow.state[system_agents._PR_PENDING_CHECKS_STATE_KEY], 0
+            )
+            self.assertNotIn(
+                system_agents._PR_MONITOR_BACKOFF_STATE_KEY, workflow.state
+            )
+            monitor = workflow.state[system_agents._PR_MONITOR_STATE_KEY]
+            self.assertTrue(
+                monitor[system_agents._PR_MONITOR_REINTERPRETATION_REQUIRED_KEY]
+            )
+            self.assertNotIn("monitor_feedback", monitor)
+            rerun = SystemAgentRun.objects.get(thread_id="rerun-monitor-thread")
+            self.assertEqual(rerun.input["gh_observation"], passing_observation)
+            self.assertIn(
+                passing_feedback, mock_spawn_session.call_args.kwargs["prompt"]
+            )
+
+        self.assertEqual(mock_observe.call_count, 3)
+        mock_spawn_session.assert_called_once()
+        mock_spawn_turn.assert_not_called()
+
     @patch(
         "hitch.main.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation({"head_sha": "newsha"}),
