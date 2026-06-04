@@ -4062,13 +4062,10 @@ def _render_session_detail(
         cookie_updates = resolved_settings.cookie_updates
         plan_model = _plan_mode_model_from_models(resumed, settings, models_data)
     else:
-        config = codex_pool.app_server_config(
-            enable_memories=initial_settings.enable_memories
-        )
 
         def _resume_for_detail(codex: Codex) -> tuple[Any, Any, list[Any], Any, Any]:
             # ``thread/read`` only works for threads already loaded into the
-            # app-server's in-memory map. Each request spawns a fresh app-server
+            # app-server's in-memory map. A cold open spawns a fresh app-server
             # subprocess, so newly-created threads (or any thread persisted by a
             # different worker) need ``thread/resume`` to read them off disk.
             # The resume response already carries the full thread including turns,
@@ -4091,13 +4088,19 @@ def _render_session_detail(
             )
             return resumed, thread, models_data, resolved_settings, plan_model
 
-        # ``thread_resume`` lazily migrates a foreign thread's state-DB rows and
-        # can exit the app-server on a contended CODEX_HOME lock; retry the
-        # open+resume (the resume is idempotent) so a transient lock does not
-        # 500 the page. See ``codex_pool.run_codex_op_with_retry``.
+        # Prefer a warm pooled app-server: cold-opening here re-runs the
+        # CODEX_HOME init write that contends on the state-DB writer lock, which
+        # is what surfaced "failed to initialize sqlite state runtime ...
+        # database is locked" on this page while a worker held the lock. A warm
+        # server is already initialized, so the resume does no init write; only
+        # an empty pool falls back to a retrying cold open. ``thread_resume``
+        # lazily migrates a foreign thread's rows and is idempotent, so a retry
+        # (or the warm->cold fallback re-running it) is safe.
         resumed, thread, models_data, resolved_settings, plan_model = (
-            codex_pool.run_codex_op_with_retry(
-                lambda: Codex(config=config), _resume_for_detail
+            codex_pool.run_borrowed_op_with_retry(
+                Codex,
+                _resume_for_detail,
+                enable_memories=initial_settings.enable_memories,
             )
         )
         settings = resolved_settings.values

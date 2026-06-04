@@ -10,6 +10,7 @@ covered separately.
 import threading
 from collections.abc import Callable
 from typing import Any, override
+from unittest import mock
 
 from django.test import SimpleTestCase, override_settings
 from openai_codex import TransportClosedError
@@ -187,6 +188,32 @@ class SharedCodexPoolTests(SimpleTestCase):
         self.assertTrue(_closed(first))
         self.assertEqual(len(built), 2)
 
+    def test_checkout_warm_only_returns_none_when_empty(self) -> None:
+        pool = codex_pool._SharedCodexPool()
+        # No warm server: must not construct one (that is the contended init).
+        self.assertIsNone(pool.checkout_warm_only(self.key))
+        self.assertEqual(pool._in_use, 0)
+
+    def test_checkout_warm_only_reuses_and_skips_dead(self) -> None:
+        pool = codex_pool._SharedCodexPool()
+        factory, built = _counting_factory()
+        dead = pool.checkout(self.key, factory)
+        live = pool.checkout(self.key, factory)
+        # Release dead first so it sits at the pop end and is examined before
+        # the live one (checkout pops the right, release appends the left).
+        pool.release(self.key, dead, healthy=True)
+        pool.release(self.key, live, healthy=True)
+        _mark_dead(dead)
+
+        warm = pool.checkout_warm_only(self.key)
+
+        self.assertIs(warm, live)
+        self.assertTrue(_closed(dead))
+        self.assertEqual(pool._in_use, 1)
+        # Never constructs: a second call with nothing warm left returns None.
+        self.assertIsNone(pool.checkout_warm_only(self.key))
+        self.assertEqual(len(built), 2)
+
     def test_full_pool_evicts_other_key_rather_than_starving(self) -> None:
         pool = codex_pool._SharedCodexPool(max_size=2)
         factory, built = _counting_factory()
@@ -254,3 +281,147 @@ class BorrowCodexTests(SimpleTestCase):
         with codex_pool.borrow_codex(codex_class) as replacement:
             self.assertIsNot(replacement, codex)
         self.assertEqual(len(built), 2)
+
+
+class _ProbeCodex(_FakeCodex):
+    """``_FakeCodex`` that records keepalive probe calls."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self.thread_list_calls: list[dict[str, Any]] = []
+
+    def thread_list(self, **kwargs: Any) -> object:
+        self.thread_list_calls.append(kwargs)
+        return object()
+
+
+class RunBorrowedOpWithRetryTests(SimpleTestCase):
+    @override
+    def setUp(self) -> None:
+        saved_pool = codex_pool._SHARED_POOL
+        codex_pool._SHARED_POOL = codex_pool._SharedCodexPool()
+        self.addCleanup(setattr, codex_pool, "_SHARED_POOL", saved_pool)
+
+    @override_settings(TESTING=False)
+    def test_uses_warm_server_without_constructing(self) -> None:
+        factory, built = _counting_factory()
+        codex_class = lambda **_: factory()  # noqa: E731
+        # Pre-warm one server, then return it to the idle pool.
+        with codex_pool.borrow_codex(codex_class) as warm:
+            pass
+
+        seen: list[Any] = []
+
+        def operation(codex: Any) -> str:
+            seen.append(codex)
+            return "ok"
+
+        result = codex_pool.run_borrowed_op_with_retry(codex_class, operation)
+
+        self.assertEqual(result, "ok")
+        # Reused the warm server; no second construction and no init write.
+        self.assertEqual(len(built), 1)
+        self.assertIs(seen[0], warm)
+        self.assertFalse(_closed(warm))
+
+    @override_settings(TESTING=False)
+    def test_falls_back_to_cold_open_when_pool_empty(self) -> None:
+        factory, built = _counting_factory()
+        codex_class = lambda **_: factory()  # noqa: E731
+
+        seen: list[Any] = []
+
+        def operation(codex: Any) -> str:
+            seen.append(codex)
+            return "ok"
+
+        result = codex_pool.run_borrowed_op_with_retry(codex_class, operation)
+
+        self.assertEqual(result, "ok")
+        # Empty pool: one cold open, run, and close (the cold path owns the server).
+        self.assertEqual(len(built), 1)
+        self.assertTrue(_closed(seen[0]))
+
+    @override_settings(TESTING=False)
+    def test_warm_locked_op_drops_server_and_falls_back(self) -> None:
+        factory, built = _counting_factory()
+        codex_class = lambda **_: factory()  # noqa: E731
+        with codex_pool.borrow_codex(codex_class) as warm:
+            pass
+
+        calls = {"n": 0}
+
+        def operation(_codex: Any) -> str:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise TransportClosedError(_LOCKED)
+            return "ok"
+
+        result = codex_pool.run_borrowed_op_with_retry(codex_class, operation)
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(calls["n"], 2)
+        # Warm server poisoned by the locked op is dropped; a fresh one is opened.
+        self.assertTrue(_closed(warm))
+        self.assertEqual(len(built), 2)
+
+    @override_settings(TESTING=False)
+    def test_warm_non_locked_error_propagates_without_fallback(self) -> None:
+        factory, built = _counting_factory()
+        codex_class = lambda **_: factory()  # noqa: E731
+        with codex_pool.borrow_codex(codex_class) as warm:
+            pass
+
+        def operation(_codex: Any) -> str:
+            raise ValueError("boom")
+
+        with self.assertRaises(ValueError):
+            codex_pool.run_borrowed_op_with_retry(codex_class, operation)
+
+        # The warm server is dropped, but a non-locked error does not retry.
+        self.assertTrue(_closed(warm))
+        self.assertEqual(len(built), 1)
+
+
+class CodexPoolKeepaliveTests(SimpleTestCase):
+    @override
+    def setUp(self) -> None:
+        saved_pool = codex_pool._SHARED_POOL
+        codex_pool._SHARED_POOL = codex_pool._SharedCodexPool()
+        self.addCleanup(setattr, codex_pool, "_SHARED_POOL", saved_pool)
+
+    def test_disabled_under_testing(self) -> None:
+        self.assertFalse(codex_pool.start_codex_pool_keepalive())
+
+    @override_settings(TESTING=False)
+    def test_tick_warms_and_probes_a_server(self) -> None:
+        built: list[_ProbeCodex] = []
+
+        def codex_class(**_kwargs: Any) -> _ProbeCodex:
+            codex = _ProbeCodex()
+            built.append(codex)
+            return codex
+
+        with mock.patch.object(codex_pool, "Codex", codex_class):
+            codex_pool._codex_pool_keepalive_tick()
+
+        # One warm server constructed and exercised with a cheap read.
+        self.assertEqual(len(built), 1)
+        self.assertEqual(
+            built[0].thread_list_calls,
+            [{"limit": 1, "use_state_db_only": True}],
+        )
+        # Returned to the pool (warm) rather than closed.
+        self.assertFalse(_closed(built[0]))
+
+    @override_settings(TESTING=False)
+    def test_tick_swallows_probe_failure(self) -> None:
+        def codex_class(**_kwargs: Any) -> _FakeCodex:
+            return _FakeCodex()
+
+        with (
+            mock.patch.object(codex_pool, "borrow_codex", side_effect=RuntimeError),
+            mock.patch.object(codex_pool, "Codex", codex_class),
+        ):
+            # Must not raise: a failed probe is logged and retried next tick.
+            codex_pool._codex_pool_keepalive_tick()

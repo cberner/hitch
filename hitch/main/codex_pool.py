@@ -1457,6 +1457,54 @@ def run_codex_op_with_retry(
     raise last_error
 
 
+def run_borrowed_op_with_retry(
+    codex_factory: Callable[..., Codex],
+    operation: Callable[[Codex], T],
+    *,
+    enable_memories: bool = False,
+    web_search_mode: str | None = None,
+) -> T:
+    """Run ``operation`` against a *warm* pooled app-server when one exists,
+    falling back to a retrying cold open only when the pool is empty.
+
+    ``run_codex_op_with_retry`` always cold-opens a fresh app-server, so every
+    call pays the CODEX_HOME init write that contends on the state-DB writer lock
+    -- the failure mode behind "failed to initialize sqlite state runtime ...
+    database is locked" on request paths like the session-detail resume. This
+    instead borrows an already-initialized server from the shared pool first, so
+    the steady-state request does *no* init write at all. ``operation`` must be
+    idempotent (a warm server that dies on a locked op is dropped and the call
+    falls back to the cold path, so it may run more than once) -- safe for reads
+    like ``thread_resume``/``thread_list``, not for turn starts.
+    """
+    config = app_server_config(
+        enable_memories=enable_memories, web_search_mode=web_search_mode
+    )
+    if _shared_pool_enabled():
+        key = _pool_key(enable_memories, web_search_mode)
+        warm = _SHARED_POOL.checkout_warm_only(key)
+        if warm is not None:
+            healthy = True
+            try:
+                return operation(warm)
+            except TransportClosedError as exc:
+                healthy = False
+                if not is_database_locked_error(exc):
+                    raise
+                # The warm server exited on a locked op; drop it and fall through
+                # to a fresh cold open (which retries the locked init itself).
+                logger.warning(
+                    "warm app-server state DB locked during borrowed op; "
+                    "falling back to a fresh open"
+                )
+            except BaseException:
+                healthy = False
+                raise
+            finally:
+                _SHARED_POOL.release(key, warm, healthy=healthy)
+    return run_codex_op_with_retry(lambda: codex_factory(config=config), operation)
+
+
 def start_codex(config: AppServerConfig) -> Codex:
     """Construct a long-lived Codex app-server with ``_start_codex_with_retry``.
 
@@ -1650,6 +1698,32 @@ class _SharedCodexPool:
                 self._in_use -= 1
             raise
 
+    def checkout_warm_only(self, key: _ConfigKey) -> Codex | None:
+        """Check out a live idle server without ever constructing one.
+
+        Returns ``None`` when no warm server is available rather than cold-opening
+        (and so re-initializing the CODEX_HOME state DB). Lets callers prefer a
+        warm server on the request path and fall back to their own retrying cold
+        open only when the pool is empty -- the construction write is exactly what
+        contends on the state-DB writer lock, so skipping it when a warm server
+        exists avoids the lock entirely.
+        """
+        dead: list[Codex] = []
+        reused: Codex | None = None
+        with self._lock:
+            idle = self._idle.get(key)
+            while idle:
+                candidate = idle.pop()
+                if _codex_is_alive(candidate):
+                    reused = candidate
+                    break
+                dead.append(candidate)
+            if reused is not None:
+                self._in_use += 1
+        for stale in dead:
+            _close_quietly(stale)
+        return reused
+
     def release(self, key: _ConfigKey, codex: Codex, *, healthy: bool) -> None:
         to_close: Codex | None = None
         with self._lock:
@@ -1690,6 +1764,65 @@ def _shared_pool_enabled() -> bool:
     # call, so caching pooled instances across cases would leak mocks. The pool
     # itself is covered directly by test_codex_pool_shared.
     return not getattr(settings, "TESTING", False)
+
+
+# How often the keepalive exercises a warm pooled server. Short relative to any
+# plausible app-server idle timeout so the server stays warm, long enough not to
+# add meaningful load.
+_KEEPALIVE_INTERVAL_SECONDS = 30
+_keepalive_lock = threading.Lock()
+_keepalive_started = False
+
+
+def start_codex_pool_keepalive() -> bool:
+    """Start a daemon that keeps one warm pooled app-server present and healthy.
+
+    The shared pool only fills when a request borrows, and an idle pooled server
+    can die (laptop sleep, OOM, a Codex-side idle exit) with nothing noticing
+    until the next checkout cold-opens a replacement. After an idle stretch that
+    makes the first request -- and the session-detail resume -- cold-open and
+    race the per-turn worker on the CODEX_HOME init write, which is the
+    "database is locked" users hit first thing in the morning. This periodically
+    borrows the default config key and runs one cheap read, so an initialized
+    server is already warm when the user returns and a dead one is rebuilt
+    *before* they hit it rather than on their request.
+    """
+    global _keepalive_started
+    if getattr(settings, "TESTING", False):
+        return False
+    with _keepalive_lock:
+        if _keepalive_started:
+            return False
+        _keepalive_started = True
+        threading.Thread(
+            target=_codex_pool_keepalive_loop,
+            name="hitch-codex-pool-keepalive",
+            daemon=True,
+        ).start()
+        return True
+
+
+def _codex_pool_keepalive_loop() -> None:
+    stop = threading.Event()
+    while True:
+        _codex_pool_keepalive_tick()
+        stop.wait(_KEEPALIVE_INTERVAL_SECONDS)
+
+
+def _codex_pool_keepalive_tick() -> None:
+    """Borrow the default-key server and exercise it with one cheap read.
+
+    Borrowing reconstructs a dead pooled server (checkout drops one whose
+    subprocess has exited) and the read both keeps the app-server from idling out
+    and surfaces a wedged-but-alive server -- a failed probe makes ``borrow_codex``
+    drop it, so the next tick rebuilds a healthy one. Best-effort: any failure is
+    logged and retried next tick rather than killing the daemon.
+    """
+    try:
+        with borrow_codex(Codex) as codex:
+            codex.thread_list(limit=1, use_state_db_only=True)
+    except Exception:
+        logger.warning("codex pool keepalive probe failed", exc_info=True)
 
 
 @contextlib.contextmanager
