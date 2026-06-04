@@ -1346,8 +1346,26 @@ def reconcile_dead_for_workflow(
         main_thread_id=main_thread_id,
         workflow_id=workflow_id,
     )
+    # A hidden workflow stream may be the only thing reconciling (maintenance
+    # scheduler disabled, or between its 60s ticks), so reap leaked workers here
+    # too -- otherwise a wedged workflow worker keeps the Codex state-DB lock.
+    # The reap is a global /proc scan, so debounce it: many concurrent workflow
+    # streams collapse to one sweep per interval (the 60s reap grace makes this
+    # coarse gate harmless).
+    _reconcile_orphaned_workers_if_due()
     _prune_reaped_workers()
     return updated
+
+
+def _reconcile_orphaned_workers_if_due() -> int:
+    """Debounced global orphan reap for scoped callers (workflow streams)."""
+    if getattr(settings, "TESTING", False):
+        return reconcile_orphaned_workers()
+    if rate_limit.claim(
+        "reconcile_orphaned_workers", min_interval=_RECONCILE_DEAD_MIN_INTERVAL
+    ):
+        return reconcile_orphaned_workers()
+    return 0
 
 
 def _mark_dead_instances_failed(pending: Iterable[CodexInstance]) -> int:

@@ -1931,6 +1931,25 @@ class ReconcileAndLookupTests(TestCase):
             workflow_id=target_workflow.pk,
         )
 
+    @patch("hitch.main.codex_pool.reconcile_orphaned_workers", return_value=0)
+    @patch("hitch.main.system_agents.reconcile_terminal_workflow_instances")
+    def test_reconcile_dead_for_workflow_reaps_orphans(
+        self, _mock_reconcile: MagicMock, mock_reap: MagicMock
+    ) -> None:
+        # A hidden workflow stream may be the only thing reconciling, so it must
+        # still run the orphan reap to free a wedged worker's DB lock.
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+        )
+
+        codex_pool.reconcile_dead_for_workflow(
+            workflow.pk, main_thread_id=workflow.main_thread_id
+        )
+
+        mock_reap.assert_called_once()
+
     @patch("hitch.main.system_agents.on_codex_instance_finished")
     def test_reconcile_does_not_notify_system_agents_for_unassigned_pid(
         self, mock_notify: MagicMock
