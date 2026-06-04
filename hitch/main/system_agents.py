@@ -160,6 +160,11 @@ _PR_MONITOR_STATE_KEY = "last_pr_monitor"
 _PR_MONITOR_BACKOFF_STATE_KEY = "pr_monitor_backoff"
 _PR_GATES_STATE_KEY = "pr_gates"
 _PR_PENDING_CHECKS_STATE_KEY = "pr_pending_checks"
+_WORKFLOW_TURN_DEATH_RETRY_STATE_KEY = "workflow_turn_death_retries"
+_WORKFLOW_TURN_DEATH_RETRY_LIMIT = 1
+_WORKER_EXITED_BEFORE_COMPLETION_ERROR = (
+    "worker process exited before reporting completion"
+)
 _PR_GATE_MERGE_CONFLICTS = "merge_conflicts"
 _PR_GATE_REVIEW = "review"
 _PR_GATE_CI = "ci"
@@ -2553,6 +2558,8 @@ def _handle_system_feedback_finished(instance: CodexInstance) -> None:
     if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
         return
     if instance.status != CodexInstance.STATUS_COMPLETED:
+        if _retry_dead_system_feedback_worker(instance, workflow):
+            return
         if workflow.step == STEP_PR_FEEDBACK_RUNNING:
             _block_workflow(workflow, f"PR feedback worker failed: {instance.error}")
         else:
@@ -2566,10 +2573,14 @@ def _handle_system_feedback_finished(instance: CodexInstance) -> None:
             workflow.status == SystemWorkflow.STATUS_RUNNING
             and workflow.step == STEP_PR_FEEDBACK_RUNNING
         ):
+            _clear_feedback_worker_death_retries(workflow, "pr_feedback")
             _handle_pr_feedback_finished(instance, workflow)
         return
+    workflow.state = _state_without_feedback_worker_death_retry(
+        workflow.state, "qa_feedback"
+    )
     workflow.step = STEP_QA_RUNNING
-    workflow.save(update_fields=["step", "updated_at"])
+    workflow.save(update_fields=["step", "state", "updated_at"])
     try:
         if _state_bool(workflow, "qa_panel_enabled"):
             _spawn_pr_qa_panel_runs(workflow)
@@ -2577,6 +2588,97 @@ def _handle_system_feedback_finished(instance: CodexInstance) -> None:
             _spawn_pr_qa_run(workflow)
     except Exception as exc:
         _block_workflow(workflow, f"failed to restart QA agent: {exc!r}")
+
+
+def _retry_dead_system_feedback_worker(
+    instance: CodexInstance, workflow: SystemWorkflow
+) -> bool:
+    retry_kind = _feedback_worker_retry_kind(workflow)
+    if (
+        workflow.status != SystemWorkflow.STATUS_RUNNING
+        or not retry_kind
+        or instance.error.strip() != _WORKER_EXITED_BEFORE_COMPLETION_ERROR
+    ):
+        return False
+    retries = _feedback_worker_death_retries(workflow.state)
+    retry_count = retries.get(retry_kind, 0)
+    if retry_count >= _WORKFLOW_TURN_DEATH_RETRY_LIMIT:
+        return False
+    workflow.state = {
+        **workflow.state,
+        _WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {
+            **retries,
+            retry_kind: retry_count + 1,
+        },
+    }
+    workflow.save(update_fields=["state", "updated_at"])
+    try:
+        _spawn_workflow_turn(
+            workflow,
+            prompt=instance.prompt,
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            display_author=(
+                instance.display_author
+                or (
+                    PR_MONITOR_DISPLAY_AUTHOR
+                    if retry_kind == "pr_feedback"
+                    else QA_DISPLAY_AUTHOR
+                )
+            ),
+            agent_kind=instance.agent_kind,
+        )
+    except Exception as exc:
+        label = "PR feedback" if retry_kind == "pr_feedback" else "QA feedback"
+        _block_workflow(
+            workflow,
+            f"failed to retry {label} turn after worker exit: {exc!r}",
+        )
+    return True
+
+
+def _feedback_worker_retry_kind(workflow: SystemWorkflow) -> str:
+    if workflow.step == STEP_FEEDBACK_RUNNING:
+        return "qa_feedback"
+    if workflow.step == STEP_PR_FEEDBACK_RUNNING:
+        return "pr_feedback"
+    return ""
+
+
+def _feedback_worker_death_retries(state: Mapping[str, Any]) -> dict[str, int]:
+    raw = state.get(_WORKFLOW_TURN_DEATH_RETRY_STATE_KEY)
+    if not isinstance(raw, dict):
+        return {}
+    retries: dict[str, int] = {}
+    for key in ("qa_feedback", "pr_feedback"):
+        value = raw.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            retries[key] = value
+    return retries
+
+
+def _clear_feedback_worker_death_retries(
+    workflow: SystemWorkflow, retry_kind: str
+) -> None:
+    state = _state_without_feedback_worker_death_retry(workflow.state, retry_kind)
+    if state == workflow.state:
+        return
+    workflow.state = state
+    workflow.save(update_fields=["state", "updated_at"])
+
+
+def _state_without_feedback_worker_death_retry(
+    state: Mapping[str, Any], retry_kind: str
+) -> dict[str, Any]:
+    retries = _feedback_worker_death_retries(state)
+    if retry_kind not in retries:
+        return dict(state)
+    retries.pop(retry_kind, None)
+    updated = dict(state)
+    if retries:
+        updated[_WORKFLOW_TURN_DEATH_RETRY_STATE_KEY] = retries
+    else:
+        updated.pop(_WORKFLOW_TURN_DEATH_RETRY_STATE_KEY, None)
+    return updated
 
 
 def _handle_pr_qa_agent_finished(
