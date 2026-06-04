@@ -1168,14 +1168,16 @@ def _kill_orphaned_worker(pid: int, instance_id: int) -> bool:
     except Exception:
         logger.exception("could not load instance %s for orphan reap", instance_id)
     scope_unit = instance.systemd_scope_unit if instance is not None else None
-    # The row may be gone (e.g. a reset/cleaned DB) while the worker is still
-    # running. A scoped worker is reparented out of our session by systemd-run,
-    # so it is not a session leader; if the scanned pid is ours under the relaxed
-    # check but fails the session-leader check it was launched under systemd
-    # isolation, and the killpg path below would skip it -- leaving its
-    # app-server (and the Codex DB lock) alive. Reap it through its derived scope.
+    # The scope unit may be absent even for a scoped worker: the row can be gone
+    # (e.g. a reset/cleaned DB) or exist with an empty ``systemd_scope_unit`` (the
+    # parent died after ``systemd-run`` returned but before saving it). A scoped
+    # worker is reparented out of our session by systemd-run, so it is not a
+    # session leader; if the scanned pid is ours under the relaxed check but fails
+    # the session-leader check it was launched under systemd isolation, and the
+    # killpg path below would skip it -- leaving its app-server (and the Codex DB
+    # lock) alive. Reap it through its derived scope instead.
     if (
-        instance is None
+        not scope_unit
         and _pid_is_our_worker(pid, instance_id, require_session_leader=False)
         and not _pid_is_our_worker(pid, instance_id)
     ):
@@ -1188,7 +1190,11 @@ def _kill_orphaned_worker(pid: int, instance_id: int) -> bool:
         # instance (scoped workers are not session leaders) before signaling.
         if not _pid_is_our_worker(pid, instance_id, require_session_leader=False):
             return False
-        target = instance or CodexInstance(pid=pid, systemd_scope_unit=scope_unit)
+        # Carry the effective scope unit on the target even when the row had it
+        # empty (a derived scope), so _force_kill_instance signals the unit
+        # rather than falling back to killpg.
+        target = instance or CodexInstance(pid=pid)
+        target.systemd_scope_unit = scope_unit
         try:
             _force_kill_instance(target)
             return True
