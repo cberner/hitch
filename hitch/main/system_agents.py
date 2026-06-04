@@ -961,6 +961,68 @@ def start_pr_qa_workflow(
     return workflow
 
 
+def start_pr_monitor_workflow(
+    *,
+    main_thread_id: str,
+    cwd: str,
+    pr_url: str,
+    sandbox_policy: str | None,
+    approval_mode: str | None,
+    model: str | None = None,
+    reasoning_effort: str | None = None,
+    base_instructions: str | None = None,
+    developer_instructions: str | None = None,
+    enable_memories: bool = False,
+    web_search_mode: str | None = None,
+    initial_user_message_index: int = 0,
+) -> SystemWorkflow:
+    """Start PR monitoring for an already-opened PR, skipping the QA step."""
+    pr_handoff = _compact_pr_handoff(
+        _pr_handoff_from_github_url(pr_url, source_tool="fix_pr_slash")
+    )
+    try:
+        with transaction.atomic():
+            workflow = SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id=main_thread_id,
+                cwd=cwd,
+                status=SystemWorkflow.STATUS_RUNNING,
+                step=STEP_PR_MONITORING,
+                max_iterations=PR_QA_WORKFLOW_MAX_ITERATIONS,
+                state={
+                    "pr_prompt": PR_SLASH_PROMPT,
+                    "sandbox_policy": sandbox_policy or "",
+                    "approval_mode": approval_mode or "",
+                    "model": model or "",
+                    "reasoning_effort": reasoning_effort or "",
+                    "base_instructions": base_instructions or "",
+                    "developer_instructions": developer_instructions or "",
+                    "enable_memories": enable_memories,
+                    "web_search_mode": web_search_mode or "",
+                    "next_user_message_index": max(initial_user_message_index, 0),
+                    "open_pr_on_lgtm": True,
+                    "qa_panel_enabled": False,
+                    "auto_merge_branch": "",
+                    _PR_HANDOFF_STATE_KEY: pr_handoff,
+                },
+            )
+    except IntegrityError:
+        existing_workflow = SystemWorkflow.objects.filter(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id=main_thread_id,
+            status=SystemWorkflow.STATUS_RUNNING,
+        ).first()
+        if existing_workflow is None:
+            raise
+        return existing_workflow
+
+    try:
+        _spawn_pr_followup_monitor_run(workflow)
+    except Exception as exc:
+        _block_workflow(workflow, f"failed to start PR follow-up monitor: {exc!r}")
+    return workflow
+
+
 def maybe_start_auto_proposal_workflows(*, project: Project | None = None) -> int:
     goals = AutonomousGoal.objects.select_related("project").filter(
         auto_proposal_enabled=True,

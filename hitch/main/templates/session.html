@@ -2418,6 +2418,11 @@
                     <button type="button" role="menuitem" data-slash-pr>
                         <span class="slash-menu-title">PR</span>
                     </button>
+                    {% if pr_url %}
+                    <button type="button" role="menuitem" data-slash-fix-pr>
+                        <span class="slash-menu-title">Fix PR</span>
+                    </button>
+                    {% endif %}
                     <button type="button" role="menuitem" data-slash-qa>
                         <span class="slash-menu-title">QA</span>
                     </button>
@@ -2765,6 +2770,7 @@
                 const slashMenu = composer.querySelector("[data-slash-menu]");
                 const slashPlan = composer.querySelector("[data-slash-plan]");
                 const slashPr = composer.querySelector("[data-slash-pr]");
+                const slashFixPr = composer.querySelector("[data-slash-fix-pr]");
                 const slashQa = composer.querySelector("[data-slash-qa]");
                 const imageButton = composer.querySelector("[data-image-button]");
                 const imageInput = composer.querySelector("[data-image-input]");
@@ -2780,6 +2786,7 @@
                 const mobileComposerQuery = window.matchMedia("(max-width: 640px)");
                 const composerKeyboardSettleDelays = [50, 150, 300, 500];
                 const prPrompt = "{{ pr_slash_prompt|escapejs }}";
+                const fixPrPrompt = "{{ fix_pr_slash_command|escapejs }}";
                 const qaPrompt = "{{ qa_slash_prompt|escapejs }}";
                 const workflowLocked = composer.dataset.workflowLocked === "true";
                 let composerKeyboardFrame = 0;
@@ -2894,6 +2901,12 @@
                     if ((parts[0] || "").toLowerCase() !== "/pr") return null;
                     return prPrompt;
                 };
+                const parseFixPrCommand = () => {
+                    const text = input.value.trim();
+                    const parts = text.split(/\s+/, 2);
+                    if ((parts[0] || "").toLowerCase() !== fixPrPrompt) return null;
+                    return fixPrPrompt;
+                };
                 const parseQaCommand = () => {
                     const text = input.value.trim();
                     const parts = text.split(/\s+/, 2);
@@ -2902,6 +2915,7 @@
                 };
                 const syncNextMessageConfig = () => {
                     const workflowCommand = parsePrCommand() !== null
+                        || parseFixPrCommand() !== null
                         || parseQaCommand() !== null;
                     const planMode = !workflowCommand && (
                         composer.dataset.planMode === "true"
@@ -2993,6 +3007,16 @@
                         requestSubmit(composer, submit);
                     });
                 }
+                if (slashFixPr) {
+                    slashFixPr.addEventListener("click", () => {
+                        setPlanMode(false, true);
+                        clearImages();
+                        input.value = fixPrPrompt;
+                        sync();
+                        closeSlashMenu();
+                        requestSubmit(composer, submit);
+                    });
+                }
                 if (slashQa) {
                     slashQa.addEventListener("click", () => {
                         setPlanMode(false, true);
@@ -3051,8 +3075,11 @@
                         clearImages();
                     } else {
                         const prCommandPrompt = parsePrCommand();
-                        const qaCommandPrompt = prCommandPrompt === null ? parseQaCommand() : null;
-                        const workflowCommandPrompt = prCommandPrompt || qaCommandPrompt;
+                        const fixPrCommandPrompt = prCommandPrompt === null ? parseFixPrCommand() : null;
+                        const qaCommandPrompt = (
+                            prCommandPrompt === null && fixPrCommandPrompt === null
+                        ) ? parseQaCommand() : null;
+                        const workflowCommandPrompt = prCommandPrompt || fixPrCommandPrompt || qaCommandPrompt;
                         const commandPrompt = workflowCommandPrompt === null ? parsePlanCommand() : null;
                         if (workflowCommandPrompt !== null) {
                             setPlanMode(false, true);
