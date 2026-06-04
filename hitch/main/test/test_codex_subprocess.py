@@ -2642,7 +2642,13 @@ class FinalizeReapedInstanceTests(TestCase):
 
         mock_resolve.assert_called_once_with(failed.pk)
 
-    def test_completed_auto_pr_not_fired_is_marked_failed(self) -> None:
+    @patch(
+        "hitch.main.system_agents.auto_review_intentionally_skipped",
+        return_value=False,
+    )
+    def test_completed_auto_pr_not_fired_is_marked_failed(
+        self, _mock_skipped: MagicMock
+    ) -> None:
         done = self._make(
             status=CodexInstance.STATUS_COMPLETED, auto_pr_enabled=True
         )
@@ -2653,6 +2659,25 @@ class FinalizeReapedInstanceTests(TestCase):
         self.assertEqual(done.status, CodexInstance.STATUS_FAILED)
         self.assertIn("auto-PR", done.error)
         self.assertIn("retry", done.error)
+
+    @patch(
+        "hitch.main.system_agents.auto_review_intentionally_skipped",
+        return_value=True,
+    )
+    def test_completed_auto_pr_intentionally_skipped_is_preserved(
+        self, _mock_skipped: MagicMock
+    ) -> None:
+        # Visible-approval mode / pending proposed plan: the null trigger is by
+        # design, so a successful turn must not be rewritten as failed.
+        done = self._make(
+            status=CodexInstance.STATUS_COMPLETED, auto_pr_enabled=True
+        )
+
+        codex_pool._finalize_reaped_instance(done.pk)
+
+        done.refresh_from_db()
+        self.assertEqual(done.status, CodexInstance.STATUS_COMPLETED)
+        self.assertEqual(done.error, "")
 
     def test_completed_without_auto_review_is_untouched(self) -> None:
         done = self._make(status=CodexInstance.STATUS_COMPLETED)

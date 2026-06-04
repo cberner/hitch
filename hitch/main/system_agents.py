@@ -2343,6 +2343,20 @@ def _maybe_start_auto_review_workflow(instance: CodexInstance) -> None:
         raise
 
 
+def auto_review_intentionally_skipped(instance: CodexInstance) -> bool:
+    """Whether auto-PR/QA would decline for this completed turn by design.
+
+    ``_maybe_start_auto_review_workflow`` returns without claiming a trigger when
+    the turn needs visible approval or ends with a pending proposed plan, so the
+    null ``auto_pr_triggered_at`` / ``auto_qa_triggered_at`` are expected rather
+    than a dropped follow-up. The orphan reaper uses this so it does not rewrite
+    such an intentionally-skipped (but successful) turn as failed.
+    """
+    return _auto_review_requires_visible_approval(
+        instance
+    ) or _completed_turn_has_pending_proposed_plan(instance)
+
+
 def _auto_review_requires_visible_approval(instance: CodexInstance) -> bool:
     return (
         instance.approval_mode or SYSTEM_AGENT_APPROVAL_MODE

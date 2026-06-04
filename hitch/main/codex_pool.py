@@ -1209,8 +1209,13 @@ def _reaped_turn_lost_auto_review(instance: CodexInstance) -> bool:
     ``auto_qa_triggered_at`` as it does. A reaped COMPLETED user turn with the
     automation enabled but neither field set was killed before it could fire --
     and unlike workflow-owned rows there is no later reconcile that recovers it.
+
+    Excludes turns where the automation would have been *intentionally* declined
+    (visible-approval mode, or a pending proposed plan): there the null
+    timestamps are by design, so the turn is a real success, not a lost
+    follow-up, and must not be rewritten as failed.
     """
-    return (
+    if not (
         instance.status == CodexInstance.STATUS_COMPLETED
         and instance.purpose == CodexInstance.PURPOSE_USER
         and instance.workflow_id is None
@@ -1218,7 +1223,21 @@ def _reaped_turn_lost_auto_review(instance: CodexInstance) -> bool:
         and (instance.auto_pr_enabled or instance.auto_qa_enabled)
         and instance.auto_pr_triggered_at is None
         and instance.auto_qa_triggered_at is None
-    )
+    ):
+        return False
+    try:
+        from hitch.main import system_agents
+
+        if system_agents.auto_review_intentionally_skipped(instance):
+            return False
+    except Exception:
+        # If we cannot determine intent, prefer leaving a completed turn intact
+        # over rewriting a successful result as a false failure.
+        logger.exception(
+            "could not check auto-review intent for reaped instance %s", instance.pk
+        )
+        return False
+    return True
 
 
 def _finalize_reaped_instance(instance_id: int) -> None:
