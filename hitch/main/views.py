@@ -562,6 +562,7 @@ _PLAN_ACTION_APPROVE = "approve"
 _PLAN_ACTION_REVISE = "revise"
 _VALID_PLAN_ACTIONS = frozenset({"", _PLAN_ACTION_APPROVE, _PLAN_ACTION_REVISE})
 _PR_SLASH_COMMAND = "/pr"
+_FIX_PR_SLASH_COMMAND = "/fix-pr"
 _PR_SLASH_PROMPT = system_agents.PR_SLASH_DISPLAY_PROMPT
 _PR_SLASH_FINAL_PROMPT = system_agents.PR_SLASH_PROMPT
 _PREVIOUS_DEFAULT_BRANCH_PR_SLASH_DISPLAY_PROMPT = (
@@ -4121,10 +4122,11 @@ def _render_session_detail(
     if metadata is not None:
         metadata_by_thread[session_id] = metadata
     session_project = _project_for_thread(thread, metadata_by_thread, projects)
-    pr_url = (
-        rollout_data.latest_pr_url
+    latest_pr_url = rollout_data.latest_pr_url if rollout_data is not None else None
+    pr_observation = (
+        rollout_data.pr_observation
         if rollout_data is not None
-        else _pr_url_for_thread(thread)
+        else _pr_observation_result_for_thread(thread)
     )
     latest_pr_workflow = _latest_pr_workflow_for_thread(session_id)
     stage_workflow = active_system_workflow or latest_pr_workflow
@@ -4134,22 +4136,24 @@ def _render_session_detail(
         and active_system_workflow.kind == SystemWorkflow.KIND_PR_QA
         else latest_pr_workflow
     )
+    main_updated_at = getattr(thread, "updated_at", None)
+    stage_workflow = _workflow_after_main_lifecycle(
+        stage_workflow, pr_observation, main_updated_at=main_updated_at
+    )
+    stage_pr_workflow = _workflow_after_main_lifecycle(
+        stage_pr_workflow, pr_observation, main_updated_at=main_updated_at
+    )
+    pr_url = _current_pr_url_for_thread(
+        thread,
+        pr_observation=pr_observation,
+        stage_pr_workflow=stage_pr_workflow,
+        latest_pr_url=latest_pr_url,
+        latest_pr_url_loaded=rollout_data is not None,
+    )
     stage_context: dict[str, Any] | None = None
     if not read_only:
-        pr_observation = (
-            rollout_data.pr_observation
-            if rollout_data is not None
-            else _pr_observation_result_for_thread(thread)
-        )
         awaiting_user_input = session_id in _thread_ids_waiting_for_user_input(
             [session_id]
-        )
-        main_updated_at = getattr(thread, "updated_at", None)
-        stage_workflow = _workflow_after_main_lifecycle(
-            stage_workflow, pr_observation, main_updated_at=main_updated_at
-        )
-        stage_pr_workflow = _workflow_after_main_lifecycle(
-            stage_pr_workflow, pr_observation, main_updated_at=main_updated_at
         )
         # Serve the last-known PR stage now and refresh off-request when due.
         # A synchronous ``gh pr view`` here shelled out on every detail render
@@ -4188,12 +4192,6 @@ def _render_session_detail(
                 stage_refreshing = True
         if stage_refreshing:
             _schedule_pr_stage_refresh(session_id)
-        if not pr_url:
-            pr_url = (
-                _string_value(workflow_pr_snapshot.get("url"))
-                or _string_value(log_pr_snapshot.get("url") if log_pr_snapshot else None)
-                or None
-            )
         stage = session_stage.derive_stage(
             entries=entries,
             active_instance=active_instance,
@@ -4381,6 +4379,7 @@ def _render_session_detail(
             "next_message_config": _next_message_config(settings, resumed, plan_model),
             "input_image_accept": _INPUT_IMAGE_ACCEPT,
             "pr_slash_prompt": _PR_SLASH_PROMPT,
+            "fix_pr_slash_command": _FIX_PR_SLASH_COMMAND,
             "qa_slash_prompt": _QA_SLASH_PROMPT,
             "default_plan_mode": default_plan_mode,
             "plan_approval_prompt": _PLAN_APPROVAL_PROMPT,
@@ -8622,8 +8621,9 @@ def session_demo_proxy(
 def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
     intent = _message_intent(request)
     pr_activation = _is_pr_activation(request)
+    fix_pr_activation = _is_fix_pr_activation(request)
     qa_activation = _is_qa_activation(request)
-    qa_workflow_activation = pr_activation or qa_activation
+    qa_workflow_activation = pr_activation or qa_activation or fix_pr_activation
     prompt = intent.prompt
     plan_mode = intent.plan_mode
     has_input_images = _has_input_image_uploads(request)
@@ -8948,6 +8948,18 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 workflow_kwargs["web_search_mode"] = web_search_mode
             if base_instructions:
                 workflow_kwargs["base_instructions"] = base_instructions
+            if fix_pr_activation:
+                pr_url = _fix_pr_url_for_thread(session_id, thread)
+                if not pr_url:
+                    _cleanup_saved_input_images(input_image_paths)
+                    return HttpResponseBadRequest(
+                        "fix-pr requires an opened PR for this session"
+                    )
+                system_agents.start_pr_monitor_workflow(
+                    pr_url=pr_url,
+                    **workflow_kwargs,
+                )
+                return redirect("session", session_id=session_id)
             if settings.qa_panel_enabled:
                 workflow_kwargs["qa_panel_enabled"] = True
             if qa_activation:
@@ -9146,6 +9158,43 @@ def _pr_url_for_thread(thread: Any) -> str | None:
         return None
     rollout_path = _rollout_path_for(thread)
     return rollout.latest_pr_url(rollout_path) if rollout_path is not None else None
+
+
+def _current_pr_url_for_thread(
+    thread: Any,
+    *,
+    pr_observation: codex_events.PrObservationResult,
+    stage_pr_workflow: SystemWorkflow | None,
+    latest_pr_url: str | None = None,
+    latest_pr_url_loaded: bool = False,
+) -> str | None:
+    # A raw latest PR URL is only valid while the PR observation epoch is
+    # current. Lifecycle-cleared sessions must not expose old PR actions.
+    if not pr_observation.superseded_by_lifecycle:
+        thread_url = latest_pr_url if latest_pr_url_loaded else _pr_url_for_thread(thread)
+        if thread_url:
+            return thread_url
+    workflow_handoff = system_agents.pr_handoff_for_workflow(stage_pr_workflow)
+    workflow_url = _string_value(workflow_handoff.get("url"))
+    if workflow_url:
+        return workflow_url
+    snapshot = pr_observation.snapshot
+    return _string_value(snapshot.get("url") if snapshot else None) or None
+
+
+def _fix_pr_url_for_thread(session_id: str, thread: Any) -> str | None:
+    pr_observation = _pr_observation_result_for_thread(thread)
+    stage_pr_workflow = _workflow_after_main_lifecycle(
+        _latest_pr_workflow_for_thread(session_id),
+        pr_observation,
+        main_updated_at=getattr(thread, "updated_at", None),
+    )
+    return _current_pr_url_for_thread(
+        thread,
+        pr_observation=pr_observation,
+        stage_pr_workflow=stage_pr_workflow,
+        latest_pr_url=None,
+    )
 
 
 def _pr_snapshot_for_thread(thread: Any) -> dict[str, Any] | None:
@@ -9523,6 +9572,8 @@ def _message_intent(request: HttpRequest) -> _MessageIntent:
         )
     if command == _PR_SLASH_COMMAND:
         return _MessageIntent(_PR_SLASH_PROMPT, False, False, False)
+    if command == _FIX_PR_SLASH_COMMAND:
+        return _MessageIntent(_FIX_PR_SLASH_COMMAND, False, False, False)
     if command == _QA_SLASH_COMMAND:
         return _MessageIntent(_QA_SLASH_PROMPT, False, False, False)
     if not plan_mode and prompt in _PR_PROMPT_ALIASES:
@@ -9539,6 +9590,12 @@ def _is_pr_activation(request: HttpRequest) -> bool:
         bool(parts and parts[0].lower() == _PR_SLASH_COMMAND)
         or prompt in _PR_PROMPT_ALIASES
     )
+
+
+def _is_fix_pr_activation(request: HttpRequest) -> bool:
+    prompt = request.POST.get("prompt", "").strip()
+    parts = prompt.split(maxsplit=1)
+    return bool(parts and parts[0].lower() == _FIX_PR_SLASH_COMMAND)
 
 
 def _is_qa_activation(request: HttpRequest) -> bool:
@@ -10189,11 +10246,14 @@ def _render_new_session_page(request: HttpRequest) -> HttpResponse:
 def _post_new_session(request: HttpRequest) -> HttpResponse:
     intent = _message_intent(request)
     pr_activation = _is_pr_activation(request)
+    fix_pr_activation = _is_fix_pr_activation(request)
     qa_activation = _is_qa_activation(request)
-    qa_workflow_activation = pr_activation or qa_activation
+    qa_workflow_activation = pr_activation or qa_activation or fix_pr_activation
     prompt = intent.prompt
     plan_mode = False if qa_workflow_activation else intent.plan_mode
     has_input_images = _has_input_image_uploads(request)
+    if fix_pr_activation:
+        return HttpResponseBadRequest("fix-pr requires an existing session with a PR")
     projects = list(Project.objects.all())
     target, target_error = _posted_new_session_target(request, projects)
     if target_error is not None or target is None:

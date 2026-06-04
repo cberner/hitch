@@ -3564,6 +3564,56 @@ class SpecCriticWorkflowTests(TestCase):
         "hitch.main.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_start_pr_monitor_workflow_skips_qa_and_starts_monitor(
+        self, mock_spawn: MagicMock, mock_observe: MagicMock
+    ) -> None:
+        mock_spawn.return_value = _instance(
+            thread_id="monitor-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        )
+
+        workflow = system_agents.start_pr_monitor_workflow(
+            main_thread_id="main-thread",
+            cwd="/repo",
+            pr_url="https://github.com/cberner/hitch/pull/169",
+            sandbox_policy="workspace-write",
+            approval_mode="auto_review",
+            model="gpt-5.4",
+            reasoning_effort="high",
+            base_instructions="Use Hitch.",
+            developer_instructions="Use repo conventions.",
+            enable_memories=True,
+            web_search_mode="live",
+            initial_user_message_index=7,
+        )
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+        self.assertEqual(workflow.state["next_user_message_index"], 7)
+        self.assertEqual(workflow.state["model"], "gpt-5.4")
+        handoff = workflow.state[system_agents._PR_HANDOFF_STATE_KEY]
+        self.assertEqual(handoff["url"], "https://github.com/cberner/hitch/pull/169")
+        self.assertEqual(handoff["repository_full_name"], "cberner/hitch")
+        self.assertEqual(handoff["pr_number"], 169)
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(
+            kwargs["agent_kind"], system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND
+        )
+        self.assertEqual(
+            kwargs["display_author"], system_agents.PR_MONITOR_DISPLAY_AUTHOR
+        )
+        mock_observe.assert_called_once_with(workflow)
+        run = SystemAgentRun.objects.get(workflow=workflow)
+        self.assertEqual(run.thread_id, "monitor-thread")
+        self.assertEqual(run.input["pr_handoff"]["pr_number"], 169)
+
+    @patch(
+        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation(),
+    )
     @patch("hitch.main.system_agents.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_stores_handoff_and_starts_monitor(

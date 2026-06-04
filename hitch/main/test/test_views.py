@@ -426,6 +426,11 @@ class SessionDetailFastPathTests(TestCase):
         self.assertContains(response, "high")
         self.assertContains(response, f'href="{pr_url}"')
         self.assertContains(
+            response,
+            '<button type="button" role="menuitem" data-slash-fix-pr>',
+            count=1,
+        )
+        self.assertContains(
             response, '<span class="stage-badge" data-tone="active">PR</span>'
         )
         self.assertContains(response, f'data-ts="{now.timestamp()}"')
@@ -651,7 +656,82 @@ class SessionDetailFastPathTests(TestCase):
             response,
             '<span class="usage-label">out</span><span class="usage-value">30</span>',
         )
+        self.assertNotContains(response, "Fix PR")
         self.assertEqual(load_rollout_lines.call_count, 1)
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_inactive_session_detail_hides_fix_pr_after_pr_epoch_clears(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        pr_url = "https://github.com/cberner/hitch/pull/94"
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_create_pull_request",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps({"url": pr_url}),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Opened the PR."}],
+                        "phase": "final_answer",
+                    },
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Make another change"},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Implemented."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ],
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="cleared-pr-epoch",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Cleared PR epoch",
+            codex_preview="Make another change",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "cleared-pr-epoch"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Implemented.")
+        self.assertNotContains(response, "Fix PR")
         mock_codex.assert_not_called()
 
     @patch("hitch.main.views._start_models_refresh_thread")
@@ -12869,7 +12949,7 @@ class SendMessageViewTests(TestCase):
         mock_spawn: MagicMock,
         mock_start_workflow: MagicMock,
     ) -> None:
-        for prompt in ("/pr", "/qa"):
+        for prompt in ("/pr", "/qa", "/fix-pr"):
             with self.subTest(prompt=prompt):
                 response = self.client.post(
                     reverse("send_message", kwargs={"session_id": "abc"}),
@@ -13726,6 +13806,193 @@ class SendMessageViewTests(TestCase):
                 }
                 workflow_kwargs.update(expected)
                 mock_start_workflow.assert_called_once_with(**workflow_kwargs)
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.system_agents.start_pr_monitor_workflow")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_fix_pr_slash_starts_monitor_for_opened_pr(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_start_monitor: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        pr_url = "https://github.com/cberner/hitch/pull/169"
+        rollout_path = self._make_rollout(
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_create_pull_request",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps({"url": pr_url}),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Opened the PR."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+        self._patch_codex(
+            mock_codex,
+            model="gpt-5.4",
+            reasoning_effort="high",
+            path=str(rollout_path),
+        )
+        mock_discover.return_value = [Path("/repo")]
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="abc",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_READY,
+            state={
+                "pr_handoff": {
+                    "url": "https://github.com/cberner/hitch/pull/168",
+                    "state": "closed",
+                    "merged": False,
+                }
+            },
+        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=datetime.now(UTC) - timedelta(minutes=5)
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "/fix-pr"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_start_workflow.assert_not_called()
+        mock_start_monitor.assert_called_once_with(
+            main_thread_id="abc",
+            cwd="/repo",
+            pr_url=pr_url,
+            sandbox_policy=None,
+            approval_mode="auto_review",
+            model="gpt-5.4",
+            reasoning_effort="high",
+            developer_instructions=None,
+            enable_memories=False,
+            initial_user_message_index=1,
+        )
+
+    @patch("hitch.main.views.system_agents.start_pr_monitor_workflow")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_fix_pr_slash_requires_opened_pr(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_start_monitor: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex, model="gpt-5.4")
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "/fix-pr"},
+        )
+
+        self.assertContains(
+            response,
+            "fix-pr requires an opened PR for this session",
+            status_code=400,
+        )
+        mock_start_monitor.assert_not_called()
+
+    @patch("hitch.main.views.system_agents.start_pr_monitor_workflow")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_fix_pr_slash_rejects_lifecycle_superseded_pr_url(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_start_monitor: MagicMock,
+    ) -> None:
+        pr_url = "https://github.com/cberner/hitch/pull/169"
+        rollout_path = self._make_rollout(
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": system_agents.PR_SLASH_PROMPT},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call",
+                        "name": "github_create_pull_request",
+                        "arguments": "{}",
+                        "call_id": "call-pr",
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call-pr",
+                        "output": json.dumps({"url": pr_url}),
+                    },
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Opened the PR."}],
+                        "phase": "final_answer",
+                    },
+                ),
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Make another change"},
+                ),
+                _rollout_line(
+                    "response_item",
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Implemented."}],
+                        "phase": "final_answer",
+                    },
+                ),
+            ]
+        )
+        self._patch_codex(mock_codex, model="gpt-5.4", path=str(rollout_path))
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "/fix-pr"},
+        )
+
+        self.assertContains(
+            response,
+            "fix-pr requires an opened PR for this session",
+            status_code=400,
+        )
+        mock_start_monitor.assert_not_called()
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.discover_repos")
