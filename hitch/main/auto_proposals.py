@@ -24,6 +24,11 @@ _AUTO_PROPOSAL_SCHEDULER_INTERVAL_SECONDS = 60
 # minutes and stall the rest of the scheduler. Leftover rows converge on later
 # 60s ticks, matching the workflow-maintenance scheduler's PR-stage cap.
 _PR_STAGE_REFRESH_LIMIT_PER_TICK = 5
+# Pages of the active session list refreshed per tick. The scheduler resumes
+# from its own cursor each tick, so the whole list is still covered
+# incrementally -- this only bounds the per-tick work so a busy instance with
+# many active sessions does not rescan all of them every minute.
+_SESSION_STATE_REFRESH_MAX_PAGES = 5
 _SCHEDULER_ENV = "HITCH_AUTO_PROPOSAL_SCHEDULER"
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
@@ -36,6 +41,9 @@ class SessionStateRefreshResult(NamedTuple):
     synced: int
     failed: bool
     pr_stages_refreshed: int
+    # Cursor to resume the incremental active-index scan from on the next tick;
+    # empty means the list was fully traversed (restart from the front).
+    active_next_cursor: str = ""
 
 
 class _SchedulerCodex:
@@ -103,9 +111,15 @@ def _auto_proposal_scheduler_loop() -> None:
     # Reused across ticks so the periodic state refresh doesn't spawn (and
     # re-init the Codex state DB for) a fresh app-server every 60 seconds.
     scheduler_codex = _SchedulerCodex()
+    # Resume point for the incremental active-index scan; carried across ticks
+    # so the scan walks the whole list a bounded window at a time rather than
+    # rescanning everything each tick.
+    active_cursor = ""
     try:
         while True:
-            _run_auto_proposal_scheduler_tick(scheduler_codex)
+            active_cursor = _run_auto_proposal_scheduler_tick(
+                scheduler_codex, start_cursor=active_cursor
+            )
             stop.wait(_AUTO_PROPOSAL_SCHEDULER_INTERVAL_SECONDS)
     finally:
         scheduler_codex.reset()
@@ -113,11 +127,17 @@ def _auto_proposal_scheduler_loop() -> None:
 
 def _run_auto_proposal_scheduler_tick(
     scheduler_codex: _SchedulerCodex | None = None,
-) -> None:
+    *,
+    start_cursor: str = "",
+) -> str:
+    """Run one scheduler tick. Returns the active-index cursor for the next tick."""
     close_old_connections()
+    next_cursor = ""
     try:
         codex_pool.reconcile_dead()
-        _refresh_unarchived_session_state_best_effort(scheduler_codex)
+        next_cursor = _refresh_unarchived_session_state_best_effort(
+            scheduler_codex, start_cursor=start_cursor
+        )
         started = system_agents.maybe_start_auto_proposal_workflows()
         if started:
             logger.info("started %s auto-proposal workflow(s)", started)
@@ -125,58 +145,74 @@ def _run_auto_proposal_scheduler_tick(
         logger.exception("failed to run auto-proposal scheduler tick")
     finally:
         close_old_connections()
+    return next_cursor
 
 
 def _refresh_unarchived_session_state_best_effort(
     scheduler_codex: _SchedulerCodex | None = None,
-) -> SessionStateRefreshResult | None:
+    *,
+    start_cursor: str = "",
+) -> str:
+    """Refresh a window of active session state. Returns the next-tick cursor.
+
+    A failed refresh (or a reused app-server that died) resets the cursor to the
+    front so the next tick starts a clean pass rather than resuming from a stale
+    position against a freshly reconnected app-server.
+    """
     try:
         codex = scheduler_codex.get() if scheduler_codex is not None else None
-        result = refresh_unarchived_session_state(codex)
+        result = refresh_unarchived_session_state(codex, start_cursor=start_cursor)
         # A failed metadata refresh may mean the reused app-server died; drop it
         # so the next tick reconnects rather than reusing a dead transport.
         if scheduler_codex is not None and result.failed:
             scheduler_codex.reset()
-        return result
+            return ""
+        return result.active_next_cursor
     except Exception:
         if scheduler_codex is not None:
             scheduler_codex.reset()
         logger.exception("failed to refresh unarchived session state")
-        return None
+        return ""
 
 
 def refresh_unarchived_session_state(
     codex: Codex | None = None,
+    *,
+    start_cursor: str = "",
+    max_pages: int = _SESSION_STATE_REFRESH_MAX_PAGES,
 ) -> SessionStateRefreshResult:
     """Refresh active Codex session metadata and GitHub-derived PR stages.
 
     ``codex`` lets the scheduler pass a long-lived app-server it reuses across
-    ticks; when omitted a short-lived one is opened just for this call.
+    ticks; when omitted a short-lived one is opened just for this call. The
+    active-index scan is bounded to ``max_pages`` per call and resumes from
+    ``start_cursor``, so successive ticks cover the whole list incrementally
+    instead of rescanning it every tick.
     """
     codex_synced = 0
     codex_failed = False
+    active_next_cursor = ""
     try:
         projects = list(Project.objects.all())
         if codex is not None:
-            codex_result = session_index.refresh_from_codex(
+            window = session_index.refresh_active_window(
                 codex,
                 projects=projects,
-                include_active=True,
-                include_archived=False,
-                max_pages=None,
+                start_cursor=start_cursor,
+                max_pages=max_pages,
             )
         else:
             config = codex_pool.app_server_config()
             with codex_pool.open_codex(lambda: Codex(config=config)) as opened:
-                codex_result = session_index.refresh_from_codex(
+                window = session_index.refresh_active_window(
                     opened,
                     projects=projects,
-                    include_active=True,
-                    include_archived=False,
-                    max_pages=None,
+                    start_cursor=start_cursor,
+                    max_pages=max_pages,
                 )
-        codex_synced = codex_result.synced
-        codex_failed = codex_result.failed
+        codex_synced = window.synced
+        codex_failed = window.failed
+        active_next_cursor = window.next_cursor
     except Exception:
         codex_failed = True
         logger.exception("failed to refresh active Codex session metadata")
@@ -187,4 +223,5 @@ def refresh_unarchived_session_state(
         synced=codex_synced,
         failed=codex_failed,
         pr_stages_refreshed=pr_stages_refreshed,
+        active_next_cursor=active_next_cursor,
     )

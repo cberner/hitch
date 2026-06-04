@@ -52,7 +52,7 @@ class AutoProposalSchedulerTests(SimpleTestCase):
         auto_proposals._run_auto_proposal_scheduler_tick()
 
         mock_reconcile_dead.assert_called_once_with()
-        mock_refresh.assert_called_once_with(None)
+        mock_refresh.assert_called_once_with(None, start_cursor="")
         mock_start.assert_called_once_with()
 
     @patch("hitch.main.auto_proposals.logger.exception")
@@ -279,7 +279,7 @@ class SchedulerCodexReuseTests(SimpleTestCase):
         # One app-server initialized once, reused for both ticks.
         self.assertEqual(mock_start.call_count, 1)
         self.assertEqual(mock_refresh.call_count, 2)
-        mock_refresh.assert_called_with(codex)
+        mock_refresh.assert_called_with(codex, start_cursor="")
 
     @patch("hitch.main.auto_proposals.refresh_unarchived_session_state")
     @patch("hitch.main.auto_proposals.codex_pool.app_server_config")

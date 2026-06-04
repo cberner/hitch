@@ -61,6 +61,13 @@ class _SourceRefreshResult(NamedTuple):
     seen_thread_ids: set[str]
 
 
+class ActiveWindowResult(NamedTuple):
+    synced: int
+    next_cursor: str
+    complete: bool
+    failed: bool
+
+
 def should_refresh(*, archived: bool) -> bool:
     source = (
         SessionIndexSyncState.SOURCE_ARCHIVED
@@ -149,6 +156,56 @@ def refresh_from_codex(
         failed=failed,
         active_next_cursor=active_next_cursor,
         archived_next_cursor=archived_next_cursor,
+    )
+
+
+def refresh_active_window(
+    codex: Codex,
+    *,
+    projects: list[Project],
+    start_cursor: str = "",
+    max_pages: int = 1,
+) -> ActiveWindowResult:
+    """Refresh one bounded window of the *active* session index from a cursor.
+
+    The background scheduler used to rescan the entire active list on every
+    tick (``max_pages=None``). This pages a bounded number of pages from
+    ``start_cursor`` instead and returns the cursor to resume from, so the
+    scheduler covers the whole list incrementally across ticks without holding
+    one app-server busy on a full sweep every minute. An empty returned
+    ``next_cursor`` means the list was fully traversed; the caller should resume
+    from the front next cycle.
+
+    Deliberately self-contained relative to ``SessionIndexSyncState``: a partial
+    background window is not a completed sync and must not advance the
+    request-path freshness/pagination cursor. On a *completed* pass it does bump
+    the freshness signal (``mark_synced``) so an idle dashboard still skips its
+    own refresh, matching the old full-sweep behavior.
+    """
+    try:
+        result = _refresh_source(
+            codex,
+            projects=projects,
+            archived=False,
+            use_state_db_only=True,
+            max_pages=max_pages,
+            start_cursor=start_cursor or None,
+        )
+    except AppServerError:
+        logger.warning("failed to refresh active session index window")
+        return ActiveWindowResult(
+            synced=0, next_cursor=start_cursor, complete=False, failed=True
+        )
+    if result.complete:
+        mark_synced(archived=False, complete=True)
+        return ActiveWindowResult(
+            synced=result.synced, next_cursor="", complete=True, failed=False
+        )
+    return ActiveWindowResult(
+        synced=result.synced,
+        next_cursor=result.next_cursor,
+        complete=False,
+        failed=False,
     )
 
 
@@ -333,9 +390,15 @@ def _refresh_source(
     archived: bool,
     use_state_db_only: bool,
     max_pages: int | None,
+    start_cursor: str | None = None,
 ) -> _SourceRefreshResult:
-    cursor: str | None = None
-    seen_cursors: set[str] = set()
+    cursor: str | None = start_cursor or None
+    # Seed the duplicate-cursor guard with the entry cursor. A windowed refresh
+    # (small ``max_pages``, resuming from ``start_cursor`` each tick) otherwise
+    # starts every call with an empty set, so a ``thread_list`` response that
+    # returns the same cursor it was called with goes undetected and the
+    # scheduler refreshes that one page forever instead of progressing.
+    seen_cursors: set[str] = {cursor} if cursor else set()
     pages = 0
     synced = 0
     seen_thread_ids: set[str] = set()
@@ -365,11 +428,19 @@ def _refresh_source(
                 seen_thread_ids=seen_thread_ids,
             )
         if next_cursor in seen_cursors:
-            logger.warning("thread list returned duplicate cursor; stopping session index refresh")
+            # ``thread_list`` handed back a cursor we already paged from (often
+            # the very one this window started at). Resuming from it would pin an
+            # incremental scheduler on the same page every tick, so reset to the
+            # front: report not-complete with an empty cursor and let the next
+            # cycle start a clean pass rather than re-pinning the stuck cursor.
+            logger.warning(
+                "thread list returned duplicate cursor; resetting session index "
+                "refresh to the front"
+            )
             return _SourceRefreshResult(
                 synced=synced,
                 complete=False,
-                next_cursor=next_cursor,
+                next_cursor="",
                 seen_thread_ids=seen_thread_ids,
             )
         seen_cursors.add(next_cursor)
