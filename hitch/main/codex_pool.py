@@ -1167,7 +1167,20 @@ def _kill_orphaned_worker(pid: int, instance_id: int) -> bool:
         instance = CodexInstance.objects.filter(pk=instance_id).first()
     except Exception:
         logger.exception("could not load instance %s for orphan reap", instance_id)
-    if instance is not None and instance.systemd_scope_unit:
+    scope_unit = instance.systemd_scope_unit if instance is not None else None
+    # The row may be gone (e.g. a reset/cleaned DB) while the worker is still
+    # running. A scoped worker is reparented out of our session by systemd-run,
+    # so it is not a session leader; if the scanned pid is ours under the relaxed
+    # check but fails the session-leader check it was launched under systemd
+    # isolation, and the killpg path below would skip it -- leaving its
+    # app-server (and the Codex DB lock) alive. Reap it through its derived scope.
+    if (
+        instance is None
+        and _pid_is_our_worker(pid, instance_id, require_session_leader=False)
+        and not _pid_is_our_worker(pid, instance_id)
+    ):
+        scope_unit = _scope_unit_for_instance(instance_id)
+    if scope_unit:
         # The scope unit name (``hitch-codex-worker-<id>.scope``) is not
         # deployment-unique, so ``systemctl kill <unit>`` could hit another
         # checkout's reused unit if our scoped worker exited since the scan.
@@ -1175,8 +1188,9 @@ def _kill_orphaned_worker(pid: int, instance_id: int) -> bool:
         # instance (scoped workers are not session leaders) before signaling.
         if not _pid_is_our_worker(pid, instance_id, require_session_leader=False):
             return False
+        target = instance or CodexInstance(pid=pid, systemd_scope_unit=scope_unit)
         try:
-            _force_kill_instance(instance)
+            _force_kill_instance(target)
             return True
         except ProcessLookupError:
             return False
@@ -1244,26 +1258,38 @@ def _finalize_reaped_instance(instance_id: int) -> None:
     """Clean up after force-killing a reaped worker so its turn isn't left in a
     silently-broken state.
 
-    Two cases the killed worker never got to handle itself:
+    Things the killed worker never got to handle itself:
 
-    * a ``FAILED`` turn: ``codex_worker`` cancels its dangling approval/input
-      prompts before exiting, and reaped terminal rows never pass through
-      ``_mark_dead_instances_failed`` (which does the same), so otherwise the UI
-      keeps actionable cards no worker can answer;
-    * a ``COMPLETED`` turn whose auto-PR/QA never fired (``_reaped_turn_lost_
-      auto_review``): surface it as a failed turn with a retry hint so the user
-      sees the dropped follow-up instead of a silent success.
+    * finish routing: a terminal demo/system-agent (or workflow-owned user) turn
+      relies on ``_notify_system_agents_if_needed`` to route its post-terminal
+      hooks, the same idempotent callback ``_mark_dead_instances_failed`` runs for
+      rows that died after saving terminal status; without it the
+      ``SessionDemo``/``SystemAgentRun``/workflow follow-up is stranded;
+    * a ``FAILED`` turn's dangling prompts: ``codex_worker`` cancels its pending
+      approval/input prompts before exiting, and reaped terminal rows never pass
+      through ``_mark_dead_instances_failed`` (which does the same), so otherwise
+      the UI keeps actionable cards no worker can answer;
+    * a ``COMPLETED`` plain user turn whose auto-PR/QA never fired
+      (``_reaped_turn_lost_auto_review``; not covered by the routing above):
+      surface it as a failed turn with a retry hint so the user sees the dropped
+      follow-up instead of a silent success.
     """
     try:
         instance = CodexInstance.objects.filter(pk=instance_id).first()
     except Exception:
         logger.exception("could not load reaped instance %s for finalize", instance_id)
         return
-    if instance is None:
+    if instance is None or instance.status not in (
+        CodexInstance.STATUS_COMPLETED,
+        CodexInstance.STATUS_FAILED,
+    ):
         return
     if instance.status == CodexInstance.STATUS_FAILED:
         _resolve_dangling_requests(instance.pk)
-        return
+    # Idempotent finish routing for demo/system-agent/workflow-owned rows (a
+    # no-op for a plain user turn, which the lost-auto-review check below covers).
+    _notify_system_agents_if_needed(instance)
+    cleanup_requested_input_images_for(instance)
     if _reaped_turn_lost_auto_review(instance):
         automation = "auto-PR" if instance.auto_pr_enabled else "auto-QA"
         CodexInstance.objects.filter(
