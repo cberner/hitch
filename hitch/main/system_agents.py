@@ -74,6 +74,7 @@ SPEC_RISK_AGENT_KIND = "spec_critic_risks"
 SPEC_TEST_AGENT_KIND = "spec_critic_tests"
 SPEC_SYNTHESIZER_AGENT_KIND = "spec_critic_synthesizer"
 QA_DISPLAY_AUTHOR = "QA agent"
+PR_WORKFLOW_DISPLAY_AUTHOR = "PR workflow"
 PR_MONITOR_DISPLAY_AUTHOR = "PR monitor"
 QA_PANEL_DISPLAY_AUTHOR = "QA panel"
 AUTONOMOUS_GOAL_DISPLAY_AUTHOR = "Autonomous goal agent"
@@ -144,6 +145,9 @@ _AUTONOMOUS_GOAL_USE_WORKTREES_STATE_KEY = "use_worktrees"
 _AUTONOMOUS_GOAL_SESSION_CWD_STATE_KEY = "session_cwd"
 _QA_DESIGN_SYNTHESIS_STATE_KEY = "qa_design_synthesis_gate"
 _QA_REVIEW_REVISION_STATE_KEY = "qa_review_revision"
+_WORKFLOW_FAILURE_OWNER_STATE_KEY = "failure_owner"
+_WORKFLOW_FAILURE_OWNER_QA = "qa"
+_WORKFLOW_FAILURE_OWNER_PR = "pr"
 _WORKFLOW_ROUTE_CLAIM_TIMEOUT = timedelta(minutes=10)
 # A Spec Critic classification runs in an in-process daemon thread, so it is
 # lost if the web process restarts mid-flight. Reconciliation re-arms a
@@ -5665,15 +5669,67 @@ def _spawn_pr_prompt(workflow: SystemWorkflow) -> CodexInstance:
 def _spawn_workflow_failure_turn(
     workflow: SystemWorkflow, error: str
 ) -> CodexInstance:
+    headline, display_author = _workflow_failure_turn_context(workflow, error)
     return _spawn_workflow_turn(
         workflow,
         prompt=(
-            "Hitch QA agent could not complete the PR workflow.\n\n"
+            f"{headline}\n\n"
             f"Status: {error}\n\n"
             "Tell the user the PR workflow needs attention before continuing."
         ),
         purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-        display_author=QA_DISPLAY_AUTHOR,
+        display_author=display_author,
+    )
+
+
+def _workflow_failure_turn_context(
+    workflow: SystemWorkflow, error: str
+) -> tuple[str, str]:
+    if _workflow_failure_owner(workflow, error) == _WORKFLOW_FAILURE_OWNER_QA:
+        return "Hitch QA agent could not complete the PR workflow.", QA_DISPLAY_AUTHOR
+    return "Hitch PR workflow could not complete.", PR_WORKFLOW_DISPLAY_AUTHOR
+
+
+def _workflow_failure_owner(workflow: SystemWorkflow, error: str) -> str:
+    stored_owner = workflow.state.get(_WORKFLOW_FAILURE_OWNER_STATE_KEY)
+    if stored_owner in {_WORKFLOW_FAILURE_OWNER_QA, _WORKFLOW_FAILURE_OWNER_PR}:
+        return str(stored_owner)
+    step_owner = _workflow_failure_owner_for_step(workflow.step)
+    if step_owner:
+        return step_owner
+    if _is_qa_workflow_failure(error):
+        return _WORKFLOW_FAILURE_OWNER_QA
+    return _WORKFLOW_FAILURE_OWNER_PR
+
+
+def _workflow_failure_owner_for_step(step: str) -> str:
+    if step in {STEP_QA_RUNNING, STEP_FEEDBACK_RUNNING}:
+        return _WORKFLOW_FAILURE_OWNER_QA
+    if step in {
+        STEP_USER_STEERING_RUNNING,
+        STEP_PR_PROMPT_SPAWNED,
+        STEP_PR_PROMPT_RUNNING,
+        STEP_PR_MONITORING,
+        STEP_PR_FEEDBACK_RUNNING,
+    }:
+        return _WORKFLOW_FAILURE_OWNER_PR
+    return ""
+
+
+def _is_qa_workflow_failure(error: str) -> bool:
+    return error.startswith(
+        (
+            "QA agent reached",
+            "QA feedback worker failed",
+            "QA output ",
+            "QA panel ",
+            "QA worker ",
+            "failed to restart QA agent",
+            "failed to start QA agent",
+            "failed to start QA feedback turn",
+            "failed to start QA panel synthesizer",
+            "unsupported PR QA agent kind",
+        )
     )
 
 
@@ -8178,9 +8234,14 @@ def _block_workflow(
     # overwrite cannot lose a concurrent write.
     with transaction.atomic():
         locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        failure_owner = _workflow_failure_owner(locked, error)
         locked.status = SystemWorkflow.STATUS_BLOCKED
         locked.step = STEP_BLOCKED
-        locked.state = {**locked.state, "error": error}
+        locked.state = {
+            **locked.state,
+            "error": error,
+            _WORKFLOW_FAILURE_OWNER_STATE_KEY: failure_owner,
+        }
         locked.save(update_fields=["status", "step", "state", "updated_at"])
         workflow.status = locked.status
         workflow.step = locked.step
@@ -8225,7 +8286,12 @@ def _surface_workflow_failure(workflow: SystemWorkflow, error: str) -> None:
         locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
         if locked.state.get("failure_surfaced") is True:
             return
-        locked.state = {**locked.state, "failure_surfaced": True}
+        failure_owner = _workflow_failure_owner(locked, error)
+        locked.state = {
+            **locked.state,
+            "failure_surfaced": True,
+            _WORKFLOW_FAILURE_OWNER_STATE_KEY: failure_owner,
+        }
         locked.save(update_fields=["state", "updated_at"])
         workflow.state = locked.state
     try:

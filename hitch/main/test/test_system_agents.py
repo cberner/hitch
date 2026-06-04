@@ -331,6 +331,53 @@ class PrQaWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertTrue(workflow.state["failure_surfaced"])
 
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_pr_prompt_failure_is_not_surfaced_as_qa_failure(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={"next_user_message_index": 1},
+        )
+
+        system_agents._surface_workflow_failure(
+            workflow,
+            "PR prompt worker failed: worker process exited before reporting completion",
+        )
+
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(
+            kwargs["display_author"], system_agents.PR_WORKFLOW_DISPLAY_AUTHOR
+        )
+        self.assertIn("Hitch PR workflow could not complete.", kwargs["prompt"])
+        self.assertNotIn("Hitch QA agent could not complete", kwargs["prompt"])
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_qa_panel_synthesizer_start_failure_is_surfaced_as_qa_failure(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_QA_RUNNING,
+            state={"next_user_message_index": 1, "qa_panel_enabled": True},
+        )
+
+        system_agents._surface_workflow_failure(
+            workflow,
+            "failed to start QA panel synthesizer: RuntimeError('spawn failed')",
+        )
+
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(kwargs["display_author"], system_agents.QA_DISPLAY_AUTHOR)
+        self.assertIn("Hitch QA agent could not complete", kwargs["prompt"])
+
 
 class SessionPrStageRefreshTests(TestCase):
     def _due_pr_workflow(self, thread_id: str, cwd: str) -> SystemWorkflow:
@@ -7258,6 +7305,12 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.state["error"], "QA workflow stopped by user")
         self.assertNotIn(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, workflow.state)
         mock_spawn.assert_called_once()
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(
+            kwargs["display_author"], system_agents.PR_WORKFLOW_DISPLAY_AUTHOR
+        )
+        self.assertIn("Hitch PR workflow could not complete.", kwargs["prompt"])
+        self.assertNotIn("Hitch QA agent could not complete", kwargs["prompt"])
 
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
     def test_active_workflow_reconciles_terminal_hidden_run(
@@ -7619,9 +7672,11 @@ class SpecCriticWorkflowTests(TestCase):
         )
         self.assertTrue(workflow.state["failure_surfaced"])
         mock_spawn_turn.assert_called_once()
+        kwargs = mock_spawn_turn.call_args.kwargs
+        self.assertEqual(kwargs["display_author"], system_agents.QA_DISPLAY_AUTHOR)
         self.assertIn(
-            "Hitch QA agent could not complete the PR workflow",
-            mock_spawn_turn.call_args.kwargs["prompt"],
+            "Hitch QA agent could not complete the PR workflow.",
+            kwargs["prompt"],
         )
 
     @patch("hitch.main.system_agents._spawn_pr_qa_run")
@@ -7745,9 +7800,13 @@ class SpecCriticWorkflowTests(TestCase):
         )
         self.assertTrue(workflow.state["failure_surfaced"])
         mock_spawn_turn.assert_called_once()
+        kwargs = mock_spawn_turn.call_args.kwargs
+        self.assertEqual(
+            kwargs["display_author"], system_agents.PR_WORKFLOW_DISPLAY_AUTHOR
+        )
         self.assertIn(
-            "Hitch QA agent could not complete the PR workflow",
-            mock_spawn_turn.call_args.kwargs["prompt"],
+            "Hitch PR workflow could not complete.",
+            kwargs["prompt"],
         )
 
     @patch("hitch.main.system_agents._spawn_pr_followup_monitor_run")
