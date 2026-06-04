@@ -1221,46 +1221,75 @@ def _kill_orphaned_worker(pid: int, instance_id: int) -> bool:
         return False
 
 
+_APP_SERVER_DEPLOYMENT_ENV = "HITCH_CODEX_DEPLOYMENT"
+
+
+def _app_server_deployment_id() -> str:
+    """Stable per-deployment id stamped on the app-servers Hitch spawns.
+
+    Uses this checkout's ``BASE_DIR`` -- the same deployment identity the worker
+    reaper derives from ``manage.py`` (see ``_our_manage_py``) -- so two
+    checkouts running under one Unix user and sharing a resolved ``codex``
+    binary never match each other's app-servers.
+    """
+    return str(settings.BASE_DIR)
+
+
+def _proc_is_our_app_server(pid_dir: Path, deployment_id: str) -> bool:
+    """Whether ``pid_dir`` is a ``codex app-server`` process this deployment spawned.
+
+    Two independent signals, both fixed at ``exec`` and therefore stable across
+    reparenting (so a leaked/orphaned app-server whose worker died is still
+    matched):
+
+    * cmdline is the SDK's stdio app-server invocation
+      (``codex ... app-server --listen stdio://``) -- so an interactive
+      ``codex`` TUI a developer runs by hand never matches;
+    * environ carries our ``HITCH_CODEX_DEPLOYMENT`` marker
+      (stamped in ``app_server_config``) -- so another checkout's app-servers
+      are excluded even when the resolved ``codex`` binary is shared. Pinning
+      ``argv[0]`` to the binary path alone could not tell two such checkouts
+      apart, which is why the deployment marker is required.
+
+    Re-reading ``/proc`` here (rather than caching the scan result) also lets
+    callers reuse this as the pre-signal identity recheck that guards against
+    pid recycling.
+    """
+    try:
+        cmdline = (pid_dir / "cmdline").read_bytes()
+    except OSError:
+        return False
+    parts = cmdline.split(b"\0")
+    if b"app-server" not in parts or b"stdio://" not in parts:
+        return False
+    try:
+        environ = (pid_dir / "environ").read_bytes()
+    except OSError:
+        return False
+    marker = f"{_APP_SERVER_DEPLOYMENT_ENV}={deployment_id}".encode()
+    return marker in environ.split(b"\0")
+
+
 def _iter_codex_app_server_pids(
-    *, proc_root: Path = Path("/proc"), codex_bin: str | None = None
+    *, proc_root: Path = Path("/proc"), deployment_id: str | None = None
 ) -> Iterable[int]:
     """Yield pids of ``codex app-server`` processes this deployment started.
-
-    Hitch only ever runs Codex through the SDK's stdio app-server, launched as
-    ``<codex_bin> [--config ...] app-server --listen stdio://`` (see
-    ``openai_codex.client``). We match that exact invocation -- so an
-    interactive ``codex`` TUI a developer runs by hand never matches -- and pin
-    ``argv[0]`` to this deployment's resolved ``codex`` binary so a second
-    checkout's app-servers under the same user are left alone. Linux-only; on a
-    host without ``/proc`` it yields nothing.
 
     Discovery is process-based (a /proc scan), not DB-based, on purpose: a
     leaked app-server -- one whose worker died without reaping it, or whose
     CodexInstance row is already terminal or gone -- is exactly what this is
-    meant to find, and it has no live DB row to locate it by.
+    meant to find, and it has no live DB row to locate it by. Scoping to this
+    deployment is handled by ``_proc_is_our_app_server``. Linux-only; on a host
+    without ``/proc`` it yields nothing.
     """
     if not proc_root.exists():
         return
-    target_bin = codex_bin if codex_bin is not None else _codex_bin()
-    target = target_bin.encode() if target_bin else None
+    if deployment_id is None:
+        deployment_id = _app_server_deployment_id()
     for entry in proc_root.iterdir():
         if not entry.name.isdigit():
             continue
-        try:
-            cmdline = (entry / "cmdline").read_bytes()
-        except OSError:
-            continue
-        parts = [part for part in cmdline.split(b"\0") if part]
-        if not parts:
-            continue
-        if b"app-server" not in parts or b"stdio://" not in parts:
-            continue
-        if target is not None:
-            if parts[0] != target:
-                continue
-        elif os.path.basename(parts[0].decode("utf-8", errors="replace")) != "codex":
-            # No resolvable deployment binary to pin against; fall back to the
-            # basename so a renamed/wrapped ``codex`` on PATH is still matched.
+        if not _proc_is_our_app_server(entry, deployment_id):
             continue
         try:
             yield int(entry.name)
@@ -1268,7 +1297,7 @@ def _iter_codex_app_server_pids(
             continue
 
 
-def nuke_codex_app_servers() -> int:
+def nuke_codex_app_servers(*, proc_root: Path = Path("/proc")) -> int:
     """SIGKILL every ``codex app-server`` process this deployment started.
 
     A manual escape hatch (surfaced on the profile page) for when app-servers
@@ -1285,12 +1314,22 @@ def nuke_codex_app_servers() -> int:
     group kill could take down the parent. Returns the number of processes
     signaled.
     """
+    deployment_id = _app_server_deployment_id()
     killed = 0
-    for pid in list(_iter_codex_app_server_pids()):
+    for pid in list(
+        _iter_codex_app_server_pids(proc_root=proc_root, deployment_id=deployment_id)
+    ):
+        # Re-verify identity immediately before signaling: the pid could have
+        # been recycled since the scan, and we must never SIGKILL an unrelated
+        # process. Re-reading /proc (not just trusting ProcessLookupError, which
+        # a recycled pid would never raise) closes that race the same way
+        # ``_kill_orphaned_worker`` does.
+        if not _proc_is_our_app_server(proc_root / str(pid), deployment_id):
+            continue
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
-            # Exited between the scan and the signal -- nothing to kill.
+            # Exited between the recheck and the signal -- nothing to kill.
             continue
         except OSError:
             logger.warning("failed to SIGKILL codex app-server pid %s", pid)
@@ -1762,7 +1801,16 @@ def app_server_config(
     web_search_mode = _normalized_web_search_mode(web_search_mode)
     if web_search_mode:
         overrides.append(f"web_search={json.dumps(web_search_mode)}")
-    return AppServerConfig(codex_bin=_codex_bin(), config_overrides=tuple(overrides))
+    return AppServerConfig(
+        codex_bin=_codex_bin(),
+        config_overrides=tuple(overrides),
+        # Stamp every app-server we spawn with this deployment's id (merged onto
+        # the inherited environment by the SDK). The profile "nuke" sweep scopes
+        # its SIGKILLs to this marker so a second checkout sharing the resolved
+        # codex binary -- whose app-server command lines are otherwise identical
+        # -- is never swept.
+        env={_APP_SERVER_DEPLOYMENT_ENV: _app_server_deployment_id()},
+    )
 
 
 # Every ``Codex(config=config)`` spawns a ``codex app-server`` subprocess that

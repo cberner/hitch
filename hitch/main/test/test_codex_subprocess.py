@@ -162,6 +162,18 @@ class SpawnNewSessionTests(TestCase):
 
         self.assertEqual(config.config_overrides, ("features.memories=false",))
 
+    def test_stamps_deployment_marker_for_nuke_scoping(self) -> None:
+        config = codex_pool.app_server_config()
+
+        self.assertEqual(
+            config.env,
+            {
+                codex_pool._APP_SERVER_DEPLOYMENT_ENV: (
+                    codex_pool._app_server_deployment_id()
+                )
+            },
+        )
+
     def test_app_server_config_rejects_invalid_web_search_mode(self) -> None:
         with self.assertRaises(ValueError):
             codex_pool.app_server_config(
@@ -2907,78 +2919,103 @@ class IterRunningWorkerPidsTests(SimpleTestCase):
 
 
 class IterCodexAppServerPidsTests(SimpleTestCase):
-    _BIN = "/usr/local/bin/codex"
+    _DEPLOYMENT = "/srv/hitch"
+    _MARKER = f"{codex_pool._APP_SERVER_DEPLOYMENT_ENV}={_DEPLOYMENT}".encode()
+    _APP_SERVER_ARGV = [
+        b"/usr/local/bin/codex",
+        b"--config",
+        b"features.memories=false",
+        b"app-server",
+        b"--listen",
+        b"stdio://",
+    ]
 
-    def _write_cmdline(self, proc_root: Path, pid: int, argv: list[bytes]) -> None:
+    def _write_proc(
+        self,
+        proc_root: Path,
+        pid: int,
+        argv: list[bytes],
+        environ: list[bytes] | None = None,
+    ) -> None:
         pid_dir = proc_root / str(pid)
         pid_dir.mkdir()
         (pid_dir / "cmdline").write_bytes(b"\0".join(argv) + b"\0")
+        if environ is not None:
+            (pid_dir / "environ").write_bytes(b"\0".join(environ) + b"\0")
 
     def test_matches_our_app_server_and_scopes_out_others(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             proc_root = Path(tmp)
-            # Our app-server, as the SDK launches it.
-            self._write_cmdline(
-                proc_root,
-                100,
-                [
-                    self._BIN.encode(),
-                    b"--config",
-                    b"features.memories=false",
-                    b"app-server",
-                    b"--listen",
-                    b"stdio://",
-                ],
+            # Our app-server: SDK invocation + our deployment marker.
+            self._write_proc(
+                proc_root, 100, self._APP_SERVER_ARGV, [b"PATH=/usr/bin", self._MARKER]
             )
-            # A different codex binary (another deployment / install) -- ignored.
-            self._write_cmdline(
+            # Another checkout's app-server: identical command line, but its
+            # environ carries a different deployment id -- must be ignored.
+            self._write_proc(
                 proc_root,
                 101,
-                [b"/opt/other/codex", b"app-server", b"--listen", b"stdio://"],
+                self._APP_SERVER_ARGV,
+                [
+                    f"{codex_pool._APP_SERVER_DEPLOYMENT_ENV}=/other/hitch".encode(),
+                ],
             )
-            # An interactive codex TUI -- no app-server stdio markers, ignored.
-            self._write_cmdline(proc_root, 102, [self._BIN.encode(), b"chat"])
+            # An app-server with no marker at all (e.g. pre-upgrade) -- ignored.
+            self._write_proc(proc_root, 102, self._APP_SERVER_ARGV, [b"PATH=/usr/bin"])
+            # An interactive codex TUI -- no app-server stdio markers -- ignored
+            # even though it carries our marker.
+            self._write_proc(
+                proc_root, 103, [b"/usr/local/bin/codex", b"chat"], [self._MARKER]
+            )
             # Unrelated process.
-            self._write_cmdline(proc_root, 103, [b"bash", b"-l"])
+            self._write_proc(proc_root, 104, [b"bash", b"-l"], [self._MARKER])
             # Non-pid entry and an unreadable pid dir are skipped, not fatal.
             (proc_root / "not-a-pid").mkdir()
-            (proc_root / "104").mkdir()
+            (proc_root / "105").mkdir()
 
             found = sorted(
                 codex_pool._iter_codex_app_server_pids(
-                    proc_root=proc_root, codex_bin=self._BIN
+                    proc_root=proc_root, deployment_id=self._DEPLOYMENT
                 )
             )
 
         self.assertEqual(found, [100])
 
-    def test_falls_back_to_basename_without_resolvable_binary(self) -> None:
+    def test_unreadable_environ_is_not_matched(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             proc_root = Path(tmp)
-            self._write_cmdline(
-                proc_root,
-                200,
-                [b"/any/path/codex", b"app-server", b"--listen", b"stdio://"],
-            )
-            self._write_cmdline(
-                proc_root,
-                201,
-                [b"/any/path/not-codex", b"app-server", b"--listen", b"stdio://"],
-            )
+            # cmdline matches but environ is missing -- cannot confirm ownership.
+            self._write_proc(proc_root, 200, self._APP_SERVER_ARGV)
 
-            with patch("hitch.main.codex_pool._codex_bin", return_value=None):
-                found = sorted(
-                    codex_pool._iter_codex_app_server_pids(proc_root=proc_root)
+            found = list(
+                codex_pool._iter_codex_app_server_pids(
+                    proc_root=proc_root, deployment_id=self._DEPLOYMENT
                 )
+            )
 
-        self.assertEqual(found, [200])
+        self.assertEqual(found, [])
+
+    def test_defaults_deployment_id_from_settings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            marker = (
+                f"{codex_pool._APP_SERVER_DEPLOYMENT_ENV}="
+                f"{codex_pool._app_server_deployment_id()}"
+            ).encode()
+            self._write_proc(proc_root, 300, self._APP_SERVER_ARGV, [marker])
+
+            found = list(
+                codex_pool._iter_codex_app_server_pids(proc_root=proc_root)
+            )
+
+        self.assertEqual(found, [300])
 
     def test_no_proc_root_yields_nothing(self) -> None:
         missing = Path(tempfile.gettempdir()) / "definitely-not-here-67890"
         self.assertEqual(
             list(
                 codex_pool._iter_codex_app_server_pids(
-                    proc_root=missing, codex_bin=self._BIN
+                    proc_root=missing, deployment_id=self._DEPLOYMENT
                 )
             ),
             [],
@@ -2986,37 +3023,77 @@ class IterCodexAppServerPidsTests(SimpleTestCase):
 
 
 class NukeCodexAppServersTests(SimpleTestCase):
-    @patch("hitch.main.codex_pool.os.kill")
-    @patch("hitch.main.codex_pool._iter_codex_app_server_pids")
-    def test_sigkills_each_app_server(
-        self, mock_iter: MagicMock, mock_kill: MagicMock
-    ) -> None:
-        mock_iter.return_value = iter([111, 222])
+    _DEPLOYMENT = "/srv/hitch"
 
-        killed = codex_pool.nuke_codex_app_servers()
+    def _proc_root(self, tmp: str) -> Path:
+        return Path(tmp)
+
+    def _write_app_server(self, proc_root: Path, pid: int) -> None:
+        marker = (
+            f"{codex_pool._APP_SERVER_DEPLOYMENT_ENV}="
+            f"{codex_pool._app_server_deployment_id()}"
+        ).encode()
+        pid_dir = proc_root / str(pid)
+        pid_dir.mkdir()
+        (pid_dir / "cmdline").write_bytes(
+            b"\0".join(
+                [b"/usr/local/bin/codex", b"app-server", b"--listen", b"stdio://"]
+            )
+            + b"\0"
+        )
+        (pid_dir / "environ").write_bytes(marker + b"\0")
+
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_sigkills_each_app_server(self, mock_kill: MagicMock) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            self._write_app_server(proc_root, 111)
+            self._write_app_server(proc_root, 222)
+
+            killed = codex_pool.nuke_codex_app_servers(proc_root=proc_root)
 
         self.assertEqual(killed, 2)
         mock_kill.assert_any_call(111, signal.SIGKILL)
         mock_kill.assert_any_call(222, signal.SIGKILL)
 
     @patch("hitch.main.codex_pool.os.kill")
-    @patch("hitch.main.codex_pool._iter_codex_app_server_pids")
-    def test_already_gone_pid_is_not_counted(
-        self, mock_iter: MagicMock, mock_kill: MagicMock
+    def test_recycled_pid_failing_recheck_is_not_signaled(
+        self, mock_kill: MagicMock
     ) -> None:
-        mock_iter.return_value = iter([111, 222])
-        mock_kill.side_effect = [ProcessLookupError, None]
+        # The pid matched during the scan but its /proc entry no longer looks
+        # like our app-server at signal time (recycled): it must not be killed.
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            self._write_app_server(proc_root, 111)
 
-        self.assertEqual(codex_pool.nuke_codex_app_servers(), 1)
+            with patch(
+                "hitch.main.codex_pool._iter_codex_app_server_pids",
+                return_value=iter([111, 999]),
+            ):
+                killed = codex_pool.nuke_codex_app_servers(proc_root=proc_root)
+
+        self.assertEqual(killed, 1)
+        mock_kill.assert_called_once_with(111, signal.SIGKILL)
+
+    @patch("hitch.main.codex_pool.os.kill", side_effect=ProcessLookupError)
+    def test_already_gone_pid_is_not_counted(self, _mock_kill: MagicMock) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            self._write_app_server(proc_root, 111)
+
+            self.assertEqual(
+                codex_pool.nuke_codex_app_servers(proc_root=proc_root), 0
+            )
 
     @patch("hitch.main.codex_pool.os.kill", side_effect=PermissionError)
-    @patch("hitch.main.codex_pool._iter_codex_app_server_pids")
-    def test_unsignalable_pid_is_skipped(
-        self, mock_iter: MagicMock, _mock_kill: MagicMock
-    ) -> None:
-        mock_iter.return_value = iter([333])
+    def test_unsignalable_pid_is_skipped(self, _mock_kill: MagicMock) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            self._write_app_server(proc_root, 333)
 
-        self.assertEqual(codex_pool.nuke_codex_app_servers(), 0)
+            self.assertEqual(
+                codex_pool.nuke_codex_app_servers(proc_root=proc_root), 0
+            )
 
 
 class InterruptActiveTests(TestCase):
