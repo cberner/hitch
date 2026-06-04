@@ -1822,17 +1822,19 @@ def app_server_config(
 # or after a codex upgrade: the loser exits with "database is locked", surfaced
 # as a TransportClosedError whose stderr tail carries that message.
 #
-# We do NOT serialize startups. Once the schema is current, concurrent
-# app-server opens don't write the state DB and so don't contend; serializing
-# every startup behind one machine-wide lock instead made a detached worker's
-# slow init stall every other turn waiting on it. So we just retry a locked
-# init: the race is transient (it lasts only while one process migrates) and the
-# retry budget below comfortably outlasts a real migration, leaving steady-state
-# startups fully concurrent.
+# We do NOT serialize startups. Once the schema is current, most app-server opens
+# don't need exclusive state-DB work; serializing every startup behind one
+# machine-wide lock made unrelated turns queue behind each other. So we retry a
+# locked init instead. Request-path opens stay bounded so a page render does not
+# hang for minutes, while detached worker starts get a longer budget: a worker
+# sitting behind Codex's own long state/log maintenance is much less harmful than
+# failing the whole turn or system-agent workflow.
 _APPSERVER_START_MAX_ATTEMPTS = 10
+_APPSERVER_WORKER_START_MAX_ATTEMPTS = 24
 _APPSERVER_START_BACKOFF_BASE_SECONDS = 0.2
-# Capped per-attempt backoff; the summed budget (~26s across all attempts) is
-# only ever spent while an actual first-run/upgrade migration is in flight.
+# Capped per-attempt backoff; request-path callers spend about 26s in Hitch
+# backoff before giving up, on top of Codex's own 5s SQLite busy timeout per
+# failed attempt. Detached workers use a larger attempt count.
 _APPSERVER_START_BACKOFF_MAX_SECONDS = 5.0
 
 
@@ -2018,33 +2020,38 @@ def open_codex_resumed(
     """
     resume_kwargs = resume_kwargs or {}
     last_error: TransportClosedError | None = None
-    for attempt in range(_APPSERVER_START_MAX_ATTEMPTS):
-        codex = _start_codex_with_retry(factory)
-        entered = codex.__enter__()
+    for attempt in range(_APPSERVER_WORKER_START_MAX_ATTEMPTS):
+        codex = None
+        entered = None
         try:
+            codex = factory()
+            entered = codex.__enter__()
             if configure is not None:
                 configure(entered)
             thread = entered.thread_resume(thread_id, **resume_kwargs)
         except TransportClosedError as exc:
-            codex.__exit__(type(exc), exc, exc.__traceback__)
+            if entered is not None and codex is not None:
+                codex.__exit__(type(exc), exc, exc.__traceback__)
             if not is_database_locked_error(exc):
                 raise
             last_error = exc
             logger.warning(
-                "Codex app-server state DB locked during resume (attempt %s/%s)",
+                "Codex app-server state DB locked during worker open+resume "
+                "(attempt %s/%s)",
                 attempt + 1,
-                _APPSERVER_START_MAX_ATTEMPTS,
+                _APPSERVER_WORKER_START_MAX_ATTEMPTS,
             )
-            if attempt + 1 < _APPSERVER_START_MAX_ATTEMPTS:
+            if attempt + 1 < _APPSERVER_WORKER_START_MAX_ATTEMPTS:
                 time.sleep(
                     min(
                         _APPSERVER_START_BACKOFF_BASE_SECONDS * (2**attempt),
                         _APPSERVER_START_BACKOFF_MAX_SECONDS,
                     )
-                )
+            )
             continue
         except BaseException as exc:
-            codex.__exit__(type(exc), exc, exc.__traceback__)
+            if entered is not None and codex is not None:
+                codex.__exit__(type(exc), exc, exc.__traceback__)
             raise
         try:
             yield entered, thread

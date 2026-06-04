@@ -261,6 +261,51 @@ class OpenCodexResumedTests(SimpleTestCase):
         self.assertEqual(codex.resume_calls, 1)
         self.assertTrue(codex.closed)
 
+    def test_locked_worker_construction_uses_worker_retry_budget(self) -> None:
+        factory = MagicMock(side_effect=TransportClosedError(_LOCKED))
+        with (
+            patch("hitch.main.codex_pool.time.sleep"),
+            self.assertRaises(TransportClosedError),
+            codex_pool.open_codex_resumed(
+                cast("Callable[[], Any]", factory), thread_id="t1"
+            ),
+        ):
+            pass
+
+        self.assertEqual(
+            factory.call_count, codex_pool._APPSERVER_WORKER_START_MAX_ATTEMPTS
+        )
+
+    def test_mixed_worker_construction_and_resume_locks_share_budget(self) -> None:
+        factory_calls = 0
+        servers: list[_ResumableCodex] = []
+
+        def factory() -> _ResumableCodex:
+            nonlocal factory_calls
+            factory_calls += 1
+            if factory_calls % 2:
+                raise TransportClosedError(_LOCKED)
+            server = _ResumableCodex(fail_times=1)
+            servers.append(server)
+            return server
+
+        with (
+            patch("hitch.main.codex_pool.time.sleep"),
+            self.assertRaises(TransportClosedError),
+            codex_pool.open_codex_resumed(
+                cast("Callable[[], Any]", factory), thread_id="t1"
+            ),
+        ):
+            pass
+
+        self.assertEqual(
+            factory_calls, codex_pool._APPSERVER_WORKER_START_MAX_ATTEMPTS
+        )
+        self.assertEqual(
+            len(servers), codex_pool._APPSERVER_WORKER_START_MAX_ATTEMPTS // 2
+        )
+        self.assertTrue(all(server.closed for server in servers))
+
     def test_caller_exception_closes_server(self) -> None:
         codex = _ResumableCodex()
         with (
