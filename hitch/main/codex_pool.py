@@ -29,7 +29,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Generator, Iterable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar, cast
 
@@ -1078,6 +1078,111 @@ def _is_tracked_worker(pid: int) -> bool:
         return pid in _TRACKED_WORKER_PROCS
 
 
+# How long a live ``starting``/``running`` worker may make no progress -- no new
+# event appended to its events file and not waiting on a user approval/input
+# prompt -- before the stall watchdog treats it as wedged and reaps it. A healthy
+# turn streams events continuously (agent text, reasoning, tool calls/output), so
+# a silence this long means the app-server stopped producing output -- e.g. it is
+# hung waiting on the contended CODEX_HOME state DB while still holding its
+# connection, which is exactly the leak that accumulates until a restart.
+# Conservative by default so a genuinely long but output-silent tool call is not
+# mistaken for a hang; override via ``CODEX_WORKER_STALL_TIMEOUT`` (a ``timedelta``
+# or a number of seconds).
+_WORKER_STALL_TIMEOUT_DEFAULT = timedelta(minutes=20)
+
+
+def _worker_stall_timeout() -> timedelta:
+    configured = getattr(settings, "CODEX_WORKER_STALL_TIMEOUT", None)
+    if isinstance(configured, timedelta):
+        return configured
+    if (
+        isinstance(configured, int | float)
+        and not isinstance(configured, bool)
+        and configured > 0
+    ):
+        return timedelta(seconds=configured)
+    return _WORKER_STALL_TIMEOUT_DEFAULT
+
+
+def _instances_awaiting_user(instance_ids: Iterable[int]) -> set[int] | None:
+    """Instance ids with an unanswered approval/input prompt.
+
+    A turn paused on one of these is *legitimately* idle (the worker is blocked
+    polling the row until the browser records a decision, up to the 30-minute
+    prompt timeout), not wedged, so the stall watchdog must never reap it. Return
+    ``None`` if the rows cannot be read -- the caller then spares every live
+    worker rather than reaping on incomplete information.
+    """
+    ids = list(instance_ids)
+    if not ids:
+        return set()
+    try:
+        waiting = set(
+            ApprovalRequest.objects.filter(
+                instance_id__in=ids, decision=ApprovalRequest.DECISION_PENDING
+            ).values_list("instance_id", flat=True)
+        )
+        waiting.update(
+            UserInputRequest.objects.filter(
+                instance_id__in=ids, response__isnull=True
+            ).values_list("instance_id", flat=True)
+        )
+    except Exception:
+        logger.exception("could not read pending prompts; skipping stall reap")
+        return None
+    return waiting
+
+
+def _worker_progress_stalled(
+    started_at: datetime | None, events_path: str, now: datetime
+) -> bool:
+    """Whether a live worker has made no progress for the stall timeout.
+
+    Progress is the most recent of the row's ``started_at`` and its events file's
+    mtime: ``codex_worker`` appends to ``events_path`` on every streamed event, so
+    a frozen mtime means the app-server has stopped producing output. ``started_at``
+    floors it so a worker that just started (events file freshly created, or not
+    written to yet) is never seen as stalled. If neither timestamp is available we
+    cannot tell, so report not-stalled (spare it).
+    """
+    last_activity_ts = started_at.timestamp() if started_at is not None else None
+    if events_path:
+        try:
+            mtime = os.stat(events_path).st_mtime
+        except OSError:
+            mtime = None
+        if mtime is not None and (
+            last_activity_ts is None or mtime > last_activity_ts
+        ):
+            last_activity_ts = mtime
+    if last_activity_ts is None:
+        return False
+    return last_activity_ts < (now - _worker_stall_timeout()).timestamp()
+
+
+def _fail_stalled_instance(instance_id: int, now: datetime) -> None:
+    """Flip a reaped, wedged worker's row to FAILED with a retry hint.
+
+    The killed worker was still ``starting``/``running`` (unlike an orphan reap,
+    where the row is already terminal), so nothing else will mark it. The
+    conditional UPDATE keyed on the active statuses preserves a row that reached a
+    terminal state in the gap. ``_finalize_reaped_instance`` (called next) then
+    resolves the now-dangling prompts and runs finish routing.
+    """
+    CodexInstance.objects.filter(
+        pk=instance_id,
+        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+    ).update(
+        status=CodexInstance.STATUS_FAILED,
+        error=(
+            "This turn was terminated because its Codex worker stopped making "
+            "progress for an extended period while holding the Codex database "
+            "lock. Send the message again to retry."
+        ),
+        ended_at=now,
+    )
+
+
 def reconcile_orphaned_workers() -> int:
     """Kill leaked worker processes whose instance is no longer expected to run.
 
@@ -1095,7 +1200,11 @@ def reconcile_orphaned_workers() -> int:
 
     * its instance is still ``starting``/``running`` (spanning *all* purposes --
       user, system-agent, and workflow turns -- so a system-session worker is
-      never reaped);
+      never reaped) AND it is making progress: the stall watchdog
+      (``_worker_progress_stalled``) reaps an active worker that has appended no
+      event for ``_worker_stall_timeout`` and is not paused on a user prompt,
+      because such a worker is wedged (e.g. its app-server hung waiting on the
+      contended state DB) and would otherwise hold its connection until a restart;
     * its instance reached a terminal status within ``_ORPHAN_REAP_GRACE``:
       ``codex_worker`` commits the terminal status *before* running
       ``_notify_system_agents`` (which can spawn follow-up turns) and input-image
@@ -1114,10 +1223,12 @@ def reconcile_orphaned_workers() -> int:
     instance_ids = {instance_id for _, instance_id in running}
     try:
         rows = {
-            pk: (status, ended_at)
-            for pk, status, ended_at in CodexInstance.objects.filter(
-                pk__in=instance_ids
-            ).values_list("pk", "status", "ended_at")
+            pk: (status, ended_at, started_at, events_path)
+            for pk, status, ended_at, started_at, events_path in (
+                CodexInstance.objects.filter(pk__in=instance_ids).values_list(
+                    "pk", "status", "ended_at", "started_at", "events_path"
+                )
+            )
         }
     except Exception:
         # Never kill on incomplete information: if the DB read fails (e.g. it is
@@ -1125,23 +1236,39 @@ def reconcile_orphaned_workers() -> int:
         logger.exception("could not read worker rows; skipping orphan reap")
         return 0
     now = timezone.now()
+    # ``None`` when the pending-prompt rows could not be read: spare every live
+    # worker from the stall reap rather than act on incomplete information.
+    awaiting_user = _instances_awaiting_user(instance_ids)
     killed = 0
+    stalled = 0
     for pid, instance_id in running:
         row = rows.get(instance_id)
+        stalled_reap = False
         if row is not None:
-            status, ended_at = row
+            status, ended_at, started_at, events_path = row
             if status in (
                 CodexInstance.STATUS_STARTING,
                 CodexInstance.STATUS_RUNNING,
             ):
-                continue
+                # Spare an active worker unless the stall watchdog finds it
+                # wedged: alive but making no progress for the stall timeout and
+                # not paused on a user prompt. Such a worker keeps its CODEX_HOME
+                # state-DB connection open indefinitely, so reap it to release the
+                # lock and fail the turn with a retry hint.
+                if (
+                    awaiting_user is None
+                    or instance_id in awaiting_user
+                    or not _worker_progress_stalled(started_at, events_path, now)
+                ):
+                    continue
+                stalled_reap = True
             # Terminal: spare it only while it may still be running its
             # post-terminal hooks. Within the grace window it is finishing them;
             # *past* the grace a still-live terminal worker is wedged and IS
             # reaped -- even one this process spawned -- so the same-process
             # process actually holding the state-DB lock gets killed rather than
             # exempted forever by the tracked check.
-            if ended_at is not None:
+            elif ended_at is not None:
                 if ended_at > now - _ORPHAN_REAP_GRACE:
                     continue
             elif _is_tracked_worker(pid):
@@ -1151,12 +1278,22 @@ def reconcile_orphaned_workers() -> int:
                 continue
         if _kill_orphaned_worker(pid, instance_id):
             killed += 1
+            if stalled_reap:
+                stalled += 1
+                # Still ``starting``/``running``: flip it to FAILED ourselves so
+                # the turn doesn't hang in the UI; _finalize_reaped_instance then
+                # clears its dangling prompts and runs finish routing.
+                _fail_stalled_instance(instance_id, now)
             # The worker was killed before its own post-terminal cleanup, so
             # cancel a failed turn's dangling prompts and surface a completed
             # turn whose auto-PR/QA follow-up was dropped.
             _finalize_reaped_instance(instance_id)
     if killed:
-        logger.warning("reaped %s orphaned codex worker process(es)", killed)
+        logger.warning(
+            "reaped %s codex worker process(es) (%s wedged mid-turn)",
+            killed,
+            stalled,
+        )
     return killed
 
 

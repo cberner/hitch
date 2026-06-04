@@ -2683,6 +2683,120 @@ class ReconcileOrphanedWorkersTests(TestCase):
 
         mock_finalize.assert_called_once_with(done.pk)
 
+    def _backdate_started(self, instance: CodexInstance, delta: timedelta) -> None:
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            started_at=timezone.now() - delta
+        )
+
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_reaps_stalled_running_worker(
+        self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
+    ) -> None:
+        # Alive and still RUNNING but no event for well past the stall timeout
+        # and not paused on a prompt: wedged, holding its state-DB connection.
+        wedged = self._make(pid=5020, status=CodexInstance.STATUS_RUNNING)
+        # Non-existent events path so progress falls back to started_at.
+        CodexInstance.objects.filter(pk=wedged.pk).update(events_path="/nope/missing")
+        self._backdate_started(wedged, timedelta(minutes=30))
+        mock_iter.return_value = [(5020, wedged.pk)]
+
+        killed = codex_pool.reconcile_orphaned_workers()
+
+        self.assertEqual(killed, 1)
+        mock_killpg.assert_called_once_with(5020, signal.SIGKILL)
+        wedged.refresh_from_db()
+        self.assertEqual(wedged.status, CodexInstance.STATUS_FAILED)
+        self.assertIn("stopped making progress", wedged.error)
+        self.assertIsNotNone(wedged.ended_at)
+
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_reaps_stalled_starting_worker(
+        self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
+    ) -> None:
+        wedged = self._make(pid=5021, status=CodexInstance.STATUS_STARTING)
+        CodexInstance.objects.filter(pk=wedged.pk).update(events_path="")
+        self._backdate_started(wedged, timedelta(minutes=30))
+        mock_iter.return_value = [(5021, wedged.pk)]
+
+        killed = codex_pool.reconcile_orphaned_workers()
+
+        self.assertEqual(killed, 1)
+        mock_killpg.assert_called_once_with(5021, signal.SIGKILL)
+        wedged.refresh_from_db()
+        self.assertEqual(wedged.status, CodexInstance.STATUS_FAILED)
+
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_spares_running_worker_with_recent_events(
+        self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
+    ) -> None:
+        # started_at is old, but the events file mtime is fresh: the worker is
+        # streaming output, so it is making progress and must be spared.
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as handle:
+            events_path = handle.name
+        self.addCleanup(os.remove, events_path)
+        active = self._make(pid=5022, status=CodexInstance.STATUS_RUNNING)
+        CodexInstance.objects.filter(pk=active.pk).update(events_path=events_path)
+        self._backdate_started(active, timedelta(minutes=30))
+        mock_iter.return_value = [(5022, active.pk)]
+
+        killed = codex_pool.reconcile_orphaned_workers()
+
+        self.assertEqual(killed, 0)
+        mock_killpg.assert_not_called()
+        active.refresh_from_db()
+        self.assertEqual(active.status, CodexInstance.STATUS_RUNNING)
+
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_spares_stalled_worker_awaiting_approval(
+        self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
+    ) -> None:
+        # No events for ages, but the worker is blocked on an unanswered approval
+        # prompt (legitimately idle up to the prompt timeout), so it is not wedged.
+        waiting = self._make(pid=5023, status=CodexInstance.STATUS_RUNNING)
+        CodexInstance.objects.filter(pk=waiting.pk).update(events_path="/nope/missing")
+        self._backdate_started(waiting, timedelta(minutes=30))
+        ApprovalRequest.objects.create(
+            instance=waiting,
+            method="item/commandExecution/requestApproval",
+            decision=ApprovalRequest.DECISION_PENDING,
+        )
+        mock_iter.return_value = [(5023, waiting.pk)]
+
+        killed = codex_pool.reconcile_orphaned_workers()
+
+        self.assertEqual(killed, 0)
+        mock_killpg.assert_not_called()
+        waiting.refresh_from_db()
+        self.assertEqual(waiting.status, CodexInstance.STATUS_RUNNING)
+
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_stall_timeout_is_configurable(
+        self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
+    ) -> None:
+        wedged = self._make(pid=5024, status=CodexInstance.STATUS_RUNNING)
+        CodexInstance.objects.filter(pk=wedged.pk).update(events_path="/nope/missing")
+        self._backdate_started(wedged, timedelta(minutes=2))
+        mock_iter.return_value = [(5024, wedged.pk)]
+
+        # 2 minutes of silence is under the 20-minute default (spared)...
+        self.assertEqual(codex_pool.reconcile_orphaned_workers(), 0)
+        mock_killpg.assert_not_called()
+
+        # ...but over a 60-second override (reaped).
+        with override_settings(CODEX_WORKER_STALL_TIMEOUT=60):
+            self.assertEqual(codex_pool.reconcile_orphaned_workers(), 1)
+        mock_killpg.assert_called_once_with(5024, signal.SIGKILL)
+
 
 class FinalizeReapedInstanceTests(TestCase):
     def _make(
