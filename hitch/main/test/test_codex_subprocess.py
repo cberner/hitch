@@ -25,7 +25,7 @@ from django.conf import settings
 from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
-from openai_codex import ApprovalMode
+from openai_codex import ApprovalMode, Codex
 from openai_codex._message_router import MessageRouter
 from openai_codex.generated.v2_all import (
     ApprovalsReviewer,
@@ -218,6 +218,31 @@ class SpawnNewSessionTests(TestCase):
             sandbox_policy=None,
             approval_mode=None,
         )
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.codex_pool.run_borrowed_op_with_retry")
+    def test_creates_thread_via_warm_pool(
+        self, mock_borrow: MagicMock, mock_launch: MagicMock
+    ) -> None:
+        # Creating a session borrows a warm pooled app-server (skipping the
+        # contended CODEX_HOME init write that fails under concurrent turns)
+        # instead of always cold-opening a fresh one.
+        mock_borrow.return_value = ("thread-warm", "/root/.codex/rollout-warm.jsonl")
+        mock_launch.return_value = SimpleNamespace(pid=4343)
+
+        with (
+            _events_dir() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_new_session(
+                cwd="/repo", prompt="hi", enable_memories=True, web_search_mode="live"
+            )
+
+        self.assertEqual(instance.thread_id, "thread-warm")
+        mock_borrow.assert_called_once()
+        self.assertIs(mock_borrow.call_args.args[0], Codex)
+        self.assertTrue(mock_borrow.call_args.kwargs["enable_memories"])
+        self.assertEqual(mock_borrow.call_args.kwargs["web_search_mode"], "live")
 
     @patch("hitch.main.codex_pool._launch_worker_process")
     @patch("hitch.main.codex_pool.Codex")

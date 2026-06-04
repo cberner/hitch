@@ -131,10 +131,6 @@ def spawn_new_session(
     has an id to redirect to immediately); the prompt itself is run by the
     detached worker.
     """
-    config = app_server_config(
-        enable_memories=enable_memories,
-        web_search_mode=web_search_mode,
-    )
     start_kwargs: dict[str, Any] = {
         "cwd": cwd,
         "developerInstructions": developer_instructions,
@@ -169,15 +165,21 @@ def spawn_new_session(
         codex._client.thread_set_name(thread.id, _initial_thread_name(name_source))
         return thread.id, _thread_path_value(thread)
 
-    # ``thread_set_name`` triggers the CODEX_HOME state-DB persist, whose
-    # one-time migration path has no SQLITE_BUSY retry; a lock there kills the
-    # app-server mid-operation as a ``TransportClosedError`` that ``open_codex``
-    # (construction-only retry) never sees. Retrying the whole open+create here
-    # is safe even though ``thread_start`` is not idempotent: that failure means
-    # the app-server exited *before* the thread was persisted to disk, so the
-    # discarded in-memory thread leaves nothing behind to duplicate.
-    thread_id, thread_path = run_codex_op_with_retry(
-        lambda: Codex(config=config), _create_and_persist
+    # Prefer a warm pooled app-server: cold-opening here re-runs the CODEX_HOME
+    # init whose one-time migration path has no SQLITE_BUSY retry, so a lock
+    # there kills the app-server mid-operation -- the "failed to initialize
+    # sqlite state runtime ... database is locked" users hit when creating a
+    # session while other turns are writing. A warm server is already
+    # initialized, so it does no init write; only an empty pool falls back to a
+    # retrying cold open. Retrying the whole open+create is safe even though
+    # ``thread_start`` is not idempotent: a locked persist exits (or fails) the
+    # app-server before the thread reaches disk, so the discarded in-memory
+    # thread leaves nothing behind to duplicate.
+    thread_id, thread_path = run_borrowed_op_with_retry(
+        Codex,
+        _create_and_persist,
+        enable_memories=enable_memories,
+        web_search_mode=web_search_mode,
     )
     instance = _spawn_worker(
         thread_id=thread_id,
@@ -222,10 +224,6 @@ def create_session_thread(
     web_search_mode: str | None = None,
 ) -> str:
     """Create and persist a visible Codex thread without starting a turn."""
-    config = app_server_config(
-        enable_memories=enable_memories,
-        web_search_mode=web_search_mode,
-    )
     # Use the low-level client (like spawn_new_session) so this visible session
     # can register Hitch dynamic tools. These threads are real user sessions the
     # user drives directly, so they need the same tools (e.g.
@@ -245,11 +243,18 @@ def create_session_thread(
         codex._client.thread_set_name(thread.id, _initial_thread_name(name))
         return thread.id
 
-    # See ``spawn_new_session``: retry the open+create when the ``thread_set_name``
-    # persist races the CODEX_HOME state-DB migration. Safe to retry despite the
-    # non-idempotent ``thread_start`` because a locked persist exits the
-    # app-server before anything reaches disk.
-    return run_codex_op_with_retry(lambda: Codex(config=config), _create_and_persist)
+    # See ``spawn_new_session``: prefer a warm pooled server so creating a
+    # visible session does no CODEX_HOME init write (which races the state-DB
+    # migration under concurrent turns), falling back to a retrying cold open
+    # only when the pool is empty. Safe to retry despite the non-idempotent
+    # ``thread_start`` because a locked persist exits/fails the app-server before
+    # anything reaches disk.
+    return run_borrowed_op_with_retry(
+        Codex,
+        _create_and_persist,
+        enable_memories=enable_memories,
+        web_search_mode=web_search_mode,
+    )
 
 
 # Upper bound for the auto-derived thread name. Matches the
