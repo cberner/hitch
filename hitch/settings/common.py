@@ -143,11 +143,18 @@ STATIC_URL = "static/"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 
+# Shared Hitch runtime state. By default this is ``~/.hitch``; keep the setting
+# separate so tests and deployments can relocate the whole state tree.
+HITCH_HOME_DIR = Path(os.environ.get("HITCH_HOME_DIR", Path.home() / ".hitch"))
+HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT = os.environ.get(
+    "HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT", "20"
+)
+
 # Per-worker JSONL event logs (see hitch.main.codex_pool). Workers detach from
 # the Django process and write here; the dir must be writable by the user
 # running Django and live somewhere that survives restarts. Kept outside the
 # project tree so setuptools' flat-layout discovery doesn't pick it up.
-CODEX_EVENTS_DIR = Path.home() / ".hitch" / "codex_events"
+CODEX_EVENTS_DIR = HITCH_HOME_DIR / "codex_events"
 
 # Worker isolation policy: "auto" uses systemd scopes only when the user
 # manager is reachable, "systemd" fails closed, and "direct" preserves the
@@ -182,4 +189,4 @@ CODEX_WORKER_OOM_SCORE_ADJ = os.environ.get(
 
 # Managed git worktrees for new Codex sessions when the user opts into
 # isolating agent changes from the source checkout selected in the UI.
-HITCH_WORKTREES_DIR = Path.home() / ".hitch" / "worktrees"
+HITCH_WORKTREES_DIR = HITCH_HOME_DIR / "worktrees"

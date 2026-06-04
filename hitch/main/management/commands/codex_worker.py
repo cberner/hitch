@@ -77,6 +77,7 @@ from openai_codex.generated.v2_all import (
 from openai_codex.models import Notification
 from pydantic import BaseModel
 
+from hitch.main import disk_cleanup
 from hitch.main.codex_events import GOAL_METHODS
 from hitch.main.codex_pool import (
     app_server_config,
@@ -278,6 +279,7 @@ class Command(BaseCommand):
                 resolve_dangling_requests_for_instance(instance.pk)
             _notify_system_agents(instance)
             cleanup_requested_input_images_for(instance)
+            disk_cleanup.run_finished_session_disk_cleanup()
             raise
 
         instance.ended_at = timezone.now()
@@ -302,6 +304,7 @@ class Command(BaseCommand):
             resolve_dangling_requests_for_instance(instance.pk)
         _notify_system_agents(instance)
         cleanup_requested_input_images_for(instance)
+        disk_cleanup.run_finished_session_disk_cleanup()
 
 
 def _commit_terminal_status(instance: CodexInstance) -> None:
