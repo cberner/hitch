@@ -23,7 +23,7 @@ from unittest.mock import MagicMock, patch
 
 from django.conf import settings
 from django.core.management import call_command
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from openai_codex import ApprovalMode
 from openai_codex._message_router import MessageRouter
@@ -2449,6 +2449,123 @@ class ReconcileOrphanedWorkersTests(TestCase):
 
         self.assertEqual(killed, 0)
         mock_killpg.assert_not_called()
+
+    @patch("hitch.main.codex_pool._force_kill_instance")
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_scoped_worker_killed_via_force_kill_instance(
+        self,
+        mock_iter: MagicMock,
+        mock_killpg: MagicMock,
+        mock_force_kill: MagicMock,
+    ) -> None:
+        scoped = self._make(pid=5009, status=CodexInstance.STATUS_COMPLETED)
+        scoped.systemd_scope_unit = "codex-worker-5009.scope"
+        scoped.save(update_fields=["systemd_scope_unit"])
+        mock_iter.return_value = [(5009, scoped.pk)]
+
+        killed = codex_pool.reconcile_orphaned_workers()
+
+        self.assertEqual(killed, 1)
+        # Scoped workers are killed through systemctl, not a raw killpg.
+        mock_force_kill.assert_called_once()
+        mock_killpg.assert_not_called()
+
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_kills_nothing_when_expected_set_unreadable(
+        self, mock_iter: MagicMock, mock_killpg: MagicMock
+    ) -> None:
+        done = self._make(pid=5010, status=CodexInstance.STATUS_COMPLETED)
+        mock_iter.return_value = [(5010, done.pk)]
+
+        with patch.object(
+            codex_pool.CodexInstance.objects,
+            "filter",
+            side_effect=Exception("db down"),
+        ):
+            killed = codex_pool.reconcile_orphaned_workers()
+
+        # Never act on incomplete information.
+        self.assertEqual(killed, 0)
+        mock_killpg.assert_not_called()
+
+
+class IterRunningWorkerPidsTests(SimpleTestCase):
+    def _write_cmdline(self, proc_root: Path, pid: int, argv: list[bytes]) -> None:
+        pid_dir = proc_root / str(pid)
+        pid_dir.mkdir()
+        (pid_dir / "cmdline").write_bytes(b"\0".join(argv) + b"\0")
+
+    def test_matches_our_worker_and_scopes_out_other_deployments(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            ours = "/srv/hitch/manage.py"
+            # Our worker.
+            self._write_cmdline(
+                proc_root,
+                100,
+                [b"python", ours.encode(), b"codex_worker", b"--instance-id", b"7"],
+            )
+            # Another Hitch checkout under the same user: same codex_worker marker
+            # but a different manage.py path -- must be ignored.
+            self._write_cmdline(
+                proc_root,
+                101,
+                [
+                    b"python",
+                    b"/other/hitch/manage.py",
+                    b"codex_worker",
+                    b"--instance-id",
+                    b"7",
+                ],
+            )
+            # Unrelated process.
+            self._write_cmdline(proc_root, 102, [b"bash", b"-l"])
+            # A non-pid entry must be skipped without error.
+            (proc_root / "not-a-pid").mkdir()
+
+            found = sorted(
+                codex_pool._iter_running_worker_pids(
+                    proc_root=proc_root, manage_py=ours
+                )
+            )
+
+        self.assertEqual(found, [(100, 7)])
+
+    def test_skips_malformed_instance_id_and_missing_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            ours = "/srv/hitch/manage.py"
+            self._write_cmdline(
+                proc_root,
+                200,
+                [b"python", ours.encode(), b"codex_worker", b"--instance-id", b"x"],
+            )
+            self._write_cmdline(
+                proc_root,
+                201,
+                [b"python", ours.encode(), b"codex_worker"],
+            )
+
+            found = list(
+                codex_pool._iter_running_worker_pids(
+                    proc_root=proc_root, manage_py=ours
+                )
+            )
+
+        self.assertEqual(found, [])
+
+    def test_no_proc_root_yields_nothing(self) -> None:
+        missing = Path(tempfile.gettempdir()) / "definitely-not-here-12345"
+        self.assertEqual(
+            list(
+                codex_pool._iter_running_worker_pids(
+                    proc_root=missing, manage_py="/srv/hitch/manage.py"
+                )
+            ),
+            [],
+        )
 
 
 class InterruptActiveTests(TestCase):

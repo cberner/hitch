@@ -996,17 +996,27 @@ def reconcile_dead() -> int:
     return updated
 
 
-def _iter_running_worker_pids() -> Iterable[tuple[int, int]]:
-    """Yield ``(pid, instance_id)`` for every live ``codex_worker`` process.
+def _iter_running_worker_pids(
+    *,
+    proc_root: Path = Path("/proc"),
+    manage_py: str | None = None,
+) -> Iterable[tuple[int, int]]:
+    """Yield ``(pid, instance_id)`` for this deployment's live ``codex_worker``
+    processes.
 
-    Reads ``/proc/<pid>/cmdline`` for the same ``codex_worker --instance-id <pk>``
-    marker ``_pid_is_our_worker`` matches on. Linux-only (the deployment target);
-    on a host without ``/proc`` it yields nothing, so the orphan reap is simply a
-    no-op there rather than guessing.
+    Matches the same ``codex_worker --instance-id <pk>`` marker
+    ``_pid_is_our_worker`` uses, and *additionally* requires this deployment's
+    ``manage.py`` path on the command line. Without that, a second Hitch checkout
+    running under the same Unix user -- whose worker command lines carry the same
+    generic ``codex_worker`` marker but whose instance ids belong to a different
+    database -- would be scanned here and could be reaped as "not in our expected
+    set". Linux-only (the deployment target); on a host without ``/proc`` it
+    yields nothing, so the orphan reap is simply a no-op there rather than
+    guessing.
     """
-    proc_root = Path("/proc")
     if not proc_root.exists():
         return
+    marker = (manage_py or str(Path(settings.BASE_DIR) / "manage.py")).encode()
     for entry in proc_root.iterdir():
         if not entry.name.isdigit():
             continue
@@ -1015,7 +1025,7 @@ def _iter_running_worker_pids() -> Iterable[tuple[int, int]]:
         except OSError:
             continue
         parts = cmdline.split(b"\0")
-        if b"codex_worker" not in parts:
+        if b"codex_worker" not in parts or marker not in parts:
             continue
         try:
             idx = parts.index(b"--instance-id")
@@ -1779,9 +1789,21 @@ class _SharedCodexPool:
         self._idle: dict[_ConfigKey, deque[Codex]] = {}
         self._in_use = 0
         self._max = max_size
+        # Config keys ever borrowed, so the keepalive knows which keys to keep
+        # warm -- a memories-enabled session uses a different key than the
+        # default, and would otherwise cold-open on its first render after idle.
+        self._seen_keys: set[_ConfigKey] = set()
 
     def _total_warm(self) -> int:
         return self._in_use + sum(len(idle) for idle in self._idle.values())
+
+    def warm_target_keys(self) -> list[_ConfigKey]:
+        """Keys the keepalive should keep warm: every key borrowed so far, plus
+        the default key so a fresh process always keeps one server warm."""
+        with self._lock:
+            keys = set(self._seen_keys)
+        keys.add(_pool_key(enable_memories=False, web_search_mode=None))
+        return sorted(keys, key=lambda k: (k[0], k[1] or ""))
 
     def _pop_idle_other_key(self, key: _ConfigKey) -> Codex | None:
         """Pop the oldest idle server belonging to a different config key."""
@@ -1793,6 +1815,7 @@ class _SharedCodexPool:
     def checkout(self, key: _ConfigKey, factory: Callable[[], Codex]) -> Codex:
         dead: list[Codex] = []
         with self._lock:
+            self._seen_keys.add(key)
             idle = self._idle.get(key)
             reused: Codex | None = None
             while idle:
@@ -1828,6 +1851,7 @@ class _SharedCodexPool:
         dead: list[Codex] = []
         reused: Codex | None = None
         with self._lock:
+            self._seen_keys.add(key)
             idle = self._idle.get(key)
             while idle:
                 candidate = idle.pop()
@@ -1927,19 +1951,33 @@ def _codex_pool_keepalive_loop() -> None:
 
 
 def _codex_pool_keepalive_tick() -> None:
-    """Borrow the default-key server and exercise it with one cheap read.
+    """Borrow and exercise one server per used config key with a cheap read.
 
     Borrowing reconstructs a dead pooled server (checkout drops one whose
     subprocess has exited) and the read both keeps the app-server from idling out
     and surfaces a wedged-but-alive server -- a failed probe makes ``borrow_codex``
-    drop it, so the next tick rebuilds a healthy one. Best-effort: any failure is
+    drop it, so the next tick rebuilds a healthy one. Every key ever borrowed is
+    kept warm, not just the default: a memories-enabled session uses a different
+    pool key and would otherwise cold-open (and race the state-DB init lock) on
+    its first detail render after idle. Best-effort: a failure on one key is
     logged and retried next tick rather than killing the daemon.
     """
-    try:
-        with borrow_codex(Codex) as codex:
-            codex.thread_list(limit=1, use_state_db_only=True)
-    except Exception:
-        logger.warning("codex pool keepalive probe failed", exc_info=True)
+    for enable_memories, web_search_mode in _SHARED_POOL.warm_target_keys():
+        try:
+            with borrow_codex(
+                Codex,
+                enable_memories=enable_memories,
+                web_search_mode=web_search_mode,
+            ) as codex:
+                codex.thread_list(limit=1, use_state_db_only=True)
+        except Exception:
+            logger.warning(
+                "codex pool keepalive probe failed for key "
+                "(enable_memories=%s, web_search_mode=%s)",
+                enable_memories,
+                web_search_mode,
+                exc_info=True,
+            )
 
 
 @contextlib.contextmanager
