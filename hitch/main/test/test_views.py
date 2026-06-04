@@ -5003,6 +5003,14 @@ class IndexViewTests(TestCase):
                 for mock_call in client.thread_list.call_args_list
             )
         )
+        active_state = SessionIndexSyncState.objects.get(
+            source=SessionIndexSyncState.SOURCE_ACTIVE
+        )
+        archived_state = SessionIndexSyncState.objects.get(
+            source=SessionIndexSyncState.SOURCE_ARCHIVED
+        )
+        self.assertFalse(active_state.is_complete)
+        self.assertFalse(archived_state.is_complete)
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -7276,6 +7284,31 @@ class IndexViewTests(TestCase):
             include_active=True,
             include_archived=True,
         )
+
+    @patch("hitch.main.views.Codex")
+    def test_usage_page_throttles_recent_incomplete_index_refresh(
+        self, mock_codex: MagicMock
+    ) -> None:
+        session_index.mark_synced(archived=False, complete=False)
+        session_index.mark_synced(archived=True, complete=False)
+        client = _setup_codex(mock_codex)
+
+        with (
+            patch(
+                "hitch.main.views._start_usage_session_index_refresh_thread"
+            ) as start_index_refresh,
+            patch("hitch.main.views._start_usage_token_refresh_thread"),
+            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            self.captureOnCommitCallbacks(execute=True),
+        ):
+            response = self.client.get(reverse("usage"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "All sessions usage unavailable.")
+        self.assertIsNone(response.context["lifetime_usage"])
+        client.thread_list.assert_not_called()
+        start_index_refresh.assert_not_called()
 
     @patch("hitch.main.views.Codex")
     def test_usage_page_renders_zero_usage_when_complete_index_is_empty(
