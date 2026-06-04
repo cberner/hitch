@@ -911,6 +911,75 @@ def _systemd_scope_is_missing(systemctl: str, scope_unit: str) -> bool:
     return result.stdout.decode("utf-8", errors="replace").strip() in {"", "not-found"}
 
 
+def _scope_has_live_worker(scope_unit: str, *, proc_root: Path = Path("/proc")) -> bool:
+    """Whether any live ``codex_worker`` process currently runs in ``scope_unit``.
+
+    Scope unit names (``hitch-codex-worker-<id>.scope``) are not
+    deployment-unique, so once our dead worker's scope is collected another Hitch
+    checkout under the same user can create a scope with the same name. We only
+    reap a scope whose own worker is already gone, so a *live* ``codex_worker`` in
+    it means the name was reused by a different launch -- signaling it would kill
+    that launch's worker and grandchildren. Linux-only; without ``/proc`` it
+    reports ``False`` (the reap is then best-effort, as before).
+    """
+    if not proc_root.exists():
+        return False
+    target = scope_unit.encode()
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            cmdline = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        if b"codex_worker" not in cmdline.split(b"\0"):
+            continue
+        try:
+            cgroup = (entry / "cgroup").read_bytes()
+        except OSError:
+            continue
+        if target in cgroup:
+            return True
+    return False
+
+
+def _reap_scope_cgroup(instance: CodexInstance) -> None:
+    """Best-effort kill of a dead scoped worker's cgroup to clear leaked
+    grandchildren.
+
+    A worker reaped here exited without reporting completion -- wedged,
+    OOM-killed, or SIGKILL'd. The codex exec sandbox runs each command in its own
+    pgid/session, so a grandchild it spawned (e.g. a runaway ``cargo bench``) is
+    reparented out of the worker's process group but stays in the worker's scope
+    cgroup, holding memory until the scope's last process exits. A scope only
+    dies when that last process exits, so without this the grandchild can hold
+    gigabytes for hours after the worker is gone. ``systemctl kill
+    --kill-whom=all`` reaches every process in the cgroup; an already
+    empty/collected scope is a no-op. Non-scoped (direct) launches have no cgroup
+    to sweep and their already-dead pid must never be re-signaled, so they are
+    skipped.
+
+    Scope names are not deployment-unique, so a collected scope's name can be
+    reused by another checkout: skip the reap if a live worker now holds the
+    scope (it can't be ours -- ours is already dead) rather than killing an
+    unrelated launch's worker.
+    """
+    if not instance.systemd_scope_unit:
+        return
+    if _scope_has_live_worker(instance.systemd_scope_unit):
+        return
+    try:
+        _force_kill_instance(instance)
+    except ProcessLookupError:
+        return
+    except OSError:
+        logger.warning(
+            "failed to reap scope cgroup %s for instance %s",
+            instance.systemd_scope_unit,
+            instance.pk,
+        )
+
+
 def _pid_is_instance_worker(instance: CodexInstance) -> bool:
     if instance.systemd_scope_unit:
         return _pid_is_our_worker(
@@ -1533,6 +1602,11 @@ def _mark_dead_instances_failed(pending: Iterable[CodexInstance]) -> int:
             continue
         _resolve_dangling_requests(instance.pk)
         instance.refresh_from_db()
+        # The worker died without reporting completion, so its scope cgroup may
+        # still hold grandchildren the codex sandbox reparented into their own
+        # session (a process-group signal would miss them). Reap the cgroup so a
+        # leaked ``cargo bench`` can't hold memory long after the worker is gone.
+        _reap_scope_cgroup(instance)
         _notify_system_agents_if_needed(instance)
         cleanup_requested_input_images_for(instance)
         updated += 1
