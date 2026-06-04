@@ -3217,6 +3217,11 @@ def system_session(request: HttpRequest, session_id: str) -> HttpResponse:
     if instance is None:
         if run_id is not None:
             raise Http404("system session not found")
+        metadata = _session_detail_metadata(session_id)
+        if not _valid_codex_session_id(session_id) and not (
+            metadata is not None and metadata.is_hidden_system_session
+        ):
+            raise Http404("system session not found")
         return _render_session_detail(
             request,
             session_id,
@@ -4417,6 +4422,15 @@ def _thread_resume_missing_or_invalid(exc: InvalidRequestError) -> bool:
             )
         )
     )
+
+
+def _valid_codex_session_id(session_id: str) -> bool:
+    value = session_id.removeprefix("urn:uuid:")
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _debug_chat_new_session_url(
@@ -8320,6 +8334,47 @@ def _accept_proposed_session_for_session(
     return True
 
 
+def _claim_candidate_proposal_start(
+    *,
+    proposed_session: ProposedSession,
+    candidate_session: SessionMetadata,
+    cookie_updates: dict[str, str],
+) -> HttpResponse | None:
+    if _accept_proposed_session_for_session(proposed_session, candidate_session):
+        return None
+    response = redirect("inbox")
+    _apply_cookie_updates(response, cookie_updates)
+    return response
+
+
+def _reset_candidate_proposal_start_claim(
+    proposed_session: ProposedSession, candidate_session: SessionMetadata
+) -> None:
+    outcome_metadata = _proposal_outcome_metadata(
+        proposed_session,
+        {
+            "accepted_by": None,
+            "accepted_session_id": None,
+            "accepted_thread_id": None,
+        },
+    )
+    applied = ProposedSession.objects.filter(
+        pk=proposed_session.pk,
+        outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        accepted_session=candidate_session,
+    ).update(
+        outcome_status=ProposedSession.OUTCOME_UNSET,
+        accepted_session=None,
+        outcome_metadata=outcome_metadata,
+        updated_at=timezone.now(),
+    )
+    if not applied:
+        return
+    proposed_session.outcome_status = ProposedSession.OUTCOME_UNSET
+    proposed_session.accepted_session = None
+    proposed_session.outcome_metadata = outcome_metadata
+
+
 def _proposed_session_thread_title(proposed_session: ProposedSession) -> str:
     return proposed_session.title.strip()[:_NAME_MAX_LEN].rstrip()
 
@@ -9659,14 +9714,6 @@ def _finish_candidate_proposal_start(
         if target.project_cleared
         else candidate_session.project or target.project
     )
-    # Win the accept transition before adopting the candidate. If a concurrent
-    # inbox reject/dismiss resolved the proposal first, it may have already
-    # cleaned up this candidate's worktree, so we must not unhide it as a visible
-    # working session -- bail back to the inbox and leave the candidate hidden.
-    if not _accept_proposed_session_for_session(proposed_session, candidate_session):
-        response = redirect("inbox")
-        _apply_cookie_updates(response, cookie_updates)
-        return response
     _rename_codex_thread_from_proposal(
         proposed_session=proposed_session,
         session_metadata=candidate_session,
@@ -9755,7 +9802,18 @@ def _start_candidate_proposal_session(
             workflow_kwargs["open_pr_on_lgtm"] = False
         if auto_merge_branch:
             workflow_kwargs["auto_merge_branch"] = auto_merge_branch
-        system_agents.start_pr_qa_workflow(**workflow_kwargs)
+        claim_response = _claim_candidate_proposal_start(
+            proposed_session=proposed_session,
+            candidate_session=candidate_session,
+            cookie_updates=cookie_updates,
+        )
+        if claim_response is not None:
+            return claim_response
+        try:
+            system_agents.start_pr_qa_workflow(**workflow_kwargs)
+        except Exception:
+            _reset_candidate_proposal_start_claim(proposed_session, candidate_session)
+            raise
         # Persist the proposal-derived auto-review configuration so subsequent
         # turns in this session keep honoring it. Hardcoding ``False`` here would
         # silently drop a goal's auto-QA/auto-merge settings after the first turn.
@@ -9809,16 +9867,27 @@ def _start_candidate_proposal_session(
         if auto_merge_to_local_branch:
             spawn_kwargs["auto_merge_to_local_branch"] = True
             spawn_kwargs["auto_merge_branch"] = auto_merge_branch
+
     input_images_owned = False
+    claim_response = _claim_candidate_proposal_start(
+        proposed_session=proposed_session,
+        candidate_session=candidate_session,
+        cookie_updates=cookie_updates,
+    )
+    if claim_response is not None:
+        _cleanup_saved_input_images(input_image_paths)
+        return claim_response
     try:
         codex_pool.spawn_turn(**spawn_kwargs)
         input_images_owned = True
     except codex_pool.InputAttachmentLimitExceededError as exc:
         _cleanup_saved_input_images(input_image_paths)
+        _reset_candidate_proposal_start_claim(proposed_session, candidate_session)
         return HttpResponseBadRequest(str(exc))
     except Exception:
         if not input_images_owned:
             _cleanup_saved_input_images(input_image_paths)
+            _reset_candidate_proposal_start_claim(proposed_session, candidate_session)
         raise
 
     return _finish_candidate_proposal_start(
