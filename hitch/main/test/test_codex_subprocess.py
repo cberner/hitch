@@ -2443,6 +2443,36 @@ class ReconcileOrphanedWorkersTests(TestCase):
             target.systemd_scope_unit, codex_pool._scope_unit_for_instance(999999)
         )
 
+    @patch("hitch.main.codex_pool._force_kill_instance")
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._pid_is_our_worker")
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_kills_scoped_worker_when_row_lacks_scope_unit(
+        self,
+        mock_iter: MagicMock,
+        mock_identity: MagicMock,
+        mock_killpg: MagicMock,
+        mock_force_kill: MagicMock,
+    ) -> None:
+        # The row exists but never saved its scope unit (parent died after
+        # systemd-run returned): the worker is still scoped (not a session
+        # leader), so derive the scope rather than falling through to killpg.
+        done = self._make(pid=5006, status=CodexInstance.STATUS_COMPLETED)
+        mock_identity.side_effect = (
+            lambda pid, iid, require_session_leader=True: not require_session_leader
+        )
+        mock_iter.return_value = [(5006, done.pk)]
+
+        killed = codex_pool.reconcile_orphaned_workers()
+
+        self.assertEqual(killed, 1)
+        mock_killpg.assert_not_called()
+        mock_force_kill.assert_called_once()
+        target = mock_force_kill.call_args.args[0]
+        self.assertEqual(
+            target.systemd_scope_unit, codex_pool._scope_unit_for_instance(done.pk)
+        )
+
     @patch("hitch.main.codex_pool.os.killpg")
     @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.codex_pool._iter_running_worker_pids")
