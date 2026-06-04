@@ -10712,3 +10712,15 @@ class AutonomousGoalWorkflowTests(TestCase):
         hidden_ids = system_agents.hidden_thread_ids()
         self.assertIn("candidate-thread", hidden_ids)
         self.assertNotIn("implementation-thread", hidden_ids)
+
+
+class AutoReviewIntentionallySkippedTests(TestCase):
+    def test_blocked_approval_mode_is_skipped(self) -> None:
+        # A visible-approval mode means auto-review declines by design.
+        instance = _instance(approval_mode="prompt_user", auto_pr_enabled=True)
+        self.assertTrue(system_agents.auto_review_intentionally_skipped(instance))
+
+    def test_plain_completed_turn_is_not_skipped(self) -> None:
+        # auto_review mode, no pending proposed plan -> would fire, not skipped.
+        instance = _instance(approval_mode="auto_review", auto_pr_enabled=True)
+        self.assertFalse(system_agents.auto_review_intentionally_skipped(instance))
