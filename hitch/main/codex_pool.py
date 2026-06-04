@@ -1074,8 +1074,8 @@ def reconcile_orphaned_workers() -> int:
     takes its app-server child down with it (the app-server inherits the worker's
     session, so ``killpg``/``systemctl kill --kill-whom=all`` reaches it).
 
-    A still-running worker is spared in three cases, so a turn that is genuinely
-    in progress or just finishing is never killed:
+    A still-running worker is spared only while a turn could genuinely be in
+    progress or just finishing:
 
     * its instance is still ``starting``/``running`` (spanning *all* purposes --
       user, system-agent, and workflow turns -- so a system-session worker is
@@ -1084,8 +1084,10 @@ def reconcile_orphaned_workers() -> int:
       ``codex_worker`` commits the terminal status *before* running
       ``_notify_system_agents`` (which can spawn follow-up turns) and input-image
       cleanup, so a terminal-but-live worker inside that window is finishing
-      hooks, not leaked;
-    * this process is still supervising it (``_is_tracked_worker``).
+      hooks, not leaked. *Past* the grace a still-live terminal worker is wedged
+      and is reaped even if this process spawned it -- the tracked check only
+      guards the thin race before ``ended_at`` is recorded, so a same-process
+      hung worker holding the lock is never exempted indefinitely.
 
     We only ever kill on a positive DB answer: if the rows cannot be read,
     nothing is killed.
@@ -1117,10 +1119,20 @@ def reconcile_orphaned_workers() -> int:
                 CodexInstance.STATUS_RUNNING,
             ):
                 continue
-            if ended_at is not None and ended_at > now - _ORPHAN_REAP_GRACE:
+            # Terminal: spare it only while it may still be running its
+            # post-terminal hooks. Within the grace window it is finishing them;
+            # *past* the grace a still-live terminal worker is wedged and IS
+            # reaped -- even one this process spawned -- so the same-process
+            # process actually holding the state-DB lock gets killed rather than
+            # exempted forever by the tracked check.
+            if ended_at is not None:
+                if ended_at > now - _ORPHAN_REAP_GRACE:
+                    continue
+            elif _is_tracked_worker(pid):
+                # No ``ended_at`` recorded yet but we still supervise it: it is
+                # mid terminal-commit, not leaked. (Real terminal rows set
+                # ``ended_at`` before committing, so this is a thin race guard.)
                 continue
-        if _is_tracked_worker(pid):
-            continue
         if _kill_orphaned_worker(pid, instance_id):
             killed += 1
     if killed:

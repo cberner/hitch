@@ -2511,10 +2511,13 @@ class ReconcileOrphanedWorkersTests(TestCase):
     @patch("hitch.main.codex_pool.os.killpg")
     @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.codex_pool._iter_running_worker_pids")
-    def test_spares_worker_this_process_still_supervises(
+    def test_spares_supervised_worker_mid_terminal_commit(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
     ) -> None:
+        # Terminal status but no ended_at recorded yet and still supervised by
+        # this process: it is mid terminal-commit, not leaked.
         done = self._make(pid=5013, status=CodexInstance.STATUS_COMPLETED)
+        self.assertIsNone(done.ended_at)
         mock_iter.return_value = [(5013, done.pk)]
         with codex_pool._TRACKED_WORKER_PROCS_LOCK:
             codex_pool._TRACKED_WORKER_PROCS[5013] = (done.pk, cast(Any, MagicMock()))
@@ -2524,6 +2527,42 @@ class ReconcileOrphanedWorkersTests(TestCase):
 
         self.assertEqual(killed, 0)
         mock_killpg.assert_not_called()
+
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_reaps_supervised_worker_wedged_past_grace(
+        self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
+    ) -> None:
+        # A worker this process spawned that is terminal and hung past the grace
+        # is the exact same-process process holding the lock: it MUST be killed,
+        # not exempted forever by the tracked check.
+        done = self._make(pid=5015, status=CodexInstance.STATUS_COMPLETED)
+        done.ended_at = timezone.now() - codex_pool._ORPHAN_REAP_GRACE - timedelta(
+            seconds=5
+        )
+        done.save(update_fields=["ended_at"])
+        mock_iter.return_value = [(5015, done.pk)]
+        with codex_pool._TRACKED_WORKER_PROCS_LOCK:
+            codex_pool._TRACKED_WORKER_PROCS[5015] = (done.pk, cast(Any, MagicMock()))
+        self.addCleanup(_forget_worker_pid, 5015)
+
+        killed = codex_pool.reconcile_orphaned_workers()
+
+        self.assertEqual(killed, 1)
+        mock_killpg.assert_called_once_with(5015, signal.SIGKILL)
+
+    @patch("hitch.main.codex_pool.os.killpg", side_effect=ProcessLookupError)
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_kill_already_gone_counts_as_not_killed(
+        self, mock_iter: MagicMock, _mock_identity: MagicMock, _mock_killpg: MagicMock
+    ) -> None:
+        # The leaked process exited between scan and signal: not counted, no raise.
+        done = self._make(pid=5014, status=CodexInstance.STATUS_COMPLETED)
+        mock_iter.return_value = [(5014, done.pk)]
+
+        self.assertEqual(codex_pool.reconcile_orphaned_workers(), 0)
 
     @patch("hitch.main.codex_pool.os.killpg")
     @patch("hitch.main.codex_pool._iter_running_worker_pids")
@@ -2578,6 +2617,8 @@ class IterRunningWorkerPidsTests(SimpleTestCase):
             self._write_cmdline(proc_root, 102, [b"bash", b"-l"])
             # A non-pid entry must be skipped without error.
             (proc_root / "not-a-pid").mkdir()
+            # A pid dir whose cmdline cannot be read is skipped, not fatal.
+            (proc_root / "104").mkdir()
 
             found = sorted(
                 codex_pool._iter_running_worker_pids(

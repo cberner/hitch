@@ -366,6 +366,23 @@ class RunBorrowedOpWithRetryTests(SimpleTestCase):
         self.assertEqual(len(built), 2)
 
     @override_settings(TESTING=False)
+    def test_warm_non_locked_transport_error_propagates(self) -> None:
+        factory, built = _counting_factory()
+        codex_class = lambda **_: factory()  # noqa: E731
+        with codex_pool.borrow_codex(codex_class) as warm:
+            pass
+
+        def operation(_codex: Any) -> str:
+            raise TransportClosedError("app-server closed stdout. crash")
+
+        with self.assertRaises(TransportClosedError):
+            codex_pool.run_borrowed_op_with_retry(codex_class, operation)
+
+        # A non-locked transport error drops the warm server but does not retry.
+        self.assertTrue(_closed(warm))
+        self.assertEqual(len(built), 1)
+
+    @override_settings(TESTING=False)
     def test_warm_non_locked_error_propagates_without_fallback(self) -> None:
         factory, built = _counting_factory()
         codex_class = lambda **_: factory()  # noqa: E731
@@ -392,6 +409,20 @@ class CodexPoolKeepaliveTests(SimpleTestCase):
 
     def test_disabled_under_testing(self) -> None:
         self.assertFalse(codex_pool.start_codex_pool_keepalive())
+
+    @override_settings(TESTING=False)
+    def test_starts_one_daemon_thread(self) -> None:
+        self.addCleanup(setattr, codex_pool, "_keepalive_started", False)
+        codex_pool._keepalive_started = False
+        with mock.patch("hitch.main.codex_pool.threading.Thread") as thread_cls:
+            started = codex_pool.start_codex_pool_keepalive()
+            # Idempotent: a second call does not start another thread.
+            again = codex_pool.start_codex_pool_keepalive()
+
+        self.assertTrue(started)
+        self.assertFalse(again)
+        thread_cls.assert_called_once()
+        thread_cls.return_value.start.assert_called_once_with()
 
     @override_settings(TESTING=False)
     def test_tick_warms_and_probes_a_server(self) -> None:
