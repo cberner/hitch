@@ -1730,12 +1730,13 @@ class ReconcileAndLookupTests(TestCase):
         thread_id: str = "t",
         status: str | None = None,
         purpose: str = CodexInstance.PURPOSE_USER,
+        events_path: str = "/dev/null",
     ) -> CodexInstance:
         return CodexInstance.objects.create(
             pid=pid,
             thread_id=thread_id,
             cwd="/r",
-            events_path="/dev/null",
+            events_path=events_path,
             status=status or CodexInstance.STATUS_COMPLETED,
             purpose=purpose,
         )
@@ -1761,6 +1762,48 @@ class ReconcileAndLookupTests(TestCase):
         self.assertIsNone(live_running.ended_at)
         self.assertEqual(completed.status, CodexInstance.STATUS_COMPLETED)
         self.assertIn("exited", dead_running.error)
+
+    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_dead_records_last_auto_approval_timeout(
+        self, _mock_worker_alive: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = Path(raw) / "events.jsonl"
+            events_path.write_text(
+                json.dumps(
+                    {
+                        "method": "item/autoApprovalReview/completed",
+                        "payload": {
+                            "action": {"command": "pkill -f target/release/bench"},
+                            "review": {
+                                "status": "timedOut",
+                                "rationale": (
+                                    "Automatic approval review timed out while "
+                                    "evaluating the requested approval."
+                                ),
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            instance = self._make(
+                pid=13,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(events_path),
+            )
+
+            n = codex_pool.reconcile_dead()
+
+        self.assertEqual(n, 1)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertIn(
+            "worker process exited before reporting completion", instance.error
+        )
+        self.assertIn("auto-approval review timed out", instance.error)
+        self.assertIn("pkill -f target/release/bench", instance.error)
 
     @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_cancels_pending_requests_of_dead_worker(
