@@ -31,6 +31,18 @@ class SessionStageTests(SimpleTestCase):
 
                 self.assertEqual(session_stage.derive_stage(workflow=workflow), expected_stage)
 
+    def test_archived_workflow_does_not_derive_blocked_stage(self) -> None:
+        # Archived stale-blocked rows must drop out of the Blocked inbox stage.
+        workflow = SystemWorkflow(
+            kind=SystemWorkflow.KIND_PR_QA,
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_ARCHIVED,
+        )
+
+        self.assertNotEqual(
+            session_stage.derive_stage(workflow=workflow), session_stage.BLOCKED
+        )
+
     def test_approval_declined_after_plan_stays_plan_stage(self) -> None:
         stage = session_stage.derive_stage(
             entries=[
