@@ -74,13 +74,18 @@ def cleanup_hitch_disk_usage_if_needed() -> int:
     hitch_home = _hitch_home_dir()
     usage_path = _existing_disk_usage_path(hitch_home)
     try:
-        disk_total = shutil.disk_usage(usage_path).total
+        usage = shutil.disk_usage(usage_path)
     except OSError:
         logger.exception("failed to inspect disk usage for %s", usage_path)
         return 0
-    if disk_total <= 0:
+    if usage.total <= 0:
         return 0
-    limit_bytes = int(disk_total * (_max_allowed_percent() / 100.0))
+    limit_bytes = int(usage.total * (_max_allowed_percent() / 100.0))
+    # Partition-level prefilter: ~/.hitch can only exceed the configured
+    # percentage of total disk if the partition itself does. statvfs is
+    # constant-time; the recursive lstat walk below scales with file count.
+    if usage.used <= limit_bytes:
+        return 0
     used_bytes = _directory_size(hitch_home)
     if used_bytes <= limit_bytes:
         return 0
@@ -97,12 +102,12 @@ def cleanup_hitch_disk_usage_if_needed() -> int:
                 candidate.reason,
                 candidate.metadata.thread_id,
             )
-            used_bytes = _directory_size(hitch_home)
             continue
         if not removed:
-            used_bytes = _directory_size(hitch_home)
             continue
         cleaned += 1
+        # Only an actual removal can change the tree size, so re-walk solely
+        # on success — failure and no-op iterations leave used_bytes intact.
         used_bytes = _directory_size(hitch_home)
     return cleaned
 
