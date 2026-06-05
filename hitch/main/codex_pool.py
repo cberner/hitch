@@ -1877,7 +1877,7 @@ def worker_logs_dir() -> Path:
     configured = getattr(settings, "CODEX_WORKER_LOG_DIR", None)
     if configured is not None:
         return Path(configured)
-    return hitch_home_dir()
+    return hitch_home_dir() / "worker_logs"
 
 
 def worker_log_path(instance_id: int) -> Path:
