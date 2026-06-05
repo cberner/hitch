@@ -2130,6 +2130,7 @@ class ReconcileAndLookupTests(TestCase):
                 events_path=str(Path(raw) / "missing.jsonl"),
             )
             log_path = codex_pool.worker_log_path(instance.pk)
+            log_path.parent.mkdir(parents=True)
             log_path.write_text("stale host log\n", encoding="utf-8")
 
             n = codex_pool.reconcile_dead()
@@ -5042,8 +5043,10 @@ class EventsDirTests(TestCase):
             tempfile.TemporaryDirectory() as raw,
             override_settings(CODEX_WORKER_LOG_DIR=None, HITCH_HOME_DIR=Path(raw)),
         ):
-            self.assertEqual(codex_pool.worker_logs_dir(), Path(raw))
-            self.assertEqual(codex_pool.worker_log_path(7), Path(raw) / "7.log")
+            self.assertEqual(codex_pool.worker_logs_dir(), Path(raw) / "worker_logs")
+            self.assertEqual(
+                codex_pool.worker_log_path(7), Path(raw) / "worker_logs" / "7.log"
+            )
 
 
 class _FakePayload(BaseModel):
