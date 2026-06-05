@@ -9677,6 +9677,226 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_cleanup.assert_called_once_with("/repo-worktree-2")
 
+    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    @patch(
+        "hitch.main.system_agents.snapshot_worktree_to_commit",
+        return_value="c" * 40,
+    )
+    @patch(
+        "hitch.main.system_agents.default_branch_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_stacked_diff_no_proposal_publishes_existing_proposal(
+        self,
+        mock_spawn: MagicMock,
+        _mock_default_sha: MagicMock,
+        _mock_snapshot: MagicMock,
+        mock_cleanup: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=2,
+        )
+        self.mock_create_worktree.side_effect = [
+            MagicMock(path=Path("/repo-worktree-1")),
+            MagicMock(path=Path("/repo-worktree-2")),
+        ]
+        candidate_1 = _instance(
+            thread_id="candidate-1",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        judge_1 = _instance(
+            thread_id="judge-1",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            events_path=_events_file(
+                self,
+                {
+                    "confidence": "high",
+                    "summary": "The first candidate is useful.",
+                    "rationale": "It is focused.",
+                },
+            ),
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
+        )
+        candidate_2 = _instance(
+            thread_id="candidate-2",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            events_path=_events_file(
+                self,
+                {
+                    "proposal": None,
+                    "message": "The continuation did not improve the proposal.",
+                    "next_steps_summary": "No stronger proposal found.",
+                    "memory_relevant_files": [],
+                },
+            ),
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        mock_spawn.side_effect = [candidate_1, judge_1, candidate_2]
+
+        workflow = system_agents.start_autonomous_goal_workflow(
+            autonomous_goal=autonomous_goal,
+            use_worktrees=True,
+        )
+        candidate_1.events_path = _events_file(
+            self,
+            {
+                "proposal": {
+                    "title": "Add parser coverage",
+                    "summary": "Cover parser edge cases.",
+                    "impact": "Fewer regressions.",
+                    "implementation_direction": "Finish parser tests.",
+                    "relevant_files": ["hitch/main/rollout.py"],
+                },
+                "message": "",
+                "next_steps_summary": "Selected parser coverage.",
+                "memory_relevant_files": [],
+            },
+        )
+        candidate_1.save(update_fields=["events_path"])
+        system_agents.on_codex_instance_finished(candidate_1)
+        system_agents.on_codex_instance_finished(judge_1)
+
+        system_agents.on_codex_instance_finished(candidate_2)
+
+        workflow.refresh_from_db()
+        proposal = ProposedSession.objects.get()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertFalse(
+            proposal.outcome_metadata["stacked_diff_hidden_until_complete"]
+        )
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED)
+        self.assertEqual(
+            workflow.state["stacked_diff_stopped_reason"],
+            "candidate_no_proposal",
+        )
+        mock_cleanup.assert_called_once_with("/repo-worktree-2")
+
+    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    @patch(
+        "hitch.main.system_agents.snapshot_worktree_to_commit",
+        return_value="c" * 40,
+    )
+    @patch(
+        "hitch.main.system_agents.default_branch_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_stacked_diff_judge_parse_failure_publishes_existing_proposal(
+        self,
+        mock_spawn: MagicMock,
+        _mock_default_sha: MagicMock,
+        _mock_snapshot: MagicMock,
+        mock_cleanup: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=2,
+        )
+        self.mock_create_worktree.side_effect = [
+            MagicMock(path=Path("/repo-worktree-1")),
+            MagicMock(path=Path("/repo-worktree-2")),
+        ]
+        candidate_1 = _instance(
+            thread_id="candidate-1",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        judge_1 = _instance(
+            thread_id="judge-1",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            events_path=_events_file(
+                self,
+                {
+                    "confidence": "high",
+                    "summary": "The first candidate is useful.",
+                    "rationale": "It is focused.",
+                },
+            ),
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
+        )
+        candidate_2 = _instance(
+            thread_id="candidate-2",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        judge_2 = _instance(
+            thread_id="judge-2",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            events_path=_events_file(self, {"unexpected": "shape"}),
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
+        )
+        mock_spawn.side_effect = [candidate_1, judge_1, candidate_2, judge_2]
+
+        workflow = system_agents.start_autonomous_goal_workflow(
+            autonomous_goal=autonomous_goal,
+            use_worktrees=True,
+        )
+        candidate_1.events_path = _events_file(
+            self,
+            {
+                "proposal": {
+                    "title": "Add parser coverage",
+                    "summary": "Cover parser edge cases.",
+                    "impact": "Fewer regressions.",
+                    "implementation_direction": "Finish parser tests.",
+                    "relevant_files": ["hitch/main/rollout.py"],
+                },
+                "message": "",
+                "next_steps_summary": "Selected parser coverage.",
+                "memory_relevant_files": [],
+            },
+        )
+        candidate_1.save(update_fields=["events_path"])
+        system_agents.on_codex_instance_finished(candidate_1)
+        system_agents.on_codex_instance_finished(judge_1)
+        candidate_2.events_path = _events_file(
+            self,
+            {
+                "proposal": {
+                    "title": "Expand parser coverage",
+                    "summary": "Cover more parser edge cases.",
+                    "impact": "Even fewer regressions.",
+                    "implementation_direction": "Finish broader parser tests.",
+                    "relevant_files": ["hitch/main/rollout.py"],
+                },
+                "message": "",
+                "next_steps_summary": "Expanded parser coverage.",
+                "memory_relevant_files": [],
+            },
+        )
+        candidate_2.save(update_fields=["events_path"])
+        system_agents.on_codex_instance_finished(candidate_2)
+
+        system_agents.on_codex_instance_finished(judge_2)
+
+        workflow.refresh_from_db()
+        proposal = ProposedSession.objects.get()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertFalse(
+            proposal.outcome_metadata["stacked_diff_hidden_until_complete"]
+        )
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED)
+        self.assertEqual(
+            workflow.state["stacked_diff_continuation_error"],
+            "autonomous goal judge output was not valid JSON",
+        )
+        mock_cleanup.assert_called_once_with("/repo-worktree-2")
+
     @patch("hitch.main.system_agents.cleanup_worktree")
     @patch(
         "hitch.main.system_agents.default_branch_commit_hash",
