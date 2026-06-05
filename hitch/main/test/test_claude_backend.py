@@ -1140,6 +1140,58 @@ class WorkspaceWriteMcpGuardTests(TestCase):
         self.assertIsInstance(result, PermissionResultAllow)
 
 
+class SteerPendingRollbackTests(TestCase):
+    """A steered follow-up registers its pending response before scheduling the
+    query, so a query that never runs must roll that registration back -- else the
+    receive loop waits forever on a response that can't arrive."""
+
+    def _runner(self) -> Any:
+        import io
+
+        from hitch.main.management.commands import claude_worker
+
+        instance = CodexInstance(
+            thread_id="t",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_RUNNING,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            purpose=CodexInstance.PURPOSE_USER,
+        )
+        return claude_worker._TurnRunner(
+            instance=instance,
+            events_file=io.StringIO(),
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=None,
+            approval_mode=None,
+            web_search_mode=None,
+            plan_mode=False,
+        )
+
+    def test_failed_steer_query_rolls_back_pending(self) -> None:
+        from concurrent.futures import Future
+
+        runner = self._runner()
+        runner._steer_pending = 1
+        future: Future[Any] = Future()
+        future.set_exception(RuntimeError("client is closing"))
+        runner._steer_query_done(future)
+        self.assertEqual(runner._steer_pending, 0)
+
+    def test_successful_steer_query_keeps_pending(self) -> None:
+        from concurrent.futures import Future
+
+        runner = self._runner()
+        runner._steer_pending = 1
+        future: Future[Any] = Future()
+        future.set_result(None)
+        runner._steer_query_done(future)
+        self.assertEqual(runner._steer_pending, 1)
+
+
 class DemoSandboxOverrideTests(TestCase):
     """A Claude demo run forces full host access regardless of the user's sandbox
     so its podman/shell container setup is neither blocked nor confined."""

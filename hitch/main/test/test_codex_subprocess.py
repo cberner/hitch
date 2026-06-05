@@ -3911,6 +3911,26 @@ class IterRunningWorkerPidsTests(SimpleTestCase):
 
         self.assertEqual(found, [(100, 7)])
 
+    def test_matches_claude_worker_so_orphans_are_reaped(self) -> None:
+        # Claude rows launch ``claude_worker`` processes; a leaked one must be
+        # visible to the reverse orphan reconciliation just like ``codex_worker``.
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            ours = "/srv/hitch/manage.py"
+            self._write_cmdline(
+                proc_root,
+                300,
+                [b"python", ours.encode(), b"claude_worker", b"--instance-id", b"9"],
+            )
+
+            found = sorted(
+                codex_pool._iter_running_worker_pids(
+                    proc_root=proc_root, manage_py=ours
+                )
+            )
+
+        self.assertEqual(found, [(300, 9)])
+
     def test_skips_malformed_instance_id_and_missing_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             proc_root = Path(tmp)

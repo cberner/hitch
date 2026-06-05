@@ -781,10 +781,29 @@ class _TurnRunner:
                 # learns another response is coming.
                 with self._steer_lock:
                     self._steer_pending += 1
-                asyncio.run_coroutine_threadsafe(
+                future = asyncio.run_coroutine_threadsafe(
                     self._client.query(query_input), self._loop
                 )
+                future.add_done_callback(self._steer_query_done)
         return offset + len(complete)
+
+    def _steer_query_done(self, future: Any) -> None:
+        """Roll back the pending count if a scheduled steer query never ran.
+
+        The pending response is registered eagerly above so the receive loop
+        can't tear the turn down before it learns a follow-up is coming. But if
+        the SDK rejects the scheduled ``query`` (the client is interrupting or
+        closing, or refuses a concurrent follow-up) no ``ResultMessage`` will
+        ever arrive for that registration, so drop it -- otherwise the loop's
+        outstanding-response accounting waits on a response that can't come. The
+        common case is an immediate rejection that completes before the loop
+        consumes the count, so the count nets back to zero and no phantom
+        response is ever awaited.
+        """
+        if future.cancelled() or future.exception() is None:
+            return
+        with self._steer_lock:
+            self._steer_pending -= 1
 
 
 def _is_external_mcp_tool(tool_name: str) -> bool:
