@@ -7981,6 +7981,9 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     spec_critic = request.POST.get("spec_critic", "").strip()
     web_search_mode = request.POST.get("web_search_mode", "").strip()
     posted_disk_usage_max_percent = request.POST.get("disk_usage_max_percent")
+    posted_initial_disk_usage_max_percent = request.POST.get(
+        "initial_disk_usage_max_percent"
+    )
     posted_show_archived = request.POST.get("show_archived_sessions")
     show_archived = (
         posted_show_archived.strip() if posted_show_archived is not None else None
@@ -8046,6 +8049,14 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         )
         if disk_usage_error is not None:
             return HttpResponseBadRequest(disk_usage_error)
+        if posted_initial_disk_usage_max_percent is not None:
+            initial_disk_usage_max_percent, initial_disk_usage_error = (
+                _parse_disk_usage_max_percent(posted_initial_disk_usage_max_percent)
+            )
+            if initial_disk_usage_error is not None:
+                return HttpResponseBadRequest(initial_disk_usage_error)
+            if disk_usage_max_percent == initial_disk_usage_max_percent:
+                disk_usage_max_percent = None
     if show_archived is not None and show_archived not in {"", "true"}:
         return HttpResponseBadRequest("invalid archived sessions visibility")
     if enable_memories not in {"", "true"}:
