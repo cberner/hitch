@@ -2078,13 +2078,16 @@
         <div class="topbar-inner">
             {% include "_primary_nav.html" %}
             <div class="topbar-title">{{ display_title }}</div>
-            {% if not read_only %}
+            {% if not read_only or debug_chat_url %}
             <div class="topbar-menu" data-session-menu>
                 <button type="button" class="topbar-action" aria-label="Session actions" aria-haspopup="menu" aria-expanded="false" data-session-menu-open>...</button>
                 <div class="session-menu" role="menu" data-session-menu-panel hidden>
+                    {% if not read_only %}
                     <button type="button" role="menuitem" data-edit-title-open>Rename</button>
                     <button type="button" role="menuitem" data-diff-open {% if not diff_view.has_changes %}disabled{% endif %}>View diff</button>
+                    {% endif %}
                     <a href="{{ debug_chat_url }}" role="menuitem">Debug chat</a>
+                    {% if not read_only %}
                     <button type="button" role="menuitem" data-move-project-open>Move to project</button>
                     <form method="post" action="{{ start_demo_url }}" role="none">
                         {% csrf_token %}
@@ -2101,6 +2104,7 @@
                         <input type="hidden" name="archived" value="{% if is_archived %}false{% else %}true{% endif %}">
                         <button type="submit" role="menuitem">{% if is_archived %}Unarchive{% else %}Archive{% endif %}</button>
                     </form>
+                    {% endif %}
                 </div>
             </div>
             {% endif %}

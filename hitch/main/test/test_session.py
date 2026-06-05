@@ -3617,9 +3617,10 @@ class SessionViewActiveWorkerTests(TestCase):
             body.index("QA agent approved the diff and merged it into main."),
         )
 
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_system_session_detail_is_read_only_and_shows_system_prompt(
-        self, mock_codex: MagicMock
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
         prompt = "You are Hitch's QA agent.\nReview <diff>."
         _patch_thread(
@@ -3659,9 +3660,28 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, '<details class="system-prompt">', html=False)
         self.assertContains(response, "<summary>System prompt</summary>", html=False)
         self.assertContains(response, "Review &lt;diff&gt;.")
+        self.assertContains(response, 'aria-label="Session actions"')
+        self.assertContains(response, ">Debug chat</a>")
+        debug_url = cast(str, cast(Any, response).context["debug_chat_url"])
+        parsed = urlparse(debug_url)
+        query = parse_qs(parsed.query)
+        self.assertEqual(parsed.path, reverse("new_session"))
+        self.assertEqual(query["cwd"], ["/repo"])
+        self.assertIn("session UID qa-thread", query["prompt"][0])
         self.assertNotContains(response, '<span class="meta-label">stage</span>')
         self.assertNotContains(response, "No messages in this session yet.")
         self.assertNotContains(response, 'class="composer"')
+        self.assertNotContains(
+            response,
+            '<button type="button" role="menuitem" data-edit-title-open>Rename</button>',
+            html=False,
+        )
+        self.assertNotContains(
+            response,
+            '<button type="button" role="menuitem" data-move-project-open>Move to project</button>',
+            html=False,
+        )
+        self.assertNotContains(response, 'name="archived"')
 
     def test_system_session_detail_requires_system_run(self) -> None:
         response = self.client.get(
