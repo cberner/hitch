@@ -1864,12 +1864,20 @@ def events_dir() -> Path:
     return Path.home() / ".hitch" / "codex_events"
 
 
+def hitch_home_dir() -> Path:
+    """Filesystem directory holding shared Hitch runtime state."""
+    configured = getattr(settings, "HITCH_HOME_DIR", None)
+    if configured is not None:
+        return Path(configured)
+    return Path.home() / ".hitch"
+
+
 def worker_logs_dir() -> Path:
     """Filesystem directory holding detached worker stderr logs."""
     configured = getattr(settings, "CODEX_WORKER_LOG_DIR", None)
     if configured is not None:
         return Path(configured)
-    return events_dir() / "worker_logs"
+    return hitch_home_dir() / "worker_logs"
 
 
 def worker_log_path(instance_id: int) -> Path:
