@@ -106,7 +106,12 @@ def cleanup_hitch_disk_usage_if_needed() -> int:
     attempted_paths: set[str] = set()
     for candidate in candidates:
         if successful_bytes >= bytes_to_free:
-            break
+            # Hardlinked files may remain reachable through other worktrees.
+            used_bytes = _directory_size(hitch_home)
+            if used_bytes <= limit_bytes:
+                break
+            bytes_to_free = used_bytes - limit_bytes
+            successful_bytes = 0
         normalized_path = _normalized_managed_path(candidate.cwd)
         if normalized_path is None or normalized_path in attempted_paths:
             continue
