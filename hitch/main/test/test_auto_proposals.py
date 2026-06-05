@@ -143,6 +143,62 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         )
         self.assertEqual(mock_cleanup.call_count, 2)
 
+    def test_scheduler_loop_runs_due_disk_cleanup_between_ticks(self) -> None:
+        class StopSchedulerError(Exception):
+            pass
+
+        fake_stop = MagicMock()
+        fake_stop.wait.side_effect = StopSchedulerError
+        with (
+            patch(
+                "hitch.main.workflow_maintenance.threading.Event",
+                return_value=fake_stop,
+            ),
+            patch(
+                "hitch.main.workflow_maintenance.time.monotonic",
+                return_value=10.0,
+            ),
+            patch(
+                "hitch.main.workflow_maintenance._run_workflow_maintenance_scheduler_tick"
+            ) as mock_tick,
+            patch(
+                "hitch.main.workflow_maintenance._run_due_disk_usage_cleanup",
+                return_value=999.0,
+            ) as mock_disk_cleanup,
+            self.assertRaises(StopSchedulerError),
+        ):
+            workflow_maintenance._workflow_maintenance_scheduler_loop()
+
+        mock_tick.assert_called_once_with()
+        mock_disk_cleanup.assert_called_once_with(
+            next_due_at=10.0
+            + workflow_maintenance._DISK_USAGE_CLEANUP_INTERVAL_SECONDS
+        )
+        fake_stop.wait.assert_called_once_with(
+            workflow_maintenance._WORKFLOW_MAINTENANCE_INTERVAL_SECONDS
+        )
+
+    @patch("hitch.main.workflow_maintenance.logger.exception")
+    @patch(
+        "hitch.main.workflow_maintenance.disk_cleanup.run_finished_session_disk_cleanup",
+        side_effect=RuntimeError("cleanup failed"),
+    )
+    def test_disk_usage_cleanup_failure_is_logged_and_rescheduled(
+        self, mock_cleanup: MagicMock, mock_log_exception: MagicMock
+    ) -> None:
+        next_due = workflow_maintenance._run_due_disk_usage_cleanup(
+            next_due_at=100.0, now=100.0
+        )
+
+        self.assertEqual(
+            next_due,
+            100.0 + workflow_maintenance._DISK_USAGE_CLEANUP_INTERVAL_SECONDS,
+        )
+        mock_cleanup.assert_called_once_with()
+        mock_log_exception.assert_called_once_with(
+            "failed to run scheduled Hitch disk cleanup"
+        )
+
     @override_settings(TESTING=False)
     @patch.dict(
         os.environ,

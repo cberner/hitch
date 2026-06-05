@@ -1790,6 +1790,26 @@ class UpdateSettingsViewTests(TestCase):
         settings = GlobalSettings.objects.get(pk=GlobalSettings.SINGLETON_PK)
         self.assertEqual(settings.disk_usage_max_percent, 35.5)
 
+    def test_staff_update_settings_updates_existing_disk_usage_global_setting(
+        self,
+    ) -> None:
+        user = get_user_model().objects.create_user(
+            "admin@example.com", password="StrongPass123!", is_staff=True
+        )
+        self.client.force_login(user)
+        GlobalSettings.objects.create(
+            pk=GlobalSettings.SINGLETON_PK, disk_usage_max_percent=35.5
+        )
+
+        response = self.client.post(
+            reverse("update_settings"),
+            data={"disk_usage_max_percent": "42.3"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        settings = GlobalSettings.objects.get(pk=GlobalSettings.SINGLETON_PK)
+        self.assertEqual(settings.disk_usage_max_percent, 42.3)
+
     def test_staff_update_settings_rejects_invalid_disk_usage_global_setting(
         self,
     ) -> None:

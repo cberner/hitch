@@ -82,6 +82,39 @@ class DiskCleanupTests(TestCase):
 
         self.assertEqual(disk_cleanup._max_allowed_percent(), 35.5)
 
+    @override_settings(HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=35)
+    @patch("hitch.main.disk_cleanup.logger.exception")
+    def test_max_allowed_percent_falls_back_when_saved_global_read_fails(
+        self, mock_log_exception: MagicMock
+    ) -> None:
+        with patch(
+            "hitch.main.disk_cleanup.GlobalSettings.objects.filter",
+            side_effect=RuntimeError("database unavailable"),
+        ):
+            self.assertEqual(disk_cleanup._max_allowed_percent(), 35.0)
+
+        mock_log_exception.assert_called_once_with(
+            "failed to load saved Hitch disk usage setting"
+        )
+
+    @override_settings(HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=35)
+    @patch("hitch.main.disk_cleanup.logger.warning")
+    def test_invalid_saved_global_max_allowed_percent_uses_default(
+        self, mock_warning: MagicMock
+    ) -> None:
+        GlobalSettings.objects.create(
+            pk=GlobalSettings.SINGLETON_PK, disk_usage_max_percent=100.1
+        )
+
+        self.assertEqual(
+            disk_cleanup._max_allowed_percent(),
+            disk_cleanup.DEFAULT_MAX_ALLOWED_DISK_SPACE_PERCENT,
+        )
+        mock_warning.assert_called_once()
+
+    def test_global_settings_str(self) -> None:
+        self.assertEqual(str(GlobalSettings()), "GlobalSettings")
+
     def test_cleanup_orders_system_then_archived_pr_then_old_archived(self) -> None:
         with (
             tempfile.TemporaryDirectory() as raw,
