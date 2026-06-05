@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -150,7 +151,7 @@ class DiskCleanupTests(TestCase):
 
             cleaned = self._run_cleanup(
                 root=root,
-                sizes=[300, 50, 50, 50],
+                sizes=[300, 50, 50, 50, 200],
                 mock_cleanup=mock_cleanup,
             )
 
@@ -284,7 +285,7 @@ class DiskCleanupTests(TestCase):
             ) as mock_cleanup,
             patch(
                 "hitch.main.disk_cleanup._directory_size",
-                side_effect=[500, 125, 125, 125, 125],
+                side_effect=[500, 125, 125, 125, 125, 200],
             ) as mock_size,
         ):
             root = Path(raw)
@@ -317,11 +318,73 @@ class DiskCleanupTests(TestCase):
                 cleaned = disk_cleanup.cleanup_hitch_disk_usage_if_needed()
 
         self.assertEqual(cleaned, 3)
-        self.assertEqual(mock_size.call_count, 5)
+        self.assertEqual(mock_size.call_count, 6)
         self.assertEqual(
             [call.args[0] for call in mock_cleanup.call_args_list],
             paths[:3],
         )
+
+    def test_shared_hardlink_usage_is_rechecked_before_stopping(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            hitch_home = root / ".hitch"
+            managed = hitch_home / "worktrees"
+            first = managed / "repo" / "first"
+            second = managed / "repo" / "second"
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+            first_blob = first / "blob"
+            first_blob.write_bytes(b"x" * 4096)
+            os.link(first_blob, second / "blob")
+            archived_at = timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE
+            self._session(
+                thread_id="first",
+                cwd=str(first),
+                archived=True,
+                archived_at=archived_at,
+            )
+            self._session(
+                thread_id="second",
+                cwd=str(second),
+                archived=True,
+                archived_at=archived_at,
+            )
+            used_bytes = disk_cleanup._directory_size(hitch_home)
+            first_unique_bytes = (
+                disk_cleanup._directory_size(first)
+                - disk_cleanup._allocated_size(first_blob.lstat())
+            )
+            limit_bytes = used_bytes - first_unique_bytes - 1
+            removed_paths: list[str] = []
+
+            def cleanup_path(path: str) -> bool:
+                removed_paths.append(path)
+                shutil.rmtree(path)
+                return True
+
+            with (
+                override_settings(
+                    HITCH_HOME_DIR=hitch_home,
+                    HITCH_WORKTREES_DIR=managed,
+                    HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=20,
+                ),
+                patch(
+                    "hitch.main.disk_cleanup.shutil.disk_usage",
+                    return_value=SimpleNamespace(
+                        total=limit_bytes * 5,
+                        used=limit_bytes * 5,
+                    ),
+                ),
+                patch(
+                    "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                    side_effect=cleanup_path,
+                ),
+            ):
+                cleaned = disk_cleanup.cleanup_hitch_disk_usage_if_needed()
+
+            self.assertEqual(cleaned, 2)
+            self.assertEqual(removed_paths, [str(first), str(second)])
+            self.assertLessEqual(disk_cleanup._directory_size(hitch_home), limit_bytes)
 
     def test_failed_removal_falls_back_to_later_candidate(self) -> None:
         from hitch.main.worktrees import WorktreeCleanupError
