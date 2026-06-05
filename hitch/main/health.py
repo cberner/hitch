@@ -114,6 +114,25 @@ class HealthReport:
     def overall_label(self) -> str:
         return _SEVERITY_LABEL.get(self.overall_severity, "Unknown")
 
+    @property
+    def headline_metric(self) -> HealthMetric | None:
+        """The worst-severity metric driving the overall status, or ``None`` when OK.
+
+        Surfaces the single row that pushed the dashboard off "OK" so callers
+        need not scan every section. Ties are broken by section order, then by
+        metric order within a section (strict ``>`` keeps the first-seen winner).
+        """
+        if self.overall_severity == SEVERITY_OK:
+            return None
+        worst: HealthMetric | None = None
+        for section in self.sections:
+            for metric in section.metrics:
+                if worst is None or _SEVERITY_RANK.get(metric.severity, 0) > _SEVERITY_RANK.get(
+                    worst.severity, 0
+                ):
+                    worst = metric
+        return worst
+
     def copy_text(self) -> str:
         """Plain-text summary built for pasting into a chat with the assistant."""
         lines = [
@@ -121,6 +140,9 @@ class HealthReport:
             f"Generated: {self.generated_at}",
             f"Overall: {self.overall_label.upper()}",
         ]
+        headline = self.headline_metric
+        if headline is not None:
+            lines.append(f"Headline: {headline.label} — {headline.value}")
         if self.server_git_hash:
             lines.append(f"Server git hash: {self.server_git_hash}")
         for section in self.sections:

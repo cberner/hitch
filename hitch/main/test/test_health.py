@@ -160,6 +160,28 @@ class CollectHealthReportTests(TestCase):
 
         self.assertEqual(_find(report, "hitch_disk").severity, health.SEVERITY_DANGER)
 
+    def test_headline_metric_is_none_when_ok(self) -> None:
+        report = health.collect_health_report()
+
+        self.assertEqual(report.overall_severity, health.SEVERITY_OK)
+        self.assertIsNone(report.headline_metric)
+
+    def test_headline_metric_surfaces_worst_severity_row(self) -> None:
+        with patch.object(
+            disk_cleanup,
+            "hitch_home_disk_usage",
+            return_value=HitchDiskUsage(used_bytes=2_000_000, limit_bytes=1_000_000, disk_total_bytes=10_000_000),
+        ):
+            report = health.collect_health_report()
+
+        headline = report.headline_metric
+        self.assertIsNotNone(headline)
+        assert headline is not None
+        self.assertEqual(headline.key, "hitch_disk")
+        self.assertEqual(headline.severity, health.SEVERITY_DANGER)
+        self.assertIn("Headline:", report.copy_text())
+        self.assertIn(headline.value, report.copy_text())
+
     def test_metric_failure_degrades_gracefully(self) -> None:
         with patch.object(
             codex_pool,
