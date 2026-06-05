@@ -103,8 +103,12 @@ APPROVAL_DENY_ALL = "deny_all"
 APPROVAL_AUTO_REVIEW = "auto_review"
 
 # Codex reasoning-effort strings that line up with a Claude effort level. Other
-# values (e.g. Codex's "minimal") are dropped so the CLI uses its default.
-_EFFORT_VALUES = frozenset({"low", "medium", "high", "xhigh", "max"})
+# values (e.g. Codex's "minimal") are dropped so the CLI uses its default. The
+# settings dialog advertises this set for Claude models so the effort dropdown
+# never offers (and ``update_settings`` never stores) a value the worker would
+# silently drop.
+CLAUDE_REASONING_EFFORTS = frozenset({"low", "medium", "high", "xhigh", "max"})
+_EFFORT_VALUES = CLAUDE_REASONING_EFFORTS
 
 CanUseTool = Callable[
     [str, dict[str, Any], ToolPermissionContext],

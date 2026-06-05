@@ -745,7 +745,6 @@ def _settings_context(
     # advertise any constraint, so every effort is allowed (matching
     # ``_validate_settings_against_models``).
     supported_by_model = {m.id: _supported_effort_values(m) for m in models_data}
-    current_supported = supported_by_model.get(current_settings.model, set())
     codex_model_options = [
         {
             "id": m.id,
@@ -754,11 +753,24 @@ def _settings_context(
         }
         for m in models_data
     ]
+    # Claude has no app-server effort listing; it accepts a fixed set (no
+    # ``minimal``), so advertise that so the dropdown filters it out rather than
+    # storing a value the Claude worker silently drops.
+    claude_supported_efforts = claude_options.CLAUDE_REASONING_EFFORTS
     claude_model_options = [
-        {"id": value, "display_name": label, "supported_efforts": ""}
+        {
+            "id": value,
+            "display_name": label,
+            "supported_efforts": " ".join(sorted(claude_supported_efforts)),
+        }
         for value, label in claude_options.CLAUDE_MODELS
     ]
     current_provider = _effective_provider(current_settings)
+    current_supported = (
+        set(claude_supported_efforts)
+        if current_provider == coding_agents.PROVIDER_CLAUDE
+        else supported_by_model.get(current_settings.model, set())
+    )
     # Render the model dropdown for the saved provider so opening the dialog
     # with Claude selected does not show (and post) a Codex model id that
     # ``update_settings`` would reject. The JS swaps lists on provider change.
@@ -9431,6 +9443,10 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         # Claude model set instead of cross-checking the Codex catalog.
         if model and model not in claude_options.VALID_CLAUDE_MODELS:
             return HttpResponseBadRequest("invalid model")
+        # Reject an effort Claude doesn't accept (e.g. Codex's "minimal") rather
+        # than storing one the worker would silently drop at turn time.
+        if effort and effort not in claude_options.CLAUDE_REASONING_EFFORTS:
+            return HttpResponseBadRequest("invalid reasoning effort")
     elif model or effort:
         # Cross-check the posted (model, effort) pair against what Codex
         # actually offers so a malformed POST (typo, stale model id, effort

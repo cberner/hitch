@@ -3526,6 +3526,81 @@ class ClaudeFollowUpAutoQaTests(TestCase):
         mock_spec.assert_called_once()
 
 
+class ClaudeReasoningEffortSettingsTests(TestCase):
+    """Claude accepts a fixed effort set (no ``minimal``), so the settings dialog
+    must advertise it and ``update_settings`` must reject an unsupported effort
+    rather than store one the Claude worker silently drops at turn time."""
+
+    def _claude_settings(self, **overrides: Any) -> Any:
+        from hitch.main import views
+
+        base: dict[str, Any] = dict(
+            model=claude_options.DEFAULT_CLAUDE_MODEL,
+            reasoning_effort="",
+            sandbox_policy="",
+            approval_mode="auto_review",
+            coding_agent="",
+            extra_system_prompt="",
+            use_worktrees=False,
+            auto_pr_enabled=False,
+            auto_qa_enabled=False,
+            qa_panel_enabled=False,
+            spec_critic_enabled=False,
+            web_search_mode="",
+            show_archived_sessions=False,
+            last_selected_repo="",
+            selected_project_id=None,
+            visible_session_project_ids=None,
+            show_no_project_sessions=False,
+            enable_memories=False,
+            provider=coding_agents.PROVIDER_CLAUDE,
+        )
+        base.update(overrides)
+        return views.SettingsValues(**base)
+
+    def test_settings_dialog_hides_minimal_effort_for_claude(self) -> None:
+        from hitch.main import views
+
+        ctx = views._settings_context(self._claude_settings(), [])
+        claude_opts = ctx["model_options_by_provider"][coding_agents.PROVIDER_CLAUDE]
+        advertised = claude_opts[0]["supported_efforts"].split()
+        self.assertNotIn("minimal", advertised)
+        self.assertIn("high", advertised)
+        # The initial render (Claude provider) marks minimal unsupported so the
+        # dropdown hides it, while a real Claude effort stays selectable.
+        supported = {o["value"]: o["supported"] for o in ctx["effort_options"]}
+        self.assertFalse(supported["minimal"])
+        self.assertTrue(supported["high"])
+
+    def test_update_settings_rejects_minimal_effort_for_claude(self) -> None:
+        from django.urls import reverse
+
+        response = self.client.post(
+            reverse("update_settings"),
+            data={
+                "provider": "claude",
+                "model": claude_options.DEFAULT_CLAUDE_MODEL,
+                "reasoning_effort": "minimal",
+                "approval_mode": "auto_review",
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_update_settings_accepts_supported_effort_for_claude(self) -> None:
+        from django.urls import reverse
+
+        response = self.client.post(
+            reverse("update_settings"),
+            data={
+                "provider": "claude",
+                "model": claude_options.DEFAULT_CLAUDE_MODEL,
+                "reasoning_effort": "high",
+                "approval_mode": "auto_review",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+
+
 class CandidateThreadIndexTests(TestCase):
     """A Claude candidate thread is local-only, so its user-message index must
     come from the worker events, not a Codex ``thread_resume``."""
