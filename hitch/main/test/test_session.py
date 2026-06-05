@@ -1217,6 +1217,8 @@ class SessionViewTests(TestCase):
 
         timestamp_rows: list[dict[str, str]] = []
         plan_timestamps: list[str] = []
+        header_timestamp_count = 0
+        tool_box_timestamp_count = 0
         with sync_playwright() as playwright:
             try:
                 browser = playwright.chromium.launch(headless=True)
@@ -1412,6 +1414,8 @@ class SessionViewTests(TestCase):
                         "(els) => els.map((el) => el.dataset.ts || '')"
                     ),
                 )
+                header_timestamp_count = page.locator(".entry-header time[data-ts]").count()
+                tool_box_timestamp_count = page.locator(".tool-call time[data-ts]").count()
                 body = page.locator("body").inner_text()
             finally:
                 browser.close()
@@ -1419,7 +1423,9 @@ class SessionViewTests(TestCase):
         self.assertGreaterEqual(len(timestamp_rows), 5)
         self.assertTrue(any(row["ts"] == "1700000123" for row in timestamp_rows))
         self.assertEqual(plan_timestamps, ["1700000124"])
-        self.assertEqual(sum(row["className"] == "timestamp" for row in timestamp_rows), 3)
+        self.assertGreaterEqual(header_timestamp_count, 4)
+        self.assertEqual(tool_box_timestamp_count, 0)
+        self.assertEqual(sum(row["className"] == "timestamp" for row in timestamp_rows), 0)
         for row in timestamp_rows:
             self.assertTrue(row["dateTime"])
             self.assertNotEqual(row["text"], row["ts"])
@@ -1800,18 +1806,14 @@ class SessionViewTests(TestCase):
         self.assertContains(response, "hitch/main/views.py")
         # Unmapped types fall back to the raw type tag so nothing is hidden.
         self.assertContains(response, "brandNewTool")
-        # Four separate tool-call rows (inside the collapsed intermediate
-        # block), not a single aggregate row.
-        self.assertEqual(body.count('class="tool-call"'), 4)
+        # Detailed tool calls render as separate boxes, while label-only
+        # unknown tool calls still remain visible in the header row.
+        self.assertEqual(body.count('class="tool-call"'), 3)
         self.assertContains(response, 'data-ts="1700000123"')
         self.assertEqual(
-            body.count('<time data-ts="1700000123">1700000123</time>'), 2
+            body.count('<time data-ts="1700000123">1700000123</time>'), 6
         )
-        self.assertContains(
-            response,
-            '<time class="timestamp" data-ts="1700000123">1700000123</time>',
-            count=4,
-        )
+        self.assertNotContains(response, '<time class="timestamp"')
         self.assertNotContains(response, 'data-format="time"')
         self.assertContains(response, 'timeZoneName: "short"', count=2)
         self.assertContains(response, "formatTimestamps(document);")

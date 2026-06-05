@@ -46,14 +46,18 @@ intermediate block, so the per-item layout stays identical in both contexts.
 </div>
 {% elif entry.kind == "tool_call" %}
 <div class="entry">
-    <div class="tool-call">
-        <span class="label">{{ entry.label }}</span>
-        {% if entry.detail %}<span class="detail">{{ entry.detail }}</span>{% endif %}
-        {% if entry.status %}<span class="status {{ entry.status }}">{{ entry.status }}</span>{% endif %}
+    <div class="entry-header">
+        <span class="role">{{ entry.label }}</span>
         {% if entry.timestamp %}
-        <time class="timestamp" data-ts="{{ entry.timestamp }}">{{ entry.timestamp }}</time>
+        <time data-ts="{{ entry.timestamp }}">{{ entry.timestamp }}</time>
         {% endif %}
     </div>
+    {% if entry.detail or entry.status %}
+    <div class="tool-call">
+        {% if entry.detail %}<span class="detail">{{ entry.detail }}</span>{% endif %}
+        {% if entry.status %}<span class="status {{ entry.status }}">{{ entry.status }}</span>{% endif %}
+    </div>
+    {% endif %}
 </div>
 {% elif entry.kind == "approval_declined" %}
 <div class="entry">
