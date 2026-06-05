@@ -841,7 +841,12 @@ class HiddenAutoReviewApprovalTests(TestCase):
     write sandbox; an unsandboxed run, or a project/user MCP tool reaching
     ``can_use_tool``, must be denied since these runs have no approval UI."""
 
-    def _runner(self, *, sandbox_policy: str | None = "workspaceWrite") -> Any:
+    def _runner(
+        self,
+        *,
+        sandbox_policy: str | None = "workspaceWrite",
+        approval_mode: str = claude_options.APPROVAL_AUTO_REVIEW,
+    ) -> Any:
         import io
 
         from hitch.main.management.commands import claude_worker
@@ -862,7 +867,7 @@ class HiddenAutoReviewApprovalTests(TestCase):
             model=None,
             reasoning_effort=None,
             sandbox_policy=sandbox_policy,
-            approval_mode=claude_options.APPROVAL_AUTO_REVIEW,
+            approval_mode=approval_mode,
             web_search_mode=None,
             plan_mode=False,
         )
@@ -909,6 +914,37 @@ class HiddenAutoReviewApprovalTests(TestCase):
         runner._instance.agent_kind = demo.DEMO_AGENT_KIND
         result = asyncio.run(runner._can_use_tool("Bash", {"command": "podman ps"}, None))
         self.assertIsInstance(result, PermissionResultAllow)
+
+    def test_demo_agent_runs_setup_commands_under_deny_all(self) -> None:
+        import asyncio
+
+        from hitch.main import demo
+
+        # A saved ``deny_all`` preference must not break the opt-in web demo:
+        # the trusted setup agent is exempted from the blanket denial and its
+        # built-in setup commands are auto-approved (mirroring Codex's
+        # never-ask ``deny_all``).
+        runner = self._runner(
+            sandbox_policy=None, approval_mode=claude_options.APPROVAL_DENY_ALL
+        )
+        runner._instance.agent_kind = demo.DEMO_AGENT_KIND
+        for tool in ("Bash", "Edit", "Write"):
+            result = asyncio.run(runner._can_use_tool(tool, {}, None))
+            self.assertIsInstance(result, PermissionResultAllow, tool)
+
+    def test_non_demo_agent_denied_under_deny_all(self) -> None:
+        import asyncio
+
+        from claude_agent_sdk import PermissionResultDeny
+
+        # A non-demo hidden run under ``deny_all`` is still blanket-denied; only
+        # the trusted demo agent is exempted.
+        runner = self._runner(
+            sandbox_policy="workspaceWrite",
+            approval_mode=claude_options.APPROVAL_DENY_ALL,
+        )
+        result = asyncio.run(runner._can_use_tool("Bash", {"command": "ls"}, None))
+        self.assertIsInstance(result, PermissionResultDeny)
 
 
 class WorkspaceWriteConfinementTests(TestCase):
@@ -3391,6 +3427,103 @@ class ClaudeFollowUpAutoQaTests(TestCase):
         self.assertEqual(kwargs["prompt"], "add a parser feature")
         self.assertEqual(kwargs["model"], "claude-sonnet-4-6")
         self.assertEqual(kwargs["initial_user_message_index"], 2)
+
+    def test_fix_pr_routes_to_monitor_workflow(self) -> None:
+        from hitch.main import system_agents, views
+
+        self._claude_instance(model="claude-sonnet-4-6")
+        pr_url = "https://github.com/cberner/hitch/pull/7"
+        with (
+            patch.object(views, "_is_allowed_session_cwd", return_value=True),
+            patch.object(views, "_claude_user_message_index", return_value=4),
+            patch.object(views, "_claude_fix_pr_url", return_value=pr_url),
+            patch.object(system_agents, "start_pr_monitor_workflow") as mock_monitor,
+        ):
+            response = views._start_claude_fix_pr_workflow(
+                session_id="claude-thread",
+                settings=self._settings(model="claude-sonnet-4-6"),
+                input_image_paths=[],
+            )
+        self.assertEqual(response.status_code, 302)
+        kwargs = mock_monitor.call_args.kwargs
+        # /fix-pr targets the already-open PR via the monitor workflow, so it
+        # never opens a second PR; the URL comes from the PR workflow handoff.
+        self.assertEqual(kwargs["pr_url"], pr_url)
+        self.assertEqual(kwargs["main_thread_id"], "claude-thread")
+        self.assertEqual(kwargs["model"], "claude-sonnet-4-6")
+        self.assertEqual(kwargs["initial_user_message_index"], 4)
+
+    def test_fix_pr_requires_an_opened_pr(self) -> None:
+        from hitch.main import system_agents, views
+
+        self._claude_instance()
+        with (
+            patch.object(views, "_claude_fix_pr_url", return_value=None),
+            patch.object(system_agents, "start_pr_monitor_workflow") as mock_monitor,
+        ):
+            response = views._start_claude_fix_pr_workflow(
+                session_id="claude-thread",
+                settings=self._settings(),
+                input_image_paths=[],
+            )
+        self.assertEqual(response.status_code, 400)
+        mock_monitor.assert_not_called()
+
+    def test_send_message_routes_fix_pr_to_monitor_not_qa(self) -> None:
+        from django.http import HttpResponse
+        from django.urls import reverse
+
+        from hitch.main import views
+
+        self._claude_instance()
+        with (
+            patch.object(
+                views, "_stored_settings", return_value=self._settings()
+            ),
+            patch.object(
+                views,
+                "_start_claude_fix_pr_workflow",
+                return_value=HttpResponse(status=204),
+            ) as mock_fix,
+            patch.object(views, "_start_claude_qa_workflow") as mock_qa,
+        ):
+            response = self.client.post(
+                reverse("send_message", kwargs={"session_id": "claude-thread"}),
+                data={"prompt": "/fix-pr"},
+            )
+        self.assertEqual(response.status_code, 204)
+        mock_fix.assert_called_once()
+        mock_qa.assert_not_called()
+
+    def test_send_message_spec_critic_followup_is_not_preclassified(self) -> None:
+        from django.http import HttpResponse
+        from django.urls import reverse
+
+        from hitch.main import system_agents, views
+
+        self._claude_instance()
+        with (
+            patch.object(
+                views,
+                "_stored_settings",
+                return_value=self._settings(spec_critic_enabled=True),
+            ),
+            patch.object(system_agents, "spec_critic_should_run") as mock_should_run,
+            patch.object(
+                views,
+                "_start_claude_spec_critic_follow_up",
+                return_value=HttpResponse(status=204),
+            ) as mock_spec,
+        ):
+            response = self.client.post(
+                reverse("send_message", kwargs={"session_id": "claude-thread"}),
+                data={"prompt": "add a parser feature"},
+            )
+        self.assertEqual(response.status_code, 204)
+        # The workflow classifies in the background; the request path must not run
+        # the synchronous Codex classifier.
+        mock_should_run.assert_not_called()
+        mock_spec.assert_called_once()
 
 
 class CandidateThreadIndexTests(TestCase):

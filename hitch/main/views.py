@@ -5683,6 +5683,72 @@ def _start_claude_qa_workflow(
     return redirect("session", session_id=session_id)
 
 
+def _claude_fix_pr_url(session_id: str) -> str | None:
+    """Resolve the open PR URL for a Claude ``/fix-pr`` from the PR workflow handoff.
+
+    Claude threads have no Codex rollout to scan for a PR link, so -- like the
+    Claude session detail -- the URL comes from the latest PR/QA workflow's
+    recorded handoff rather than ``_pr_url_for_thread``.
+    """
+    pr_observation = codex_events.PrObservationResult(snapshot=None)
+    stage_pr_workflow = _workflow_after_main_lifecycle(
+        _latest_pr_workflow_for_thread(session_id),
+        pr_observation,
+        main_updated_at=None,
+    )
+    return _current_pr_url_for_thread(
+        None,
+        pr_observation=pr_observation,
+        stage_pr_workflow=stage_pr_workflow,
+        latest_pr_url=None,
+        latest_pr_url_loaded=True,
+    )
+
+
+def _start_claude_fix_pr_workflow(
+    *,
+    session_id: str,
+    settings: SettingsValues,
+    input_image_paths: list[str],
+) -> HttpResponse:
+    """Start PR-follow-up monitoring for an existing Claude session (``/fix-pr``).
+
+    The Claude analog of the Codex ``fix_pr`` route: it targets the session's
+    already-open PR via ``start_pr_monitor_workflow`` (which skips the QA step
+    and never opens a second PR) rather than the generic PR/QA activation.
+    """
+    # ``/fix-pr`` carries no image attachments (rejected earlier), so drop the
+    # saved temp copies.
+    _cleanup_saved_input_images(input_image_paths)
+    pr_url = _claude_fix_pr_url(session_id)
+    if not pr_url:
+        return HttpResponseBadRequest("fix-pr requires an opened PR for this session")
+    common = _claude_workflow_common(session_id, settings)
+    if isinstance(common, HttpResponse):
+        return common
+    cwd, model, developer_instructions = common
+    workflow_kwargs: dict[str, Any] = {
+        "main_thread_id": session_id,
+        "cwd": cwd,
+        "pr_url": pr_url,
+        "sandbox_policy": _effective_sandbox_policy(settings) or None,
+        "approval_mode": _effective_approval_mode(settings),
+        "model": model,
+        "reasoning_effort": settings.reasoning_effort or None,
+        "developer_instructions": developer_instructions or None,
+        "enable_memories": settings.enable_memories,
+        "initial_user_message_index": _claude_user_message_index(session_id),
+    }
+    web_search_mode = _valid_web_search_mode_or_default(settings.web_search_mode)
+    if web_search_mode:
+        workflow_kwargs["web_search_mode"] = web_search_mode
+    # No base instructions: a Claude workflow ships its own system prompt, so
+    # Hitch's Codex base-instruction variants must not reach the Claude monitor
+    # agent even if the global provider was switched back to Codex.
+    system_agents.start_pr_monitor_workflow(**workflow_kwargs)
+    return redirect("session", session_id=session_id)
+
+
 def _start_claude_spec_critic_follow_up(
     *,
     session_id: str,
@@ -10460,6 +10526,15 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         # Claude threads have no Codex rollout to resume, so route their
         # follow-up turns around the app-server entirely.
         if _session_is_claude(session_id):
+            # ``/fix-pr`` targets the session's already-open PR, so route it to the
+            # PR-monitor workflow (no second PR on LGTM) instead of the generic
+            # QA/PR activation below -- mirroring the Codex follow-up path.
+            if fix_pr_activation:
+                return _start_claude_fix_pr_workflow(
+                    session_id=session_id,
+                    settings=settings,
+                    input_image_paths=input_image_paths,
+                )
             if qa_workflow_activation:
                 return _start_claude_qa_workflow(
                     session_id=session_id,
@@ -10467,11 +10542,15 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                     settings=settings,
                     input_image_paths=input_image_paths,
                 )
+            # ``start_spec_critic_workflow`` runs the should-run classifier on a
+            # background thread, so do not pre-classify on the request path here:
+            # that would stream a synchronous classifier turn (and classify the
+            # prompt twice). Route in whenever Spec Critic is eligible, exactly
+            # like the new-session path.
             if (
                 settings.spec_critic_enabled
                 and not plan_mode
                 and not input_image_paths
-                and system_agents.spec_critic_should_run(prompt)
             ):
                 return _start_claude_spec_critic_follow_up(
                     session_id=session_id,

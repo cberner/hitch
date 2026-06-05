@@ -474,7 +474,15 @@ class _TurnRunner:
         if tool_name == _EXIT_PLAN_MODE_TOOL:
             if self._instance.purpose != CodexInstance.PURPOSE_USER:
                 return claude_options.deny_result("Hidden runs cannot leave plan mode.")
-        elif self._approval_mode == claude_options.APPROVAL_DENY_ALL:
+        elif (
+            self._approval_mode == claude_options.APPROVAL_DENY_ALL
+            and not self._is_demo_agent()
+        ):
+            # The trusted web-demo setup agent is exempted here and auto-approved
+            # below (after the cwd/read-only guards) so an opt-in demo can still
+            # bring up its container under a saved ``deny_all`` preference --
+            # matching the Codex backend, whose ``deny_all`` means "never ask"
+            # rather than "deny every tool".
             return claude_options.deny_result("Denied by Hitch approval policy.")
         # ``workspaceWrite`` confines edits to the repo, but ``SandboxSettings``
         # only sandboxes bash -- the SDK's Write/Edit tools are not -- so enforce
@@ -510,25 +518,37 @@ class _TurnRunner:
         # to -- auto-approve instead, matching how the Codex backend lets its
         # hidden reviewer runs proceed. Sandbox/read-only tool gating still
         # bounds what these runs can do.
+        # The demo agent is a trusted, opt-in Hitch-authored setup flow ("Start
+        # demo") that must run shell/podman commands to bring up the container, so
+        # auto-approve its built-in Bash/file tools regardless of approval mode or
+        # sandbox -- including ``deny_all`` (whose blanket denial above skips it)
+        # -- mirroring how the Codex backend lets demo commands proceed. The cwd
+        # and read-only guards above still bound what it can touch.
+        if self._is_demo_agent():
+            if (
+                tool_name in _COMMAND_TOOLS or tool_name in _FILE_TOOLS
+            ) and not self._powershell_unconfined(tool_name):
+                return claude_options.allow_result()
+            return claude_options.deny_result(
+                "The demo setup agent may only auto-run built-in Bash/file tools."
+            )
+        # Hidden system-agent runs (QA/spec/autonomous) have no visible approval
+        # UI, so a browser ``ApprovalRequest`` would just wait out the timeout
+        # and be denied. Under ``auto_review`` -- the mode these runs are pinned
+        # to -- auto-approve instead, matching how the Codex backend lets its
+        # hidden reviewer runs proceed. Sandbox/read-only tool gating still
+        # bounds what these runs can do.
         if (
             self._instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
             and self._approval_mode == claude_options.APPROVAL_AUTO_REVIEW
         ):
-            from hitch.main import demo
-
-            # The demo agent is a trusted Hitch-authored setup flow (opt-in via
-            # "Start demo") that must run shell/podman commands to bring up the
-            # container, so auto-approve its built-in tools regardless of sandbox
-            # -- mirroring how the Codex backend lets demo commands proceed.
-            is_demo = self._instance.agent_kind == demo.DEMO_AGENT_KIND
-            # Otherwise auto-approve the built-in mutating tools only under a write
-            # sandbox. ``readOnly`` already blocks Bash/file via
-            # ``resolve_tool_lists``; a run with no sandbox would otherwise
-            # auto-run *unsandboxed* commands/edits with no visible approval, so a
-            # propose/review-only or prompt-injected hidden agent could touch the
-            # host. Anything else (and project ``.claude`` MCP tools, which also
-            # reach here) is denied.
-            writes_allowed = is_demo or self._sandbox_policy in (
+            # Auto-approve the built-in mutating tools only under a write sandbox.
+            # ``readOnly`` already blocks Bash/file via ``resolve_tool_lists``; a
+            # run with no sandbox would otherwise auto-run *unsandboxed*
+            # commands/edits with no visible approval, so a propose/review-only or
+            # prompt-injected hidden agent could touch the host. Anything else
+            # (and project ``.claude`` MCP tools, which also reach here) is denied.
+            writes_allowed = self._sandbox_policy in (
                 claude_options.SANDBOX_WORKSPACE_WRITE,
                 claude_options.SANDBOX_DANGER_FULL_ACCESS,
             )
@@ -576,6 +596,15 @@ class _TurnRunner:
         if _decision_allows(decision):
             return claude_options.allow_result()
         return claude_options.deny_result("Declined by the user.")
+
+    def _is_demo_agent(self) -> bool:
+        """Whether this run is the trusted web-demo setup agent."""
+        from hitch.main import demo
+
+        return (
+            self._instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
+            and self._instance.agent_kind == demo.DEMO_AGENT_KIND
+        )
 
     def _powershell_unconfined(self, tool_name: str) -> bool:
         """Whether this is a ``PowerShell`` call that can't be confined.
