@@ -9619,6 +9619,43 @@ class AutonomousGoalWorkflowTests(TestCase):
         return_value="a" * 40,
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_ignores_manual_transient_proposal_start_claim(
+        self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            title="Manual proposal start",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            outcome_metadata={
+                "accepted_by": "user",
+                ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY: (
+                    datetime.now(UTC).isoformat()
+                ),
+            },
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 1)
+        self.assertEqual(SystemWorkflow.objects.count(), 1)
+
+    @patch(
+        "hitch.main.system_agents.default_branch_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_ignores_stale_proposal_start_claim(
         self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
     ) -> None:

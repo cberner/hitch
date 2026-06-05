@@ -10168,6 +10168,71 @@ class NewSessionViewTests(TestCase):
             proposal.outcome_metadata,
         )
 
+    def test_new_session_finish_ignores_replaced_start_claim(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        claim_key = ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY
+        old_claim = "2026-06-05T14:00:00+00:00"
+        new_claim = "2026-06-05T14:45:00+00:00"
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Add parser coverage",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            outcome_metadata={
+                "accepted_by": "user",
+                "accepted_thread_id": "",
+                claim_key: old_claim,
+            },
+        )
+        ProposedSession.objects.filter(pk=proposal.pk).update(
+            outcome_metadata={
+                "accepted_by": "user",
+                "accepted_thread_id": "",
+                claim_key: new_claim,
+            }
+        )
+        metadata = SessionMetadata.objects.create(
+            thread_id="late-thread",
+            cwd=self.REPO,
+            project=project,
+        )
+
+        views._finish_new_session_proposal_start_claim(proposal, metadata)
+
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
+        self.assertIsNone(proposal.accepted_session)
+        self.assertEqual(proposal.outcome_metadata[claim_key], new_claim)
+
+    def test_new_session_reset_ignores_replaced_start_claim(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        claim_key = ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY
+        old_claim = "2026-06-05T14:00:00+00:00"
+        new_claim = "2026-06-05T14:45:00+00:00"
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Add parser coverage",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            outcome_metadata={
+                "accepted_by": "user",
+                "accepted_thread_id": "",
+                claim_key: old_claim,
+            },
+        )
+        ProposedSession.objects.filter(pk=proposal.pk).update(
+            outcome_metadata={
+                "accepted_by": "user",
+                "accepted_thread_id": "",
+                claim_key: new_claim,
+            }
+        )
+
+        views._reset_new_session_proposal_start_claim(proposal)
+
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
+        self.assertIsNone(proposal.accepted_session)
+        self.assertEqual(proposal.outcome_metadata[claim_key], new_claim)
+
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
