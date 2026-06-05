@@ -206,6 +206,46 @@ def _basic_session_rollout_lines(user_message: str, assistant_text: str) -> list
     ]
 
 
+def _due_pr_monitor_state(
+    *, pr_url: str, repo: str, pr_number: int, now: datetime
+) -> dict[str, object]:
+    return {
+        system_agents._PR_HANDOFF_STATE_KEY: {
+            "url": pr_url,
+            "repository_full_name": repo,
+            "pr_number": pr_number,
+            "state": "open",
+            "merged": False,
+        },
+        system_agents._PR_PENDING_CHECKS_STATE_KEY: 1,
+        system_agents._PR_MONITOR_BACKOFF_STATE_KEY: {
+            "reason": "pending_gates",
+            "scheduled_at": int(now.timestamp()) - 301,
+            "next_attempt_at": int(now.timestamp()) - 1,
+            "delay_seconds": 300,
+        },
+    }
+
+
+def _merged_pr_monitor_observation(
+    *, pr_url: str, repo: str, pr_number: int
+) -> dict[str, object]:
+    return {
+        "status": "terminal",
+        "summary": "PR was merged.",
+        "feedback": "",
+        "pr": {
+            "url": pr_url,
+            "repository_full_name": repo,
+            "pr_number": pr_number,
+            "state": "closed",
+            "merged": True,
+            "merged_at": "2026-06-05T05:20:00Z",
+        },
+        "blockers": [],
+    }
+
+
 def _seed_usage_metadata(
     thread_id: str,
     *,
@@ -1218,6 +1258,69 @@ class SessionDetailFastPathTests(TestCase):
             response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
         )
         mock_gh_pr_view.assert_called_once()
+
+    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_inactive_session_detail_refreshes_due_pr_monitor_backoff_to_done_merged(
+        self,
+        mock_codex: MagicMock,
+        _start_models_refresh: MagicMock,
+        mock_observe: MagicMock,
+    ) -> None:
+        pr_url = "https://github.com/cberner/hitch/pull/60"
+        repo = "cberner/hitch"
+        pr_number = 60
+        rollout_path = _make_rollout(
+            self,
+            _basic_session_rollout_lines("Open a PR", "Opened."),
+        )
+        now = datetime.now(UTC)
+        SessionMetadata.objects.create(
+            thread_id="monitor-pr-merged-detail",
+            cwd=str(rollout_path.parent),
+            codex_path=str(rollout_path),
+            codex_name="Monitor PR merged detail",
+            codex_preview="Open a PR",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="monitor-pr-merged-detail",
+            cwd=str(rollout_path.parent),
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state=_due_pr_monitor_state(
+                pr_url=pr_url, repo=repo, pr_number=pr_number, now=now
+            ),
+        )
+        mock_observe.return_value = _merged_pr_monitor_observation(
+            pr_url=pr_url, repo=repo, pr_number=pr_number
+        )
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "monitor-pr-merged-detail"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active" data-refreshing="true">PR</span>',
+        )
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
+        self.assertTrue(workflow.state["pr_handoff"]["merged"])
+        mock_observe.assert_called_once()
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "monitor-pr-merged-detail"})
+        )
+        self.assertContains(
+            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+        )
+        mock_observe.assert_called_once()
 
     @patch("hitch.main.system_agents._gh_pr_view")
     @patch("hitch.main.views._start_models_refresh_thread")
@@ -2557,6 +2660,77 @@ class IndexViewTests(TestCase):
             response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
         )
         mock_gh_pr_view.assert_called_once()
+
+    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cached_session_list_refreshes_due_pr_monitor_backoff_to_done_merged(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_observe: MagicMock,
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        pr_url = "https://github.com/cberner/hitch/pull/60"
+        repo = "cberner/hitch"
+        pr_number = 60
+        rollout_path = _make_rollout(
+            self,
+            _basic_session_rollout_lines("Open a PR", "Opened."),
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        SessionMetadata.objects.create(
+            thread_id="monitor-pr-merged-list",
+            cwd=str(rollout_path.parent),
+            codex_display_title="Monitor PR merged list",
+            codex_preview="Open a PR",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="monitor-pr-merged-list",
+            cwd=str(rollout_path.parent),
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state=_due_pr_monitor_state(
+                pr_url=pr_url, repo=repo, pr_number=pr_number, now=now
+            ),
+        )
+        mock_observe.return_value = _merged_pr_monitor_observation(
+            pr_url=pr_url, repo=repo, pr_number=pr_number
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Monitor PR merged list")
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="active" data-refreshing="true">PR #60</span>',
+        )
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_CLOSED)
+        self.assertTrue(workflow.state["pr_handoff"]["merged"])
+        mock_observe.assert_called_once()
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
+        response = self.client.get(reverse("index"))
+        self.assertContains(
+            response, '<span class="stage-badge" data-tone="done">Done: Merged</span>'
+        )
+        mock_observe.assert_called_once()
 
     @patch("hitch.main.views._schedule_pr_stage_refresh")
     @patch("hitch.main.system_agents.pr_snapshot_stage_refresh_due", return_value=True)
