@@ -1730,6 +1730,17 @@ class SessionViewTests(TestCase):
         # block), not a single aggregate row.
         self.assertEqual(body.count('class="tool-call"'), 4)
         self.assertContains(response, 'data-ts="1700000123"')
+        self.assertEqual(
+            body.count('<time data-ts="1700000123">1700000123</time>'), 2
+        )
+        self.assertContains(
+            response,
+            '<time class="timestamp" data-ts="1700000123" data-format="time">1700000123</time>',
+            count=4,
+        )
+        self.assertContains(response, 'timeZoneName: "short"', count=2)
+        self.assertContains(response, "formatTimestamps(document);")
+        self.assertContains(response, "formatTimestamps(body);")
 
     @patch("hitch.main.views.Codex")
     def test_sdk_memory_citation_renders_details(self, mock_codex: MagicMock) -> None:
@@ -2052,6 +2063,7 @@ class RolloutFileViewTests(TestCase):
                     "type": "item_completed",
                     "item": {"type": "Plan", "id": "turn-plan", "text": plan},
                 },
+                timestamp="1970-01-01T00:01:23Z",
             ),
             _rollout_line(
                 "response_item",
@@ -2086,6 +2098,8 @@ class RolloutFileViewTests(TestCase):
         self.assertContains(response, 'data-initial-plan-mode="true"')
         self.assertContains(response, 'name="plan_mode" value="true" data-plan-mode-input')
         self.assertContains(response, 'name="default_plan_mode" value="true"')
+        self.assertContains(response, '<time data-ts="83">83</time>')
+        self.assertNotContains(response, '<time data-ts="83" data-format="time">83</time>')
         self.assertContains(
             response,
             'name="plan_mode_explicit" value="" data-plan-mode-explicit-input',

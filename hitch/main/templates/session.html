@@ -515,6 +515,7 @@
         .entry { margin: 0; }
         .entry-header {
             display: flex;
+            flex-wrap: wrap;
             align-items: baseline;
             gap: 0.5rem;
             font-size: 0.72rem;
@@ -530,6 +531,7 @@
         }
         .entry-header time {
             font-variant-numeric: tabular-nums;
+            white-space: nowrap;
         }
 
         .message {
@@ -768,6 +770,7 @@
         }
         .plan-card .plan-header {
             display: flex;
+            flex-wrap: wrap;
             align-items: center;
             gap: 0.45rem;
             font-size: 0.78rem;
@@ -779,6 +782,10 @@
         .plan-card .plan-explanation {
             color: var(--text-muted);
             font-size: 0.84rem;
+        }
+        .plan-card time {
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
         }
         .plan-card .plan-explanation[hidden],
         .plan-card .plan-checklist[hidden],
@@ -2470,21 +2477,32 @@
     <script>
         (function () {
             const dateTime = new Intl.DateTimeFormat(undefined, {
-                dateStyle: "medium",
-                timeStyle: "medium",
+                year: "numeric",
+                month: "short",
+                day: "numeric",
+                hour: "numeric",
+                minute: "2-digit",
+                second: "2-digit",
+                timeZoneName: "short",
             });
             const timeOnly = new Intl.DateTimeFormat(undefined, {
-                timeStyle: "medium",
+                hour: "numeric",
+                minute: "2-digit",
+                second: "2-digit",
+                timeZoneName: "short",
             });
-            for (const el of document.querySelectorAll("time[data-ts]")) {
-                const seconds = Number(el.dataset.ts);
-                if (!Number.isFinite(seconds) || seconds <= 0) continue;
-                const date = new Date(seconds * 1000);
-                el.dateTime = date.toISOString();
-                el.title = date.toString();
-                const fmt = el.dataset.format === "time" ? timeOnly : dateTime;
-                el.textContent = fmt.format(date);
+            function formatTimestamps(root) {
+                for (const el of root.querySelectorAll("time[data-ts]")) {
+                    const seconds = Number(el.dataset.ts);
+                    if (!Number.isFinite(seconds) || seconds <= 0) continue;
+                    const date = new Date(seconds * 1000);
+                    el.dateTime = date.toISOString();
+                    el.title = date.toString();
+                    const fmt = el.dataset.format === "time" ? timeOnly : dateTime;
+                    el.textContent = fmt.format(date);
+                }
             }
+            formatTimestamps(document);
 
             async function loadIntermediateDetails(details) {
                 if (!details || details.dataset.loaded === "true" || details.dataset.loading === "true") return;
@@ -2500,6 +2518,7 @@
                     });
                     if (!response.ok) throw new Error(`HTTP ${response.status}`);
                     body.innerHTML = await response.text();
+                    formatTimestamps(body);
                     details.dataset.loaded = "true";
                 } catch (_error) {
                     body.textContent = "Unable to load details.";

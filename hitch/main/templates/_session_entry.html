@@ -69,7 +69,7 @@ intermediate block, so the per-item layout stays identical in both contexts.
         <div class="plan-header">
             <span>Plan</span>
             {% if entry.timestamp %}
-            <time data-ts="{{ entry.timestamp }}" data-format="time">{{ entry.timestamp }}</time>
+            <time data-ts="{{ entry.timestamp }}">{{ entry.timestamp }}</time>
             {% endif %}
         </div>
         <div class="plan-text">{{ entry.text }}</div>
