@@ -7339,6 +7339,18 @@ def pr_handoff_stage_refresh_due(workflow: SystemWorkflow | None) -> bool:
     return _pr_stage_refresh_globally_due(handoff)
 
 
+def pr_monitor_backoff_stage_refresh_due(workflow: SystemWorkflow | None) -> bool:
+    if (
+        workflow is None
+        or workflow.kind != SystemWorkflow.KIND_PR_QA
+        or workflow.status != SystemWorkflow.STATUS_RUNNING
+        or workflow.step != STEP_PR_MONITORING
+        or not _pr_monitor_backoff_due(workflow)
+    ):
+        return False
+    return not _pr_monitor_has_active_agent_run(workflow)
+
+
 def _pr_stage_refresh_globally_due(handoff: Mapping[str, Any]) -> bool:
     """Whether the central per-PR debounce window is open for this handoff.
 
