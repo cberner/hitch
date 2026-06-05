@@ -119,6 +119,7 @@ STEP_PR_MONITORING = "pr_monitoring"
 STEP_PR_FEEDBACK_RUNNING = "pr_feedback_running"
 STEP_PR_READY = "pr_ready"
 STEP_PR_CLOSED = "pr_closed"
+STEP_PR_NO_CHANGES = "pr_no_changes"
 STEP_LOCAL_BRANCH_MERGED = "local_branch_merged"
 STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING = "autonomous_goal_candidate_running"
 STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING = "autonomous_goal_judge_running"
@@ -573,6 +574,15 @@ _SPEC_CRITIC_HIGH_IMPACT_RE = re.compile(
 
 class _GhPrOpenError(RuntimeError):
     pass
+
+
+class _PrWorkflowNoCommitsError(RuntimeError):
+    """The PR branch has no commits beyond the base, so no PR is warranted.
+
+    The PR cleanup turn can legitimately produce no delta (it rebased its work
+    away or the diff was already clean). That is a successful no-op, not a
+    failure, so it must complete the workflow rather than block it.
+    """
 
 
 def _nullable_schema(schema_type: str) -> dict[str, Any]:
@@ -2566,6 +2576,11 @@ def _handle_system_feedback_finished(instance: CodexInstance) -> None:
     if instance.status != CodexInstance.STATUS_COMPLETED:
         if _retry_dead_system_feedback_worker(instance, workflow):
             return
+        if workflow.status != SystemWorkflow.STATUS_RUNNING:
+            # A feedback/notice turn that fails after the workflow already
+            # reached a terminal state (e.g. the no-change completion notice or
+            # a failure-surface turn) must not revert that state to Blocked.
+            return
         if workflow.step == STEP_PR_FEEDBACK_RUNNING:
             _block_workflow(workflow, f"PR feedback worker failed: {instance.error}")
         else:
@@ -2979,6 +2994,9 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
         try:
             snapshot = _open_or_find_pr_with_gh_cli(workflow)
             hitch_handoff_snapshot = True
+        except _PrWorkflowNoCommitsError:
+            _complete_pr_workflow_without_changes(workflow)
+            return
         except _GhPrOpenError as exc:
             _block_workflow(
                 workflow,
@@ -3025,6 +3043,35 @@ def _handle_pr_prompt_finished(instance: CodexInstance, workflow: SystemWorkflow
         _block_workflow(workflow, f"failed to start PR follow-up monitor: {exc!r}")
 
 
+def _complete_pr_workflow_without_changes(workflow: SystemWorkflow) -> None:
+    # The PR cleanup turn produced no commits beyond the base branch, so there
+    # is nothing to open a PR for. Treat it as a successful no-op completion.
+    workflow.status = SystemWorkflow.STATUS_COMPLETED
+    workflow.step = STEP_PR_NO_CHANGES
+    workflow.save(update_fields=["status", "step", "state", "updated_at"])
+    _surface_pr_workflow_no_changes(workflow)
+
+
+def _surface_pr_workflow_no_changes(workflow: SystemWorkflow) -> None:
+    try:
+        _spawn_workflow_turn(
+            workflow,
+            prompt=(
+                "Hitch did not open a pull request because the PR cleanup turn "
+                "produced no commits beyond the base branch.\n\n"
+                "Tell the user that no PR was opened because there were no "
+                "changes to submit. This is a successful no-op outcome, not a "
+                "failure. Keep the explanation concise."
+            ),
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            display_author=PR_WORKFLOW_DISPLAY_AUTHOR,
+        )
+    except Exception:
+        logger.exception(
+            "failed to surface no-change PR completion for workflow %s", workflow.pk
+        )
+
+
 def _pr_prompt_worker_snapshot_is_authoritative(
     snapshot: dict[str, Any] | None,
 ) -> bool:
@@ -3040,6 +3087,9 @@ def _open_or_find_pr_with_gh_cli(workflow: SystemWorkflow) -> dict[str, Any]:
     if existing is not None and not _pr_handoff_is_terminal(existing):
         return existing
 
+    if _pr_branch_has_no_new_commits(workflow):
+        raise _PrWorkflowNoCommitsError()
+
     created = _run_gh_cli(workflow, ["pr", "create", "--fill"])
     if created.returncode != 0:
         raise _GhPrOpenError(f"`gh pr create --fill` failed: {_gh_error(created)}")
@@ -3053,6 +3103,25 @@ def _open_or_find_pr_with_gh_cli(workflow: SystemWorkflow) -> dict[str, Any]:
     if viewed is None:
         return created_handoff
     return _merge_pr_handoff_dicts(created_handoff, viewed)
+
+
+def _pr_branch_has_no_new_commits(workflow: SystemWorkflow) -> bool:
+    # `gh pr create --fill` refuses to open a PR when the head branch carries no
+    # commits beyond the base branch. Detect that here so the no-op case
+    # completes the workflow cleanly instead of blocking on gh's error. When the
+    # count cannot be determined, fall through and let gh surface the real error.
+    result = _run_git_cli(workflow, ["rev-list", "--count", "origin/HEAD..HEAD"])
+    if result.returncode != 0:
+        return False
+    if result.stdout.strip() != "0":
+        return False
+    # Uncommitted worktree changes with no commits mean the PR worker failed to
+    # commit its work -- not a clean no-op. Fall through so the gh handoff path
+    # blocks rather than silently completing and discarding the diff.
+    status = _run_git_cli(workflow, ["status", "--porcelain"])
+    if status.returncode != 0:
+        return False
+    return status.stdout.strip() == ""
 
 
 def _push_current_branch_for_pr_workflow(workflow: SystemWorkflow) -> None:

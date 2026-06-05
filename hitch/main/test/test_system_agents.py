@@ -3809,6 +3809,7 @@ class SpecCriticWorkflowTests(TestCase):
             SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
             SimpleNamespace(returncode=0, stdout="", stderr=""),
             SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found"),
+            SimpleNamespace(returncode=0, stdout="3\n", stderr=""),
             SimpleNamespace(
                 returncode=0,
                 stdout="https://github.com/cberner/hitch/pull/170\n",
@@ -3865,14 +3866,17 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(commands[4][:3], ["gh", "pr", "view"])
         self.assertNotIn("baseRefOid", commands[4][-1])
         self.assertIn("headRefOid", commands[4][-1])
-        self.assertEqual(commands[5], ["gh", "pr", "create", "--fill"])
         self.assertEqual(
-            commands[6][:4],
+            commands[5], ["git", "rev-list", "--count", "origin/HEAD..HEAD"]
+        )
+        self.assertEqual(commands[6], ["gh", "pr", "create", "--fill"])
+        self.assertEqual(
+            commands[7][:4],
             ["gh", "pr", "view", "https://github.com/cberner/hitch/pull/170"],
         )
         self.assertEqual(mock_run.call_args_list[3].kwargs["cwd"], "/repo")
         self.assertEqual(
-            mock_run.call_args_list[5].kwargs["env"]["GH_PROMPT_DISABLED"], "1"
+            mock_run.call_args_list[6].kwargs["env"]["GH_PROMPT_DISABLED"], "1"
         )
         handoff = workflow.state[system_agents._PR_HANDOFF_STATE_KEY]
         self.assertEqual(handoff["url"], "https://github.com/cberner/hitch/pull/170")
@@ -3892,6 +3896,136 @@ class SpecCriticWorkflowTests(TestCase):
             },
         )
         mock_spawn.assert_called_once()
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    @patch("hitch.main.system_agents.subprocess.run")
+    def test_pr_prompt_completion_completes_without_changes_when_no_commits(
+        self, mock_run: MagicMock, mock_spawn_turn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={"next_user_message_index": 5},
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+            workflow_id=workflow.pk,
+        )
+        mock_run.side_effect = [
+            SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found"),
+            SimpleNamespace(returncode=0, stdout="feature\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+            SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found"),
+            SimpleNamespace(returncode=0, stdout="0\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+        ]
+        mock_spawn_turn.return_value = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            workflow_id=workflow.pk,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_NO_CHANGES)
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        self.assertEqual(
+            commands[-2], ["git", "rev-list", "--count", "origin/HEAD..HEAD"]
+        )
+        self.assertEqual(commands[-1], ["git", "status", "--porcelain"])
+        self.assertNotIn(["gh", "pr", "create", "--fill"], commands)
+        self.assertNotIn(system_agents._PR_HANDOFF_STATE_KEY, workflow.state)
+        mock_spawn_turn.assert_called_once()
+        self.assertEqual(
+            mock_spawn_turn.call_args.kwargs["purpose"],
+            CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+        )
+
+    @patch("hitch.main.system_agents._pr_monitor_observation_from_gh", return_value={})
+    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.system_agents._surface_workflow_failure")
+    def test_pr_prompt_completion_blocks_when_no_commits_but_worktree_dirty(
+        self,
+        mock_surface: MagicMock,
+        mock_run: MagicMock,
+        _mock_observe: MagicMock,
+    ) -> None:
+        # A dirty worktree with no commits means the worker failed to commit its
+        # work, so it must not be treated as a clean no-op completion.
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_PROMPT_RUNNING,
+            state={"next_user_message_index": 5},
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+            workflow_id=workflow.pk,
+        )
+        mock_run.side_effect = [
+            SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found"),
+            SimpleNamespace(returncode=0, stdout="feature\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+            SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found"),
+            SimpleNamespace(returncode=0, stdout="0\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout=" M file.py\n", stderr=""),
+            SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="could not find any commits between origin/master and feature",
+            ),
+        ]
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        commands = [call.args[0] for call in mock_run.call_args_list]
+        self.assertIn(["git", "status", "--porcelain"], commands)
+        self.assertEqual(commands[-1], ["gh", "pr", "create", "--fill"])
+        mock_surface.assert_called_once()
+
+    @patch("hitch.main.system_agents._surface_workflow_failure")
+    def test_failed_notice_turn_does_not_reblock_completed_workflow(
+        self, mock_surface: MagicMock
+    ) -> None:
+        # The no-change completion notice is a SYSTEM_FEEDBACK turn tied to the
+        # workflow; if it later fails it must not revert the terminal workflow
+        # back to Blocked.
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_PR_NO_CHANGES,
+            state={},
+        )
+        instance = _instance(
+            thread_id="main-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_FAILED,
+            error="codex call failed",
+        )
+
+        system_agents._handle_system_feedback_finished(instance)
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_NO_CHANGES)
+        mock_surface.assert_not_called()
 
     @patch("hitch.main.system_agents.subprocess.run")
     @patch("hitch.main.system_agents._surface_workflow_failure")
@@ -4093,6 +4227,7 @@ class SpecCriticWorkflowTests(TestCase):
             SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
             SimpleNamespace(returncode=0, stdout="", stderr=""),
             closed_pr,
+            SimpleNamespace(returncode=0, stdout="3\n", stderr=""),
             SimpleNamespace(
                 returncode=0,
                 stdout="https://github.com/cberner/hitch/pull/173\n",
@@ -4139,9 +4274,12 @@ class SpecCriticWorkflowTests(TestCase):
             ["git", "push", "-u", "origin", "HEAD:refs/heads/feature"],
         )
         self.assertEqual(commands[4][:3], ["gh", "pr", "view"])
-        self.assertEqual(commands[5], ["gh", "pr", "create", "--fill"])
         self.assertEqual(
-            commands[6][:4],
+            commands[5], ["git", "rev-list", "--count", "origin/HEAD..HEAD"]
+        )
+        self.assertEqual(commands[6], ["gh", "pr", "create", "--fill"])
+        self.assertEqual(
+            commands[7][:4],
             ["gh", "pr", "view", "https://github.com/cberner/hitch/pull/173"],
         )
         handoff = workflow.state[system_agents._PR_HANDOFF_STATE_KEY]
@@ -4214,6 +4352,7 @@ class SpecCriticWorkflowTests(TestCase):
             SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
             SimpleNamespace(returncode=0, stdout="", stderr=""),
             closed_pr,
+            SimpleNamespace(returncode=0, stdout="3\n", stderr=""),
             SimpleNamespace(
                 returncode=0,
                 stdout="https://github.com/cberner/hitch/pull/174\n",
@@ -4260,9 +4399,12 @@ class SpecCriticWorkflowTests(TestCase):
             ["git", "push", "-u", "origin", "HEAD:refs/heads/feature"],
         )
         self.assertEqual(commands[4][:3], ["gh", "pr", "view"])
-        self.assertEqual(commands[5], ["gh", "pr", "create", "--fill"])
         self.assertEqual(
-            commands[6][:4],
+            commands[5], ["git", "rev-list", "--count", "origin/HEAD..HEAD"]
+        )
+        self.assertEqual(commands[6], ["gh", "pr", "create", "--fill"])
+        self.assertEqual(
+            commands[7][:4],
             ["gh", "pr", "view", "https://github.com/cberner/hitch/pull/174"],
         )
         handoff = workflow.state[system_agents._PR_HANDOFF_STATE_KEY]
@@ -4300,6 +4442,7 @@ class SpecCriticWorkflowTests(TestCase):
             SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
             SimpleNamespace(returncode=0, stdout="", stderr=""),
             SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found"),
+            SimpleNamespace(returncode=0, stdout="3\n", stderr=""),
             SimpleNamespace(
                 returncode=0,
                 stdout="https://github.com/cberner/hitch/pull/171\n",
@@ -4324,9 +4467,12 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
         commands = [call.args[0] for call in mock_run.call_args_list]
-        self.assertEqual(commands[5], ["gh", "pr", "create", "--fill"])
         self.assertEqual(
-            commands[6][:4],
+            commands[5], ["git", "rev-list", "--count", "origin/HEAD..HEAD"]
+        )
+        self.assertEqual(commands[6], ["gh", "pr", "create", "--fill"])
+        self.assertEqual(
+            commands[7][:4],
             ["gh", "pr", "view", "https://github.com/cberner/hitch/pull/171"],
         )
         handoff = workflow.state[system_agents._PR_HANDOFF_STATE_KEY]
@@ -6507,6 +6653,7 @@ class SpecCriticWorkflowTests(TestCase):
             SimpleNamespace(returncode=0, stdout="origin/master\n", stderr=""),
             SimpleNamespace(returncode=0, stdout="", stderr=""),
             SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found"),
+            SimpleNamespace(returncode=0, stdout="2\n", stderr=""),
             SimpleNamespace(
                 returncode=0,
                 stdout="https://github.com/cberner/hitch/pull/174\n",
@@ -6561,7 +6708,10 @@ class SpecCriticWorkflowTests(TestCase):
             ["git", "push", "-u", "origin", "HEAD:refs/heads/followup"],
         )
         self.assertEqual(commands[4][:3], ["gh", "pr", "view"])
-        self.assertEqual(commands[5], ["gh", "pr", "create", "--fill"])
+        self.assertEqual(
+            commands[5], ["git", "rev-list", "--count", "origin/HEAD..HEAD"]
+        )
+        self.assertEqual(commands[6], ["gh", "pr", "create", "--fill"])
         mock_spawn.assert_called_once()
 
     def test_monitor_ready_completes_workflow(self) -> None:
