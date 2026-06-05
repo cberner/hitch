@@ -2997,6 +2997,49 @@ def _systemd_worker_slice_properties() -> list[str]:
     )
 
 
+# cgroup-v2 cpu.weight bounds (CPUWeight=1..10000, default 100).
+_CPU_WEIGHT_MIN = 1
+_CPU_WEIGHT_MAX = 10000
+_CPU_WEIGHT_DEFAULT = 100
+
+
+def _parent_slice() -> str:
+    return str(getattr(settings, "CODEX_PARENT_SLICE", "") or "").strip()
+
+
+def _systemd_parent_slice_properties() -> list[str]:
+    """Build the CPU-weight property for Hitch's parent slice.
+
+    The weight biases the runserver subtree against the worker pool when CPU is
+    contested (see ``CODEX_PARENT_SLICE`` in settings for why this must live on
+    the parent slice, not the workers slice). Configured declaratively like the
+    memory caps: a cleared value resets to the cgroup-v2 default of 100 rather
+    than leaving a stale ``--runtime`` weight lingering. An out-of-range or
+    non-integer value is dropped with a warning so a typo is loud but the slice
+    keeps whatever weight it already has rather than failing every worker spawn.
+    """
+    raw = str(getattr(settings, "CODEX_PARENT_SLICE_CPU_WEIGHT", "") or "").strip()
+    if not raw:
+        return [f"CPUWeight={_CPU_WEIGHT_DEFAULT}"]
+    try:
+        weight = int(raw)
+    except ValueError:
+        logger.warning(
+            "ignoring CODEX_PARENT_SLICE_CPU_WEIGHT=%r: not an integer", raw
+        )
+        return []
+    if not _CPU_WEIGHT_MIN <= weight <= _CPU_WEIGHT_MAX:
+        logger.warning(
+            "ignoring CODEX_PARENT_SLICE_CPU_WEIGHT=%r: outside the cgroup-v2 "
+            "range %d-%d",
+            raw,
+            _CPU_WEIGHT_MIN,
+            _CPU_WEIGHT_MAX,
+        )
+        return []
+    return [f"CPUWeight={weight}"]
+
+
 # Powers-of-1024 suffixes systemd accepts for absolute memory sizes. Used only
 # for the best-effort swap-cap comparison below; percentages and "infinity"
 # deliberately fall outside this map so we skip numeric comparison for them.
@@ -3117,23 +3160,21 @@ def _warn_on_swap_cap_hierarchy() -> None:
         )
 
 
-def _ensure_systemd_worker_slice() -> None:
-    global _swap_hierarchy_warned
-    slice_unit = _worker_slice()
-    if not slice_unit:
-        return
-    # Running inside a slice means its parent swap cap applies; check the
-    # hierarchy once per process so a misconfigured cushion doesn't go
-    # unnoticed without spamming the log on every worker launch.
-    if not _swap_hierarchy_warned:
-        _swap_hierarchy_warned = True
-        _warn_on_swap_cap_hierarchy()
-    properties = _systemd_worker_slice_properties()
-    if not properties:
+def _apply_slice_properties(slice_unit: str, properties: list[str]) -> None:
+    """Apply declarative cgroup properties to a slice via ``set-property``.
+
+    A no-op when the slice name or property list is empty so callers can
+    configure optional slices unconditionally. Idempotent: ``--runtime``
+    set-property only changes the properties it is handed, and the configured
+    state is rendered declaratively so re-applying converges on the same values.
+    """
+    if not slice_unit or not properties:
         return
     systemctl = shutil.which("systemctl")
     if systemctl is None:
-        raise RuntimeError("systemctl is required to configure Codex worker slice")
+        raise RuntimeError(
+            f"systemctl is required to configure Codex slice {slice_unit}"
+        )
     try:
         result = subprocess.run(
             [
@@ -3151,18 +3192,40 @@ def _ensure_systemd_worker_slice() -> None:
             timeout=2,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeError(
-            f"failed to configure Codex worker slice {slice_unit}"
-        ) from exc
+        raise RuntimeError(f"failed to configure Codex slice {slice_unit}") from exc
     if result.returncode == 0:
         return
     detail = result.stderr.decode("utf-8", errors="replace").strip()
-    message = f"failed to configure Codex worker slice {slice_unit}"
+    message = f"failed to configure Codex slice {slice_unit}"
     if detail:
         message = f"{message}: {detail}"
     else:
         message = f"{message}: exited with status {result.returncode}"
     raise RuntimeError(message)
+
+
+def _ensure_systemd_worker_slice() -> None:
+    global _swap_hierarchy_warned
+    slice_unit = _worker_slice()
+    if not slice_unit:
+        # Without a worker slice, `_systemd_scope_argv` omits `--slice`, so
+        # workers land in systemd-run's default slice rather than under the
+        # parent slice. Biasing the parent would not reach them (and a failure
+        # configuring an unrelated slice would needlessly abort every launch),
+        # so skip all slice configuration when worker placement is disabled.
+        return
+    # Running inside a slice means its parent swap cap applies; check the
+    # hierarchy once per process so a misconfigured cushion doesn't go
+    # unnoticed without spamming the log on every worker launch.
+    if not _swap_hierarchy_warned:
+        _swap_hierarchy_warned = True
+        _warn_on_swap_cap_hierarchy()
+    _apply_slice_properties(slice_unit, _systemd_worker_slice_properties())
+    # Bias the parent slice so the user-facing runserver wins CPU contests
+    # against the worker pool. The CPU weight belongs on the parent (sibling to
+    # the runserver's slice), not on the leaf workers slice, which the workers
+    # nest under. Empty CODEX_PARENT_SLICE disables just this bias.
+    _apply_slice_properties(_parent_slice(), _systemd_parent_slice_properties())
 
 
 def _worker_argv(
