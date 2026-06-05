@@ -155,6 +155,10 @@ HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT = os.environ.get(
 # running Django and live somewhere that survives restarts. Kept outside the
 # project tree so setuptools' flat-layout discovery doesn't pick it up.
 CODEX_EVENTS_DIR = HITCH_HOME_DIR / "codex_events"
+_CODEX_WORKER_LOG_DIR = os.environ.get("HITCH_CODEX_WORKER_LOG_DIR")
+CODEX_WORKER_LOG_DIR = (
+    Path(_CODEX_WORKER_LOG_DIR) if _CODEX_WORKER_LOG_DIR else None
+)
 
 # Worker isolation policy: "auto" uses systemd scopes only when the user
 # manager is reachable, "systemd" fails closed, and "direct" preserves the

@@ -11,8 +11,9 @@ Invoked by ``codex_pool._launch_worker_process`` as a fresh-session Django
   4. On success mark the row ``completed``; on any exception mark ``failed``
      and write the exception message to ``error``.
 
-The events file plus the status transitions on the row are the only output —
-stdout/stderr are redirected to /dev/null by the parent.
+The events file plus the status transitions on the row are the primary output;
+the parent also redirects stderr to a durable per-worker log for crash
+forensics.
 
 Interactive browser prompts route through ``_make_approval_handler``: when
 the SDK reader thread receives an approval or ``request_user_input`` request,
@@ -33,8 +34,10 @@ import json
 import logging
 import os
 import signal
+import sys
 import threading
 import time
+import traceback
 from collections import deque
 from collections.abc import Callable
 from pathlib import Path
@@ -86,6 +89,7 @@ from hitch.main.codex_pool import (
     discard_input_attachment_paths,
     open_codex_resumed,
     resolve_dangling_requests_for_instance,
+    worker_log_io_enabled,
 )
 from hitch.main.codex_tools import (
     ToolContext,
@@ -175,6 +179,34 @@ _cancel_requested = False
 _steer_wakeup: threading.Event | None = None
 
 
+def _worker_log(instance_id: int, message: str) -> None:
+    if not _worker_stderr_logging_enabled():
+        return
+    with contextlib.suppress(Exception):
+        print(
+            f"{timezone.now().isoformat()} codex_worker[{os.getpid()}] "
+            f"instance={instance_id} {message}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+
+def _worker_stderr_logging_enabled() -> bool:
+    return worker_log_io_enabled()
+
+
+def _worker_log_exception(exc: BaseException) -> None:
+    if not _worker_stderr_logging_enabled():
+        return
+    with contextlib.suppress(Exception):
+        traceback.print_exception(
+            type(exc),
+            exc,
+            exc.__traceback__,
+            file=sys.stderr,
+        )
+
+
 def _on_sigterm(_signum: int, _frame: Any) -> None:
     """Mark the active turn for graceful cancellation.
 
@@ -249,6 +281,10 @@ class Command(BaseCommand):
         instance.pid = os.getpid()
         instance.status = CodexInstance.STATUS_RUNNING
         instance.save(update_fields=["pid", "status"])
+        _worker_log(
+            instance_id,
+            f"started thread_id={instance.thread_id} events_path={instance.events_path}",
+        )
 
         try:
             with open(instance.events_path, "a", buffering=1, encoding="utf-8") as events_file:
@@ -270,7 +306,9 @@ class Command(BaseCommand):
                     plan_mode=plan_mode,
                     output_schema=instance.output_schema,
                 )
-        except Exception as exc:  # noqa: BLE001 - record any failure, then re-raise
+        except BaseException as exc:  # noqa: BLE001 - record any failure, then re-raise
+            _worker_log(instance_id, f"failed with {type(exc).__name__}: {exc!r}")
+            _worker_log_exception(exc)
             instance.status = CodexInstance.STATUS_FAILED
             instance.ended_at = timezone.now()
             instance.error = repr(exc)
@@ -299,6 +337,10 @@ class Command(BaseCommand):
                 if error is not None and error.message
                 else f"turn ended with status {final_turn.status.value}"
             )
+        _worker_log(
+            instance_id,
+            f"finished status={instance.status} error={instance.error!r}",
+        )
         _commit_terminal_status(instance)
         if instance.status == CodexInstance.STATUS_FAILED:
             resolve_dangling_requests_for_instance(instance.pk)
