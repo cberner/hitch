@@ -1215,6 +1215,8 @@ class SessionViewTests(TestCase):
         except ImportError as exc:
             self.skipTest(f"playwright unavailable: {exc}")
 
+        timestamp_rows: list[dict[str, str]] = []
+        plan_timestamps: list[str] = []
         with sync_playwright() as playwright:
             try:
                 browser = playwright.chromium.launch(headless=True)
@@ -1263,6 +1265,54 @@ class SessionViewTests(TestCase):
                             { path: "/tmp/token-secret.txt" },
                             { path: "/home/user/.ssh/id_rsa" },
                         ];
+                        window.__eventSource.emit("message", {
+                            method: "item/started",
+                            recordedAt: 1700000123000000,
+                            eventSeq: 1,
+                            payload: {
+                                item: {
+                                    id: "agent-1",
+                                    type: "agentMessage",
+                                    text: "Working.",
+                                },
+                            },
+                        });
+                        window.__eventSource.emit("message", {
+                            method: "item/plan/delta",
+                            recordedAt: 1700000124000000,
+                            eventSeq: 2,
+                            payload: {
+                                itemId: "plan-1",
+                                turnId: "turn-1",
+                                delta: "Step 1",
+                            },
+                        });
+                        window.__eventSource.emit("message", {
+                            method: "item/started",
+                            recordedAt: 1700000125000000,
+                            eventSeq: 3,
+                            payload: {
+                                turnId: "turn-1",
+                                item: {
+                                    id: "plan-1",
+                                    type: "plan",
+                                    text: "Step 1",
+                                },
+                            },
+                        });
+                        window.__eventSource.emit("message", {
+                            method: "item/completed",
+                            recordedAt: 1700000126000000,
+                            eventSeq: 4,
+                            payload: {
+                                turnId: "turn-1",
+                                item: {
+                                    id: "plan-1",
+                                    type: "plan",
+                                    text: "Step 1\\nStep 2",
+                                },
+                            },
+                        });
                         window.__eventSource.emit("message", {
                             method: "approval/requested",
                             payload: {
@@ -1345,10 +1395,34 @@ class SessionViewTests(TestCase):
                     }
                     """
                 )
+                timestamp_rows = cast(
+                    list[dict[str, str]],
+                    page.locator(".entry time[data-ts]").evaluate_all(
+                        """(els) => els.map((el) => ({
+                            className: el.className,
+                            dateTime: el.dateTime,
+                            text: el.textContent,
+                            ts: el.dataset.ts,
+                        }))"""
+                    ),
+                )
+                plan_timestamps = cast(
+                    list[str],
+                    page.locator(".plan-header time[data-ts]").evaluate_all(
+                        "(els) => els.map((el) => el.dataset.ts || '')"
+                    ),
+                )
                 body = page.locator("body").inner_text()
             finally:
                 browser.close()
 
+        self.assertGreaterEqual(len(timestamp_rows), 5)
+        self.assertTrue(any(row["ts"] == "1700000123" for row in timestamp_rows))
+        self.assertEqual(plan_timestamps, ["1700000124"])
+        self.assertEqual(sum(row["className"] == "timestamp" for row in timestamp_rows), 3)
+        for row in timestamp_rows:
+            self.assertTrue(row["dateTime"])
+            self.assertNotEqual(row["text"], row["ts"])
         self.assertNotIn("token-secret", body)
         self.assertNotIn("--token", body)
         self.assertNotIn("Authorization", body)
@@ -1735,9 +1809,10 @@ class SessionViewTests(TestCase):
         )
         self.assertContains(
             response,
-            '<time class="timestamp" data-ts="1700000123" data-format="time">1700000123</time>',
+            '<time class="timestamp" data-ts="1700000123">1700000123</time>',
             count=4,
         )
+        self.assertNotContains(response, 'data-format="time"')
         self.assertContains(response, 'timeZoneName: "short"', count=2)
         self.assertContains(response, "formatTimestamps(document);")
         self.assertContains(response, "formatTimestamps(body);")
