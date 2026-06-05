@@ -212,6 +212,9 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         )
 
     @patch(
+        "hitch.main.workflow_maintenance.disk_cleanup.run_finished_session_disk_cleanup"
+    )
+    @patch(
         "hitch.main.workflow_maintenance.system_agents.refresh_unarchived_session_pr_stages",
         return_value=1,
     )
@@ -225,10 +228,14 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         mock_reconcile_dead: MagicMock,
         mock_refresh: MagicMock,
         mock_refresh_pr_stages: MagicMock,
+        mock_disk_cleanup: MagicMock,
     ) -> None:
         workflow_maintenance._run_workflow_maintenance_scheduler_tick()
 
         mock_reconcile_dead.assert_called_once_with()
+        # Disk cleanup runs only on the separate 10-minute cadence, never as
+        # part of the 60-second maintenance tick.
+        mock_disk_cleanup.assert_not_called()
         # PR-monitor backoff polling shells out to gh per due monitor, so it is
         # bounded per tick like the PR-stage sweep below.
         mock_refresh.assert_called_once_with(

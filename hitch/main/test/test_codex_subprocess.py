@@ -1896,6 +1896,32 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(completed.status, CodexInstance.STATUS_COMPLETED)
         self.assertIn("exited", dead_running.error)
 
+    @patch("hitch.main.disk_cleanup.run_finished_session_disk_cleanup")
+    @patch("hitch.main.codex_pool.cleanup_requested_input_images_for")
+    @patch("hitch.main.codex_pool._notify_system_agents_if_needed")
+    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    def test_mark_dead_instances_failed_does_not_fan_out_disk_cleanup(
+        self,
+        _mock_alive: MagicMock,
+        _mock_notify: MagicMock,
+        _mock_cleanup_images: MagicMock,
+        mock_disk_cleanup: MagicMock,
+    ) -> None:
+        # Both the per-instance kill branch and the already-terminal branch of
+        # _mark_dead_instances_failed used to fan out a full ~/.hitch walk per
+        # row. A single reconcile sweep must trigger zero disk cleanups.
+        dead = self._make(pid=30, status=CodexInstance.STATUS_RUNNING)
+        late = self._make(pid=31, status=CodexInstance.STATUS_RUNNING)
+        pending = list(CodexInstance.objects.filter(pk__in=[dead.pk, late.pk]))
+        CodexInstance.objects.filter(pk=late.pk).update(
+            status=CodexInstance.STATUS_COMPLETED
+        )
+
+        n = codex_pool._mark_dead_instances_failed(pending)
+
+        self.assertEqual(n, 1)
+        mock_disk_cleanup.assert_not_called()
+
     @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_dead_records_last_auto_approval_timeout(
         self, _mock_worker_alive: MagicMock
@@ -3344,6 +3370,18 @@ class FinalizeReapedInstanceTests(TestCase):
         running.refresh_from_db()
         self.assertEqual(running.status, CodexInstance.STATUS_RUNNING)
 
+    @patch("hitch.main.disk_cleanup.run_finished_session_disk_cleanup")
+    def test_does_not_fan_out_disk_cleanup(
+        self, mock_disk_cleanup: MagicMock
+    ) -> None:
+        # Disk cleanup walks all of ~/.hitch; finalizing a reaped worker must
+        # not trigger it — the 10-minute scheduler owns that cadence.
+        done = self._make(status=CodexInstance.STATUS_COMPLETED)
+
+        codex_pool._finalize_reaped_instance(done.pk)
+
+        mock_disk_cleanup.assert_not_called()
+
     @patch(
         "hitch.main.system_agents.auto_review_intentionally_skipped",
         return_value=False,
@@ -3758,6 +3796,30 @@ class InterruptActiveTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertEqual(instance.error, "forcibly stopped by user")
         self.assertIsNotNone(instance.ended_at)
+
+    @patch("hitch.main.disk_cleanup.run_finished_session_disk_cleanup")
+    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_force_stop_does_not_fan_out_disk_cleanup(
+        self,
+        _mock_kill: MagicMock,
+        _mock_killpg: MagicMock,
+        _mock_identity: MagicMock,
+        mock_disk_cleanup: MagicMock,
+    ) -> None:
+        # Flipping a row to FAILED via _mark_failed must not trigger the
+        # recursive ~/.hitch disk walk on every worker death.
+        instance = self._make(pid=4321, status=CodexInstance.STATUS_RUNNING)
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            interrupt_requested_at=timezone.now()
+        )
+
+        codex_pool.interrupt_active("t")
+
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        mock_disk_cleanup.assert_not_called()
 
     @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
     @patch("hitch.main.codex_pool.subprocess.run")

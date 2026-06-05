@@ -39,7 +39,7 @@ from django.utils import timezone
 from openai_codex import AppServerConfig, Codex, TransportClosedError
 from openai_codex.generated.v2_all import ThreadSource, WebSearchMode
 
-from hitch.main import disk_cleanup, rate_limit
+from hitch.main import rate_limit
 from hitch.main.codex_tools import registered_dynamic_tool_specs
 from hitch.main.db import is_database_locked_error
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
@@ -835,7 +835,6 @@ def _mark_failed(instance: CodexInstance, error: str) -> CodexInstance | None:
         return None
     _resolve_dangling_requests(instance.pk)
     instance.refresh_from_db()
-    disk_cleanup.run_finished_session_disk_cleanup()
     return instance
 
 
@@ -1497,7 +1496,6 @@ def _finalize_reaped_instance(instance_id: int) -> None:
                 "Codex database lock. Send the message again to retry."
             ),
         )
-    disk_cleanup.run_finished_session_disk_cleanup()
 
 
 # Floor on how often the request/SSE-path debounce lets the global sweep run.
@@ -1601,7 +1599,6 @@ def _mark_dead_instances_failed(pending: Iterable[CodexInstance]) -> int:
             ):
                 _notify_system_agents_if_needed(instance)
                 cleanup_requested_input_images_for(instance)
-                disk_cleanup.run_finished_session_disk_cleanup()
             continue
         _resolve_dangling_requests(instance.pk)
         instance.refresh_from_db()
@@ -1612,7 +1609,6 @@ def _mark_dead_instances_failed(pending: Iterable[CodexInstance]) -> int:
         _reap_scope_cgroup(instance)
         _notify_system_agents_if_needed(instance)
         cleanup_requested_input_images_for(instance)
-        disk_cleanup.run_finished_session_disk_cleanup()
         updated += 1
     return updated
 
