@@ -142,6 +142,11 @@
             color: var(--text-muted);
             font-size: 0.85rem;
         }
+        .status-text p.status-headline {
+            color: var(--text);
+            font-size: 0.95rem;
+            font-weight: 550;
+        }
         .metric-list {
             list-style: none;
             margin: 0;
@@ -282,6 +287,7 @@
                 <span class="status-dot" aria-hidden="true"></span>
                 <div class="status-text">
                     <h2 id="health-title">{{ report.overall_label }}</h2>
+                    {% if report.headline_metric %}<p class="status-headline">{{ report.headline_metric.label }} &mdash; {{ report.headline_metric.value }}</p>{% endif %}
                     <p>Generated {{ report.generated_at }}{% if report.server_git_hash %} &middot; {{ report.server_git_hash }}{% endif %}</p>
                 </div>
             </div>

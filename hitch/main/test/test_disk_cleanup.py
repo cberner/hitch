@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -457,3 +458,48 @@ class DiskCleanupTests(TestCase):
 
         self.assertEqual(cleaned, 1)
         mock_cleanup.assert_called_once_with(old_path)
+
+
+def _naive_directory_size(path: Path) -> int:
+    """Sum allocated size for every entry without inode dedup (pre-fix behavior)."""
+    total = disk_cleanup._allocated_size(path.lstat())
+    if path.is_dir() and not path.is_symlink():
+        for child in path.iterdir():
+            total += _naive_directory_size(child)
+    return total
+
+
+class DirectorySizeTests(TestCase):
+    def test_hardlinked_file_counted_once(self) -> None:
+        # Managed worktrees hardlink shared blobs into a common object store, so
+        # a naive walk counts the same inode once per link. Dedupe must drop the
+        # duplicate exactly once, leaving directory entries untouched.
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            original = root / "a" / "blob"
+            original.parent.mkdir(parents=True)
+            original.write_bytes(b"x" * 4096)
+
+            link_dir = root / "b"
+            link_dir.mkdir()
+            os.link(original, link_dir / "blob")
+
+            allocated = disk_cleanup._allocated_size(original.lstat())
+            naive = _naive_directory_size(root)
+            total = disk_cleanup._directory_size(root)
+
+        # The duplicate inode is dropped exactly once relative to the naive walk.
+        self.assertEqual(total, naive - allocated)
+
+    def test_distinct_files_counted_separately(self) -> None:
+        # Two genuinely distinct inodes of the same size must both be summed --
+        # dedupe keys on (st_dev, st_ino), not on size.
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            (root / "first").write_bytes(b"x" * 4096)
+            (root / "second").write_bytes(b"y" * 4096)
+
+            allocated = disk_cleanup._allocated_size((root / "first").lstat())
+            total = disk_cleanup._directory_size(root)
+
+        self.assertGreaterEqual(total, 2 * allocated)

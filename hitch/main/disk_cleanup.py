@@ -481,17 +481,33 @@ def _existing_disk_usage_path(path: Path) -> Path:
 
 
 def _directory_size(path: Path) -> int:
+    # Dedupe by (st_dev, st_ino): managed worktrees share blob data via
+    # hardlinks into a common object store, so a naive sum counts each
+    # hardlinked file once per worktree it appears in and overcounts real
+    # on-disk usage. Directories always recurse; only their allocated size is
+    # deduped (directories are not hardlinked across the tree in practice, but
+    # treating them uniformly keeps the bookkeeping simple).
+    seen: set[tuple[int, int]] = set()
+    return _directory_size_inner(path, seen)
+
+
+def _directory_size_inner(path: Path, seen: set[tuple[int, int]]) -> int:
     try:
         stat_result = path.lstat()
     except OSError:
         return 0
-    total = _allocated_size(stat_result)
+    key = (stat_result.st_dev, stat_result.st_ino)
+    if key in seen:
+        total = 0
+    else:
+        seen.add(key)
+        total = _allocated_size(stat_result)
     if not stat.S_ISDIR(stat_result.st_mode) or stat.S_ISLNK(stat_result.st_mode):
         return total
     try:
         with os.scandir(path) as entries:
             for entry in entries:
-                total += _directory_size(Path(entry.path))
+                total += _directory_size_inner(Path(entry.path), seen)
     except OSError:
         return total
     return total
