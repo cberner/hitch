@@ -533,6 +533,7 @@
             font-variant-numeric: tabular-nums;
             white-space: nowrap;
         }
+        .entry-header:only-child { margin-bottom: 0; }
 
         .message {
             padding: 0.75rem 1rem;
@@ -716,14 +717,6 @@
             color: var(--text-muted);
             flex-wrap: wrap;
         }
-        .tool-call .label {
-            font-weight: 600;
-            color: var(--text-muted);
-            white-space: nowrap;
-            font-size: 0.78rem;
-            text-transform: uppercase;
-            letter-spacing: 0.04em;
-        }
         .tool-call .detail {
             font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
             font-size: 0.82rem;
@@ -748,12 +741,6 @@
         .tool-call .status.failed,
         .tool-call .status.declined { background: var(--status-error-bg); color: var(--status-error-fg); }
         .tool-call .status.inProgress { background: var(--status-warn-bg); color: var(--status-warn-fg); }
-        .tool-call .timestamp {
-            font-size: 0.7rem;
-            color: var(--text-faint);
-            font-variant-numeric: tabular-nums;
-            white-space: nowrap;
-        }
 
         .plan-card {
             display: flex;
@@ -3671,12 +3658,15 @@
                 const wrap = document.createElement("div");
                 wrap.className = "entry";
                 wrap.dataset.itemId = item.id;
+                const header = document.createElement("div");
+                header.className = "entry-header";
+                const role = document.createElement("span");
+                role.className = "role";
+                role.textContent = TOOL_LABELS[item.type] || item.type;
+                header.appendChild(role);
+                header.appendChild(timestampElement(timestampSeconds, ""));
                 const row = document.createElement("div");
                 row.className = "tool-call";
-                const label = document.createElement("span");
-                label.className = "label";
-                label.textContent = TOOL_LABELS[item.type] || item.type;
-                row.appendChild(label);
                 const detail = document.createElement("span");
                 detail.className = "detail";
                 detail.textContent = toolDetail(item);
@@ -3685,10 +3675,10 @@
                 status.className = "status inProgress";
                 status.textContent = "inProgress";
                 row.appendChild(status);
-                row.appendChild(timestampElement(timestampSeconds, "timestamp"));
+                wrap.appendChild(header);
                 wrap.appendChild(row);
                 insertBeforeLive(wrap);
-                items.set(item.id, { kind: "tool", node: wrap, statusNode: status, detail });
+                items.set(item.id, { kind: "tool", node: wrap, rowNode: row, statusNode: status, detail });
                 followRenderedContent();
             }
 
@@ -3954,6 +3944,15 @@
                     }
                     const detail = toolDetail(item);
                     if (detail && entry.detail) entry.detail.textContent = detail;
+                    if (
+                        entry.rowNode
+                        && !entry.statusNode
+                        && entry.detail
+                        && !entry.detail.textContent.trim()
+                    ) {
+                        entry.rowNode.remove();
+                        entry.rowNode = null;
+                    }
                 }
                 followRenderedContent();
             }
