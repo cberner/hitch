@@ -106,6 +106,24 @@ class _DemoHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+        if self.path.startswith("/localhost-redirect"):
+            server = cast(ThreadingHTTPServer, self.server)
+            self.send_response(302)
+            self.send_header("Location", f"http://localhost:{server.server_port}/next")
+            self.send_header("Connection", "close")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if self.path.startswith("/localhost-other-port-redirect"):
+            server = cast(ThreadingHTTPServer, self.server)
+            self.send_response(302)
+            self.send_header(
+                "Location", f"http://localhost:{server.server_port + 1}/next"
+            )
+            self.send_header("Connection", "close")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if self.path.startswith("/external-redirect"):
             self.send_response(302)
             self.send_header("Location", "https://accounts.example.com/login")
@@ -258,6 +276,34 @@ class DemoProxyTests(TestCase):
 
         self.assertEqual(response.status_code, 302)
         self.assertEqual(response["Location"], "/sessions/thread-1/demo/next")
+
+    def test_proxy_rewrites_localhost_absolute_redirect_location(self) -> None:
+        response = self.client.get(
+            reverse(
+                "session_demo_proxy",
+                kwargs={"session_id": "thread-1", "path": "localhost-redirect"},
+            )
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "/sessions/thread-1/demo/next")
+
+    def test_proxy_preserves_localhost_redirect_to_other_port(self) -> None:
+        response = self.client.get(
+            reverse(
+                "session_demo_proxy",
+                kwargs={
+                    "session_id": "thread-1",
+                    "path": "localhost-other-port-redirect",
+                },
+            )
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response["Location"],
+            f"http://localhost:{self.server.server_port + 1}/next",
+        )
 
     def test_proxy_preserves_external_absolute_redirect_location(self) -> None:
         response = self.client.get(

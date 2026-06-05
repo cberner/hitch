@@ -1189,7 +1189,7 @@ def _blocked_request_header(key: str, blocked_headers: set[str]) -> bool:
 
 def _rewrite_location(value: str, path_prefix: str, *, upstream_netloc: str) -> str:
     parsed = urlsplit(value)
-    if parsed.netloc and parsed.netloc != upstream_netloc:
+    if parsed.netloc and not _same_upstream_netloc(parsed.netloc, upstream_netloc):
         return value
     path = parsed.path
     if not path.startswith("/"):
@@ -1200,6 +1200,26 @@ def _rewrite_location(value: str, path_prefix: str, *, upstream_netloc: str) -> 
     if parsed.fragment:
         rewritten = f"{rewritten}#{parsed.fragment}"
     return rewritten
+
+
+def _same_upstream_netloc(netloc: str, upstream_netloc: str) -> bool:
+    if netloc == upstream_netloc:
+        return True
+    alias = _local_netloc_alias(netloc)
+    return alias is not None and alias == _local_netloc_alias(upstream_netloc)
+
+
+def _local_netloc_alias(netloc: str) -> tuple[str, int] | None:
+    try:
+        parsed = urlsplit(f"//{netloc}")
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    if parsed.hostname not in LOCAL_BIND_HOSTS or port is None:
+        return None
+    return ("localhost", port)
 
 
 def _should_rewrite_body(content_type: str, path_prefix: str) -> bool:
