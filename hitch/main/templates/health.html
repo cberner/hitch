@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#f7f2e8" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#161c1a" media="(prefers-color-scheme: dark)">
+    <title>Health - HITCH</title>
+    <style>
+        :root {
+            color-scheme: light dark;
+            --bg: #f7f2e8;
+            --surface: #ffffff;
+            --surface-2: #efe7da;
+            --border: #d8cdbd;
+            --border-strong: #c4b69f;
+            --text: #1c252e;
+            --text-muted: #545d58;
+            --text-faint: #6f6b62;
+            --accent: #4f8f66;
+            --accent-hover: #3f7b56;
+            --accent-soft: rgba(79, 143, 102, 0.10);
+            --accent-fg: #ffffff;
+            --danger: #b94f42;
+            --warn: #b9802f;
+            --shadow: 0 1px 2px rgba(28, 37, 46, 0.05);
+            --radius: 12px;
+            --radius-sm: 8px;
+            --safe-top: env(safe-area-inset-top, 0px);
+            --safe-bottom: env(safe-area-inset-bottom, 0px);
+        }
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg: #161c1a;
+                --surface: #1f2624;
+                --surface-2: #2a322f;
+                --border: #2f3835;
+                --border-strong: #3d4744;
+                --text: #e8e4d8;
+                --text-muted: #a0a29a;
+                --text-faint: #8a8b82;
+                --accent: #6fb286;
+                --accent-hover: #84c49a;
+                --accent-soft: rgba(111, 178, 134, 0.14);
+                --accent-fg: #0c1814;
+                --danger: #d97062;
+                --warn: #d7a24f;
+                --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+            }
+        }
+        * { box-sizing: border-box; }
+        html, body { margin: 0; padding: 0; }
+        body {
+            min-height: 100vh;
+            background: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            line-height: 1.5;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            -webkit-tap-highlight-color: transparent;
+        }
+        .topbar {
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            background: color-mix(in srgb, var(--bg) 88%, transparent);
+            backdrop-filter: saturate(180%) blur(14px);
+            -webkit-backdrop-filter: saturate(180%) blur(14px);
+            border-bottom: 1px solid var(--border);
+            padding-top: var(--safe-top);
+        }
+        .topbar-inner {
+            max-width: 760px;
+            margin: 0 auto;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.75rem;
+            padding: 0.75rem 1rem;
+        }
+        .topbar-leading {
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
+            min-width: 0;
+        }
+        .brand {
+            font-size: 1rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            margin: 0;
+            color: var(--text);
+        }
+        {% include "_primary_nav_styles.html" %}
+        main {
+            width: min(760px, 100%);
+            margin: 0 auto;
+            padding: 1.25rem 1rem calc(1.5rem + var(--safe-bottom));
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+        }
+        .section-label {
+            margin: 0 0 0.35rem;
+            font-size: 0.72rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--text-faint);
+        }
+        .panel {
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            background: var(--surface);
+            box-shadow: var(--shadow);
+            padding: 1rem;
+        }
+        .status-banner {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        .status-dot {
+            width: 0.85rem;
+            height: 0.85rem;
+            border-radius: 50%;
+            flex: 0 0 auto;
+            background: var(--accent);
+        }
+        .status-ok .status-dot { background: var(--accent); }
+        .status-warn .status-dot { background: var(--warn); }
+        .status-danger .status-dot { background: var(--danger); }
+        .status-unknown .status-dot { background: var(--text-faint); }
+        .status-text h2 {
+            margin: 0;
+            font-size: 1.15rem;
+            font-weight: 650;
+        }
+        .status-text p {
+            margin: 0.15rem 0 0;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+        .metric-list {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+        }
+        .metric {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 0.75rem;
+            padding: 0.7rem 0;
+            border-top: 1px solid var(--border);
+        }
+        .metric:first-child { border-top: none; }
+        .metric-main { min-width: 0; }
+        .metric-label {
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.45rem;
+        }
+        .metric-detail {
+            margin: 0.2rem 0 0;
+            color: var(--text-muted);
+            font-size: 0.82rem;
+        }
+        .metric-value {
+            font-variant-numeric: tabular-nums;
+            font-weight: 650;
+            white-space: nowrap;
+            flex: 0 0 auto;
+            text-align: right;
+        }
+        .badge {
+            font-size: 0.68rem;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            border-radius: 999px;
+            padding: 0.1rem 0.45rem;
+            border: 1px solid transparent;
+        }
+        .sev-warn .metric-value { color: var(--warn); }
+        .sev-danger .metric-value { color: var(--danger); }
+        .badge.sev-warn {
+            color: var(--warn);
+            border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+            background: color-mix(in srgb, var(--warn) 10%, transparent);
+        }
+        .badge.sev-danger {
+            color: var(--danger);
+            border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+            background: color-mix(in srgb, var(--danger) 10%, transparent);
+        }
+        .badge.sev-unknown {
+            color: var(--text-faint);
+            border-color: var(--border-strong);
+        }
+        .copy-help {
+            margin: 0 0 0.6rem;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+        .copy-block {
+            margin: 0;
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-size: 0.8rem;
+            line-height: 1.45;
+            white-space: pre-wrap;
+            word-break: break-word;
+            background: var(--surface-2);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            padding: 0.85rem;
+            color: var(--text);
+            /* A single tap / long-press selects the whole report for copying. */
+            -webkit-user-select: all;
+            user-select: all;
+            -webkit-touch-callout: default;
+        }
+        .copy-actions {
+            margin-top: 0.75rem;
+            display: flex;
+            gap: 0.5rem;
+        }
+        .button {
+            font: inherit;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.4rem;
+            min-height: 2.4rem;
+            border: 1px solid var(--accent);
+            border-radius: var(--radius-sm);
+            background: var(--accent);
+            color: var(--accent-fg);
+            padding: 0.55rem 0.8rem;
+            text-decoration: none;
+            cursor: pointer;
+            font-weight: 600;
+            transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
+        }
+        .button:active { transform: scale(0.98); }
+        .button.secondary {
+            background: transparent;
+            color: var(--text);
+            border-color: var(--border-strong);
+        }
+        .health-footer {
+            display: flex;
+            justify-content: flex-start;
+        }
+        @media (max-width: 480px) {
+            .metric {
+                flex-direction: column;
+                align-items: stretch;
+                gap: 0.3rem;
+            }
+            .metric-value { text-align: left; }
+        }
+    </style>
+</head>
+<body>
+    <header class="topbar">
+        <div class="topbar-inner">
+            <div class="topbar-leading">
+                {% include "_primary_nav.html" %}
+                <h1 class="brand">HITCH</h1>
+            </div>
+        </div>
+    </header>
+    <main>
+        <section class="panel status-{{ report.overall_severity }}" aria-labelledby="health-title">
+            <p class="section-label">Health</p>
+            <div class="status-banner">
+                <span class="status-dot" aria-hidden="true"></span>
+                <div class="status-text">
+                    <h2 id="health-title">{{ report.overall_label }}</h2>
+                    <p>Generated {{ report.generated_at }}{% if report.server_git_hash %} &middot; {{ report.server_git_hash }}{% endif %}</p>
+                </div>
+            </div>
+        </section>
+
+        <section class="panel" aria-labelledby="copy-title">
+            <p class="section-label" id="copy-title">Send this to the assistant</p>
+            <p class="copy-help">Long-press the block to select all, then copy &mdash; or tap Copy.</p>
+            <pre class="copy-block" id="health-copy">{{ copy_text }}</pre>
+            <div class="copy-actions">
+                <button type="button" class="button" id="copy-button" data-copy-target="health-copy">Copy</button>
+            </div>
+        </section>
+
+        {% for section in report.sections %}
+        <section class="panel" aria-labelledby="section-{{ forloop.counter }}-title">
+            <p class="section-label" id="section-{{ forloop.counter }}-title">{{ section.title }}</p>
+            <ul class="metric-list">
+                {% for metric in section.metrics %}
+                <li class="metric sev-{{ metric.severity }}">
+                    <div class="metric-main">
+                        <div class="metric-label">
+                            <span>{{ metric.label }}</span>
+                            {% if metric.severity != "ok" %}
+                            <span class="badge sev-{{ metric.severity }}">{{ metric.severity }}</span>
+                            {% endif %}
+                        </div>
+                        {% if metric.detail %}<p class="metric-detail">{{ metric.detail }}</p>{% endif %}
+                    </div>
+                    <span class="metric-value">{{ metric.value }}</span>
+                </li>
+                {% endfor %}
+            </ul>
+        </section>
+        {% endfor %}
+
+        <div class="health-footer">
+            <a class="button secondary" href="{{ profile_url }}">Back to profile</a>
+        </div>
+    </main>
+    <script>
+        (function () {
+            {% include "_primary_nav_script.html" %}
+
+            var button = document.getElementById("copy-button");
+            if (!button) { return; }
+            var target = document.getElementById(button.getAttribute("data-copy-target"));
+            if (!target) { return; }
+            var original = button.textContent;
+            var resetTimer = null;
+            function flash(message) {
+                button.textContent = message;
+                if (resetTimer) { clearTimeout(resetTimer); }
+                resetTimer = setTimeout(function () {
+                    button.textContent = original;
+                }, 1500);
+            }
+            function selectTarget() {
+                var range = document.createRange();
+                range.selectNodeContents(target);
+                var selection = window.getSelection();
+                if (selection) {
+                    selection.removeAllRanges();
+                    selection.addRange(range);
+                }
+            }
+            button.addEventListener("click", function () {
+                var text = target.innerText;
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(text).then(
+                        function () { flash("Copied"); },
+                        function () { selectTarget(); flash("Select + copy"); }
+                    );
+                } else {
+                    selectTarget();
+                    flash("Select + copy");
+                }
+            });
+        })();
+    </script>
+</body>
+</html>
