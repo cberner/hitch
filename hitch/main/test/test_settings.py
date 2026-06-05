@@ -496,8 +496,9 @@ class SettingsPageRenderTests(TestCase):
         self.assertContains(response, 'value="disabled"')
         self.assertContains(response, 'value="cached"')
         self.assertContains(response, 'value="live"')
-        self.assertNotContains(response, "Max Hitch disk usage (%)")
-        self.assertNotContains(response, 'name="disk_usage_max_percent"')
+        self.assertContains(response, "Max Hitch disk usage (%)")
+        self.assertContains(response, 'name="initial_disk_usage_max_percent"')
+        self.assertContains(response, 'name="disk_usage_max_percent"')
         self.assertContains(response, 'name="selected_project"')
         self.assertContains(response, "All projects")
         self.assertContains(response, "Create project")
@@ -508,13 +509,9 @@ class SettingsPageRenderTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_staff_page_renders_saved_disk_usage_percent(
+    def test_page_renders_saved_disk_usage_percent(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        user = get_user_model().objects.create_user(
-            "admin@example.com", password="StrongPass123!", is_staff=True
-        )
-        self.client.force_login(user)
         GlobalSettings.objects.create(
             pk=GlobalSettings.SINGLETON_PK, disk_usage_max_percent=35.5
         )
@@ -533,13 +530,9 @@ class SettingsPageRenderTests(TestCase):
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
-    def test_staff_page_rounds_disk_usage_percent_to_input_step(
+    def test_page_rounds_disk_usage_percent_to_input_step(
         self, mock_codex: MagicMock, mock_discover: MagicMock
     ) -> None:
-        user = get_user_model().objects.create_user(
-            "admin@example.com", password="StrongPass123!", is_staff=True
-        )
-        self.client.force_login(user)
         GlobalSettings.objects.create(
             pk=GlobalSettings.SINGLETON_PK, disk_usage_max_percent=35.55
         )
@@ -1753,16 +1746,17 @@ class UpdateSettingsViewTests(TestCase):
                 self.assertEqual(response.status_code, 400)
                 self.assertNotIn(cookie, response.cookies)
 
-    def test_update_settings_forbids_anonymous_disk_usage_global_setting(self) -> None:
+    def test_update_settings_allows_anonymous_disk_usage_global_setting(self) -> None:
         response = self.client.post(
             reverse("update_settings"),
             data={"disk_usage_max_percent": "35.5"},
         )
 
-        self.assertEqual(response.status_code, 403)
-        self.assertFalse(GlobalSettings.objects.exists())
+        self.assertEqual(response.status_code, 302)
+        settings = GlobalSettings.objects.get(pk=GlobalSettings.SINGLETON_PK)
+        self.assertEqual(settings.disk_usage_max_percent, 35.5)
 
-    def test_update_settings_forbids_non_staff_disk_usage_global_setting(self) -> None:
+    def test_update_settings_allows_non_staff_disk_usage_global_setting(self) -> None:
         user = get_user_model().objects.create_user(
             "dev@example.com", password="StrongPass123!"
         )
@@ -1773,8 +1767,9 @@ class UpdateSettingsViewTests(TestCase):
             data={"disk_usage_max_percent": "35.5"},
         )
 
-        self.assertEqual(response.status_code, 403)
-        self.assertFalse(GlobalSettings.objects.exists())
+        self.assertEqual(response.status_code, 302)
+        settings = GlobalSettings.objects.get(pk=GlobalSettings.SINGLETON_PK)
+        self.assertEqual(settings.disk_usage_max_percent, 35.5)
 
     def test_staff_update_settings_saves_disk_usage_global_setting(self) -> None:
         user = get_user_model().objects.create_user(

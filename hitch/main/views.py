@@ -697,8 +697,6 @@ _INTERMEDIATE_DETAIL_CACHE: OrderedDict[
 def _settings_context(
     current_settings: SettingsValues,
     models_data: list[Any],
-    *,
-    can_manage_global_settings: bool = False,
 ) -> dict[str, Any]:
     projects = list(Project.objects.all())
     current_project = _selected_project_for_settings(current_settings, projects)
@@ -764,7 +762,6 @@ def _settings_context(
         "current_spec_critic": current_settings.spec_critic_enabled,
         "current_web_search": current_settings.web_search_mode,
         "current_enable_memories": current_settings.enable_memories,
-        "can_manage_global_settings": can_manage_global_settings,
         "current_disk_usage_max_percent": _format_disk_usage_max_percent(
             _current_disk_usage_max_percent()
         ),
@@ -7284,11 +7281,6 @@ def _authenticated_user(request: HttpRequest) -> Any | None:
     return user if user.is_authenticated else None
 
 
-def _can_manage_global_settings(request: HttpRequest) -> bool:
-    user = _authenticated_user(request)
-    return bool(user is not None and getattr(user, "is_staff", False))
-
-
 def _stored_settings(request: HttpRequest) -> SettingsValues:
     user = _authenticated_user(request)
     if user is not None:
@@ -7961,7 +7953,6 @@ def update_settings(request: HttpRequest) -> HttpResponse:
                 **_settings_context(
                     resolved_settings.values,
                     models_data,
-                    can_manage_global_settings=_can_manage_global_settings(request),
                 ),
             },
         )
@@ -8042,8 +8033,6 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         return HttpResponseBadRequest("invalid web search setting")
     disk_usage_max_percent: float | None = None
     if posted_disk_usage_max_percent is not None:
-        if not _can_manage_global_settings(request):
-            return HttpResponseForbidden("global settings require staff")
         disk_usage_max_percent, disk_usage_error = _parse_disk_usage_max_percent(
             posted_disk_usage_max_percent
         )
