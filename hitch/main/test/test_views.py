@@ -16949,6 +16949,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertIn(">auto goals</a>", nav_html)
         self.assertContains(response, "--accent-soft")
         self.assertContains(response, "--shadow-lg")
+        self.assertContains(response, "[hidden] { display: none !important; }")
         self.assertContains(response, "Improve tests")
         self.assertContains(response, "Ambition")
         self.assertContains(response, "Ambition: High")
@@ -17749,6 +17750,7 @@ class AutonomousGoalViewTests(TestCase):
                 "autonomy": AutonomousGoal.AUTONOMY_DRAFT_PR,
                 "auto_qa": "true",
                 "auto_proposal": "true",
+                "stacked_diff_depth": "3",
                 "confidence_threshold": AutonomousGoal.CONFIDENCE_VERY_HIGH,
                 "web_search_mode": AutonomousGoal.WEB_SEARCH_LIVE,
             },
@@ -17761,6 +17763,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(goal.ambition, AutonomousGoal.AMBITION_YOLO)
         self.assertEqual(goal.autonomy, AutonomousGoal.AUTONOMY_DRAFT_PR)
         self.assertFalse(goal.auto_qa_enabled)
+        self.assertEqual(goal.stacked_diff_depth, 3)
         self.assertEqual(goal.web_search_mode, AutonomousGoal.WEB_SEARCH_LIVE)
         self.assertTrue(goal.auto_proposal_enabled)
         self.assertEqual(
@@ -17816,6 +17819,7 @@ class AutonomousGoalViewTests(TestCase):
                 "autonomy": AutonomousGoal.AUTONOMY_DRAFT_PATCH,
                 "auto_qa": "true",
                 "auto_proposal": "false",
+                "stacked_diff_depth": "4",
                 "confidence_threshold": AutonomousGoal.CONFIDENCE_VERY_HIGH,
                 "web_search_mode": AutonomousGoal.WEB_SEARCH_DISABLED,
             },
@@ -17828,6 +17832,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(goal.ambition, AutonomousGoal.AMBITION_HIGH)
         self.assertEqual(goal.autonomy, AutonomousGoal.AUTONOMY_DRAFT_PATCH)
         self.assertTrue(goal.auto_qa_enabled)
+        self.assertEqual(goal.stacked_diff_depth, 4)
         self.assertEqual(goal.web_search_mode, AutonomousGoal.WEB_SEARCH_DISABLED)
         self.assertFalse(goal.auto_proposal_enabled)
         self.assertEqual(
@@ -18150,6 +18155,28 @@ class AutonomousGoalViewTests(TestCase):
                     "goal": "Find useful docs increments.",
                     "ambition": AutonomousGoal.AMBITION_HIGH,
                     "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+                    "stacked_diff_depth": "0",
+                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
+                },
+                "stacked diff depth is invalid",
+            ),
+            (
+                {
+                    "title": "Improve docs",
+                    "goal": "Find useful docs increments.",
+                    "ambition": AutonomousGoal.AMBITION_HIGH,
+                    "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+                    "stacked_diff_depth": "2",
+                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
+                },
+                "stacked diff depth requires draft patch or draft PR",
+            ),
+            (
+                {
+                    "title": "Improve docs",
+                    "goal": "Find useful docs increments.",
+                    "ambition": AutonomousGoal.AMBITION_HIGH,
+                    "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
                     "auto_proposal": "false",
                     "confidence_threshold": "absolute",
                 },
@@ -18308,6 +18335,44 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(
             proposal.outcome_notes,
             system_agents.AUTONOMOUS_GOAL_DELETED_ERROR,
+        )
+        mock_cleanup.assert_called_once_with("/repo-worktree")
+
+    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    def test_delete_autonomous_goal_cleans_hidden_stacked_proposal(
+        self, mock_cleanup: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            outcome_status=ProposedSession.OUTCOME_DISMISSED,
+            outcome_metadata={"stacked_diff_hidden_until_complete": True},
+            title="Add parser coverage",
+        )
+
+        response = self.client.post(reverse("delete_autonomous_goal", args=[goal.pk]))
+
+        self.assertEqual(response.status_code, 302)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_DISMISSED)
+        self.assertEqual(
+            proposal.outcome_notes,
+            system_agents.AUTONOMOUS_GOAL_DELETED_ERROR,
+        )
+        self.assertFalse(
+            proposal.outcome_metadata["stacked_diff_hidden_until_complete"]
         )
         mock_cleanup.assert_called_once_with("/repo-worktree")
 

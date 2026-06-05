@@ -57,6 +57,7 @@ from hitch.main.worktrees import (
     cleanup_managed_worktree_path,
     cleanup_worktree,
     create_worktree_for_session,
+    snapshot_worktree_to_commit,
 )
 
 logger = logging.getLogger(__name__)
@@ -145,6 +146,9 @@ _quota_cache_paused = False
 _quota_cache_checked_at: datetime | None = None
 _AUTONOMOUS_GOAL_USE_WORKTREES_STATE_KEY = "use_worktrees"
 _AUTONOMOUS_GOAL_SESSION_CWD_STATE_KEY = "session_cwd"
+_AUTONOMOUS_GOAL_STACKED_DEPTH_STATE_KEY = "stacked_diff_depth"
+_AUTONOMOUS_GOAL_STACKED_ITERATION_STATE_KEY = "stacked_diff_iteration"
+_AUTONOMOUS_GOAL_STACKED_FORK_CWD_STATE_KEY = "stacked_diff_fork_from_cwd"
 _QA_DESIGN_SYNTHESIS_STATE_KEY = "qa_design_synthesis_gate"
 _QA_REVIEW_REVISION_STATE_KEY = "qa_review_revision"
 _WORKFLOW_FAILURE_OWNER_STATE_KEY = "failure_owner"
@@ -177,6 +181,7 @@ _WORKER_EXITED_BEFORE_COMPLETION_ERROR = (
 _AUTONOMOUS_GOAL_CANDIDATE_RETRY_KIND = "autonomous_goal_candidate"
 _AUTONOMOUS_GOAL_JUDGE_RETRY_KIND = "autonomous_goal_judge"
 _AUTONOMOUS_GOAL_SPAWN_JUDGE_ACTION = "spawn_judge"
+_AUTONOMOUS_GOAL_SPAWN_NEXT_CANDIDATE_ACTION = "spawn_next_candidate"
 _AUTONOMOUS_GOAL_RETRY_CANDIDATE_ACTION = "retry_candidate"
 _AUTONOMOUS_GOAL_RETRY_JUDGE_ACTION = "retry_judge"
 _PR_GATE_MERGE_CONFLICTS = "merge_conflicts"
@@ -1230,6 +1235,7 @@ class _AutonomousGoalAutoProposalStartSnapshot:
     repo_path: str
     autonomy: str
     auto_qa_enabled: bool
+    stacked_diff_depth: int
     auto_merge_to_local_branch: bool
     auto_merge_branch: str
     base_ref: str
@@ -1237,8 +1243,9 @@ class _AutonomousGoalAutoProposalStartSnapshot:
 
 @dataclass(frozen=True)
 class _AutonomousGoalPostCommitAction:
-    kind: str
+    kind: str = ""
     candidate: dict[str, Any] | None = None
+    cleanup_candidate_cwds: tuple[str, ...] = ()
 
 
 def _autonomous_goal_auto_proposal_start_snapshot(
@@ -1249,6 +1256,7 @@ def _autonomous_goal_auto_proposal_start_snapshot(
         repo_path=autonomous_goal.project.repo_path,
         autonomy=autonomous_goal.autonomy,
         auto_qa_enabled=autonomous_goal.auto_qa_enabled,
+        stacked_diff_depth=autonomous_goal.effective_stacked_diff_depth,
         auto_merge_to_local_branch=autonomous_goal.auto_merge_to_local_branch,
         auto_merge_branch=autonomous_goal.auto_merge_branch,
         base_ref=_autonomous_goal_auto_merge_base_ref(autonomous_goal),
@@ -1448,6 +1456,10 @@ def _create_autonomous_goal_workflow_record(
         "autonomous_goal_id": autonomous_goal.pk,
         "auto_proposal": auto_proposal,
         _AUTONOMOUS_GOAL_USE_WORKTREES_STATE_KEY: use_worktrees,
+        _AUTONOMOUS_GOAL_STACKED_DEPTH_STATE_KEY: (
+            autonomous_goal.effective_stacked_diff_depth
+        ),
+        _AUTONOMOUS_GOAL_STACKED_ITERATION_STATE_KEY: 1,
         "autonomous_goal_updated_at": autonomous_goal.updated_at.isoformat(),
         "web_search_mode": autonomous_goal.web_search_mode,
     }
@@ -1547,6 +1559,11 @@ def _block_autonomous_goal_spawn_failure_if_active(
                 "autonomous goal no longer exists",
                 surface_to_thread=False,
             )
+            return workflow
+        if _complete_autonomous_goal_with_current_stack_proposal(
+            workflow,
+            error=error,
+        ):
             return workflow
         _block_autonomous_goal_workflow(workflow, autonomous_goal, error)
         return workflow
@@ -4974,7 +4991,11 @@ def _handle_autonomous_goal_agent_finished(
         post_commit_action = _handle_autonomous_goal_agent_finished_locked(
             instance, run, workflow, autonomous_goal, raw_output
         )
-    if post_commit_action is None or autonomous_goal is None:
+    if post_commit_action is None:
+        return
+    for cwd in post_commit_action.cleanup_candidate_cwds:
+        _cleanup_autonomous_goal_candidate_cwd(cwd)
+    if autonomous_goal is None:
         return
     if post_commit_action.kind == _AUTONOMOUS_GOAL_SPAWN_JUDGE_ACTION:
         if post_commit_action.candidate is not None:
@@ -4992,6 +5013,9 @@ def _handle_autonomous_goal_agent_finished(
         _spawn_autonomous_goal_judge_or_block(
             workflow, autonomous_goal, post_commit_action.candidate
         )
+        return
+    if post_commit_action.kind == _AUTONOMOUS_GOAL_SPAWN_NEXT_CANDIDATE_ACTION:
+        _spawn_autonomous_goal_candidate_or_block(workflow, autonomous_goal)
 
 
 def _handle_autonomous_goal_agent_finished_locked(
@@ -5007,23 +5031,21 @@ def _handle_autonomous_goal_agent_finished_locked(
         retry_action = _retry_dead_autonomous_goal_worker(instance, run, workflow)
         if retry_action is not None:
             return retry_action
-        _fail_autonomous_goal_run_and_block_workflow(
+        return _fail_autonomous_goal_run_and_block_workflow(
             run,
             autonomous_goal,
             f"autonomous goal worker failed: {instance.error}",
         )
-        return None
 
     if workflow.step == STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING:
         candidate_output = _parse_autonomous_goal_candidate_output(raw_output)
         if candidate_output is None:
-            _fail_autonomous_goal_run_and_block_workflow(
+            return _fail_autonomous_goal_run_and_block_workflow(
                 run,
                 autonomous_goal,
                 "autonomous goal candidate output was not valid JSON",
                 raw_output,
             )
-            return None
         run.status = SystemAgentRun.STATUS_COMPLETED
         run.output = candidate_output
         run.raw_output = raw_output
@@ -5033,6 +5055,24 @@ def _handle_autonomous_goal_agent_finished_locked(
             workflow.state, _AUTONOMOUS_GOAL_CANDIDATE_RETRY_KIND
         )
         if candidate_output["proposal"] is None:
+            previous_proposal = _autonomous_goal_current_stack_proposal(workflow)
+            if previous_proposal is not None and _publish_current_stack_proposal(
+                previous_proposal
+            ):
+                cleanup_cwd = _candidate_session_cwd_from_state(
+                    workflow, "candidate_session_id"
+                )
+                workflow.step = STEP_AUTONOMOUS_GOAL_PROPOSED
+                workflow.status = SystemWorkflow.STATUS_COMPLETED
+                workflow.state = {
+                    **state,
+                    "candidate": candidate_output,
+                    "stacked_diff_stopped_reason": "candidate_no_proposal",
+                }
+                workflow.save(update_fields=["status", "step", "state", "updated_at"])
+                return _AutonomousGoalPostCommitAction(
+                    cleanup_candidate_cwds=((cleanup_cwd,) if cleanup_cwd else ())
+                )
             message = str(candidate_output["message"])
             ProposedSession.objects.create(
                 project=autonomous_goal.project,
@@ -5066,13 +5106,12 @@ def _handle_autonomous_goal_agent_finished_locked(
         return None
     judgment = _parse_autonomous_goal_judge_output(raw_output)
     if judgment is None:
-        _fail_autonomous_goal_run_and_block_workflow(
+        return _fail_autonomous_goal_run_and_block_workflow(
             run,
             autonomous_goal,
             "autonomous goal judge output was not valid JSON",
             raw_output,
         )
-        return None
     run.status = SystemAgentRun.STATUS_COMPLETED
     run.output = judgment
     run.raw_output = raw_output
@@ -5084,45 +5123,23 @@ def _handle_autonomous_goal_agent_finished_locked(
     candidate = workflow.state.get("candidate")
     if not isinstance(candidate, dict):
         candidate = {}
+    cleanup_cwds: tuple[str, ...] = ()
     if _confidence_meets_threshold(
         judgment["confidence"], autonomous_goal.confidence_threshold
     ):
-        auto_pr_enabled = autonomous_goal.autonomy == AutonomousGoal.AUTONOMY_DRAFT_PR
-        auto_qa_enabled = autonomous_goal.auto_qa_enabled and not auto_pr_enabled
-        auto_merge_branch = _autonomous_goal_auto_merge_branch_for_implementation(
-            autonomous_goal
+        should_continue_stack = _autonomous_goal_should_continue_stack(
+            workflow, autonomous_goal
         )
-        auto_merge_to_local_branch = bool(auto_qa_enabled and auto_merge_branch)
-        proposal = ProposedSession.objects.create(
-            project=autonomous_goal.project,
-            autonomous_goal=autonomous_goal,
-            source_workflow=workflow,
-            title=str(candidate.get("title", autonomous_goal.title))[
-                :_AUTONOMOUS_GOAL_TITLE_MAX_LEN
-            ],
-            summary=_autonomous_goal_proposal_summary(candidate, judgment),
-            prompt=_autonomous_goal_proposed_session_prompt(
-                autonomous_goal, candidate, judgment
-            ),
-            confidence=judgment["confidence"],
-            relevant_files=_string_list(candidate.get("relevant_files")),
-            candidate_session=_session_metadata_from_state(
-                workflow, "candidate_session_id"
-            ),
-            judge_session=_session_metadata_from_state(workflow, "judge_session_id"),
-            outcome_metadata={
-                "autonomous_goal_autonomy": autonomous_goal.autonomy,
-                "automation_status": "proposed",
-                "auto_pr_enabled": auto_pr_enabled,
-                "auto_qa_enabled": auto_qa_enabled,
-                "auto_merge_to_local_branch": auto_merge_to_local_branch,
-                "auto_merge_branch": auto_merge_branch,
-                "implemented_changes": str(
-                    candidate.get("implemented_changes", "")
-                ).strip(),
-                "verification": str(candidate.get("verification", "")).strip(),
-                "rough_edges": str(candidate.get("rough_edges", "")).strip(),
-            },
+        previous_proposal = _autonomous_goal_current_stack_proposal(workflow)
+        proposal = _create_autonomous_goal_proposal(
+            workflow,
+            autonomous_goal,
+            candidate,
+            judgment,
+            publish=not should_continue_stack,
+        )
+        cleanup_cwds = _dismiss_replaced_autonomous_goal_proposal(
+            previous_proposal, replacement=proposal
         )
         _record_autonomous_goal_proposal_created(autonomous_goal)
         workflow.state = {
@@ -5131,8 +5148,36 @@ def _handle_autonomous_goal_agent_finished_locked(
             "proposal_id": proposal.pk,
             "autonomy": autonomous_goal.autonomy,
         }
+        if should_continue_stack:
+            workflow.state = _autonomous_goal_next_stack_candidate_state(
+                workflow, proposal
+            )
+            workflow.step = STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING
+            workflow.save(update_fields=["step", "state", "updated_at"])
+            return _AutonomousGoalPostCommitAction(
+                _AUTONOMOUS_GOAL_SPAWN_NEXT_CANDIDATE_ACTION,
+                cleanup_candidate_cwds=cleanup_cwds,
+            )
         workflow.step = STEP_AUTONOMOUS_GOAL_PROPOSED
     else:
+        previous_proposal = _autonomous_goal_current_stack_proposal(workflow)
+        if previous_proposal is not None and _publish_current_stack_proposal(
+            previous_proposal
+        ):
+            cleanup_cwd = _candidate_session_cwd_from_state(
+                workflow, "candidate_session_id"
+            )
+            workflow.step = STEP_AUTONOMOUS_GOAL_PROPOSED
+            workflow.status = SystemWorkflow.STATUS_COMPLETED
+            workflow.state = {
+                **state,
+                "judgment": judgment,
+                "stacked_diff_stopped_reason": "judge_confidence_below_threshold",
+            }
+            workflow.save(update_fields=["status", "step", "state", "updated_at"])
+            return _AutonomousGoalPostCommitAction(
+                cleanup_candidate_cwds=((cleanup_cwd,) if cleanup_cwd else ())
+            )
         _create_autonomous_goal_skipped_notice(
             workflow,
             autonomous_goal,
@@ -5153,6 +5198,87 @@ def _handle_autonomous_goal_agent_finished_locked(
     workflow.status = SystemWorkflow.STATUS_COMPLETED
     workflow.state = {**workflow.state, "judgment": judgment}
     workflow.save(update_fields=["status", "step", "state", "updated_at"])
+    return _AutonomousGoalPostCommitAction(cleanup_candidate_cwds=cleanup_cwds)
+
+
+def _create_autonomous_goal_proposal(
+    workflow: SystemWorkflow,
+    autonomous_goal: AutonomousGoal,
+    candidate: dict[str, Any],
+    judgment: dict[str, str],
+    *,
+    publish: bool = True,
+) -> ProposedSession:
+    auto_pr_enabled = autonomous_goal.autonomy == AutonomousGoal.AUTONOMY_DRAFT_PR
+    auto_qa_enabled = autonomous_goal.auto_qa_enabled and not auto_pr_enabled
+    auto_merge_branch = _autonomous_goal_auto_merge_branch_for_implementation(
+        autonomous_goal
+    )
+    auto_merge_to_local_branch = bool(auto_qa_enabled and auto_merge_branch)
+    hidden_until_complete = not publish
+    return ProposedSession.objects.create(
+        project=autonomous_goal.project,
+        autonomous_goal=autonomous_goal,
+        source_workflow=workflow,
+        title=str(candidate.get("title", autonomous_goal.title))[
+            :_AUTONOMOUS_GOAL_TITLE_MAX_LEN
+        ],
+        summary=_autonomous_goal_proposal_summary(candidate, judgment),
+        prompt=_autonomous_goal_proposed_session_prompt(
+            autonomous_goal, candidate, judgment
+        ),
+        confidence=judgment["confidence"],
+        relevant_files=_string_list(candidate.get("relevant_files")),
+        candidate_session=_session_metadata_from_state(
+            workflow, "candidate_session_id"
+        ),
+        judge_session=_session_metadata_from_state(workflow, "judge_session_id"),
+        outcome_status=(
+            ProposedSession.OUTCOME_UNSET
+            if publish
+            else ProposedSession.OUTCOME_DISMISSED
+        ),
+        outcome_notes=(
+            "" if publish else "Hidden while stacked diff workflow continues."
+        ),
+        outcome_metadata={
+            "autonomous_goal_autonomy": autonomous_goal.autonomy,
+            "automation_status": "proposed",
+            "auto_pr_enabled": auto_pr_enabled,
+            "auto_qa_enabled": auto_qa_enabled,
+            "auto_merge_to_local_branch": auto_merge_to_local_branch,
+            "auto_merge_branch": auto_merge_branch,
+            "stacked_diff_depth": _autonomous_goal_workflow_stacked_diff_depth(
+                workflow, autonomous_goal
+            ),
+            "stacked_diff_iteration": _autonomous_goal_stack_iteration(workflow),
+            "stacked_diff_hidden_until_complete": hidden_until_complete,
+            "implemented_changes": str(
+                candidate.get("implemented_changes", "")
+            ).strip(),
+            "verification": str(candidate.get("verification", "")).strip(),
+            "rough_edges": str(candidate.get("rough_edges", "")).strip(),
+        },
+    )
+
+
+def _autonomous_goal_current_stack_proposal(
+    workflow: SystemWorkflow,
+) -> ProposedSession | None:
+    proposal_id = _state_int(workflow, "proposal_id")
+    if not proposal_id:
+        return None
+    proposal = (
+        ProposedSession.objects.select_related("candidate_session")
+        .filter(pk=proposal_id, source_workflow=workflow)
+        .first()
+    )
+    if proposal is None:
+        return None
+    if proposal.outcome_status == ProposedSession.OUTCOME_UNSET:
+        return proposal
+    if _autonomous_goal_proposal_hidden_until_complete(proposal):
+        return proposal
     return None
 
 
@@ -5203,6 +5329,154 @@ def _autonomous_goal_worker_retry_kind(workflow: SystemWorkflow) -> str:
     if workflow.step == STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING:
         return _AUTONOMOUS_GOAL_JUDGE_RETRY_KIND
     return ""
+
+
+def _dismiss_replaced_autonomous_goal_proposal(
+    previous: ProposedSession | None, *, replacement: ProposedSession
+) -> tuple[str, ...]:
+    if previous is None or previous.pk == replacement.pk:
+        return ()
+    cleanup_cwd = previous.candidate_session.cwd if previous.candidate_session else ""
+    if (
+        previous.outcome_status != ProposedSession.OUTCOME_UNSET
+        and not _autonomous_goal_proposal_hidden_until_complete(previous)
+    ):
+        return ()
+    outcome_metadata = {
+        **_proposal_outcome_metadata(previous, {}),
+        "stacked_diff_hidden_until_complete": False,
+        "stacked_diff_replaced_by": replacement.pk,
+    }
+    applied = ProposedSession.objects.filter(
+        pk=previous.pk,
+        outcome_status=previous.outcome_status,
+    ).update(
+        outcome_status=ProposedSession.OUTCOME_DISMISSED,
+        outcome_notes=f"Replaced by stacked diff proposal #{replacement.pk}.",
+        outcome_metadata=outcome_metadata,
+        updated_at=timezone.now(),
+    )
+    return (cleanup_cwd,) if applied and cleanup_cwd else ()
+
+
+def _publish_current_stack_proposal(proposal: ProposedSession) -> bool:
+    if proposal.outcome_status == ProposedSession.OUTCOME_UNSET:
+        return ProposedSession.objects.filter(
+            pk=proposal.pk,
+            outcome_status=ProposedSession.OUTCOME_UNSET,
+        ).exists()
+    if not _autonomous_goal_proposal_hidden_until_complete(proposal):
+        return False
+    outcome_metadata = {
+        **_proposal_outcome_metadata(proposal, {}),
+        "stacked_diff_hidden_until_complete": False,
+    }
+    return bool(
+        ProposedSession.objects.filter(
+            pk=proposal.pk,
+            outcome_status=ProposedSession.OUTCOME_DISMISSED,
+            outcome_metadata__stacked_diff_hidden_until_complete=True,
+        ).update(
+            outcome_status=ProposedSession.OUTCOME_UNSET,
+            outcome_notes="",
+            outcome_metadata=outcome_metadata,
+            updated_at=timezone.now(),
+        )
+    )
+
+
+def _complete_autonomous_goal_with_current_stack_proposal(
+    workflow: SystemWorkflow, *, error: str
+) -> bool:
+    proposal = _autonomous_goal_current_stack_proposal(workflow)
+    if proposal is None or not _publish_current_stack_proposal(proposal):
+        return False
+    workflow.status = SystemWorkflow.STATUS_COMPLETED
+    workflow.step = STEP_AUTONOMOUS_GOAL_PROPOSED
+    workflow.state = {
+        **workflow.state,
+        "stacked_diff_stopped_reason": "stacked_diff_continuation_failed",
+        "stacked_diff_continuation_error": error,
+    }
+    workflow.save(update_fields=["status", "step", "state", "updated_at"])
+    return True
+
+
+def _autonomous_goal_proposal_hidden_until_complete(
+    proposal: ProposedSession,
+) -> bool:
+    return (
+        proposal.outcome_status == ProposedSession.OUTCOME_DISMISSED
+        and _proposal_outcome_metadata(proposal, {}).get(
+            "stacked_diff_hidden_until_complete"
+        )
+        is True
+    )
+
+
+def _autonomous_goal_should_continue_stack(
+    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
+) -> bool:
+    if not _autonomous_goal_candidate_allows_code_changes(workflow):
+        return False
+    return _autonomous_goal_stack_iteration(
+        workflow
+    ) < _autonomous_goal_workflow_stacked_diff_depth(workflow, autonomous_goal)
+
+
+def _autonomous_goal_workflow_stacked_diff_depth(
+    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
+) -> int:
+    depth = _state_int(workflow, _AUTONOMOUS_GOAL_STACKED_DEPTH_STATE_KEY)
+    if not depth:
+        depth = autonomous_goal.effective_stacked_diff_depth
+    return min(
+        max(depth, AutonomousGoal.STACKED_DIFF_DEPTH_MIN),
+        AutonomousGoal.STACKED_DIFF_DEPTH_MAX,
+    )
+
+
+def _autonomous_goal_stack_iteration(workflow: SystemWorkflow) -> int:
+    return max(_state_int(workflow, _AUTONOMOUS_GOAL_STACKED_ITERATION_STATE_KEY), 1)
+
+
+def _autonomous_goal_next_stack_candidate_state(
+    workflow: SystemWorkflow, proposal: ProposedSession
+) -> dict[str, Any]:
+    fork_cwd = (
+        proposal.candidate_session.cwd
+        if proposal.candidate_session and proposal.candidate_session.cwd
+        else _autonomous_goal_session_cwd(workflow)
+    )
+    state = dict(workflow.state)
+    state[_AUTONOMOUS_GOAL_STACKED_ITERATION_STATE_KEY] = (
+        _autonomous_goal_stack_iteration(workflow) + 1
+    )
+    state[_AUTONOMOUS_GOAL_STACKED_FORK_CWD_STATE_KEY] = fork_cwd
+    state["proposal_id"] = proposal.pk
+    for key in (
+        "candidate",
+        "candidate_session_id",
+        "judge_session_id",
+        "judgment",
+        "history_files",
+    ):
+        state.pop(key, None)
+    return state
+
+
+def _candidate_session_cwd_from_state(workflow: SystemWorkflow, key: str) -> str:
+    metadata = _session_metadata_from_state(workflow, key)
+    return metadata.cwd if metadata is not None else ""
+
+
+def _cleanup_autonomous_goal_candidate_cwd(cwd: str) -> None:
+    if not cwd:
+        return
+    try:
+        cleanup_managed_worktree_path(cwd)
+    except WorktreeCleanupError:
+        logger.exception("failed to clean up autonomous goal candidate worktree %s", cwd)
 
 
 # Hidden QA subagents do not surface approval prompts in the main workflow UI.
@@ -5355,6 +5629,26 @@ def _spawn_qa_panel_synthesizer_run(workflow: SystemWorkflow) -> SystemAgentRun:
 def _prepare_autonomous_goal_candidate_cwd(
     workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
 ) -> tuple[str, ManagedWorktree | None]:
+    fork_cwd = _state_string(workflow, _AUTONOMOUS_GOAL_STACKED_FORK_CWD_STATE_KEY)
+    if fork_cwd:
+        base_ref = snapshot_worktree_to_commit(fork_cwd)
+        managed_worktree = create_worktree_for_session(
+            autonomous_goal.project.repo_path,
+            base_ref=base_ref,
+        )
+        session_cwd = str(managed_worktree.path)
+        workflow.state = {
+            **workflow.state,
+            _AUTONOMOUS_GOAL_SESSION_CWD_STATE_KEY: session_cwd,
+            _AUTONOMOUS_GOAL_STACKED_FORK_CWD_STATE_KEY: "",
+        }
+        try:
+            workflow.save(update_fields=["state", "updated_at"])
+        except Exception:
+            _cleanup_new_autonomous_goal_worktree(managed_worktree)
+            raise
+        return session_cwd, managed_worktree
+
     session_cwd = _autonomous_goal_session_cwd(workflow)
     if session_cwd != workflow.cwd:
         return session_cwd, None
@@ -6582,14 +6876,37 @@ def _autonomous_goal_candidate_prompt(
     ambition = _autonomous_goal_ambition_guidance(autonomous_goal)
     memory_context = _autonomous_goal_memory_context(autonomous_goal)
     session_cwd = _autonomous_goal_session_cwd(workflow)
-    code_change_guidance = (
-        "Make code changes that turn the proposal into real, reviewable "
-        "progress; leave any changes in this session checkout so the user can "
-        "accept and continue from them. Do not run QA loops or polish this "
-        "as a finished PR; the continuation session will do that after user "
-        "approval. "
-        if _autonomous_goal_candidate_allows_code_changes(workflow)
-        else "Do not make code changes. "
+    stacked_depth = _autonomous_goal_workflow_stacked_diff_depth(
+        workflow, autonomous_goal
+    )
+    stacked_iteration = _autonomous_goal_stack_iteration(workflow)
+    if not _autonomous_goal_candidate_allows_code_changes(workflow):
+        code_change_guidance = "Do not make code changes. "
+    elif stacked_depth > 1:
+        code_change_guidance = (
+            "Make code changes that turn the proposal into real, reviewable "
+            "progress; leave any changes in this session checkout so Hitch can "
+            "continue from them. This autonomous goal is configured for stacked "
+            f"diff depth {stacked_depth}; this is candidate round "
+            f"{stacked_iteration} of {stacked_depth}. "
+            "Before returning a proposal, polish the work you changed in this "
+            "round: resolve obvious rough edges, keep the diff coherent, and "
+            "run relevant checks when practical. Do not push a branch or open a "
+            "PR. If this round is accepted and more depth remains, Hitch will "
+            "start another hidden candidate round from this proposal branch. "
+        )
+    else:
+        code_change_guidance = (
+            "Make code changes that turn the proposal into real, reviewable "
+            "progress; leave any changes in this session checkout so the user can "
+            "accept and continue from them. Do not run QA loops or polish this "
+            "as a finished PR; the continuation session will do that after user "
+            "approval. "
+        )
+    stack_context = (
+        f"Stacked diff round: {stacked_iteration} of {stacked_depth}\n"
+        if stacked_depth > 1
+        else ""
     )
     prompt = (
         "You are Hitch's autonomous goal agent.\n\n"
@@ -6603,6 +6920,7 @@ def _autonomous_goal_candidate_prompt(
         "available fallback, such as Python standard-library tooling for SQLite, "
         "or report the limitation in the JSON output.\n\n"
         f"Repository cwd: {session_cwd}\n"
+        f"{stack_context}"
         f"Autonomous goal title: {autonomous_goal.title}\n\n"
         "Autonomous goal objective:\n"
         f"{autonomous_goal.goal}\n\n"
@@ -6760,6 +7078,15 @@ def _autonomous_goal_judge_prompt(
         candidate_session.thread_id if candidate_session is not None else "(unknown)"
     )
     session_cwd = _autonomous_goal_session_cwd(workflow)
+    stacked_depth = _autonomous_goal_workflow_stacked_diff_depth(
+        workflow, autonomous_goal
+    )
+    stack_context = (
+        "Stacked diff round: "
+        f"{_autonomous_goal_stack_iteration(workflow)} of {stacked_depth}\n"
+        if stacked_depth > 1
+        else ""
+    )
     return (
         "You are Hitch's autonomous goal confidence judge.\n\n"
         "Judge whether the candidate session is likely to make meaningful "
@@ -6769,6 +7096,7 @@ def _autonomous_goal_judge_prompt(
         "Do not reward broad or vague ideas; confidence should reflect whether "
         f"the proposal is concrete and well-scoped. {ambition.judge_instruction}\n\n"
         f"Repository cwd: {session_cwd}\n"
+        f"{stack_context}"
         f"Autonomous goal title: {autonomous_goal.title}\n"
         f"Confidence threshold: {autonomous_goal.confidence_threshold}\n\n"
         "Autonomous goal objective:\n"
@@ -8374,12 +8702,21 @@ def _fail_autonomous_goal_run_and_block_workflow(
     autonomous_goal: AutonomousGoal,
     error: str,
     raw_output: str = "",
-) -> None:
+) -> _AutonomousGoalPostCommitAction | None:
     run.status = SystemAgentRun.STATUS_FAILED
     run.error = error
     run.raw_output = raw_output
     run.save(update_fields=["status", "error", "raw_output", "updated_at"])
+    workflow = run.workflow
+    if _complete_autonomous_goal_with_current_stack_proposal(workflow, error=error):
+        cleanup_cwd = _candidate_session_cwd_from_state(
+            workflow, "candidate_session_id"
+        )
+        return _AutonomousGoalPostCommitAction(
+            cleanup_candidate_cwds=((cleanup_cwd,) if cleanup_cwd else ())
+        )
     _block_autonomous_goal_workflow(run.workflow, autonomous_goal, error)
+    return None
 
 
 def _block_autonomous_goal_workflow(

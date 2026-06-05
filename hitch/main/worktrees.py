@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from os import environ
 from pathlib import Path
 
 from django.conf import settings
@@ -16,6 +17,12 @@ from django.conf import settings
 _GIT_TIMEOUT_SECONDS = 10
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _MAX_REPO_SLUG_LEN = 48
+_SNAPSHOT_COMMIT_ENV = {
+    "GIT_AUTHOR_NAME": "Hitch",
+    "GIT_AUTHOR_EMAIL": "hitch@localhost",
+    "GIT_COMMITTER_NAME": "Hitch",
+    "GIT_COMMITTER_EMAIL": "hitch@localhost",
+}
 
 
 class WorktreeCreationError(Exception):
@@ -31,6 +38,39 @@ class ManagedWorktree:
     path: Path
     branch: str
     source_repo: Path
+
+
+def snapshot_worktree_to_commit(
+    source_cwd: str | Path,
+    *,
+    message: str = "Snapshot Hitch stacked diff proposal",
+) -> str:
+    """Create an internal commit for a worktree tree without mutating it."""
+    repo = _repo_root(Path(source_cwd))
+    if repo is None:
+        raise WorktreeCreationError("source cwd is not a git repository")
+    parent_sha = (
+        _git(repo, ["rev-parse", "--verify", "HEAD^{commit}"], raise_on_error=False)
+        or ""
+    ).strip()
+    with tempfile.TemporaryDirectory(prefix="hitch-worktree-index-") as raw_tmp:
+        extra_env = {"GIT_INDEX_FILE": str(Path(raw_tmp) / "index")}
+        if parent_sha:
+            _git(repo, ["read-tree", parent_sha], extra_env=extra_env)
+        else:
+            _git(repo, ["read-tree", "--empty"], extra_env=extra_env)
+        _git(repo, ["add", "-A", "--"], extra_env=extra_env)
+        tree_output = _git(repo, ["write-tree"], extra_env=extra_env)
+        if tree_output is None:
+            raise WorktreeCreationError("failed to write worktree snapshot tree")
+        tree_sha = tree_output.strip()
+    args = ["commit-tree", tree_sha, "-m", message]
+    if parent_sha:
+        args[2:2] = ["-p", parent_sha]
+    commit_output = _git(repo, args, extra_env=_SNAPSHOT_COMMIT_ENV)
+    if commit_output is None:
+        raise WorktreeCreationError("failed to create worktree snapshot commit")
+    return commit_output.strip()
 
 
 def create_worktree_for_session(
@@ -217,6 +257,7 @@ def _git(
     raise_on_error: bool = True,
     error_cls: type[Exception] = WorktreeCreationError,
     hooks_path: Path | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> str | None:
     command = ["git"]
     if hooks_path is not None:
@@ -228,6 +269,7 @@ def _git(
             capture_output=True,
             check=False,
             timeout=_GIT_TIMEOUT_SECONDS,
+            env={**environ, **(extra_env or {})},
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         if raise_on_error:

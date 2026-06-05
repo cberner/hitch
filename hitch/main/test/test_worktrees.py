@@ -16,6 +16,7 @@ from hitch.main.worktrees import (
     create_worktree_for_session,
     discover_managed_worktrees,
     is_managed_worktree_path,
+    snapshot_worktree_to_commit,
 )
 
 
@@ -57,6 +58,39 @@ def _init_unborn_repo(repo: Path) -> None:
 
 
 class ManagedWorktreeTests(SimpleTestCase):
+    def test_snapshot_worktree_to_commit_includes_dirty_and_untracked_files(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            repo = Path(raw) / "source"
+            _init_repo(repo)
+            head = _git(repo, "rev-parse", "HEAD")
+            (repo / "README.md").write_text("changed\n")
+            (repo / "staged.txt").write_text("staged\n")
+            _git(repo, "add", "staged.txt")
+            (repo / "untracked.txt").write_text("untracked\n")
+            status_before = _git(repo, "status", "--short")
+
+            with patch.dict(
+                os.environ,
+                {
+                    "PATH": os.environ.get("PATH", ""),
+                    "HOME": str(Path(raw) / "home"),
+                    "XDG_CONFIG_HOME": str(Path(raw) / "xdg"),
+                },
+                clear=True,
+            ):
+                snapshot = snapshot_worktree_to_commit(repo)
+
+            self.assertEqual(_git(repo, "rev-parse", "HEAD"), head)
+            self.assertEqual(_git(repo, "rev-parse", f"{snapshot}^"), head)
+            self.assertEqual(_git(repo, "show", f"{snapshot}:README.md"), "changed")
+            self.assertEqual(_git(repo, "show", f"{snapshot}:staged.txt"), "staged")
+            self.assertEqual(
+                _git(repo, "show", f"{snapshot}:untracked.txt"), "untracked"
+            )
+            self.assertEqual(_git(repo, "status", "--short"), status_before)
+
     def test_creates_branch_and_worktree_under_settings_dir(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
