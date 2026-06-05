@@ -9449,9 +9449,14 @@ class AutonomousGoalWorkflowTests(TestCase):
             mock_spawn.call_args.kwargs["backend"], CodexInstance.BACKEND_CLAUDE
         )
 
+    @patch("hitch.main.system_agents.spec_critic_should_run", return_value=True)
+    @patch("hitch.main.system_agents.threading.Thread", side_effect=_synchronous_thread)
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_spec_critic_runs_hidden_agents_on_claude_backend(
-        self, mock_spawn: MagicMock
+        self,
+        mock_spawn: MagicMock,
+        mock_thread: MagicMock,
+        mock_should_run: MagicMock,
     ) -> None:
         def _spawn(**kwargs: Any) -> CodexInstance:
             return _instance(
@@ -9463,7 +9468,8 @@ class AutonomousGoalWorkflowTests(TestCase):
 
         mock_spawn.side_effect = _spawn
         # A Claude thread shell makes the backend recoverable from history, so
-        # the workflow records it and the hidden sub-agents spawn as Claude.
+        # the workflow records it and the hidden sub-agents spawn as Claude. The
+        # background classifier runs inline here and routes straight to analysis.
         thread_id = codex_pool.create_claude_session_thread(
             cwd="/repo",
             name="Improve onboarding",
