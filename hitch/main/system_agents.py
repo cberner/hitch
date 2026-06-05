@@ -1334,16 +1334,36 @@ def _autonomous_goal_unresolved_failure_notice_exists(
 def _autonomous_goal_start_claim_exists(autonomous_goal: AutonomousGoal) -> bool:
     claim_key = ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY
     claim_lookup = f"outcome_metadata__{claim_key}__isnull"
-    claimed_metadatas = ProposedSession.objects.filter(
-        project=autonomous_goal.project,
-        outcome_status=ProposedSession.OUTCOME_ACCEPTED,
-        accepted_session__isnull=True,
-        **{claim_lookup: False},
-    ).values_list("outcome_metadata", flat=True)
+    claimed_metadatas = (
+        ProposedSession.objects.filter(
+            project=autonomous_goal.project,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            accepted_session__isnull=True,
+            **{claim_lookup: False},
+        )
+        .filter(_autonomous_goal_in_flight_proposal_criteria())
+        .values_list("outcome_metadata", flat=True)
+    )
     now = timezone.now()
     return any(
         ProposedSession.accepted_session_start_claim_is_active(metadata, now=now)
         for metadata in claimed_metadatas
+    )
+
+
+def _autonomous_goal_in_flight_proposal_criteria() -> models.Q:
+    return (
+        models.Q(outcome_metadata__accepted_by=AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY)
+        | models.Q(
+            outcome_metadata__accepted_by=LEGACY_AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY
+        )
+        | (
+            models.Q(autonomous_goal__isnull=False)
+            & (
+                models.Q(outcome_metadata__auto_pr_enabled=True)
+                | models.Q(outcome_metadata__auto_qa_enabled=True)
+            )
+        )
     )
 
 
@@ -1356,19 +1376,7 @@ def _autonomous_goal_in_flight_automation_exists(autonomous_goal: AutonomousGoal
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             accepted_session__isnull=False,
         )
-        .filter(
-            models.Q(outcome_metadata__accepted_by=AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY)
-            | models.Q(
-                outcome_metadata__accepted_by=LEGACY_AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY
-            )
-            | (
-                models.Q(autonomous_goal__isnull=False)
-                & (
-                    models.Q(outcome_metadata__auto_pr_enabled=True)
-                    | models.Q(outcome_metadata__auto_qa_enabled=True)
-                )
-            )
-        )
+        .filter(_autonomous_goal_in_flight_proposal_criteria())
         .exclude(accepted_session__thread_id="")
         .values_list("accepted_session__thread_id", flat=True)
     )

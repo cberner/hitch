@@ -8567,6 +8567,9 @@ def _claim_new_session_proposal_start(
 
 
 def _reset_new_session_proposal_start_claim(proposed_session: ProposedSession) -> None:
+    claim_filter = _new_session_proposal_start_claim_filter(proposed_session)
+    if claim_filter is None:
+        return
     outcome_metadata = _proposal_outcome_metadata(
         proposed_session,
         {
@@ -8580,6 +8583,7 @@ def _reset_new_session_proposal_start_claim(proposed_session: ProposedSession) -
         pk=proposed_session.pk,
         outcome_status=ProposedSession.OUTCOME_ACCEPTED,
         accepted_session__isnull=True,
+        **claim_filter,
     ).update(
         outcome_status=ProposedSession.OUTCOME_UNSET,
         accepted_session=None,
@@ -8598,6 +8602,9 @@ def _finish_new_session_proposal_start_claim(
 ) -> None:
     if proposed_session is None:
         return
+    claim_filter = _new_session_proposal_start_claim_filter(proposed_session)
+    if claim_filter is None:
+        return
     outcome_metadata = _proposal_outcome_metadata(
         proposed_session,
         {
@@ -8611,6 +8618,7 @@ def _finish_new_session_proposal_start_claim(
         pk=proposed_session.pk,
         outcome_status=ProposedSession.OUTCOME_ACCEPTED,
         accepted_session__isnull=True,
+        **claim_filter,
     ).update(
         accepted_session=session_metadata,
         outcome_metadata=outcome_metadata,
@@ -8620,6 +8628,21 @@ def _finish_new_session_proposal_start_claim(
         return
     proposed_session.accepted_session = session_metadata
     proposed_session.outcome_metadata = outcome_metadata
+
+
+def _new_session_proposal_start_claim_filter(
+    proposed_session: ProposedSession,
+) -> dict[str, object] | None:
+    metadata = (
+        proposed_session.outcome_metadata
+        if isinstance(proposed_session.outcome_metadata, dict)
+        else {}
+    )
+    claim_key = ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY
+    claim_value = metadata.get(claim_key)
+    if claim_value is None:
+        return None
+    return {f"outcome_metadata__{claim_key}": claim_value}
 
 
 def _recover_stale_new_session_proposal_start_claims() -> None:
@@ -8633,6 +8656,9 @@ def _recover_stale_new_session_proposal_start_claims() -> None:
         **{claim_lookup: False},
     ).only("pk", "outcome_metadata")
     for proposed_session in claimed_proposals:
+        claim_filter = _new_session_proposal_start_claim_filter(proposed_session)
+        if claim_filter is None:
+            continue
         if ProposedSession.accepted_session_start_claim_is_active(
             proposed_session.outcome_metadata, now=now
         ):
@@ -8650,7 +8676,7 @@ def _recover_stale_new_session_proposal_start_claims() -> None:
             pk=proposed_session.pk,
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             accepted_session__isnull=True,
-            **{claim_lookup: False},
+            **claim_filter,
         ).update(
             outcome_status=ProposedSession.OUTCOME_UNSET,
             accepted_session=None,
