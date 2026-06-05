@@ -1331,7 +1331,25 @@ def _autonomous_goal_unresolved_failure_notice_exists(
     ).exists()
 
 
+def _autonomous_goal_start_claim_exists(autonomous_goal: AutonomousGoal) -> bool:
+    claim_key = ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY
+    claim_lookup = f"outcome_metadata__{claim_key}__isnull"
+    claimed_metadatas = ProposedSession.objects.filter(
+        project=autonomous_goal.project,
+        outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        accepted_session__isnull=True,
+        **{claim_lookup: False},
+    ).values_list("outcome_metadata", flat=True)
+    now = timezone.now()
+    return any(
+        ProposedSession.accepted_session_start_claim_is_active(metadata, now=now)
+        for metadata in claimed_metadatas
+    )
+
+
 def _autonomous_goal_in_flight_automation_exists(autonomous_goal: AutonomousGoal) -> bool:
+    if _autonomous_goal_start_claim_exists(autonomous_goal):
+        return True
     accepted_thread_ids = (
         ProposedSession.objects.filter(
             project=autonomous_goal.project,

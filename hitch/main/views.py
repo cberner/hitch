@@ -785,6 +785,7 @@ def _settings_context(
 def _proposed_session_inbox_queryset(
     project_visibility: SessionProjectVisibility,
 ) -> QuerySet[ProposedSession]:
+    _recover_stale_new_session_proposal_start_claims()
     inbox = ProposedSession.objects.filter(
         outcome_status=ProposedSession.OUTCOME_UNSET,
     )
@@ -8395,6 +8396,7 @@ def _posted_proposed_session_for_new_session(
         return None, "proposed session is required"
     if session_id < 1 or session_id > _MAX_BIGAUTOFIELD:
         return None, "proposed session is required"
+    _recover_stale_new_session_proposal_start_claims()
     proposed_session = (
         ProposedSession.objects.select_related(
             "project", "autonomous_goal__project", "candidate_session"
@@ -8526,6 +8528,135 @@ def _reset_candidate_proposal_start_claim(
     proposed_session.outcome_status = ProposedSession.OUTCOME_UNSET
     proposed_session.accepted_session = None
     proposed_session.outcome_metadata = outcome_metadata
+
+
+def _claim_new_session_proposal_start(
+    *,
+    proposed_session: ProposedSession,
+    cookie_updates: dict[str, str],
+) -> HttpResponse | None:
+    claimed_at = timezone.now()
+    outcome_metadata = _proposal_outcome_metadata(
+        proposed_session,
+        {
+            "accepted_by": "user",
+            "accepted_session_id": None,
+            "accepted_thread_id": "",
+            ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY: (
+                claimed_at.isoformat()
+            ),
+        },
+    )
+    applied = ProposedSession.objects.filter(
+        pk=proposed_session.pk,
+        outcome_status=ProposedSession.OUTCOME_UNSET,
+    ).update(
+        outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        accepted_session=None,
+        outcome_metadata=outcome_metadata,
+        updated_at=claimed_at,
+    )
+    if applied:
+        proposed_session.outcome_status = ProposedSession.OUTCOME_ACCEPTED
+        proposed_session.accepted_session = None
+        proposed_session.outcome_metadata = outcome_metadata
+        return None
+    response = redirect("inbox")
+    _apply_cookie_updates(response, cookie_updates)
+    return response
+
+
+def _reset_new_session_proposal_start_claim(proposed_session: ProposedSession) -> None:
+    outcome_metadata = _proposal_outcome_metadata(
+        proposed_session,
+        {
+            "accepted_by": None,
+            "accepted_session_id": None,
+            "accepted_thread_id": None,
+            ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY: None,
+        },
+    )
+    applied = ProposedSession.objects.filter(
+        pk=proposed_session.pk,
+        outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        accepted_session__isnull=True,
+    ).update(
+        outcome_status=ProposedSession.OUTCOME_UNSET,
+        accepted_session=None,
+        outcome_metadata=outcome_metadata,
+        updated_at=timezone.now(),
+    )
+    if not applied:
+        return
+    proposed_session.outcome_status = ProposedSession.OUTCOME_UNSET
+    proposed_session.accepted_session = None
+    proposed_session.outcome_metadata = outcome_metadata
+
+
+def _finish_new_session_proposal_start_claim(
+    proposed_session: ProposedSession | None, session_metadata: SessionMetadata
+) -> None:
+    if proposed_session is None:
+        return
+    outcome_metadata = _proposal_outcome_metadata(
+        proposed_session,
+        {
+            "accepted_by": "user",
+            "accepted_session_id": session_metadata.pk,
+            "accepted_thread_id": session_metadata.thread_id,
+            ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY: None,
+        },
+    )
+    applied = ProposedSession.objects.filter(
+        pk=proposed_session.pk,
+        outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        accepted_session__isnull=True,
+    ).update(
+        accepted_session=session_metadata,
+        outcome_metadata=outcome_metadata,
+        updated_at=timezone.now(),
+    )
+    if not applied:
+        return
+    proposed_session.accepted_session = session_metadata
+    proposed_session.outcome_metadata = outcome_metadata
+
+
+def _recover_stale_new_session_proposal_start_claims() -> None:
+    claim_key = ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY
+    claim_lookup = f"outcome_metadata__{claim_key}__isnull"
+    now = timezone.now()
+    claimed_proposals = ProposedSession.objects.filter(
+        inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL,
+        outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        accepted_session__isnull=True,
+        **{claim_lookup: False},
+    ).only("pk", "outcome_metadata")
+    for proposed_session in claimed_proposals:
+        if ProposedSession.accepted_session_start_claim_is_active(
+            proposed_session.outcome_metadata, now=now
+        ):
+            continue
+        outcome_metadata = _proposal_outcome_metadata(
+            proposed_session,
+            {
+                "accepted_by": None,
+                "accepted_session_id": None,
+                "accepted_thread_id": None,
+                claim_key: None,
+            },
+        )
+        ProposedSession.objects.filter(
+            pk=proposed_session.pk,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            accepted_session__isnull=True,
+            **{claim_lookup: False},
+        ).update(
+            outcome_status=ProposedSession.OUTCOME_UNSET,
+            accepted_session=None,
+            outcome_metadata=outcome_metadata,
+            updated_at=now,
+        )
 
 
 def _proposed_session_thread_title(proposed_session: ProposedSession) -> str:
@@ -10354,6 +10485,7 @@ def _proposed_session_for_new_session_page(
         raise Http404("proposed session not found") from exc
     if session_id < 1 or session_id > _MAX_BIGAUTOFIELD:
         raise Http404("proposed session not found")
+    _recover_stale_new_session_proposal_start_claims()
     proposed_session = (
         ProposedSession.objects.select_related(
             "project", "autonomous_goal__project", "candidate_session"
@@ -10546,6 +10678,14 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         auto_pr_enabled, auto_qa_enabled = _auto_review_settings_for_proposed_session(
             proposed_session
         )
+    auto_merge_to_local_branch = False
+    auto_merge_branch = ""
+    if proposed_session is not None:
+        auto_merge_to_local_branch, auto_merge_branch = (
+            _auto_merge_to_local_branch_for_proposal(
+                proposed_session, auto_qa_enabled=auto_qa_enabled
+            )
+        )
     web_search_mode, web_search_error = _posted_web_search_override(
         request.POST.get("web_search_mode"),
         default=settings.web_search_mode,
@@ -10599,7 +10739,22 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             create_thread_kwargs["web_search_mode"] = web_search_mode
         if base_instructions:
             create_thread_kwargs["base_instructions"] = base_instructions
-        thread_id = codex_pool.create_session_thread(**create_thread_kwargs)
+        proposal_claimed = False
+        if proposed_session is not None:
+            claim_response = _claim_new_session_proposal_start(
+                proposed_session=proposed_session,
+                cookie_updates=cookie_updates,
+            )
+            if claim_response is not None:
+                return claim_response
+            proposal_claimed = True
+        try:
+            thread_id = codex_pool.create_session_thread(**create_thread_kwargs)
+        except Exception:
+            if proposal_claimed:
+                assert proposed_session is not None
+                _reset_new_session_proposal_start_claim(proposed_session)
+            raise
         # Only proposal acceptances carry forward auto-review/auto-merge, and
         # only the settings the proposal itself requested. A bare ``/qa`` or
         # ``/pr`` (no proposal) is a one-off review, and a coding-agent proposal
@@ -10610,11 +10765,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         if proposed_session is not None:
             session_auto_pr_enabled, session_auto_qa_enabled = (
                 _auto_review_settings_for_proposed_session(proposed_session)
-            )
-            auto_merge_to_local_branch, auto_merge_branch = (
-                _auto_merge_to_local_branch_for_proposal(
-                    proposed_session, auto_qa_enabled=session_auto_qa_enabled
-                )
             )
         else:
             session_auto_pr_enabled = False
@@ -10641,7 +10791,13 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             workflow_kwargs["open_pr_on_lgtm"] = False
         if auto_merge_branch:
             workflow_kwargs["auto_merge_branch"] = auto_merge_branch
-        system_agents.start_pr_qa_workflow(**workflow_kwargs)
+        try:
+            system_agents.start_pr_qa_workflow(**workflow_kwargs)
+        except Exception:
+            if proposal_claimed:
+                assert proposed_session is not None
+                _reset_new_session_proposal_start_claim(proposed_session)
+            raise
         # Persist the proposal-derived auto-review configuration so subsequent
         # turns keep honoring it instead of reverting to manual review.
         session_metadata = session_index.upsert_local_session(
@@ -10655,7 +10811,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             auto_merge_to_local_branch=auto_merge_to_local_branch,
             auto_merge_branch=auto_merge_branch,
         )
-        _accept_proposed_session_for_session(proposed_session, session_metadata)
+        _finish_new_session_proposal_start_claim(proposed_session, session_metadata)
         remembered_values = settings._replace(last_selected_repo=cwd)
         user = _authenticated_user(request)
         if user is not None:
@@ -10724,6 +10880,9 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         spawn_kwargs["auto_qa_enabled"] = True
     if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
         spawn_kwargs["qa_panel_enabled"] = True
+    if auto_merge_to_local_branch:
+        spawn_kwargs["auto_merge_to_local_branch"] = True
+        spawn_kwargs["auto_merge_branch"] = auto_merge_branch
     # Proposed sessions already represent reviewed work for the user to start, so
     # they bypass Spec Critic entirely. For everything else the should-run
     # classifier runs inside the workflow on a background thread, so creating a
@@ -10821,12 +10980,32 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         _apply_cookie_updates(response, cookie_updates)
         return response
     input_images_owned = False
+    proposal_claimed = False
+    if proposed_session is not None:
+        claim_response = _claim_new_session_proposal_start(
+            proposed_session=proposed_session,
+            cookie_updates=cookie_updates,
+        )
+        if claim_response is not None:
+            _cleanup_saved_input_images(input_image_paths)
+            if managed_worktree is not None:
+                try:
+                    cleanup_worktree(managed_worktree)
+                except WorktreeCleanupError:
+                    logger.exception(
+                        "failed to clean up managed worktree %s", managed_worktree.path
+                    )
+            return claim_response
+        proposal_claimed = True
     try:
         instance = codex_pool.spawn_new_session(**spawn_kwargs)
         input_images_owned = True
     except Exception:
         if not input_images_owned:
             _cleanup_saved_input_images(input_image_paths)
+        if proposal_claimed:
+            assert proposed_session is not None
+            _reset_new_session_proposal_start_claim(proposed_session)
         if managed_worktree is not None:
             try:
                 cleanup_worktree(managed_worktree)
@@ -10844,9 +11023,11 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         preview=prompt,
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
+        auto_merge_to_local_branch=auto_merge_to_local_branch,
+        auto_merge_branch=auto_merge_branch,
         codex_path=codex_pool.thread_path_for_instance(instance),
     )
-    _accept_proposed_session_for_session(proposed_session, session_metadata)
+    _finish_new_session_proposal_start_claim(proposed_session, session_metadata)
     remembered_values = settings._replace(last_selected_repo=cwd)
     user = _authenticated_user(request)
     if user is not None:

@@ -10034,7 +10034,20 @@ class NewSessionViewTests(TestCase):
         )
         prompt = "Go ahead and implement this proposed session."
         mock_discover.return_value = [Path(self.REPO)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+
+        def spawn_after_concurrent_reject_attempt(**_kwargs: Any) -> SimpleNamespace:
+            rejected = ProposedSession.objects.filter(
+                pk=proposal.pk,
+                outcome_status=ProposedSession.OUTCOME_UNSET,
+            ).update(
+                outcome_status=ProposedSession.OUTCOME_REJECTED,
+                outcome_notes="Resolved from another tab.",
+                updated_at=timezone.now(),
+            )
+            self.assertEqual(rejected, 0)
+            return SimpleNamespace(thread_id="thread-xyz")
+
+        mock_spawn.side_effect = spawn_after_concurrent_reject_attempt
 
         response = self.client.post(
             reverse("new_session"),
@@ -10050,10 +10063,84 @@ class NewSessionViewTests(TestCase):
         proposal.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
         self.assertEqual(proposal.accepted_session, metadata)
+        self.assertNotIn(
+            ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY,
+            proposal.outcome_metadata,
+        )
         self._assert_new_session_spawn(
             mock_spawn,
             prompt=prompt,
             thread_name="Add parser coverage",
+        )
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_accept_preserves_proposal_auto_merge_settings(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        _setup_codex(mock_codex, models=[])
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            auto_qa_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="release",
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            title="Add parser coverage",
+            outcome_metadata={
+                "auto_pr_enabled": False,
+                "auto_qa_enabled": True,
+                "auto_merge_to_local_branch": True,
+                "auto_merge_branch": "release",
+            },
+        )
+        AutonomousGoal.objects.filter(pk=goal.pk).update(
+            auto_qa_enabled=False,
+            auto_merge_to_local_branch=False,
+            auto_merge_branch="",
+        )
+        prompt = "Go ahead and implement this proposed session."
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": prompt,
+                "cwd": self.REPO,
+                "proposed_session": str(proposal.pk),
+                "auto_qa": "false",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        metadata = SessionMetadata.objects.get(thread_id="thread-xyz")
+        self.assertTrue(metadata.auto_qa_enabled)
+        self.assertTrue(metadata.auto_merge_to_local_branch)
+        self.assertEqual(metadata.auto_merge_branch, "release")
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
+        self.assertEqual(proposal.accepted_session, metadata)
+        self.assertNotIn(
+            ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY,
+            proposal.outcome_metadata,
+        )
+        self._assert_new_session_spawn(
+            mock_spawn,
+            prompt=prompt,
+            thread_name="Add parser coverage",
+            auto_qa_enabled=True,
+            auto_merge_to_local_branch=True,
+            auto_merge_branch="release",
         )
 
     @patch("hitch.main.views.system_agents.spec_critic_should_run")
@@ -16947,6 +17034,45 @@ class AutonomousGoalViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
+    def test_inbox_recovers_stale_proposal_start_claim(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        stale_claimed_at = (
+            datetime.now(UTC)
+            - ProposedSession.ACCEPTED_SESSION_START_CLAIM_TTL
+            - timedelta(seconds=1)
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Add parser coverage",
+            summary="This adds focused parser coverage.",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            outcome_metadata={
+                "accepted_by": "user",
+                "accepted_thread_id": "",
+                ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY: (
+                    stale_claimed_at.isoformat()
+                ),
+            },
+        )
+
+        response = self.client.get(reverse("inbox"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Add parser coverage")
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertIsNone(proposal.accepted_session)
+        self.assertNotIn(
+            ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY,
+            proposal.outcome_metadata,
+        )
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
     def test_inbox_visible_projects_filter_messages(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:
@@ -17092,6 +17218,46 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, "Add focused rollout parser tests")
         self.assertContains(response, f'value="{project.pk}" selected')
         self.assertContains(response, f'href="{reverse("inbox")}"')
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_new_session_page_recovers_stale_proposal_start_claim(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _setup_codex(mock_codex)
+        stale_claimed_at = (
+            datetime.now(UTC)
+            - ProposedSession.ACCEPTED_SESSION_START_CLAIM_TTL
+            - timedelta(seconds=1)
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Add parser coverage",
+            prompt="Add focused rollout parser tests before changing behavior.",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            outcome_metadata={
+                "accepted_by": "user",
+                "accepted_thread_id": "",
+                ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY: (
+                    stale_claimed_at.isoformat()
+                ),
+            },
+        )
+
+        response = self.client.get(
+            f"{reverse('new_session')}?proposed_session={proposal.pk}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, f'value="{proposal.pk}"')
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertIsNone(proposal.accepted_session)
+        self.assertNotIn(
+            ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY,
+            proposal.outcome_metadata,
+        )
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
