@@ -9659,6 +9659,41 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(started, 1)
         self.assertEqual(SystemWorkflow.objects.count(), 1)
 
+    def test_proposal_start_claim_activity_parses_only_fresh_timestamps(self) -> None:
+        now = datetime.now(UTC)
+        claim_key = ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY
+
+        self.assertFalse(
+            ProposedSession.accepted_session_start_claim_is_active(None, now=now)
+        )
+        self.assertFalse(
+            ProposedSession.accepted_session_start_claim_is_active(
+                {claim_key: 123}, now=now
+            )
+        )
+        self.assertFalse(
+            ProposedSession.accepted_session_start_claim_is_active(
+                {claim_key: "not-a-date"}, now=now
+            )
+        )
+        self.assertFalse(
+            ProposedSession.accepted_session_start_claim_is_active(
+                {
+                    claim_key: (
+                        now
+                        - ProposedSession.ACCEPTED_SESSION_START_CLAIM_TTL
+                        - timedelta(seconds=1)
+                    ).isoformat()
+                },
+                now=now,
+            )
+        )
+        self.assertTrue(
+            ProposedSession.accepted_session_start_claim_is_active(
+                {claim_key: now.replace(tzinfo=None).isoformat()}, now=now
+            )
+        )
+
     @patch(
         "hitch.main.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
