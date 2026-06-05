@@ -305,6 +305,35 @@ class DemoProxyTests(TestCase):
             f"http://localhost:{self.server.server_port + 1}/next",
         )
 
+    def test_rewrite_location_rewrites_ipv6_localhost_alias(self) -> None:
+        response = demo._rewrite_location(
+            f"http://[::1]:{self.server.server_port}/next?tab=demo#section",
+            "/sessions/thread-1/demo/",
+            upstream_netloc=f"127.0.0.1:{self.server.server_port}",
+        )
+
+        self.assertEqual(response, "/sessions/thread-1/demo/next?tab=demo#section")
+
+    def test_rewrite_location_preserves_invalid_localhost_netlocs(self) -> None:
+        prefix = "/sessions/thread-1/demo/"
+        upstream_netloc = f"127.0.0.1:{self.server.server_port}"
+        values = [
+            "http://localhost:not-a-port/next",
+            f"http://user@localhost:{self.server.server_port}/next",
+            "http://localhost/next",
+        ]
+
+        for value in values:
+            with self.subTest(value=value):
+                self.assertEqual(
+                    demo._rewrite_location(
+                        value,
+                        prefix,
+                        upstream_netloc=upstream_netloc,
+                    ),
+                    value,
+                )
+
     def test_proxy_preserves_external_absolute_redirect_location(self) -> None:
         response = self.client.get(
             reverse(
