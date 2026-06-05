@@ -1030,6 +1030,7 @@ def start_pr_monitor_workflow(
                 step=STEP_PR_MONITORING,
                 max_iterations=PR_QA_WORKFLOW_MAX_ITERATIONS,
                 state={
+                    "backend": _backend_for_thread(main_thread_id),
                     "pr_prompt": PR_SLASH_PROMPT,
                     "sandbox_policy": sandbox_policy or "",
                     "approval_mode": approval_mode or "",

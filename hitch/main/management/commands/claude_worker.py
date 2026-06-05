@@ -358,12 +358,26 @@ class _TurnRunner:
 
     # -- options & prompt --------------------------------------------------
 
+    def _loads_project_settings(self) -> bool:
+        """Whether this run loads repo/user ``.claude`` settings and the hitch MCP.
+
+        Visible user turns and QA/PR system-feedback turns both continue the
+        user's own (trusted) session thread, so they load CLAUDE.md memory,
+        project MCP config, and the hitch propose tool -- matching a developer's
+        local ``claude``. Hidden ``PURPOSE_SYSTEM_AGENT`` runs (which may target
+        untrusted repos) load nothing.
+        """
+        return self._instance.purpose in (
+            CodexInstance.PURPOSE_USER,
+            CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+        )
+
     def _build_options(self) -> Any:
         instance = self._instance
         resume = instance.claude_session_id or None
         mcp_server = (
             build_hitch_mcp_server(cwd=instance.cwd, thread_id=instance.thread_id)
-            if instance.purpose == CodexInstance.PURPOSE_USER
+            if self._loads_project_settings()
             else None
         )
         return claude_options.build_options(
@@ -380,13 +394,14 @@ class _TurnRunner:
             session_id=None if resume else instance.thread_id,
             mcp_server=mcp_server,
             can_use_tool=self._can_use_tool,
-            # Visible user sessions load repo/user ``.claude`` settings (CLAUDE.md
-            # memory, project MCP), matching a developer's own ``claude``. Those
-            # settings can register shell *hooks* that run outside ``can_use_tool``,
-            # but a visible session is the user's own trusted repo -- the same
-            # trust boundary their local ``claude`` already honors. Hidden
-            # system-agent runs (which may target untrusted repos) load nothing.
-            load_filesystem_settings=instance.purpose == CodexInstance.PURPOSE_USER,
+            # Visible user turns and QA/PR feedback turns load repo/user
+            # ``.claude`` settings (CLAUDE.md memory, project MCP), matching a
+            # developer's own ``claude``. Those settings can register shell *hooks*
+            # that run outside ``can_use_tool``, but these turns continue the
+            # user's own trusted repo session -- the same trust boundary their
+            # local ``claude`` honors. Hidden system-agent runs (which may target
+            # untrusted repos) load nothing.
+            load_filesystem_settings=self._loads_project_settings(),
         )
 
     def _turn_input(self) -> str | AsyncIterator[dict[str, Any]]:
@@ -566,6 +581,7 @@ class _TurnRunner:
             self._approval_mode == claude_options.APPROVAL_APPROVE_ALL
             and tool_name != _EXIT_PLAN_MODE_TOOL
             and not self._powershell_unconfined(tool_name)
+            and not _is_external_mcp_tool(tool_name)
         ):
             # ``approve_all`` auto-approves without prompting. It only reaches the
             # callback for a confining sandbox (``dangerFullAccess`` maps to
@@ -576,7 +592,11 @@ class _TurnRunner:
             # approval below even under ``approve_all``. Unconfined ``PowerShell``
             # is likewise excluded: the bash sandbox can't confine it, so a visible
             # session routes it to interactive approval rather than auto-running it
-            # outside ``cwd``.
+            # outside ``cwd``. External (project/user ``.claude``) MCP tools are
+            # also excluded: the sandbox confines only built-in Bash/file tools, so
+            # an external MCP side effect (e.g. ``mcp__github__create_pr``) would
+            # otherwise escape the chosen workspace confinement -- route it to
+            # interactive approval unless the user opted into ``dangerFullAccess``.
             return claude_options.allow_result()
         params = _approval_params(method, tool_name, tool_input)
         request_id = await asyncio.to_thread(

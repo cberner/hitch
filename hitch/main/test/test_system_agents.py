@@ -3759,6 +3759,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
         self.assertEqual(workflow.state["next_user_message_index"], 7)
         self.assertEqual(workflow.state["model"], "gpt-5.4")
+        self.assertEqual(workflow.state["backend"], CodexInstance.BACKEND_CODEX)
         handoff = workflow.state[system_agents._PR_HANDOFF_STATE_KEY]
         self.assertEqual(handoff["url"], "https://github.com/cberner/hitch/pull/169")
         self.assertEqual(handoff["repository_full_name"], "cberner/hitch")
@@ -3774,6 +3775,47 @@ class SpecCriticWorkflowTests(TestCase):
         run = SystemAgentRun.objects.get(workflow=workflow)
         self.assertEqual(run.thread_id, "monitor-thread")
         self.assertEqual(run.input["pr_handoff"]["pr_number"], 169)
+
+    @patch(
+        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation(),
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_start_pr_monitor_workflow_records_claude_backend(
+        self, mock_spawn: MagicMock, mock_observe: MagicMock
+    ) -> None:
+        # A Claude-backed originating session (e.g. Claude ``/fix-pr``) must stamp
+        # the workflow so its monitor/follow-up sub-agents run on Claude rather
+        # than defaulting to the Codex app-server.
+        CodexInstance.objects.create(
+            thread_id="claude-main",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_COMPLETED,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            purpose=CodexInstance.PURPOSE_USER,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="monitor-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        )
+
+        workflow = system_agents.start_pr_monitor_workflow(
+            main_thread_id="claude-main",
+            cwd="/repo",
+            pr_url="https://github.com/cberner/hitch/pull/170",
+            sandbox_policy="workspace-write",
+            approval_mode="auto_review",
+        )
+
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.state["backend"], CodexInstance.BACKEND_CLAUDE)
+        self.assertEqual(
+            system_agents._workflow_backend(workflow), CodexInstance.BACKEND_CLAUDE
+        )
 
     @patch(
         "hitch.main.system_agents._pr_monitor_observation_from_gh",

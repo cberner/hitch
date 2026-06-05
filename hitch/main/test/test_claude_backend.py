@@ -1066,6 +1066,80 @@ class ReadOnlyMcpGuardTests(TestCase):
         self.assertIsInstance(result, PermissionResultAllow)
 
 
+class WorkspaceWriteMcpGuardTests(TestCase):
+    """A confining workspace-write sandbox bounds only built-in Bash/file tools,
+    so under ``approve_all`` an external MCP tool must route to interactive
+    approval rather than auto-run and escape the chosen confinement."""
+
+    def _runner(self, tool_name: str) -> Any:
+        import io
+
+        from hitch.main.management.commands import claude_worker
+
+        instance = CodexInstance(
+            thread_id="t",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_RUNNING,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            purpose=CodexInstance.PURPOSE_USER,
+        )
+        return claude_worker._TurnRunner(
+            instance=instance,
+            events_file=io.StringIO(),
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=claude_options.SANDBOX_WORKSPACE_WRITE,
+            approval_mode=claude_options.APPROVAL_APPROVE_ALL,
+            web_search_mode=None,
+            plan_mode=False,
+        )
+
+    def test_external_mcp_routes_to_interactive_under_approve_all(self) -> None:
+        import asyncio
+
+        from hitch.main.management.commands import claude_worker
+        from hitch.main.models import ApprovalRequest
+
+        runner = self._runner("mcp__github__create_pr")
+        with (
+            patch.object(
+                claude_worker, "_create_pending_approval", return_value=9
+            ) as mock_create,
+            patch.object(
+                claude_worker,
+                "_wait_for_decision",
+                return_value=ApprovalRequest.DECISION_ACCEPT,
+            ) as mock_wait,
+        ):
+            result = asyncio.run(
+                runner._can_use_tool("mcp__github__create_pr", {"title": "x"}, None)
+            )
+        mock_create.assert_called_once()
+        mock_wait.assert_called_once()
+        self.assertIsInstance(result, PermissionResultAllow)
+
+    def test_own_propose_tool_still_auto_allowed_under_approve_all(self) -> None:
+        import asyncio
+
+        from hitch.main.claude_tools import PROPOSE_SESSION_TOOL_NAME
+        from hitch.main.management.commands import claude_worker
+
+        # The in-process propose tool is not an external MCP server, so the guard
+        # does not touch it: approve_all still auto-allows without prompting.
+        runner = self._runner(PROPOSE_SESSION_TOOL_NAME)
+        with patch.object(
+            claude_worker, "_create_pending_approval"
+        ) as mock_create:
+            result = asyncio.run(
+                runner._can_use_tool(PROPOSE_SESSION_TOOL_NAME, {}, None)
+            )
+        mock_create.assert_not_called()
+        self.assertIsInstance(result, PermissionResultAllow)
+
+
 class DemoSandboxOverrideTests(TestCase):
     """A Claude demo run forces full host access regardless of the user's sandbox
     so its podman/shell container setup is neither blocked nor confined."""
@@ -2101,6 +2175,17 @@ class ClaudeFilesystemSettingsGatingTests(TestCase):
                 ["user", "project", "local"],
                 sandbox,
             )
+
+    def test_feedback_turn_loads_settings(self) -> None:
+        # A QA/PR feedback turn continues the user's own trusted session thread,
+        # so it loads CLAUDE.md memory and project MCP like a user turn.
+        self.assertEqual(
+            self._setting_sources(
+                purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+                sandbox_policy=claude_options.SANDBOX_WORKSPACE_WRITE,
+            ),
+            ["user", "project", "local"],
+        )
 
     def test_hidden_run_blocks_settings(self) -> None:
         self.assertEqual(
