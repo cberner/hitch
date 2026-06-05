@@ -11,6 +11,7 @@ import json
 import os
 import re
 import tempfile
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,6 +35,7 @@ from django.test import (
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
+from openai_codex import Codex
 from openai_codex.errors import AppServerError, InvalidRequestError, MethodNotFoundError
 from openai_codex.generated.v2_all import (
     GetAccountRateLimitsResponse,
@@ -323,6 +325,17 @@ def _setup_codex(
         -32601, "method not found", None
     )
     return ctx
+
+
+def _run_borrowed_with(
+    client: Any,
+) -> Callable[..., object]:
+    def side_effect(
+        _factory: object, operation: Callable[[Any], object], **_kwargs: object
+    ) -> object:
+        return operation(client)
+
+    return side_effect
 
 
 def _make_model(model_id: str, *, is_default: bool = False) -> SimpleNamespace:
@@ -10508,10 +10521,12 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.discover_managed_worktrees")
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.run_borrowed_op_with_retry")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     def test_candidate_worktree_resumes_thread_when_latest_local_index_failed(
         self,
         mock_turn: MagicMock,
+        mock_run_borrowed: MagicMock,
         mock_codex: MagicMock,
         mock_discover: MagicMock,
         mock_managed_worktrees: MagicMock,
@@ -10538,6 +10553,7 @@ class NewSessionViewTests(TestCase):
         codex._client.thread_resume.return_value = SimpleNamespace(
             thread=_session("candidate-thread", path=str(rollout_path))
         )
+        mock_run_borrowed.side_effect = _run_borrowed_with(codex)
         project = Project.objects.create(name="Hitch", repo_path=self.REPO)
         goal = AutonomousGoal.objects.create(
             project=project,
@@ -10587,6 +10603,12 @@ class NewSessionViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(mock_turn.call_args.kwargs["user_message_index"], 2)
         codex._client.thread_resume.assert_called_once_with("candidate-thread")
+        mock_run_borrowed.assert_called_once()
+        self.assertIs(mock_run_borrowed.call_args.args[0], mock_codex)
+        self.assertEqual(
+            mock_run_borrowed.call_args.kwargs,
+            {"enable_memories": False},
+        )
 
     @patch("hitch.main.views._auto_merge_to_local_branch_for_proposal")
     @patch("hitch.main.views.discover_managed_worktrees")
@@ -15237,10 +15259,10 @@ class StartSessionDemoViewTests(TestCase):
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
     @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
     @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.run_borrowed_op_with_retry")
     def test_requests_demo_agent_turn(
         self,
-        mock_codex: MagicMock,
+        mock_run_borrowed: MagicMock,
         mock_discover: MagicMock,
         _mock_managed: MagicMock,
         _mock_workflow: MagicMock,
@@ -15248,10 +15270,13 @@ class StartSessionDemoViewTests(TestCase):
         _mock_cleanup: MagicMock,
     ) -> None:
         mock_discover.return_value = [Path("/repo")]
-        client = mock_codex.return_value.__enter__.return_value
+        client = SimpleNamespace(
+            _client=SimpleNamespace(thread_resume=MagicMock())
+        )
         client._client.thread_resume.return_value = SimpleNamespace(
             thread=SimpleNamespace(cwd="/repo", turns=[])
         )
+        mock_run_borrowed.side_effect = _run_borrowed_with(client)
         spawned_instances: list[CodexInstance] = []
 
         def spawn_side_effect(**_kwargs: object) -> CodexInstance:
@@ -15289,6 +15314,13 @@ class StartSessionDemoViewTests(TestCase):
         self.assertIn("Registration token:", kwargs["prompt"])
         self.assertIn("io.hitch.managed=demo", kwargs["prompt"])
         self.assertIn("http://testserver/sessions/abc/demo/", kwargs["prompt"])
+        client._client.thread_resume.assert_called_once_with("abc")
+        mock_run_borrowed.assert_called_once()
+        self.assertIs(mock_run_borrowed.call_args.args[0], Codex)
+        self.assertEqual(
+            mock_run_borrowed.call_args.kwargs,
+            {"enable_memories": False},
+        )
         session_demo = SessionDemo.objects.get(thread_id="abc")
         self.assertTrue(session_demo.registration_token)
         self.assertEqual(spawned_instances[0].agent_kind, demo.DEMO_AGENT_KIND)

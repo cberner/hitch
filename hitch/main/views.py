@@ -8344,10 +8344,10 @@ def set_session_project(request: HttpRequest, session_id: str) -> HttpResponse:
     cwd = metadata.cwd if metadata is not None and metadata.cwd else ""
     if not cwd:
         settings = _stored_settings(request)
-        config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
-        resumed = codex_pool.run_codex_op_with_retry(
-            lambda: Codex(config=config),
+        resumed = codex_pool.run_borrowed_op_with_retry(
+            Codex,
             lambda codex: codex._client.thread_resume(session_id),
+            enable_memories=settings.enable_memories,
         )
         cwd = _thread_cwd(resumed.thread) or ""
     SessionMetadata.objects.update_or_create(
@@ -8932,10 +8932,10 @@ def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
     ).exists():
         return HttpResponseBadRequest("demo setup workflow is already running")
     settings = _stored_settings(request)
-    config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
-    resumed = codex_pool.run_codex_op_with_retry(
-        lambda: Codex(config=config),
+    resumed = codex_pool.run_borrowed_op_with_retry(
+        Codex,
         lambda codex: codex._client.thread_resume(session_id),
+        enable_memories=settings.enable_memories,
     )
     thread = resumed.thread
     cwd = _thread_cwd(thread)
@@ -10084,10 +10084,10 @@ def _is_allowed_session_cwd(cwd: str) -> bool:
 def _candidate_thread_user_message_index(
     thread_id: str, settings: SettingsValues
 ) -> int:
-    config = codex_pool.app_server_config(enable_memories=settings.enable_memories)
-    resumed = codex_pool.run_codex_op_with_retry(
-        lambda: Codex(config=config),
+    resumed = codex_pool.run_borrowed_op_with_retry(
+        Codex,
         lambda codex: codex._client.thread_resume(thread_id),
+        enable_memories=settings.enable_memories,
     )
     return _count_user_entries(list(_entries_for(resumed.thread)))
 

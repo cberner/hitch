@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ from django.core import signing
 from django.http import HttpResponse
 from django.test import Client, TestCase
 from django.urls import reverse
+from openai_codex import Codex
 from openai_codex.errors import AppServerError
 
 from hitch.main import codex_events, demo, system_agents
@@ -754,14 +756,28 @@ class SessionViewTests(TestCase):
         self.assertFalse(metadata.project_cleared)
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.run_borrowed_op_with_retry")
     def test_set_session_project_falls_back_without_metadata_cwd(
-        self, mock_codex: MagicMock
+        self, mock_run_borrowed: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/tmp/demo")
         SessionMetadata.objects.create(thread_id="thread-1")
-        thread = _thread([_turn([_user_message("hi")])])
-        _patch_thread(self, mock_codex, thread)
+        client = SimpleNamespace(
+            _client=SimpleNamespace(
+                thread_resume=MagicMock(
+                    return_value=SimpleNamespace(
+                        thread=SimpleNamespace(cwd="/tmp/demo")
+                    )
+                )
+            )
+        )
+
+        def run_side_effect(
+            _factory: object, operation: Callable[[Any], object], **_kwargs: object
+        ) -> object:
+            return operation(client)
+
+        mock_run_borrowed.side_effect = run_side_effect
 
         response = self.client.post(
             reverse("set_session_project", kwargs={"session_id": "thread-1"}),
@@ -772,8 +788,13 @@ class SessionViewTests(TestCase):
         metadata = SessionMetadata.objects.get(thread_id="thread-1")
         self.assertEqual(metadata.cwd, "/tmp/demo")
         self.assertEqual(metadata.project, project)
-        client = mock_codex.return_value.__enter__.return_value
         client._client.thread_resume.assert_called_once_with("thread-1")
+        mock_run_borrowed.assert_called_once()
+        self.assertIs(mock_run_borrowed.call_args.args[0], Codex)
+        self.assertEqual(
+            mock_run_borrowed.call_args.kwargs,
+            {"enable_memories": False},
+        )
 
     @patch("hitch.main.views.Codex")
     def test_renders_open_pr_menu_link_when_detected(
