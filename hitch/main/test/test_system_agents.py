@@ -11900,3 +11900,106 @@ class AutoReviewIntentionallySkippedTests(TestCase):
         # auto_review mode, no pending proposed plan -> would fire, not skipped.
         instance = _instance(approval_mode="auto_review", auto_pr_enabled=True)
         self.assertFalse(system_agents.auto_review_intentionally_skipped(instance))
+
+
+class ArchiveStaleBlockedWorkflowsTests(TestCase):
+    def _blocked_workflow(self, *, age_days: float, thread_id: str) -> SystemWorkflow:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id=thread_id,
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_BLOCKED,
+            step=system_agents.STEP_BLOCKED,
+            state={"error": "boom"},
+        )
+        # updated_at is auto_now, so backdate it with a raw update to bypass it.
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=datetime.now(UTC) - timedelta(days=age_days)
+        )
+        workflow.refresh_from_db()
+        return workflow
+
+    def test_dry_run_lists_stale_blocked_without_mutating(self) -> None:
+        stale = self._blocked_workflow(age_days=10, thread_id="stale")
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+
+        archived = system_agents.archive_stale_blocked_workflows(
+            older_than=cutoff, apply=False
+        )
+
+        self.assertEqual(archived, [stale.pk])
+        stale.refresh_from_db()
+        self.assertEqual(stale.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(stale.step, system_agents.STEP_BLOCKED)
+
+    def test_apply_archives_only_stale_blocked_workflows(self) -> None:
+        stale = self._blocked_workflow(age_days=10, thread_id="stale")
+        recent = self._blocked_workflow(age_days=1, thread_id="recent")
+        running = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="running",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={},
+        )
+        SystemWorkflow.objects.filter(pk=running.pk).update(
+            updated_at=datetime.now(UTC) - timedelta(days=30)
+        )
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+
+        stale_updated_at = stale.updated_at
+        archived = system_agents.archive_stale_blocked_workflows(
+            older_than=cutoff, apply=True
+        )
+
+        self.assertEqual(archived, [stale.pk])
+        stale.refresh_from_db()
+        self.assertEqual(stale.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(stale.step, system_agents.STEP_ARCHIVED)
+        self.assertTrue(
+            stale.state[system_agents._ARCHIVED_FROM_BLOCKED_STATE_KEY]
+        )
+        # The original error is preserved for auditing.
+        self.assertEqual(stale.state["error"], "boom")
+        # updated_at is preserved so the archived row cannot shadow a newer
+        # workflow on the same thread in the -updated_at-ordered session list.
+        self.assertEqual(stale.updated_at, stale_updated_at)
+        recent.refresh_from_db()
+        self.assertEqual(recent.status, SystemWorkflow.STATUS_BLOCKED)
+        running.refresh_from_db()
+        self.assertEqual(running.status, SystemWorkflow.STATUS_RUNNING)
+
+    def test_apply_leaves_non_pr_qa_blocked_workflows_untouched(self) -> None:
+        goal_run = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN,
+            main_thread_id="goal",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_BLOCKED,
+            step=system_agents.STEP_BLOCKED,
+            state={"error": "goal boom"},
+        )
+        SystemWorkflow.objects.filter(pk=goal_run.pk).update(
+            updated_at=datetime.now(UTC) - timedelta(days=30)
+        )
+        cutoff = datetime.now(UTC) - timedelta(days=7)
+
+        archived = system_agents.archive_stale_blocked_workflows(
+            older_than=cutoff, apply=True
+        )
+
+        self.assertEqual(archived, [])
+        goal_run.refresh_from_db()
+        self.assertEqual(goal_run.status, SystemWorkflow.STATUS_BLOCKED)
+
+    def test_management_command_requires_apply_to_mutate(self) -> None:
+        stale = self._blocked_workflow(age_days=10, thread_id="stale")
+
+        call_command("archive_stale_blocked_workflows", "--days", "7")
+        stale.refresh_from_db()
+        self.assertEqual(stale.status, SystemWorkflow.STATUS_BLOCKED)
+
+        call_command("archive_stale_blocked_workflows", "--days", "7", "--apply")
+        stale.refresh_from_db()
+        self.assertEqual(stale.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(stale.step, system_agents.STEP_ARCHIVED)

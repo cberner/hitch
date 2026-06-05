@@ -120,6 +120,7 @@ STEP_PR_FEEDBACK_RUNNING = "pr_feedback_running"
 STEP_PR_READY = "pr_ready"
 STEP_PR_CLOSED = "pr_closed"
 STEP_PR_NO_CHANGES = "pr_no_changes"
+STEP_ARCHIVED = "archived"
 STEP_LOCAL_BRANCH_MERGED = "local_branch_merged"
 STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING = "autonomous_goal_candidate_running"
 STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING = "autonomous_goal_judge_running"
@@ -147,6 +148,7 @@ _AUTONOMOUS_GOAL_SESSION_CWD_STATE_KEY = "session_cwd"
 _QA_DESIGN_SYNTHESIS_STATE_KEY = "qa_design_synthesis_gate"
 _QA_REVIEW_REVISION_STATE_KEY = "qa_review_revision"
 _WORKFLOW_FAILURE_OWNER_STATE_KEY = "failure_owner"
+_ARCHIVED_FROM_BLOCKED_STATE_KEY = "archived_from_blocked"
 _WORKFLOW_FAILURE_OWNER_QA = "qa"
 _WORKFLOW_FAILURE_OWNER_PR = "pr"
 _WORKFLOW_ROUTE_CLAIM_TIMEOUT = timedelta(minutes=10)
@@ -8304,6 +8306,46 @@ def _create_autonomous_goal_skipped_notice(
         judge_session=_session_metadata_from_state(workflow, "judge_session_id"),
         outcome_metadata=metadata or {},
     )
+
+
+def archive_stale_blocked_workflows(
+    *, older_than: datetime, apply: bool
+) -> list[int]:
+    """Archive blocked PR-QA workflows last updated before ``older_than``.
+
+    Historical failures keep surfacing as a Blocked stage in the session inbox
+    long after their root cause was fixed. Move stale blocked rows to a terminal
+    completed state with the ``archived`` step (which maps to no inbox stage) so
+    they stop being flagged, recording a sentinel in ``state`` for auditing.
+
+    Only ``KIND_PR_QA`` workflows drive the inbox Blocked stage, so other kinds
+    (e.g. autonomous goal runs, whose UI still reports their blocked state) are
+    left untouched.
+
+    With ``apply=False`` nothing is written; the matching workflow ids are still
+    returned so callers can preview the cleanup. Returns the affected ids in pk
+    order.
+    """
+    workflows = SystemWorkflow.objects.filter(
+        kind=SystemWorkflow.KIND_PR_QA,
+        status=SystemWorkflow.STATUS_BLOCKED,
+        updated_at__lt=older_than,
+    ).order_by("pk")
+    archived_ids: list[int] = []
+    for workflow in workflows:
+        archived_ids.append(workflow.pk)
+        if not apply:
+            continue
+        # Use update() rather than save() so ``updated_at`` (auto_now) is left
+        # as-is: the session list orders threads by -updated_at, so bumping it to
+        # now would let this archived row shadow a newer/running workflow on the
+        # same thread instead of merely dropping the stale Blocked badge.
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=STEP_ARCHIVED,
+            state={**workflow.state, _ARCHIVED_FROM_BLOCKED_STATE_KEY: True},
+        )
+    return archived_ids
 
 
 def _block_workflow(
