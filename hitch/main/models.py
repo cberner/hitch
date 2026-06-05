@@ -16,10 +16,12 @@ losing the answer.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from typing import Any, ClassVar, override
 
 from django.conf import settings
 from django.db import models
+from django.utils.dateparse import parse_datetime
 
 
 class Project(models.Model):
@@ -170,6 +172,8 @@ class ProposedSession(models.Model):
 
     INBOX_KIND_PROPOSAL = "proposal"
     INBOX_KIND_NOTICE = "notice"
+    ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY = "accepted_session_start_claimed_at"
+    ACCEPTED_SESSION_START_CLAIM_TTL = timedelta(minutes=30)
 
     OUTCOME_UNSET = ""
     OUTCOME_ACCEPTED = "accepted"
@@ -281,6 +285,22 @@ class ProposedSession(models.Model):
                 "project_id", flat=True
             ).get(pk=self.autonomous_goal_id)
         super().save(*args, **kwargs)
+
+    @classmethod
+    def accepted_session_start_claim_is_active(
+        cls, metadata: object, *, now: datetime
+    ) -> bool:
+        if not isinstance(metadata, dict):
+            return False
+        raw_claimed_at = metadata.get(cls.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY)
+        if not isinstance(raw_claimed_at, str):
+            return False
+        claimed_at = parse_datetime(raw_claimed_at)
+        if claimed_at is None:
+            return False
+        if claimed_at.tzinfo is None:
+            claimed_at = claimed_at.replace(tzinfo=UTC)
+        return now - claimed_at <= cls.ACCEPTED_SESSION_START_CLAIM_TTL
 
 
 class AutonomousGoalMemory(models.Model):
