@@ -1994,7 +1994,7 @@ class ReconcileAndLookupTests(TestCase):
     ) -> None:
         with (
             tempfile.TemporaryDirectory() as raw,
-            override_settings(CODEX_EVENTS_DIR=Path(raw), CODEX_WORKER_LOG_DIR=None),
+            override_settings(HITCH_HOME_DIR=Path(raw), CODEX_WORKER_LOG_DIR=None),
         ):
             instance = self._make(
                 pid=17,
@@ -4910,10 +4910,10 @@ class EventsDirTests(TestCase):
             self.assertEqual(codex_pool.worker_logs_dir(), Path(raw))
             self.assertEqual(codex_pool.worker_log_path(7), Path(raw) / "7.log")
 
-    def test_worker_logs_dir_falls_back_under_events_dir(self) -> None:
+    def test_worker_logs_dir_falls_back_under_hitch_home(self) -> None:
         with (
             tempfile.TemporaryDirectory() as raw,
-            override_settings(CODEX_WORKER_LOG_DIR=None, CODEX_EVENTS_DIR=Path(raw)),
+            override_settings(CODEX_WORKER_LOG_DIR=None, HITCH_HOME_DIR=Path(raw)),
         ):
             self.assertEqual(codex_pool.worker_logs_dir(), Path(raw) / "worker_logs")
 
