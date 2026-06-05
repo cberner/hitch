@@ -165,6 +165,20 @@ CODEX_WORKER_ISOLATION = os.environ.get("HITCH_CODEX_WORKER_ISOLATION", "auto")
 CODEX_WORKER_SLICE = os.environ.get(
     "HITCH_CODEX_WORKER_SLICE", "hitch-codex-workers.slice"
 )
+# Parent slice CPU bias. cgroup-v2 cpu.weight is per-level and relative to
+# siblings, so to make the user-facing runserver win CPU contests against a
+# busy worker pool the weight must sit on the deepest slice Hitch owns whose
+# parent also hosts the runserver (hitch.slice, sibling to app.slice under
+# user@.service) — NOT on the workers/codex leaf slices, which have no siblings
+# at their level and would bias workers only against each other. Default 20 vs
+# app.slice's 100 gives the runserver subtree ~5x share when contested while
+# leaving uncontested workloads at full speed. Empty disables the parent-slice
+# configuration (deployments not under systemd-user); an empty weight resets to
+# the cgroup-v2 default of 100.
+CODEX_PARENT_SLICE = os.environ.get("HITCH_CODEX_PARENT_SLICE", "hitch.slice")
+CODEX_PARENT_SLICE_CPU_WEIGHT = os.environ.get(
+    "HITCH_CODEX_PARENT_SLICE_CPU_WEIGHT", "20"
+)
 CODEX_WORKER_SLICE_MEMORY_HIGH = os.environ.get(
     "HITCH_CODEX_WORKER_SLICE_MEMORY_HIGH", "8G"
 )

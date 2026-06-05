@@ -1006,6 +1006,7 @@ class LaunchWorkerProcessTests(TestCase):
         CODEX_WORKER_SLICE_MEMORY_HIGH="8G",
         CODEX_WORKER_SLICE_MEMORY_MAX="10G",
         CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0",
+        CODEX_PARENT_SLICE="",
     )
     @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
     @patch("hitch.main.codex_pool.subprocess.run")
@@ -1040,6 +1041,7 @@ class LaunchWorkerProcessTests(TestCase):
         CODEX_WORKER_SLICE_MEMORY_HIGH="8G",
         CODEX_WORKER_SLICE_MEMORY_MAX="",
         CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="",
+        CODEX_PARENT_SLICE="",
     )
     @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
     @patch("hitch.main.codex_pool.subprocess.run")
@@ -1188,12 +1190,17 @@ class LaunchWorkerProcessTests(TestCase):
             [arg for arg in argv if arg.startswith("--property=MemorySwapMax")]
         )
 
-    @override_settings(CODEX_WORKER_SLICE="")
+    @override_settings(CODEX_WORKER_SLICE="", CODEX_PARENT_SLICE="hitch.slice")
     @patch("hitch.main.codex_pool.shutil.which")
     @patch("hitch.main.codex_pool.subprocess.run")
-    def test_skips_worker_slice_configuration_when_disabled(
+    def test_skips_all_slice_configuration_when_worker_slice_disabled(
         self, mock_run: MagicMock, mock_which: MagicMock
     ) -> None:
+        # Without a worker slice, workers are not placed under the parent slice
+        # (`_systemd_scope_argv` omits `--slice`), so the parent-slice bias is
+        # skipped too even though CODEX_PARENT_SLICE is set — it could not reach
+        # those workers, and a failure on that unrelated slice would needlessly
+        # abort every launch.
         codex_pool._ensure_systemd_worker_slice()
 
         mock_run.assert_not_called()
@@ -1216,6 +1223,127 @@ class LaunchWorkerProcessTests(TestCase):
 
         with self.assertRaisesRegex(RuntimeError, "Failed to connect to bus"):
             codex_pool._ensure_systemd_worker_slice()
+
+    @override_settings(CODEX_PARENT_SLICE_CPU_WEIGHT="20")
+    def test_parent_slice_properties_default(self) -> None:
+        self.assertEqual(
+            codex_pool._systemd_parent_slice_properties(), ["CPUWeight=20"]
+        )
+
+    @override_settings(CODEX_PARENT_SLICE_CPU_WEIGHT="")
+    def test_parent_slice_properties_cleared_resets_to_default(self) -> None:
+        # A cleared weight must render declaratively as the cgroup-v2 default so
+        # a previously-applied --runtime weight doesn't linger on the slice.
+        self.assertEqual(
+            codex_pool._systemd_parent_slice_properties(), ["CPUWeight=100"]
+        )
+
+    @override_settings(CODEX_PARENT_SLICE_CPU_WEIGHT="500")
+    def test_parent_slice_properties_passes_arbitrary_valid_weight(self) -> None:
+        self.assertEqual(
+            codex_pool._systemd_parent_slice_properties(), ["CPUWeight=500"]
+        )
+
+    @override_settings(CODEX_PARENT_SLICE_CPU_WEIGHT="20000")
+    def test_parent_slice_properties_drops_out_of_range_weight(self) -> None:
+        # Out of the cgroup-v2 1..10000 range: dropped (slice keeps its current
+        # weight) with a loud warning rather than failing every worker spawn.
+        with self.assertLogs("hitch.main.codex_pool", level="WARNING"):
+            self.assertEqual(codex_pool._systemd_parent_slice_properties(), [])
+
+    @override_settings(CODEX_PARENT_SLICE_CPU_WEIGHT="heavy")
+    def test_parent_slice_properties_drops_non_integer_weight(self) -> None:
+        with self.assertLogs("hitch.main.codex_pool", level="WARNING"):
+            self.assertEqual(codex_pool._systemd_parent_slice_properties(), [])
+
+    @override_settings(
+        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
+        CODEX_WORKER_SLICE_MEMORY_HIGH="8G",
+        CODEX_WORKER_SLICE_MEMORY_MAX="10G",
+        CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0",
+        CODEX_PARENT_SLICE="hitch.slice",
+        CODEX_PARENT_SLICE_CPU_WEIGHT="20",
+    )
+    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.codex_pool.subprocess.run")
+    def test_biases_parent_slice_after_workers_slice(
+        self, mock_run: MagicMock, _mock_which: MagicMock
+    ) -> None:
+        # The CPU weight belongs on the parent slice (sibling to the runserver's
+        # slice), applied after the workers-slice memory config. Setting it on
+        # the workers slice would be inert — workers have no siblings there.
+        mock_run.return_value = SimpleNamespace(returncode=0, stderr=b"")
+
+        codex_pool._ensure_systemd_worker_slice()
+
+        self.assertEqual(mock_run.call_count, 2)
+        workers_argv = mock_run.call_args_list[0].args[0]
+        parent_argv = mock_run.call_args_list[1].args[0]
+        self.assertEqual(workers_argv[4], "hitch-codex-workers.slice")
+        self.assertEqual(
+            parent_argv,
+            [
+                "/usr/bin/systemctl",
+                "--user",
+                "set-property",
+                "--runtime",
+                "hitch.slice",
+                "CPUWeight=20",
+            ],
+        )
+
+    @override_settings(
+        CODEX_WORKER_SLICE="hitch-codex-workers.slice",
+        CODEX_WORKER_SLICE_MEMORY_HIGH="8G",
+        CODEX_WORKER_SLICE_MEMORY_MAX="10G",
+        CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0",
+        CODEX_PARENT_SLICE="",
+    )
+    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.codex_pool.subprocess.run")
+    def test_parent_slice_configuration_skipped_when_disabled(
+        self, mock_run: MagicMock, _mock_which: MagicMock
+    ) -> None:
+        # An empty CODEX_PARENT_SLICE disables the CPU-weight bias entirely
+        # (deployments not under systemd-user) while the workers slice is still
+        # configured — only the one set-property call fires.
+        mock_run.return_value = SimpleNamespace(returncode=0, stderr=b"")
+
+        codex_pool._ensure_systemd_worker_slice()
+
+        self.assertEqual(mock_run.call_count, 1)
+        self.assertEqual(
+            mock_run.call_args.args[0][4], "hitch-codex-workers.slice"
+        )
+
+    @patch("hitch.main.codex_pool.shutil.which", return_value=None)
+    def test_apply_slice_properties_requires_systemctl(
+        self, _mock_which: MagicMock
+    ) -> None:
+        with self.assertRaisesRegex(RuntimeError, "systemctl is required"):
+            codex_pool._apply_slice_properties("hitch.slice", ["CPUWeight=20"])
+
+    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.codex_pool.subprocess.run", side_effect=OSError("boom"))
+    def test_apply_slice_properties_wraps_exec_failure(
+        self, _mock_run: MagicMock, _mock_which: MagicMock
+    ) -> None:
+        with self.assertRaisesRegex(
+            RuntimeError, "failed to configure Codex slice hitch.slice"
+        ):
+            codex_pool._apply_slice_properties("hitch.slice", ["CPUWeight=20"])
+
+    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.codex_pool.subprocess.run")
+    def test_apply_slice_properties_reports_status_without_detail(
+        self, mock_run: MagicMock, _mock_which: MagicMock
+    ) -> None:
+        # A non-zero exit with no stderr still surfaces a fatal error naming the
+        # exit status rather than failing silently.
+        mock_run.return_value = SimpleNamespace(returncode=2, stderr=b"")
+
+        with self.assertRaisesRegex(RuntimeError, "exited with status 2"):
+            codex_pool._apply_slice_properties("hitch.slice", ["CPUWeight=20"])
 
     @override_settings(CODEX_WORKER_ISOLATION="systemd")
     @patch("hitch.main.codex_pool.shutil.which", return_value=None)
