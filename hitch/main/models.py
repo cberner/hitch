@@ -844,3 +844,16 @@ class UserSettings(models.Model):
     @override
     def __str__(self) -> str:
         return f"UserSettings(user={self.user_id})"
+
+
+class GlobalSettings(models.Model):
+    """Server-wide settings that background workers need without a request."""
+
+    SINGLETON_PK: ClassVar[int] = 1
+
+    disk_usage_max_percent = models.FloatField(default=20.0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    @override
+    def __str__(self) -> str:
+        return "GlobalSettings"

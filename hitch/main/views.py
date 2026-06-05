@@ -59,6 +59,7 @@ from hitch.main import (
     codex_pool,
     coding_agents,
     demo,
+    disk_cleanup,
     rate_limit,
     rollout,
     session_index,
@@ -75,6 +76,7 @@ from hitch.main.models import (
     ArchivedSessionTokenUsage,
     AutonomousGoal,
     CodexInstance,
+    GlobalSettings,
     Project,
     ProposedSession,
     SessionMetadata,
@@ -693,7 +695,10 @@ _INTERMEDIATE_DETAIL_CACHE: OrderedDict[
 
 
 def _settings_context(
-    current_settings: SettingsValues, models_data: list[Any]
+    current_settings: SettingsValues,
+    models_data: list[Any],
+    *,
+    can_manage_global_settings: bool = False,
 ) -> dict[str, Any]:
     projects = list(Project.objects.all())
     current_project = _selected_project_for_settings(current_settings, projects)
@@ -759,6 +764,10 @@ def _settings_context(
         "current_spec_critic": current_settings.spec_critic_enabled,
         "current_web_search": current_settings.web_search_mode,
         "current_enable_memories": current_settings.enable_memories,
+        "can_manage_global_settings": can_manage_global_settings,
+        "current_disk_usage_max_percent": _format_disk_usage_max_percent(
+            _current_disk_usage_max_percent()
+        ),
         "projects": projects,
         "current_project": current_project,
         "current_project_id": current_project.pk if current_project is not None else "",
@@ -6383,6 +6392,44 @@ def _active_project_from_request(request: HttpRequest) -> Project | None:
     return _selected_project_for_settings(_stored_settings(request))
 
 
+def _current_disk_usage_max_percent() -> float:
+    return disk_cleanup._max_allowed_percent()
+
+
+def _format_disk_usage_max_percent(value: float) -> str:
+    value = round(value, 1)
+    if value.is_integer():
+        return str(int(value))
+    return f"{value:.1f}"
+
+
+def _parse_disk_usage_max_percent(raw: str) -> tuple[float | None, str | None]:
+    value = raw.strip()
+    if not value:
+        return None, "disk usage limit is required"
+    try:
+        percent = float(value)
+    except ValueError:
+        return None, "invalid disk usage limit"
+    if not math.isfinite(percent) or percent < 0.1 or percent > 100:
+        return None, "invalid disk usage limit"
+    rounded_tenths = round(percent * 10)
+    if not math.isclose(percent * 10, rounded_tenths, abs_tol=1e-9):
+        return None, "invalid disk usage limit"
+    return rounded_tenths / 10, None
+
+
+def _save_disk_usage_max_percent(value: float) -> None:
+    settings, created = GlobalSettings.objects.get_or_create(
+        pk=GlobalSettings.SINGLETON_PK,
+        defaults={"disk_usage_max_percent": value},
+    )
+    if created or settings.disk_usage_max_percent == value:
+        return
+    settings.disk_usage_max_percent = value
+    settings.save(update_fields=["disk_usage_max_percent", "updated_at"])
+
+
 def _session_project_visibility_for_settings(
     settings: SettingsValues, projects: list[Project]
 ) -> SessionProjectVisibility:
@@ -7237,6 +7284,11 @@ def _authenticated_user(request: HttpRequest) -> Any | None:
     return user if user.is_authenticated else None
 
 
+def _can_manage_global_settings(request: HttpRequest) -> bool:
+    user = _authenticated_user(request)
+    return bool(user is not None and getattr(user, "is_staff", False))
+
+
 def _stored_settings(request: HttpRequest) -> SettingsValues:
     user = _authenticated_user(request)
     if user is not None:
@@ -7906,7 +7958,11 @@ def update_settings(request: HttpRequest) -> HttpResponse:
             {
                 "settings_next_url": next_url,
                 "settings_cancel_url": next_url,
-                **_settings_context(resolved_settings.values, models_data),
+                **_settings_context(
+                    resolved_settings.values,
+                    models_data,
+                    can_manage_global_settings=_can_manage_global_settings(request),
+                ),
             },
         )
         _apply_cookie_updates(response, resolved_settings.cookie_updates)
@@ -7924,6 +7980,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     qa_panel = request.POST.get("qa_panel", "").strip()
     spec_critic = request.POST.get("spec_critic", "").strip()
     web_search_mode = request.POST.get("web_search_mode", "").strip()
+    posted_disk_usage_max_percent = request.POST.get("disk_usage_max_percent")
     posted_show_archived = request.POST.get("show_archived_sessions")
     show_archived = (
         posted_show_archived.strip() if posted_show_archived is not None else None
@@ -7980,6 +8037,15 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     spec_critic = "true" if spec_critic == "true" else "false"
     if web_search_mode and web_search_mode not in _VALID_WEB_SEARCH_MODES:
         return HttpResponseBadRequest("invalid web search setting")
+    disk_usage_max_percent: float | None = None
+    if posted_disk_usage_max_percent is not None:
+        if not _can_manage_global_settings(request):
+            return HttpResponseForbidden("global settings require staff")
+        disk_usage_max_percent, disk_usage_error = _parse_disk_usage_max_percent(
+            posted_disk_usage_max_percent
+        )
+        if disk_usage_error is not None:
+            return HttpResponseBadRequest(disk_usage_error)
     if show_archived is not None and show_archived not in {"", "true"}:
         return HttpResponseBadRequest("invalid archived sessions visibility")
     if enable_memories not in {"", "true"}:
@@ -8031,6 +8097,8 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     values = _settings_with_visible_selected_project(
         values, selected_project, cookie_required=user is None
     )
+    if disk_usage_max_percent is not None:
+        _save_disk_usage_max_percent(disk_usage_max_percent)
     if user is not None:
         _save_user_settings(user, values)
     response = redirect(_safe_next_url(request) or "index")

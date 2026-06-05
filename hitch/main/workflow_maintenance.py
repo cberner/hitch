@@ -6,15 +6,17 @@ import logging
 import os
 import sys
 import threading
+import time
 
 from django.conf import settings
 from django.db import close_old_connections
 
-from hitch.main import codex_pool, system_agents
+from hitch.main import codex_pool, disk_cleanup, system_agents
 
 logger = logging.getLogger(__name__)
 
 _WORKFLOW_MAINTENANCE_INTERVAL_SECONDS = 60
+_DISK_USAGE_CLEANUP_INTERVAL_SECONDS = 10 * 60
 # Cap PR-stage refreshes per tick: each due session can spend up to the gh-pr-
 # view timeout, and this tick also owns reconcile_dead and PR-monitor backoff
 # polling, so an unbounded sweep over dozens of stale sessions would delay the
@@ -73,8 +75,12 @@ def _running_from_server_command() -> bool:
 
 def _workflow_maintenance_scheduler_loop() -> None:
     stop = threading.Event()
+    next_disk_cleanup_at = time.monotonic() + _DISK_USAGE_CLEANUP_INTERVAL_SECONDS
     while True:
         _run_workflow_maintenance_scheduler_tick()
+        next_disk_cleanup_at = _run_due_disk_usage_cleanup(
+            next_due_at=next_disk_cleanup_at
+        )
         stop.wait(_WORKFLOW_MAINTENANCE_INTERVAL_SECONDS)
 
 
@@ -102,3 +108,22 @@ def _run_workflow_maintenance_scheduler_tick() -> None:
         logger.exception("failed to run workflow maintenance scheduler tick")
     finally:
         close_old_connections()
+
+
+def _run_due_disk_usage_cleanup(
+    *,
+    next_due_at: float,
+    now: float | None = None,
+) -> float:
+    current = time.monotonic() if now is None else now
+    if current < next_due_at:
+        return next_due_at
+
+    close_old_connections()
+    try:
+        disk_cleanup.run_finished_session_disk_cleanup()
+    except Exception:
+        logger.exception("failed to run scheduled Hitch disk cleanup")
+    finally:
+        close_old_connections()
+    return current + _DISK_USAGE_CLEANUP_INTERVAL_SECONDS
