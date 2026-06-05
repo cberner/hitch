@@ -51,7 +51,7 @@ intermediate block, so the per-item layout stays identical in both contexts.
         {% if entry.detail %}<span class="detail">{{ entry.detail }}</span>{% endif %}
         {% if entry.status %}<span class="status {{ entry.status }}">{{ entry.status }}</span>{% endif %}
         {% if entry.timestamp %}
-        <time class="timestamp" data-ts="{{ entry.timestamp }}" data-format="time">{{ entry.timestamp }}</time>
+        <time class="timestamp" data-ts="{{ entry.timestamp }}">{{ entry.timestamp }}</time>
         {% endif %}
     </div>
 </div>

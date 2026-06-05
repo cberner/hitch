@@ -2489,24 +2489,27 @@
                 second: "2-digit",
                 timeZoneName: "short",
             });
-            const timeOnly = new Intl.DateTimeFormat(undefined, {
-                hour: "numeric",
-                minute: "2-digit",
-                second: "2-digit",
-                timeZoneName: "short",
-            });
+            function formatTimestampElement(el) {
+                const seconds = Number(el.dataset.ts);
+                if (!Number.isFinite(seconds) || seconds <= 0) return;
+                const date = new Date(seconds * 1000);
+                el.dateTime = date.toISOString();
+                el.title = date.toString();
+                el.textContent = dateTime.format(date);
+            }
             function formatTimestamps(root) {
-                for (const el of root.querySelectorAll("time[data-ts]")) {
-                    const seconds = Number(el.dataset.ts);
-                    if (!Number.isFinite(seconds) || seconds <= 0) continue;
-                    const date = new Date(seconds * 1000);
-                    el.dateTime = date.toISOString();
-                    el.title = date.toString();
-                    const fmt = el.dataset.format === "time" ? timeOnly : dateTime;
-                    el.textContent = fmt.format(date);
-                }
+                for (const el of root.querySelectorAll("time[data-ts]")) formatTimestampElement(el);
             }
             formatTimestamps(document);
+            function timestampElement(seconds, className) {
+                const el = document.createElement("time");
+                if (className) el.className = className;
+                el.dataset.ts = String(seconds);
+                el.textContent = String(seconds);
+                formatTimestampElement(el);
+                return el;
+            }
+            window.__hitchTimestampElement = timestampElement;
 
             async function loadIntermediateDetails(details) {
                 if (!details || details.dataset.loaded === "true" || details.dataset.loading === "true") return;
@@ -3166,6 +3169,39 @@
             const streamUrl = streamSource && streamSource.dataset.streamUrl;
             if (!streamUrl || !indicator) return;
 
+            function timestampElement(seconds, className) {
+                if (typeof window.__hitchTimestampElement === "function") {
+                    return window.__hitchTimestampElement(seconds, className);
+                }
+                const el = document.createElement("time");
+                if (className) el.className = className;
+                el.dataset.ts = String(seconds);
+                el.textContent = String(seconds);
+                const date = new Date(seconds * 1000);
+                if (Number.isFinite(date.getTime())) {
+                    el.dateTime = date.toISOString();
+                    el.title = date.toString();
+                    el.textContent = date.toLocaleString(undefined, {
+                        year: "numeric",
+                        month: "short",
+                        day: "numeric",
+                        hour: "numeric",
+                        minute: "2-digit",
+                        second: "2-digit",
+                        timeZoneName: "short",
+                    });
+                }
+                return el;
+            }
+
+            function timestampSecondsForEvent(event) {
+                const recordedAt = Number(event && event.recordedAt);
+                if (Number.isFinite(recordedAt) && recordedAt > 0) {
+                    return recordedAt / 1000000;
+                }
+                return Date.now() / 1000;
+            }
+
             const STATE_TEXT = {
                 disconnected: "Connection lost",
                 idle: "Connected",
@@ -3474,7 +3510,7 @@
                 liveRoot.parentNode.insertBefore(node, liveRoot);
             }
 
-            function renderUserItem(item) {
+            function renderUserItem(item, timestampSeconds) {
                 if (pendingUser && pendingUser.parentNode) pendingUser.remove();
                 const wrap = document.createElement("div");
                 wrap.className = "entry";
@@ -3487,6 +3523,7 @@
                     ? liveRoot.dataset.activeAuthor
                     : "User";
                 header.appendChild(role);
+                header.appendChild(timestampElement(timestampSeconds, ""));
                 const msg = document.createElement("div");
                 msg.className = "message user";
                 msg.dataset.copyableMessage = "";
@@ -3604,7 +3641,7 @@
                 if (node) message.appendChild(node);
             }
 
-            function renderAgentItem(item) {
+            function renderAgentItem(item, timestampSeconds) {
                 const wrap = document.createElement("div");
                 wrap.className = "entry";
                 wrap.dataset.itemId = item.id;
@@ -3614,6 +3651,7 @@
                 role.className = "role";
                 role.textContent = "Agent";
                 header.appendChild(role);
+                header.appendChild(timestampElement(timestampSeconds, ""));
                 const msg = document.createElement("div");
                 msg.className = "message agent streaming";
                 msg.dataset.copyableMessage = "";
@@ -3629,7 +3667,7 @@
                 followRenderedContent();
             }
 
-            function renderToolCallItem(item) {
+            function renderToolCallItem(item, timestampSeconds) {
                 const wrap = document.createElement("div");
                 wrap.className = "entry";
                 wrap.dataset.itemId = item.id;
@@ -3647,6 +3685,7 @@
                 status.className = "status inProgress";
                 status.textContent = "inProgress";
                 row.appendChild(status);
+                row.appendChild(timestampElement(timestampSeconds, "timestamp"));
                 wrap.appendChild(row);
                 insertBeforeLive(wrap);
                 items.set(item.id, { kind: "tool", node: wrap, statusNode: status, detail });
@@ -3695,12 +3734,20 @@
                 return view;
             }
 
-            function renderPlanItem(item, turnId) {
+            function renderPlanItem(item, turnId, timestampSeconds) {
                 const view = ensurePlanView(turnId, item.id);
+                ensurePlanTimestamp(view, timestampSeconds);
                 if (item.text) activateFinalPlanText(view);
                 view.textRaw = item.text || view.textRaw || "";
                 renderPlanText(view);
                 followRenderedContent();
+            }
+
+            function ensurePlanTimestamp(view, timestampSeconds) {
+                const header = view.node.querySelector(".plan-header");
+                if (header && !header.querySelector("time[data-ts]")) {
+                    header.appendChild(timestampElement(timestampSeconds, ""));
+                }
             }
 
             function activateFinalPlanText(view) {
@@ -3812,18 +3859,28 @@
                 }
             }
 
-            function handleItemStarted(payload) {
+            function handleItemStarted(payload, event) {
                 ensureNoEmpty();
                 const item = payload.item || {};
-                if (!item.id || items.has(item.id)) return;
+                if (!item.id) return;
                 if (HIDE_LIVE_TRANSCRIPT) return;
+                if (items.has(item.id)) {
+                    if (item.type === "plan") {
+                        const entry = items.get(item.id);
+                        if (entry && entry.kind === "plan") {
+                            ensurePlanTimestamp(entry.view, timestampSecondsForEvent(event));
+                        }
+                    }
+                    return;
+                }
+                const timestampSeconds = timestampSecondsForEvent(event);
                 switch (item.type) {
                     case "userMessage":
-                        if (!HIDE_LIVE_USER_MESSAGE) renderUserItem(item);
+                        if (!HIDE_LIVE_USER_MESSAGE) renderUserItem(item, timestampSeconds);
                         break;
-                    case "agentMessage": renderAgentItem(item); break;
-                    case "plan": renderPlanItem(item, payload.turnId); break;
-                    default: renderToolCallItem(item); break;
+                    case "agentMessage": renderAgentItem(item, timestampSeconds); break;
+                    case "plan": renderPlanItem(item, payload.turnId, timestampSeconds); break;
+                    default: renderToolCallItem(item, timestampSeconds); break;
                 }
             }
 
@@ -3834,7 +3891,7 @@
                 followRenderedContent();
             }
 
-            function handlePlanDelta(payload) {
+            function handlePlanDelta(payload, event) {
                 if (HIDE_LIVE_TRANSCRIPT) return;
                 const itemId = payload.itemId;
                 if (!itemId) return;
@@ -3842,13 +3899,14 @@
                 const view = entry && entry.kind === "plan"
                     ? entry.view
                     : ensurePlanView(payload.turnId, itemId);
+                ensurePlanTimestamp(view, timestampSecondsForEvent(event));
                 activateFinalPlanText(view);
                 view.textRaw += payload.delta || "";
                 renderPlanText(view);
                 followRenderedContent();
             }
 
-            function handleItemCompleted(payload) {
+            function handleItemCompleted(payload, event) {
                 const item = payload.item || {};
                 if (HIDE_LIVE_TRANSCRIPT) return;
                 if (HIDE_LIVE_USER_MESSAGE && item.type === "userMessage") return;
@@ -3859,9 +3917,9 @@
                     // usable id can't be registered by handleItemStarted, so
                     // guard against recursing forever on it.
                     if (!item.id) return;
-                    handleItemStarted(payload);
+                    handleItemStarted(payload, event);
                     if (!items.has(item.id)) return;
-                    return handleItemCompleted(payload);
+                    return handleItemCompleted(payload, event);
                 }
                 if (entry.kind === "agent" && item.type === "agentMessage") {
                     entry.body.textContent = item.text || entry.body.textContent;
@@ -3877,6 +3935,7 @@
                     return;
                 }
                 if (entry.kind === "plan" && item.type === "plan") {
+                    ensurePlanTimestamp(entry.view, timestampSecondsForEvent(event));
                     activateFinalPlanText(entry.view);
                     entry.view.textRaw = item.text || entry.view.textRaw;
                     renderPlanText(entry.view);
@@ -4352,10 +4411,10 @@
                 const payload = parsed.payload || {};
                 const order = eventOrder(parsed, streamFallbackOrder);
                 switch (method) {
-                    case "item/started": handleItemStarted(payload); break;
+                    case "item/started": handleItemStarted(payload, parsed); break;
                     case "item/agentMessage/delta": handleAgentDelta(payload); break;
-                    case "item/plan/delta": handlePlanDelta(payload); break;
-                    case "item/completed": handleItemCompleted(payload); break;
+                    case "item/plan/delta": handlePlanDelta(payload, parsed); break;
+                    case "item/completed": handleItemCompleted(payload, parsed); break;
                     case "thread/goal/updated": handleGoalUpdated(payload, order); break;
                     case "thread/goal/cleared": handleGoalCleared(order); break;
                     case "turn/plan/updated": handlePlanUpdated(payload, order); break;
