@@ -440,13 +440,18 @@
             border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
             color: var(--warn);
         }
-        /* A moving highlight sweeps the badge while its gh-backed stage is
-           refreshing off a stale value (see _maybeReloadForStageRefresh). */
-        .session-meta .stage-badge[data-refreshing="true"] {
+        .session-meta .stage-badge[data-tone="idle"] {
+            border-color: var(--border-strong);
+            color: var(--text-muted);
+        }
+        /* data-refreshing also drives a reload; data-executing only reuses the sweep. */
+        .session-meta .stage-badge[data-refreshing="true"],
+        .session-meta .stage-badge[data-executing="true"] {
             position: relative;
             overflow: hidden;
         }
-        .session-meta .stage-badge[data-refreshing="true"]::after {
+        .session-meta .stage-badge[data-refreshing="true"]::after,
+        .session-meta .stage-badge[data-executing="true"]::after {
             content: "";
             position: absolute;
             inset: 0;
@@ -465,7 +470,8 @@
             to { transform: translateX(100%); }
         }
         @media (prefers-reduced-motion: reduce) {
-            .session-meta .stage-badge[data-refreshing="true"]::after { animation: none; }
+            .session-meta .stage-badge[data-refreshing="true"]::after,
+            .session-meta .stage-badge[data-executing="true"]::after { animation: none; }
         }
         .session-row-menu {
             position: relative;
@@ -784,7 +790,7 @@
                     <a class="session-link" href="{% if session.detail_url %}{{ session.detail_url }}{% else %}{% url 'session' session_id=session.id %}{% endif %}">
                         <div class="session-title" data-session-title>{{ session.display_title }}</div>
                         <div class="session-meta">
-                            {% if session.stage %}<span class="stage-badge" data-tone="{{ session.stage.tone }}"{% if session.stage.refreshing %} data-refreshing="true"{% endif %}>{{ session.stage.label }}</span>{% endif %}
+                            {% if session.stage %}<span class="stage-badge" data-tone="{{ session.stage.tone }}"{% if session.stage.refreshing %} data-refreshing="true"{% endif %}{% if session.stage.executing %} data-executing="true"{% endif %}>{{ session.stage.label }}</span>{% endif %}
                             <span class="meta-item"><span class="meta-label">cwd</span><code>{{ session.cwd }}</code></span>
                             {% if session.project %}<span class="meta-item"><span class="meta-label">project</span>{{ session.project.name }}</span>{% endif %}
                             {% if session.system_kind %}<span class="meta-item"><span class="meta-label">agent</span>{{ session.system_kind }}</span>{% endif %}

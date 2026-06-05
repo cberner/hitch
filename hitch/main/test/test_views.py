@@ -3167,7 +3167,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Active after PR")
         self.assertContains(
             response,
-            '<span class="stage-badge" data-tone="active">Implementation</span>',
+            '<span class="stage-badge" data-tone="active" data-executing="true">Implementation</span>',
         )
         self.assertNotContains(response, "Done: Closed")
         mock_codex.assert_not_called()
@@ -3342,7 +3342,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(active_response.status_code, 200)
         self.assertContains(
             active_response,
-            '<span class="stage-badge" data-tone="active">Implementation</span>',
+            '<span class="stage-badge" data-tone="active" data-executing="true">Implementation</span>',
         )
 
         # Worker finishes without touching the rollout, so its mtime is
@@ -3359,7 +3359,7 @@ class IndexViewTests(TestCase):
         )
         self.assertNotContains(
             idle_response,
-            '<span class="stage-badge" data-tone="active">Implementation</span>',
+            '<span class="stage-badge" data-tone="active" data-executing="true">Implementation</span>',
         )
         metadata.refresh_from_db()
         self.assertEqual(metadata.derived_stage, "done_closed")
@@ -3398,7 +3398,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Cached active session")
         self.assertContains(
             response,
-            '<span class="stage-badge" data-tone="active">Implementation</span>',
+            '<span class="stage-badge" data-tone="idle">Implementation</span>',
         )
         self.assertNotContains(
             response, '<span class="stage-badge" data-tone="default">New</span>'
@@ -3451,7 +3451,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Malformed rollout")
         self.assertContains(
             response,
-            '<span class="stage-badge" data-tone="active">Implementation</span>',
+            '<span class="stage-badge" data-tone="idle">Implementation</span>',
         )
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
@@ -3545,7 +3545,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Stale workflow")
         self.assertContains(
             response,
-            '<span class="stage-badge" data-tone="active">Implementation</span>',
+            '<span class="stage-badge" data-tone="idle">Implementation</span>',
         )
         self.assertNotContains(response, "Done: Closed")
         mock_codex.assert_not_called()
@@ -4347,7 +4347,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Workflow-only stale")
         self.assertContains(
             response,
-            '<span class="stage-badge" data-tone="active">Implementation</span>',
+            '<span class="stage-badge" data-tone="idle">Implementation</span>',
         )
         self.assertNotContains(response, "Done: Closed")
         mock_codex.assert_not_called()
