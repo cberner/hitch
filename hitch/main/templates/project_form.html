@@ -5,39 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>HITCH - New project</title>
     <style>
-        :root {
-            color-scheme: light dark;
-            --bg: #f7f2e8;
-            --surface: #ffffff;
-            --border: #d8cdbd;
-            --border-strong: #c4b69f;
-            --text: #1c252e;
-            --text-muted: #545d58;
-            --accent: #4f8f66;
-            --accent-hover: #3f7b56;
-            --accent-soft: rgba(79, 143, 102, 0.10);
-            --accent-fg: #ffffff;
-            --danger: #b94f42;
-            --shadow-lg: 0 8px 24px rgba(28, 37, 46, 0.10);
-            --radius: 12px;
-            --radius-sm: 8px;
-        }
-        @media (prefers-color-scheme: dark) {
-            :root {
-                --bg: #161c1a;
-                --surface: #1f2624;
-                --border: #2f3835;
-                --border-strong: #3d4744;
-                --text: #e8e4d8;
-                --text-muted: #a0a29a;
-                --accent: #6fb286;
-                --accent-hover: #84c49a;
-                --accent-soft: rgba(111, 178, 134, 0.14);
-                --accent-fg: #0c1814;
-                --danger: #d97062;
-                --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
-            }
-        }
+        {% include "_color_tokens.html" %}
         * { box-sizing: border-box; }
         body {
             margin: 0;
@@ -104,28 +72,7 @@
             gap: 0.5rem;
             flex-wrap: wrap;
         }
-        .button {
-            font: inherit;
-            font-weight: 500;
-            background: var(--accent);
-            color: var(--accent-fg);
-            border: 1px solid var(--accent);
-            border-radius: 999px;
-            padding: 0.5rem 1rem;
-            cursor: pointer;
-            text-decoration: none;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            min-height: 38px;
-            font-size: 0.9rem;
-        }
-        .button:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
-        .button.secondary {
-            background: transparent;
-            color: var(--text);
-            border-color: var(--border-strong);
-        }
+        {% include "_button_styles.html" %}
     </style>
 </head>
 <body>

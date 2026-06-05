@@ -1,38 +1,4 @@
-        :root {
-            color-scheme: light dark;
-            --bg: #f7f2e8;
-            --surface: #ffffff;
-            --surface-2: #efe7da;
-            --border: #d8cdbd;
-            --border-strong: #c4b69f;
-            --text: #1c252e;
-            --text-muted: #545d58;
-            --accent: #4f8f66;
-            --accent-hover: #3f7b56;
-            --accent-soft: rgba(79, 143, 102, 0.10);
-            --accent-fg: #ffffff;
-            --danger: #b94f42;
-            --shadow-lg: 0 8px 24px rgba(28, 37, 46, 0.10);
-            --radius: 12px;
-            --radius-sm: 8px;
-        }
-        @media (prefers-color-scheme: dark) {
-            :root {
-                --bg: #161c1a;
-                --surface: #1f2624;
-                --surface-2: #2a322f;
-                --border: #2f3835;
-                --border-strong: #3d4744;
-                --text: #e8e4d8;
-                --text-muted: #a0a29a;
-                --accent: #6fb286;
-                --accent-hover: #84c49a;
-                --accent-soft: rgba(111, 178, 134, 0.14);
-                --accent-fg: #0c1814;
-                --danger: #d97062;
-                --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.4);
-            }
-        }
+        {% include "_color_tokens.html" %}
         * { box-sizing: border-box; }
         body {
             min-height: 100vh;
@@ -106,25 +72,7 @@
             gap: 0.75rem;
             flex-wrap: wrap;
         }
-        .button {
-            font: inherit;
-            font-weight: 500;
-            background: var(--accent);
-            color: var(--accent-fg);
-            border: 1px solid var(--accent);
-            border-radius: 999px;
-            padding: 0.5rem 1rem;
-            cursor: pointer;
-            text-decoration: none;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            min-height: 38px;
-            transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
-            font-size: 0.9rem;
-        }
-        .button:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
-        .button:active { transform: scale(0.97); }
+        {% include "_button_styles.html" %}
         .link {
             color: var(--text-muted);
             font-size: 0.9rem;

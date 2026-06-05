@@ -3898,7 +3898,7 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "main.has-task-plan")
         self.assertContains(
             response,
-            "grid-template-columns: minmax(0, 820px) minmax(260px, 320px)",
+            "grid-template-columns: minmax(0, 900px) minmax(260px, 320px)",
         )
         self.assertContains(response, "function updateTaskPlan")
         self.assertContains(response, "function applyTaskPlanOrder")

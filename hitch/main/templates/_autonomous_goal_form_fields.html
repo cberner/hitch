@@ -33,7 +33,7 @@
     <input type="checkbox" name="auto_qa" value="true" data-autonomous-goal-auto-qa {% if default_auto_qa %}checked{% endif %}{% if default_autonomy in auto_qa_supported_autonomies %}{% else %} disabled{% endif %}>
 </label>
 <label class="checkbox-label">
-    Auto-proposal
+    <span>Auto-proposal</span>
     <input type="hidden" name="auto_proposal" value="false">
     <input type="checkbox" name="auto_proposal" value="true" {% if default_auto_proposal %}checked{% endif %}>
 </label>

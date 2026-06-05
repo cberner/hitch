@@ -1,0 +1,58 @@
+        .button {
+            font: inherit;
+            font-weight: 500;
+            font-size: 0.9rem;
+            background: var(--accent);
+            color: var(--accent-fg);
+            border: 1px solid var(--accent);
+            border-radius: 999px;
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 0.4rem;
+            min-height: 38px;
+            transition: background 0.12s ease, border-color 0.12s ease, transform 0.12s ease;
+        }
+        .button:active { transform: scale(0.97); }
+        @media (hover: hover) {
+            .button:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+        }
+        .button.secondary {
+            background: transparent;
+            color: var(--text);
+            border-color: var(--border-strong);
+        }
+        @media (hover: hover) {
+            .button.secondary:hover { background: var(--surface-2); }
+        }
+        .button.danger {
+            background: transparent;
+            color: var(--danger);
+            border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+        }
+        @media (hover: hover) {
+            .button.danger:hover {
+                background: color-mix(in srgb, var(--danger) 10%, transparent);
+                border-color: var(--danger);
+            }
+        }
+        .button:disabled,
+        .button[disabled] {
+            cursor: not-allowed;
+            opacity: 0.55;
+            transform: none;
+        }
+        .button .plus {
+            font-size: 1.1rem;
+            line-height: 1;
+            font-weight: 400;
+            margin-right: -0.15rem;
+        }
+        .account-action {
+            min-height: 2.1rem;
+            padding: 0.35rem 0.65rem;
+            font-size: 0.86rem;
+        }
