@@ -10073,6 +10073,101 @@ class NewSessionViewTests(TestCase):
             thread_name="Add parser coverage",
         )
 
+    @patch("hitch.main.views._save_posted_input_images")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_accept_losing_start_claim_redirects_without_spawn(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+        mock_save_images: MagicMock,
+    ) -> None:
+        _setup_codex(mock_codex, models=[])
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            title="Add parser coverage",
+        )
+        mock_discover.return_value = [Path(self.REPO)]
+
+        def reject_after_lookup(_request: Any) -> tuple[list[str], str | None]:
+            rejected = ProposedSession.objects.filter(
+                pk=proposal.pk,
+                outcome_status=ProposedSession.OUTCOME_UNSET,
+            ).update(
+                outcome_status=ProposedSession.OUTCOME_REJECTED,
+                outcome_notes="Resolved from another tab.",
+                updated_at=timezone.now(),
+            )
+            self.assertEqual(rejected, 1)
+            return [], None
+
+        mock_save_images.side_effect = reject_after_lookup
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={
+                "prompt": "Go ahead and implement this proposed session.",
+                "cwd": self.REPO,
+                "proposed_session": str(proposal.pk),
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.headers["Location"], reverse("inbox"))
+        mock_spawn.assert_not_called()
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_REJECTED)
+        self.assertIsNone(proposal.accepted_session)
+
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_new_session_spawn_failure_resets_proposal_start_claim(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+    ) -> None:
+        _setup_codex(mock_codex, models=[])
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        proposal = ProposedSession.objects.create(
+            autonomous_goal=goal,
+            title="Add parser coverage",
+        )
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_spawn.side_effect = RuntimeError("worker failed")
+
+        with self.assertRaises(RuntimeError):
+            self.client.post(
+                reverse("new_session"),
+                data={
+                    "prompt": "Go ahead and implement this proposed session.",
+                    "cwd": self.REPO,
+                    "proposed_session": str(proposal.pk),
+                },
+            )
+
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertIsNone(proposal.accepted_session)
+        self.assertNotIn(
+            ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY,
+            proposal.outcome_metadata,
+        )
+
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
@@ -11879,6 +11974,84 @@ class NewSessionViewTests(TestCase):
         self.assertFalse(metadata.auto_pr_enabled)
         self.assertFalse(metadata.auto_merge_to_local_branch)
         self.assertEqual(metadata.auto_merge_branch, "")
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.create_session_thread")
+    @patch("hitch.main.views.discover_repos")
+    def test_proposal_qa_thread_create_failure_resets_start_claim(
+        self,
+        mock_discover: MagicMock,
+        mock_create_thread: MagicMock,
+        mock_codex: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        _setup_codex(mock_codex, models=[])
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Tidy up logging",
+        )
+        mock_create_thread.side_effect = RuntimeError("thread failed")
+
+        with self.assertRaises(RuntimeError):
+            self.client.post(
+                reverse("new_session"),
+                data={
+                    "prompt": "/qa",
+                    "cwd": self.REPO,
+                    "proposed_session": str(proposal.pk),
+                },
+            )
+
+        mock_start_workflow.assert_not_called()
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertIsNone(proposal.accepted_session)
+        self.assertNotIn(
+            ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY,
+            proposal.outcome_metadata,
+        )
+
+    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.create_session_thread")
+    @patch("hitch.main.views.discover_repos")
+    def test_proposal_qa_workflow_start_failure_resets_start_claim(
+        self,
+        mock_discover: MagicMock,
+        mock_create_thread: MagicMock,
+        mock_codex: MagicMock,
+        mock_start_workflow: MagicMock,
+    ) -> None:
+        mock_discover.return_value = [Path(self.REPO)]
+        _setup_codex(mock_codex, models=[])
+        project = Project.objects.create(name="Hitch", repo_path=self.REPO)
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Tidy up logging",
+        )
+        mock_create_thread.return_value = "proposal-qa-thread"
+        mock_start_workflow.side_effect = RuntimeError("workflow failed")
+
+        with self.assertRaises(RuntimeError):
+            self.client.post(
+                reverse("new_session"),
+                data={
+                    "prompt": "/qa",
+                    "cwd": self.REPO,
+                    "proposed_session": str(proposal.pk),
+                },
+            )
+
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertIsNone(proposal.accepted_session)
+        self.assertNotIn(
+            ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY,
+            proposal.outcome_metadata,
+        )
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.Codex")
@@ -17067,6 +17240,40 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
         self.assertIsNone(proposal.accepted_session)
         self.assertNotIn(
+            ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY,
+            proposal.outcome_metadata,
+        )
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_inbox_keeps_active_proposal_start_claim_hidden(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Add parser coverage",
+            summary="This adds focused parser coverage.",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            outcome_metadata={
+                "accepted_by": "user",
+                "accepted_thread_id": "",
+                ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY: (
+                    datetime.now(UTC).isoformat()
+                ),
+            },
+        )
+
+        response = self.client.get(reverse("inbox"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "Add parser coverage")
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
+        self.assertIsNone(proposal.accepted_session)
+        self.assertIn(
             ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY,
             proposal.outcome_metadata,
         )
