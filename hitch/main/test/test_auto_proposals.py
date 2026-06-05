@@ -110,6 +110,39 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
             workflow_maintenance._workflow_maintenance_scheduler_enabled()
         )
 
+    @patch(
+        "hitch.main.workflow_maintenance.disk_cleanup.run_finished_session_disk_cleanup"
+    )
+    def test_disk_usage_cleanup_runs_every_ten_minutes(
+        self, mock_cleanup: MagicMock
+    ) -> None:
+        next_due = 100.0
+
+        next_due = workflow_maintenance._run_due_disk_usage_cleanup(
+            next_due_at=next_due, now=99.0
+        )
+        self.assertEqual(next_due, 100.0)
+        mock_cleanup.assert_not_called()
+
+        next_due = workflow_maintenance._run_due_disk_usage_cleanup(
+            next_due_at=next_due, now=100.0
+        )
+        self.assertEqual(
+            next_due,
+            100.0 + workflow_maintenance._DISK_USAGE_CLEANUP_INTERVAL_SECONDS,
+        )
+        mock_cleanup.assert_called_once_with()
+
+        workflow_maintenance._run_due_disk_usage_cleanup(
+            next_due_at=next_due, now=699.0
+        )
+        self.assertEqual(mock_cleanup.call_count, 1)
+
+        workflow_maintenance._run_due_disk_usage_cleanup(
+            next_due_at=next_due, now=700.0
+        )
+        self.assertEqual(mock_cleanup.call_count, 2)
+
     @override_settings(TESTING=False)
     @patch.dict(
         os.environ,

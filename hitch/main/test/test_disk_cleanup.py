@@ -10,7 +10,13 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from hitch.main import disk_cleanup
-from hitch.main.models import CodexInstance, ProposedSession, SessionMetadata, SystemWorkflow
+from hitch.main.models import (
+    CodexInstance,
+    GlobalSettings,
+    ProposedSession,
+    SessionMetadata,
+    SystemWorkflow,
+)
 
 
 class DiskCleanupTests(TestCase):
@@ -67,6 +73,14 @@ class DiskCleanupTests(TestCase):
 
     def test_default_max_allowed_percent_is_twenty(self) -> None:
         self.assertEqual(disk_cleanup._max_allowed_percent(), 20.0)
+
+    @override_settings(HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=20)
+    def test_saved_global_max_allowed_percent_overrides_env(self) -> None:
+        GlobalSettings.objects.create(
+            pk=GlobalSettings.SINGLETON_PK, disk_usage_max_percent=35.5
+        )
+
+        self.assertEqual(disk_cleanup._max_allowed_percent(), 35.5)
 
     def test_cleanup_orders_system_then_archived_pr_then_old_archived(self) -> None:
         with (

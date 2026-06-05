@@ -17,6 +17,7 @@ from django.utils import timezone
 
 from hitch.main.models import (
     CodexInstance,
+    GlobalSettings,
     ProposedSession,
     SessionMetadata,
     SystemAgentRun,
@@ -369,23 +370,51 @@ def _normalized_managed_path(raw_path: str) -> str | None:
 
 
 def _max_allowed_percent() -> float:
-    raw = getattr(
-        settings,
-        "HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT",
-        DEFAULT_MAX_ALLOWED_DISK_SPACE_PERCENT,
+    saved = _saved_max_allowed_percent()
+    if saved is not None:
+        return saved
+    raw = getattr(settings, "HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT", None)
+    if raw is None:
+        raw = DEFAULT_MAX_ALLOWED_DISK_SPACE_PERCENT
+    return _validated_max_allowed_percent(
+        raw, setting_name="HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT"
     )
+
+
+def _saved_max_allowed_percent() -> float | None:
+    try:
+        saved = (
+            GlobalSettings.objects.filter(pk=GlobalSettings.SINGLETON_PK)
+            .values_list("disk_usage_max_percent", flat=True)
+            .first()
+        )
+    except Exception:
+        logger.exception("failed to load saved Hitch disk usage setting")
+        return None
+    if saved is None:
+        return None
+    return _validated_max_allowed_percent(
+        saved, setting_name="GlobalSettings.disk_usage_max_percent"
+    )
+
+
+def _validated_max_allowed_percent(
+    raw: str | int | float, *, setting_name: str
+) -> float:
     try:
         value = float(raw)
     except (TypeError, ValueError):
         logger.warning(
-            "invalid HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT %r; using %s",
+            "invalid %s %r; using %s",
+            setting_name,
             raw,
             DEFAULT_MAX_ALLOWED_DISK_SPACE_PERCENT,
         )
         return DEFAULT_MAX_ALLOWED_DISK_SPACE_PERCENT
     if value <= 0 or value > 100:
         logger.warning(
-            "invalid HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT %r; using %s",
+            "invalid %s %r; using %s",
+            setting_name,
             raw,
             DEFAULT_MAX_ALLOWED_DISK_SPACE_PERCENT,
         )

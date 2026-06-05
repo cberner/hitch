@@ -14,7 +14,7 @@ from openai_codex.errors import MethodNotFoundError
 from openai_codex.generated.v2_all import ReasoningEffort
 
 from hitch.main import coding_agents, context_processors, views
-from hitch.main.models import Project, UserSettings
+from hitch.main.models import GlobalSettings, Project, UserSettings
 from hitch.settings import common as common_settings
 
 _MODEL_COOKIE = "hitch_model"
@@ -496,6 +496,8 @@ class SettingsPageRenderTests(TestCase):
         self.assertContains(response, 'value="disabled"')
         self.assertContains(response, 'value="cached"')
         self.assertContains(response, 'value="live"')
+        self.assertNotContains(response, "Max Hitch disk usage (%)")
+        self.assertNotContains(response, 'name="disk_usage_max_percent"')
         self.assertContains(response, 'name="selected_project"')
         self.assertContains(response, "All projects")
         self.assertContains(response, "Create project")
@@ -503,6 +505,54 @@ class SettingsPageRenderTests(TestCase):
         self.assertContains(response, "data-project-edit-dialog")
         self.assertContains(response, 'name="auto_pr_mode"')
         self.assertContains(response, "Follow global")
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_staff_page_renders_saved_disk_usage_percent(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        user = get_user_model().objects.create_user(
+            "admin@example.com", password="StrongPass123!", is_staff=True
+        )
+        self.client.force_login(user)
+        GlobalSettings.objects.create(
+            pk=GlobalSettings.SINGLETON_PK, disk_usage_max_percent=35.5
+        )
+        _seed_models_cache([_model("gpt-5", is_default=True)])
+        self.addCleanup(_clear_models_cache)
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("update_settings"))
+
+        self.assertEqual(response.status_code, 200)
+        mock_codex.assert_not_called()
+        self.assertContains(response, "Max Hitch disk usage (%)")
+        self.assertContains(response, 'name="disk_usage_max_percent"')
+        self.assertContains(response, 'value="35.5"')
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_staff_page_rounds_disk_usage_percent_to_input_step(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        user = get_user_model().objects.create_user(
+            "admin@example.com", password="StrongPass123!", is_staff=True
+        )
+        self.client.force_login(user)
+        GlobalSettings.objects.create(
+            pk=GlobalSettings.SINGLETON_PK, disk_usage_max_percent=35.55
+        )
+        _seed_models_cache([_model("gpt-5", is_default=True)])
+        self.addCleanup(_clear_models_cache)
+        mock_discover.return_value = []
+
+        response = self.client.get(reverse("update_settings"))
+
+        self.assertEqual(response.status_code, 200)
+        mock_codex.assert_not_called()
+        self.assertContains(response, 'name="disk_usage_max_percent"')
+        self.assertContains(response, 'value="35.5"')
+        self.assertNotContains(response, 'value="35.55"')
 
     @staticmethod
     def _effort_option(body: str, value: str) -> str:
@@ -1701,6 +1751,62 @@ class UpdateSettingsViewTests(TestCase):
 
                 self.assertEqual(response.status_code, 400)
                 self.assertNotIn(cookie, response.cookies)
+
+    def test_update_settings_forbids_anonymous_disk_usage_global_setting(self) -> None:
+        response = self.client.post(
+            reverse("update_settings"),
+            data={"disk_usage_max_percent": "35.5"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(GlobalSettings.objects.exists())
+
+    def test_update_settings_forbids_non_staff_disk_usage_global_setting(self) -> None:
+        user = get_user_model().objects.create_user(
+            "dev@example.com", password="StrongPass123!"
+        )
+        self.client.force_login(user)
+
+        response = self.client.post(
+            reverse("update_settings"),
+            data={"disk_usage_max_percent": "35.5"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(GlobalSettings.objects.exists())
+
+    def test_staff_update_settings_saves_disk_usage_global_setting(self) -> None:
+        user = get_user_model().objects.create_user(
+            "admin@example.com", password="StrongPass123!", is_staff=True
+        )
+        self.client.force_login(user)
+
+        response = self.client.post(
+            reverse("update_settings"),
+            data={"disk_usage_max_percent": "35.5"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        settings = GlobalSettings.objects.get(pk=GlobalSettings.SINGLETON_PK)
+        self.assertEqual(settings.disk_usage_max_percent, 35.5)
+
+    def test_staff_update_settings_rejects_invalid_disk_usage_global_setting(
+        self,
+    ) -> None:
+        user = get_user_model().objects.create_user(
+            "admin@example.com", password="StrongPass123!", is_staff=True
+        )
+        self.client.force_login(user)
+        cases = ["", "0", "0.05", "35.55", "100.1", "nan", "not-a-number"]
+        for raw in cases:
+            with self.subTest(raw=raw):
+                response = self.client.post(
+                    reverse("update_settings"),
+                    data={"disk_usage_max_percent": raw},
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertFalse(GlobalSettings.objects.exists())
 
 
 class AuthenticatedWebSearchSettingsTests(TestCase):
