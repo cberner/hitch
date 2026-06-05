@@ -156,7 +156,7 @@ HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT = os.environ.get(
 # project tree so setuptools' flat-layout discovery doesn't pick it up.
 CODEX_EVENTS_DIR = HITCH_HOME_DIR / "codex_events"
 # Optional override for detached worker stderr logs. When unset, Hitch stores
-# them under HITCH_HOME_DIR so crash forensics live in the shared runtime tree.
+# them directly under HITCH_HOME_DIR so crash forensics live in ``~/.hitch``.
 _CODEX_WORKER_LOG_DIR = os.environ.get("HITCH_CODEX_WORKER_LOG_DIR")
 CODEX_WORKER_LOG_DIR = (
     Path(_CODEX_WORKER_LOG_DIR) if _CODEX_WORKER_LOG_DIR else None
