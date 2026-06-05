@@ -23,12 +23,17 @@ from hitch.main.models import (
     SystemAgentRun,
     SystemWorkflow,
 )
-from hitch.main.worktrees import WorktreeCleanupError, cleanup_managed_worktree_path
+from hitch.main.worktrees import (
+    WorktreeCleanupError,
+    cleanup_managed_worktree_path,
+    discover_managed_worktrees,
+)
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_ALLOWED_DISK_SPACE_PERCENT = 20.0
 ARCHIVED_USER_SESSION_MIN_AGE = timedelta(hours=48)
+_WORKTREE_DIR_TIMESTAMP_FORMAT = "%Y%m%d%H%M%S"
 _PR_DONE_STAGE_KEYS = frozenset({"done_merged", "done_closed"})
 _ACTIVE_CODEX_STATUSES = (
     CodexInstance.STATUS_STARTING,
@@ -52,8 +57,11 @@ _PROPOSAL_SESSION_ID_FIELDS = (
 
 @dataclass(frozen=True)
 class _CleanupCandidate:
-    metadata: SessionMetadata
+    cwd: str
     reason: str
+    thread_id: str
+    timestamp: datetime
+    sequence: int
 
 
 def run_finished_session_disk_cleanup() -> None:
@@ -70,7 +78,7 @@ def run_finished_session_disk_cleanup() -> None:
 
 
 def cleanup_hitch_disk_usage_if_needed() -> int:
-    """Delete eligible managed worktrees until ``~/.hitch`` is under the limit."""
+    """Delete enough eligible worktrees to bring ``~/.hitch`` under the limit."""
     hitch_home = _hitch_home_dir()
     usage_path = _existing_disk_usage_path(hitch_home)
     try:
@@ -91,24 +99,34 @@ def cleanup_hitch_disk_usage_if_needed() -> int:
         return 0
 
     cleaned = 0
-    for candidate in _cleanup_candidates(now=timezone.now()):
-        if used_bytes <= limit_bytes:
+    candidates = _cleanup_candidates(now=timezone.now())
+    usage_by_path = _candidate_worktree_usage_by_path(candidates)
+    bytes_to_free = used_bytes - limit_bytes
+    successful_bytes = 0
+    attempted_paths: set[str] = set()
+    for candidate in candidates:
+        if successful_bytes >= bytes_to_free:
             break
+        normalized_path = _normalized_managed_path(candidate.cwd)
+        if normalized_path is None or normalized_path in attempted_paths:
+            continue
+        usage_bytes = usage_by_path.get(normalized_path, 0)
+        if usage_bytes <= 0:
+            continue
+        attempted_paths.add(normalized_path)
         try:
-            removed = cleanup_managed_worktree_path(candidate.metadata.cwd)
+            removed = cleanup_managed_worktree_path(candidate.cwd)
         except WorktreeCleanupError:
             logger.exception(
-                "failed to clean up %s worktree for session %s",
+                "failed to clean up %s worktree for %s",
                 candidate.reason,
-                candidate.metadata.thread_id,
+                candidate.thread_id or candidate.cwd,
             )
             continue
         if not removed:
             continue
         cleaned += 1
-        # Only an actual removal can change the tree size, so re-walk solely
-        # on success — failure and no-op iterations leave used_bytes intact.
-        used_bytes = _directory_size(hitch_home)
+        successful_bytes += usage_bytes
     return cleaned
 
 
@@ -157,19 +175,29 @@ def hitch_home_disk_usage() -> HitchDiskUsage | None:
 def _cleanup_candidates(*, now: datetime) -> list[_CleanupCandidate]:
     context = _cleanup_context(now=now)
     candidates: list[_CleanupCandidate] = []
+    metadata_paths: set[str] = set()
     for metadata in _session_metadata_rows():
-        if not _metadata_has_managed_worktree(metadata):
+        normalized_path = _normalized_managed_path(metadata.cwd)
+        if normalized_path is None:
             continue
+        metadata_paths.add(normalized_path)
         if not _safe_to_remove_worktree(metadata, context):
             continue
         is_system = _is_system_session(metadata, context)
         is_accepted_visible = metadata.thread_id in context.accepted_visible_thread_ids
         if is_system and not is_accepted_visible:
-            candidates.append(_CleanupCandidate(metadata=metadata, reason="system"))
+            candidates.append(_metadata_cleanup_candidate(metadata, reason="system"))
         elif _archived_pr_done_user_session(metadata, context):
-            candidates.append(_CleanupCandidate(metadata=metadata, reason="archived_pr"))
+            candidates.append(_metadata_cleanup_candidate(metadata, reason="archived_pr"))
         elif _old_archived_user_session(metadata, context, now=now):
-            candidates.append(_CleanupCandidate(metadata=metadata, reason="archived_old"))
+            candidates.append(_metadata_cleanup_candidate(metadata, reason="archived_old"))
+    candidates.extend(
+        _orphaned_worktree_candidates(
+            context=context,
+            metadata_paths=metadata_paths,
+            now=now,
+        )
+    )
     return sorted(candidates, key=_candidate_sort_key)
 
 
@@ -294,11 +322,90 @@ def _is_user_session(
     )
 
 
-def _candidate_sort_key(candidate: _CleanupCandidate) -> tuple[int, datetime, int]:
-    priority = {"system": 0, "archived_pr": 1, "archived_old": 2}[candidate.reason]
-    metadata = candidate.metadata
-    timestamp = metadata.codex_archived_at or metadata.codex_updated_at or _EARLIEST
-    return priority, timestamp, metadata.pk or 0
+def _metadata_cleanup_candidate(
+    metadata: SessionMetadata, *, reason: str
+) -> _CleanupCandidate:
+    return _CleanupCandidate(
+        cwd=metadata.cwd,
+        reason=reason,
+        thread_id=metadata.thread_id,
+        timestamp=metadata.codex_archived_at
+        or metadata.codex_updated_at
+        or _EARLIEST,
+        sequence=metadata.pk or 0,
+    )
+
+
+def _orphaned_worktree_candidates(
+    *,
+    context: _CleanupContext,
+    metadata_paths: set[str],
+    now: datetime,
+) -> list[_CleanupCandidate]:
+    candidates: list[_CleanupCandidate] = []
+    for path in discover_managed_worktrees():
+        normalized_path = _normalized_managed_path(str(path))
+        if normalized_path is None:
+            continue
+        if normalized_path in metadata_paths:
+            continue
+        if normalized_path in context.protected_worktree_paths:
+            continue
+        created_at = _managed_worktree_created_at(path)
+        if created_at is None:
+            continue
+        if created_at > now - ARCHIVED_USER_SESSION_MIN_AGE:
+            continue
+        candidates.append(
+            _CleanupCandidate(
+                cwd=str(path),
+                reason="orphaned",
+                thread_id="",
+                timestamp=created_at,
+                sequence=0,
+            )
+        )
+    return candidates
+
+
+def _managed_worktree_created_at(path: Path) -> datetime | None:
+    timestamp, separator, suffix = path.name.partition("-")
+    if (
+        separator != "-"
+        or len(timestamp) != 14
+        or len(suffix) != 8
+        or not suffix.isalnum()
+    ):
+        return None
+    try:
+        created_at = datetime.strptime(timestamp, _WORKTREE_DIR_TIMESTAMP_FORMAT)
+    except ValueError:
+        return None
+    return created_at.replace(tzinfo=UTC)
+
+
+def _candidate_worktree_usage_by_path(
+    candidates: list[_CleanupCandidate],
+) -> dict[str, int]:
+    usage_by_path: dict[str, int] = {}
+    for candidate in candidates:
+        normalized_path = _normalized_managed_path(candidate.cwd)
+        if normalized_path is None or normalized_path in usage_by_path:
+            continue
+        usage_by_path[normalized_path] = _directory_size(Path(normalized_path))
+    return usage_by_path
+
+
+def _candidate_sort_key(
+    candidate: _CleanupCandidate,
+) -> tuple[int, datetime, int, str]:
+    priority = {
+        "system": 0,
+        "orphaned": 1,
+        "archived_pr": 2,
+        "archived_old": 3,
+    }[candidate.reason]
+    return priority, candidate.timestamp, candidate.sequence, candidate.cwd
 
 
 _EARLIEST = datetime.min.replace(tzinfo=UTC)
@@ -389,10 +496,6 @@ def _protected_visible_user_worktree_paths(
         ):
             paths.add(metadata.cwd)
     return paths
-
-
-def _metadata_has_managed_worktree(metadata: SessionMetadata) -> bool:
-    return _normalized_managed_path(metadata.cwd) is not None
 
 
 def _normalized_managed_paths(paths: Iterable[str]) -> set[str]:

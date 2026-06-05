@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -150,7 +150,7 @@ class DiskCleanupTests(TestCase):
 
             cleaned = self._run_cleanup(
                 root=root,
-                sizes=[300, 250, 150],
+                sizes=[300, 50, 50, 50],
                 mock_cleanup=mock_cleanup,
             )
 
@@ -186,7 +186,7 @@ class DiskCleanupTests(TestCase):
 
             cleaned = self._run_cleanup(
                 root=root,
-                sizes=[300, 100],
+                sizes=[300, 150],
                 mock_cleanup=mock_cleanup,
             )
 
@@ -223,9 +223,7 @@ class DiskCleanupTests(TestCase):
         mock_size.assert_not_called()
         mock_cleanup.assert_not_called()
 
-    def test_noop_removal_does_not_rewalk_and_success_rewalks_once(self) -> None:
-        # A no-op iteration cannot change the tree size, so the loop must not
-        # re-walk after it; only an actual removal triggers one re-walk.
+    def test_noop_removal_counts_only_successful_planned_deletions(self) -> None:
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
@@ -234,7 +232,7 @@ class DiskCleanupTests(TestCase):
             ) as mock_cleanup,
             patch(
                 "hitch.main.disk_cleanup._directory_size",
-                side_effect=[300, 100],
+                side_effect=[300, 150, 150],
             ) as mock_size,
         ):
             root = Path(raw)
@@ -271,25 +269,72 @@ class DiskCleanupTests(TestCase):
                 cleaned = disk_cleanup.cleanup_hitch_disk_usage_if_needed()
 
         self.assertEqual(cleaned, 1)
-        # Initial walk + exactly one re-walk after the single successful removal.
-        self.assertEqual(mock_size.call_count, 2)
+        self.assertEqual(mock_size.call_count, 3)
         self.assertEqual(
             [call.args[0] for call in mock_cleanup.call_args_list],
             [first_path, second_path],
         )
 
-    def test_failed_removal_does_not_rewalk(self) -> None:
+    def test_cleanup_plans_enough_deletions_from_worktree_usage_snapshot(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            patch(
+                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                return_value=True,
+            ) as mock_cleanup,
+            patch(
+                "hitch.main.disk_cleanup._directory_size",
+                side_effect=[500, 125, 125, 125, 125],
+            ) as mock_size,
+        ):
+            root = Path(raw)
+            hitch_home = root / ".hitch"
+            managed = root / "managed"
+            hitch_home.mkdir()
+            managed.mkdir()
+            archived_at = timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE
+            paths: list[str] = []
+            for index in range(4):
+                path = self._managed_path(root, f"old-{index}")
+                paths.append(path)
+                self._session(
+                    thread_id=f"old-{index}",
+                    cwd=path,
+                    archived=True,
+                    archived_at=archived_at,
+                )
+            with (
+                override_settings(
+                    HITCH_HOME_DIR=hitch_home,
+                    HITCH_WORKTREES_DIR=managed,
+                    HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=20,
+                ),
+                patch(
+                    "hitch.main.disk_cleanup.shutil.disk_usage",
+                    return_value=SimpleNamespace(total=1000, used=1000),
+                ),
+            ):
+                cleaned = disk_cleanup.cleanup_hitch_disk_usage_if_needed()
+
+        self.assertEqual(cleaned, 3)
+        self.assertEqual(mock_size.call_count, 5)
+        self.assertEqual(
+            [call.args[0] for call in mock_cleanup.call_args_list],
+            paths[:3],
+        )
+
+    def test_failed_removal_falls_back_to_later_candidate(self) -> None:
         from hitch.main.worktrees import WorktreeCleanupError
 
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
                 "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
-                side_effect=WorktreeCleanupError("boom"),
+                side_effect=[WorktreeCleanupError("boom"), True],
             ) as mock_cleanup,
             patch(
                 "hitch.main.disk_cleanup._directory_size",
-                side_effect=[300],
+                side_effect=[300, 150, 150],
             ) as mock_size,
             patch("hitch.main.disk_cleanup.logger.exception"),
         ):
@@ -299,11 +344,19 @@ class DiskCleanupTests(TestCase):
             hitch_home.mkdir()
             managed.mkdir()
             old_path = self._managed_path(root, "old")
+            fallback_path = self._managed_path(root, "fallback")
+            archived_at = timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE
             self._session(
                 thread_id="old",
                 cwd=old_path,
                 archived=True,
-                archived_at=timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE,
+                archived_at=archived_at,
+            )
+            self._session(
+                thread_id="fallback",
+                cwd=fallback_path,
+                archived=True,
+                archived_at=archived_at,
             )
             with (
                 override_settings(
@@ -318,10 +371,12 @@ class DiskCleanupTests(TestCase):
             ):
                 cleaned = disk_cleanup.cleanup_hitch_disk_usage_if_needed()
 
-        self.assertEqual(cleaned, 0)
-        # Only the initial walk; the failed removal must not re-walk the tree.
-        self.assertEqual(mock_size.call_count, 1)
-        mock_cleanup.assert_called_once_with(old_path)
+        self.assertEqual(cleaned, 1)
+        self.assertEqual(mock_size.call_count, 3)
+        self.assertEqual(
+            [call.args[0] for call in mock_cleanup.call_args_list],
+            [old_path, fallback_path],
+        )
 
     def test_unarchived_user_session_protects_shared_worktree(self) -> None:
         with (
@@ -406,12 +461,113 @@ class DiskCleanupTests(TestCase):
 
             cleaned = self._run_cleanup(
                 root=root,
-                sizes=[300, 100],
+                sizes=[300, 150],
                 mock_cleanup=mock_cleanup,
             )
 
         self.assertEqual(cleaned, 1)
         mock_cleanup.assert_called_once_with(old_path)
+
+    def test_old_orphaned_managed_worktree_is_cleanup_candidate(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            patch(
+                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                return_value=True,
+            ) as mock_cleanup,
+        ):
+            root = Path(raw)
+            old_created_at = (
+                timezone.now()
+                - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE
+                - timedelta(hours=1)
+            )
+            orphan_path = (
+                root
+                / "managed"
+                / "repo"
+                / f"{old_created_at.strftime('%Y%m%d%H%M%S')}-abcdef12"
+            )
+            with patch(
+                "hitch.main.disk_cleanup.discover_managed_worktrees",
+                return_value=[orphan_path],
+            ):
+                cleaned = self._run_cleanup(
+                    root=root,
+                    sizes=[300, 150],
+                    mock_cleanup=mock_cleanup,
+                )
+
+        self.assertEqual(cleaned, 1)
+        mock_cleanup.assert_called_once_with(str(orphan_path))
+
+    def test_recent_orphaned_managed_worktree_is_preserved(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            patch(
+                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                return_value=True,
+            ) as mock_cleanup,
+        ):
+            root = Path(raw)
+            orphan_path = (
+                root
+                / "managed"
+                / "repo"
+                / f"{timezone.now().strftime('%Y%m%d%H%M%S')}-abcdef12"
+            )
+            with patch(
+                "hitch.main.disk_cleanup.discover_managed_worktrees",
+                return_value=[orphan_path],
+            ):
+                cleaned = self._run_cleanup(
+                    root=root,
+                    sizes=[300],
+                    mock_cleanup=mock_cleanup,
+                )
+
+        self.assertEqual(cleaned, 0)
+        mock_cleanup.assert_not_called()
+
+    def test_active_orphaned_managed_worktree_is_preserved(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            patch(
+                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                return_value=True,
+            ) as mock_cleanup,
+        ):
+            root = Path(raw)
+            old_created_at = (
+                timezone.now()
+                - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE
+                - timedelta(hours=1)
+            )
+            orphan_path = (
+                root
+                / "managed"
+                / "repo"
+                / f"{old_created_at.strftime('%Y%m%d%H%M%S')}-abcdef12"
+            )
+            CodexInstance.objects.create(
+                pid=123,
+                thread_id="active",
+                cwd=str(orphan_path),
+                events_path="/tmp/events.jsonl",
+                status=CodexInstance.STATUS_RUNNING,
+            )
+            with patch(
+                "hitch.main.disk_cleanup.discover_managed_worktrees",
+                return_value=[orphan_path],
+            ):
+                cleaned = self._run_cleanup(
+                    root=root,
+                    sizes=[300],
+                    mock_cleanup=mock_cleanup,
+                )
+
+        self.assertEqual(cleaned, 0)
+        mock_cleanup.assert_not_called()
 
     def test_active_system_session_is_not_finished_for_cleanup(self) -> None:
         with (
@@ -452,7 +608,7 @@ class DiskCleanupTests(TestCase):
 
             cleaned = self._run_cleanup(
                 root=root,
-                sizes=[300, 100],
+                sizes=[300, 150],
                 mock_cleanup=mock_cleanup,
             )
 
