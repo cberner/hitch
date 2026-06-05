@@ -13,6 +13,7 @@ urlpatterns = [
     path("profile/", hitch.main.views.profile, name="profile"),
     path("logout/", hitch.main.views.logout, name="logout"),
     path("nuke-codex/", hitch.main.views.nuke_codex, name="nuke_codex"),
+    path("health/", hitch.main.views.health_dashboard, name="health_dashboard"),
     path("usage/", hitch.main.views.usage, name="usage"),
     path("inbox/", hitch.main.views.inbox, name="inbox"),
     path("autonomous-goals/", hitch.main.views.autonomous_goals, name="autonomous_goals"),

@@ -60,6 +60,7 @@ from hitch.main import (
     coding_agents,
     demo,
     disk_cleanup,
+    health,
     rate_limit,
     rollout,
     session_index,
@@ -4574,6 +4575,7 @@ def profile(request: HttpRequest) -> HttpResponse:
             "profile_status": "Signed in" if user is not None else "Signed out",
             "logout_url": reverse("logout") if user is not None else "",
             "nuke_codex_url": reverse("nuke_codex") if user is not None else "",
+            "health_url": reverse("health_dashboard") if user is not None else "",
             "nuked_count": _parse_nuked_count(request.GET.get("nuked")),
             **usage_context.template_context,
         },
@@ -4612,6 +4614,28 @@ def _profile_usage_context(request: HttpRequest) -> UsageContext:
             **settings_context,
         },
         cookie_updates={},
+    )
+
+
+@require_http_methods(["GET"])
+def health_dashboard(request: HttpRequest) -> HttpResponse:
+    """Hitch health dashboard: leak and backlog signals on one page.
+
+    Linked from the bottom of the profile page. Requires authentication since
+    it exposes operational internals. The copy block is built to be long-pressed
+    and pasted into a chat with the assistant when diagnosing issues.
+    """
+    if _authenticated_user(request) is None:
+        return redirect(f"{reverse('login')}?next={reverse('health_dashboard')}")
+    report = health.collect_health_report()
+    return render(
+        request,
+        "health.html",
+        {
+            "report": report,
+            "copy_text": report.copy_text(),
+            "profile_url": reverse("profile"),
+        },
     )
 
 

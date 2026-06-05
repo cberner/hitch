@@ -1410,6 +1410,16 @@ def nuke_codex_app_servers(*, proc_root: Path = Path("/proc")) -> int:
     return killed
 
 
+def count_running_codex_app_servers(*, proc_root: Path = Path("/proc")) -> int:
+    """Number of ``codex app-server`` processes this deployment has running.
+
+    Read-only counterpart to ``nuke_codex_app_servers``: a health surface for
+    spotting leaked app-servers (each holds a CODEX_HOME state-DB connection)
+    without killing anything.
+    """
+    return sum(1 for _ in _iter_codex_app_server_pids(proc_root=proc_root))
+
+
 def _reaped_turn_lost_auto_review(instance: CodexInstance) -> bool:
     """Whether a reaped COMPLETED turn's auto-PR/QA follow-up was lost.
 

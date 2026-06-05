@@ -107,6 +107,48 @@ def cleanup_hitch_disk_usage_if_needed() -> int:
     return cleaned
 
 
+@dataclass(frozen=True)
+class HitchDiskUsage:
+    """Snapshot of ``~/.hitch`` disk consumption against its cleanup ceiling."""
+
+    used_bytes: int
+    limit_bytes: int
+    disk_total_bytes: int
+
+    @property
+    def over_limit(self) -> bool:
+        return self.used_bytes > self.limit_bytes
+
+    @property
+    def percent_of_disk(self) -> float:
+        if self.disk_total_bytes <= 0:
+            return 0.0
+        return self.used_bytes / self.disk_total_bytes * 100.0
+
+
+def hitch_home_disk_usage() -> HitchDiskUsage | None:
+    """Read-only view of the same numbers ``cleanup_hitch_disk_usage_if_needed`` acts on.
+
+    Returns ``None`` when the host disk cannot be inspected so callers can
+    render "unavailable" rather than a misleading zero.
+    """
+    hitch_home = _hitch_home_dir()
+    usage_path = _existing_disk_usage_path(hitch_home)
+    try:
+        disk_total = shutil.disk_usage(usage_path).total
+    except OSError:
+        logger.exception("failed to inspect disk usage for %s", usage_path)
+        return None
+    if disk_total <= 0:
+        return None
+    limit_bytes = int(disk_total * (_max_allowed_percent() / 100.0))
+    return HitchDiskUsage(
+        used_bytes=_directory_size(hitch_home),
+        limit_bytes=limit_bytes,
+        disk_total_bytes=disk_total,
+    )
+
+
 def _cleanup_candidates(*, now: datetime) -> list[_CleanupCandidate]:
     context = _cleanup_context(now=now)
     candidates: list[_CleanupCandidate] = []
