@@ -914,36 +914,41 @@ class LaunchWorkerProcessTests(TestCase):
     def test_direct_launches_manage_command_in_new_session(self, mock_popen: MagicMock) -> None:
         mock_popen.return_value = SimpleNamespace(pid=999)
 
-        launch = codex_pool._launch_worker_process(instance_id=7)
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_WORKER_LOG_DIR=Path(raw)),
+        ):
+            launch = codex_pool._launch_worker_process(instance_id=7)
 
-        args, kwargs = mock_popen.call_args
-        argv = args[0]
-        self.assertEqual(launch.pid, 999)
-        self.assertEqual(launch.scope_unit, "")
-        self.assertEqual(argv[1].endswith("manage.py"), True)
-        self.assertEqual(argv[2], "codex_worker")
-        self.assertIn("--instance-id", argv)
-        self.assertEqual(argv[argv.index("--instance-id") + 1], "7")
-        # The prompt is *not* passed on the command line — it lives on the
-        # CodexInstance row so a leading '-' can't be reinterpreted as an
-        # argparse option.
-        self.assertNotIn("--prompt", argv)
-        # The worker must outlive the Django process, so it gets its own
-        # session and all stdio is redirected to /dev/null.
-        self.assertTrue(kwargs["start_new_session"])
-        from subprocess import DEVNULL
+            args, kwargs = mock_popen.call_args
+            argv = args[0]
+            self.assertEqual(launch.pid, 999)
+            self.assertEqual(launch.scope_unit, "")
+            self.assertEqual(argv[1].endswith("manage.py"), True)
+            self.assertEqual(argv[2], "codex_worker")
+            self.assertIn("--instance-id", argv)
+            self.assertEqual(argv[argv.index("--instance-id") + 1], "7")
+            # The prompt is *not* passed on the command line — it lives on the
+            # CodexInstance row so a leading '-' can't be reinterpreted as an
+            # argparse option.
+            self.assertNotIn("--prompt", argv)
+            # The worker must outlive the Django process, so it gets its own
+            # session; stderr is kept in a per-worker log for crash forensics.
+            self.assertTrue(kwargs["start_new_session"])
+            from subprocess import DEVNULL
 
-        self.assertEqual(kwargs["stdin"], DEVNULL)
-        self.assertEqual(kwargs["stdout"], DEVNULL)
-        self.assertEqual(kwargs["stderr"], DEVNULL)
-        self.assertTrue(kwargs["close_fds"])
-        self.assertEqual(
-            kwargs["env"]["DJANGO_SETTINGS_MODULE"],
-            "hitch.settings.dev",
-        )
-        # No effort passed → no --reasoning-effort on the CLI; Codex's own
-        # default takes over inside the worker.
-        self.assertNotIn("--reasoning-effort", argv)
+            self.assertEqual(kwargs["stdin"], DEVNULL)
+            self.assertEqual(kwargs["stdout"], DEVNULL)
+            self.assertEqual(Path(kwargs["stderr"].name), Path(raw) / "7.log")
+            self.assertTrue(kwargs["stderr"].closed)
+            self.assertTrue(kwargs["close_fds"])
+            self.assertEqual(
+                kwargs["env"]["DJANGO_SETTINGS_MODULE"],
+                "hitch.settings.dev",
+            )
+            # No effort passed → no --reasoning-effort on the CLI; Codex's own
+            # default takes over inside the worker.
+            self.assertNotIn("--reasoning-effort", argv)
 
     @override_settings(
         CODEX_WORKER_ISOLATION="systemd",
@@ -1932,6 +1937,211 @@ class ReconcileAndLookupTests(TestCase):
         )
         self.assertIn("auto-approval review timed out", instance.error)
         self.assertIn("pkill -f target/release/bench", instance.error)
+
+    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_dead_records_pending_auto_approval(
+        self, _mock_worker_alive: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = Path(raw) / "events.jsonl"
+            events_path.write_text(
+                json.dumps(
+                    {
+                        "method": "item/started",
+                        "payload": {
+                            "item": {
+                                "type": "commandExecution",
+                                "status": "inProgress",
+                                "command": "/bin/bash -lc 'just test'",
+                            },
+                        },
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "method": "item/autoApprovalReview/started",
+                        "payload": {
+                            "action": {"command": "/bin/bash -lc 'just test'"},
+                            "review": {"status": "inProgress"},
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            instance = self._make(
+                pid=14,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(events_path),
+            )
+
+            n = codex_pool.reconcile_dead()
+
+        self.assertEqual(n, 1)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertIn(
+            "worker process exited before reporting completion", instance.error
+        )
+        self.assertIn("auto-approval review in progress", instance.error)
+        self.assertIn("/bin/bash -lc 'just test'", instance.error)
+
+    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_dead_ignores_completed_auto_approval_start(
+        self, _mock_worker_alive: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = Path(raw) / "events.jsonl"
+            action = {"command": "/bin/bash -lc 'just test'"}
+            events_path.write_text(
+                json.dumps(
+                    {
+                        "method": "item/autoApprovalReview/started",
+                        "payload": {
+                            "action": action,
+                            "review": {"status": "inProgress"},
+                        },
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "method": "item/autoApprovalReview/completed",
+                        "payload": {
+                            "action": action,
+                            "review": {"status": "approved"},
+                        },
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "method": "item/completed",
+                        "payload": {
+                            "item": {
+                                "type": "agentMessage",
+                                "text": "Continuing after approved command.",
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            instance = self._make(
+                pid=15,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(events_path),
+            )
+
+            n = codex_pool.reconcile_dead()
+
+        self.assertEqual(n, 1)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertIn("agent last said: Continuing after approved command.", instance.error)
+        self.assertNotIn("auto-approval review in progress", instance.error)
+
+    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_dead_records_last_agent_message(
+        self, _mock_worker_alive: MagicMock
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = Path(raw) / "events.jsonl"
+            events_path.write_text(
+                json.dumps(
+                    {
+                        "method": "item/completed",
+                        "payload": {
+                            "item": {
+                                "type": "agentMessage",
+                                "text": "Running the base side of the paired measurement now.",
+                            },
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            instance = self._make(
+                pid=15,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(events_path),
+            )
+
+            n = codex_pool.reconcile_dead()
+
+        self.assertEqual(n, 1)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertIn(
+            "worker process exited before reporting completion", instance.error
+        )
+        self.assertIn(
+            "agent last said: Running the base side of the paired measurement now.",
+            instance.error,
+        )
+
+    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_dead_records_worker_log_tail(
+        self, _mock_worker_alive: MagicMock
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_WORKER_LOG_DIR=Path(raw) / "logs"),
+        ):
+            instance = self._make(
+                pid=16,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(Path(raw) / "missing.jsonl"),
+            )
+            log_path = codex_pool.worker_log_path(instance.pk)
+            log_path.parent.mkdir(parents=True)
+            log_path.write_text(
+                "worker starting\n"
+                "Traceback (most recent call last):\n"
+                "SystemExit: transport closed\n",
+                encoding="utf-8",
+            )
+
+            n = codex_pool.reconcile_dead()
+
+        self.assertEqual(n, 1)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertIn(
+            "worker process exited before reporting completion", instance.error
+        )
+        self.assertIn("worker log:", instance.error)
+        self.assertIn("SystemExit: transport closed", instance.error)
+
+    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    def test_reconcile_dead_ignores_worker_log_tail_when_test_logging_disabled(
+        self, _mock_worker_alive: MagicMock
+    ) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_EVENTS_DIR=Path(raw), CODEX_WORKER_LOG_DIR=None),
+        ):
+            instance = self._make(
+                pid=17,
+                status=CodexInstance.STATUS_RUNNING,
+                events_path=str(Path(raw) / "missing.jsonl"),
+            )
+            log_path = codex_pool.worker_log_path(instance.pk)
+            log_path.parent.mkdir(parents=True)
+            log_path.write_text("stale host log\n", encoding="utf-8")
+
+            n = codex_pool.reconcile_dead()
+
+        self.assertEqual(n, 1)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertEqual(
+            instance.error,
+            "worker process exited before reporting completion",
+        )
 
     @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_cancels_pending_requests_of_dead_worker(
@@ -4820,6 +5030,21 @@ class EventsDirTests(TestCase):
                 Path.home() / ".hitch" / "codex_events",
             )
 
+    def test_worker_logs_dir_uses_setting_when_configured(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_WORKER_LOG_DIR=Path(raw)),
+        ):
+            self.assertEqual(codex_pool.worker_logs_dir(), Path(raw))
+            self.assertEqual(codex_pool.worker_log_path(7), Path(raw) / "7.log")
+
+    def test_worker_logs_dir_falls_back_under_events_dir(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_WORKER_LOG_DIR=None, CODEX_EVENTS_DIR=Path(raw)),
+        ):
+            self.assertEqual(codex_pool.worker_logs_dir(), Path(raw) / "worker_logs")
+
 
 class _FakePayload(BaseModel):
     method_kind: str = "demo"
@@ -5086,6 +5311,14 @@ class GoalNotificationForwarderTests(TestCase):
         self.assertIs(queue.get_nowait(), completed)
 
 
+class _BrokenStderr:
+    def write(self, _value: str) -> int:
+        raise OSError("stderr unavailable")
+
+    def flush(self) -> None:
+        raise OSError("stderr unavailable")
+
+
 class CodexWorkerCommandTests(TestCase):
     def _make_instance(
         self,
@@ -5295,6 +5528,75 @@ class CodexWorkerCommandTests(TestCase):
         instance.refresh_from_db()
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertEqual(instance.error, "forcibly stopped by user")
+
+    @patch("hitch.main.management.commands.codex_worker.sys.stderr", new_callable=StringIO)
+    @patch("hitch.main.management.commands.codex_worker._notify_system_agents")
+    @patch("hitch.main.management.commands.codex_worker._run_turn")
+    def test_worker_records_base_exception_before_reraising(
+        self,
+        mock_run_turn: MagicMock,
+        _mock_notify: MagicMock,
+        stderr: StringIO,
+    ) -> None:
+        mock_run_turn.side_effect = SystemExit("transport closed")
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_WORKER_LOG_DIR=Path(raw) / "worker-logs"),
+        ):
+            instance = self._make_instance(Path(raw))
+
+            with self.assertRaises(SystemExit):
+                call_command("codex_worker", "--instance-id", str(instance.pk))
+
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertEqual(instance.error, "SystemExit('transport closed')")
+        self.assertIn("failed with SystemExit", stderr.getvalue())
+
+    @patch("hitch.main.management.commands.codex_worker.sys.stderr", new_callable=_BrokenStderr)
+    @patch("hitch.main.management.commands.codex_worker._notify_system_agents")
+    @patch("hitch.main.management.commands.codex_worker._run_turn")
+    def test_worker_stderr_errors_do_not_block_completed_status(
+        self,
+        mock_run_turn: MagicMock,
+        _mock_notify: MagicMock,
+        _stderr: _BrokenStderr,
+    ) -> None:
+        mock_run_turn.return_value = SimpleNamespace(status=TurnStatus.completed)
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_WORKER_LOG_DIR=Path(raw) / "worker-logs"),
+        ):
+            instance = self._make_instance(Path(raw))
+
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
+        self.assertEqual(instance.error, "")
+
+    @patch("hitch.main.management.commands.codex_worker.sys.stderr", new_callable=_BrokenStderr)
+    @patch("hitch.main.management.commands.codex_worker._notify_system_agents")
+    @patch("hitch.main.management.commands.codex_worker._run_turn")
+    def test_worker_stderr_errors_do_not_skip_failed_status(
+        self,
+        mock_run_turn: MagicMock,
+        _mock_notify: MagicMock,
+        _stderr: _BrokenStderr,
+    ) -> None:
+        mock_run_turn.side_effect = RuntimeError("boom")
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_WORKER_LOG_DIR=Path(raw) / "worker-logs"),
+        ):
+            instance = self._make_instance(Path(raw))
+
+            with self.assertRaises(RuntimeError):
+                call_command("codex_worker", "--instance-id", str(instance.pk))
+
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertEqual(instance.error, "RuntimeError('boom')")
 
     @patch("hitch.main.management.commands.codex_worker.Codex")
     def test_enable_memories_row_sets_app_server_override(

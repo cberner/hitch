@@ -31,7 +31,7 @@ from collections.abc import Callable, Generator, Iterable
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, TypeVar, cast
+from typing import Any, BinaryIO, TypeVar, cast
 
 from django.conf import settings
 from django.db import transaction
@@ -1621,10 +1621,16 @@ def _dead_worker_error(instance: CodexInstance) -> str:
     if instance.error:
         return instance.error
     detail = _dead_worker_last_event_detail(instance.events_path)
+    log_detail = _dead_worker_log_detail(instance.pk)
     if detail:
+        message = f"worker process exited before reporting completion; last event: {detail}"
+        if log_detail:
+            message = f"{message}; worker log: {log_detail}"
+        return message
+    if log_detail:
         return (
             "worker process exited before reporting completion; "
-            f"last event: {detail}"
+            f"worker log: {log_detail}"
         )
     return "worker process exited before reporting completion"
 
@@ -1638,7 +1644,10 @@ def _dead_worker_last_event_detail(events_path: str) -> str:
     except OSError:
         return ""
 
+    auto_approval_started_detail = ""
+    completed_auto_approval_keys: set[str] = set()
     failed_command_detail = ""
+    fallback_detail = ""
     for line in reversed(recent_lines):
         try:
             event = json.loads(line)
@@ -1651,16 +1660,26 @@ def _dead_worker_last_event_detail(events_path: str) -> str:
         if not isinstance(payload, dict):
             continue
         if method == "item/autoApprovalReview/completed":
+            completed_auto_approval_keys.add(_auto_approval_event_key(payload))
             detail = _auto_approval_event_detail(payload)
             if detail:
                 return detail
+        if (
+            method == "item/autoApprovalReview/started"
+            and _auto_approval_event_key(payload) not in completed_auto_approval_keys
+        ):
+            detail = _auto_approval_event_detail(payload)
+            if detail and not auto_approval_started_detail:
+                auto_approval_started_detail = detail
         if method == "error":
             detail = _error_event_detail(payload)
             if detail:
                 return detail
         if method == "item/completed" and not failed_command_detail:
             failed_command_detail = _failed_command_event_detail(payload)
-    return failed_command_detail
+        if not fallback_detail:
+            fallback_detail = _last_visible_event_detail(method, payload)
+    return failed_command_detail or auto_approval_started_detail or fallback_detail
 
 
 def _auto_approval_event_detail(payload: dict[str, Any]) -> str:
@@ -1683,6 +1702,16 @@ def _auto_approval_event_detail(payload: dict[str, Any]) -> str:
     if rationale:
         return f"auto-approval review {status_text}: {rationale}"
     return f"auto-approval review {status_text}"
+
+
+def _auto_approval_event_key(payload: dict[str, Any]) -> str:
+    action = payload.get("action")
+    if not isinstance(action, dict):
+        return ""
+    try:
+        return json.dumps(action, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return str(action)
 
 
 def _error_event_detail(payload: dict[str, Any]) -> str:
@@ -1710,7 +1739,47 @@ def _failed_command_event_detail(payload: dict[str, Any]) -> str:
     return "command failed"
 
 
+def _last_visible_event_detail(method: object, payload: dict[str, Any]) -> str:
+    if method not in ("item/started", "item/completed"):
+        return ""
+    item = payload.get("item")
+    if not isinstance(item, dict):
+        return ""
+    item_type = item.get("type")
+    if item_type == "commandExecution":
+        command = _compact_error_detail(str(item.get("command") or ""), limit=200)
+        if not command:
+            return ""
+        status = str(item.get("status") or "").strip()
+        if method == "item/started" or status == "inProgress":
+            return f"command started: `{command}`"
+        if status == "completed":
+            return f"command completed: `{command}`"
+        return f"command {status}: `{command}`" if status else f"command: `{command}`"
+    if item_type == "agentMessage":
+        text = _compact_error_detail(str(item.get("text") or ""), limit=240)
+        if text:
+            return f"agent last said: {text}"
+    return ""
+
+
+def _dead_worker_log_detail(instance_id: int) -> str:
+    if not worker_log_io_enabled():
+        return ""
+    try:
+        with worker_log_path(instance_id).open(encoding="utf-8", errors="replace") as log_file:
+            recent_lines = deque(log_file, maxlen=20)
+    except OSError:
+        return ""
+    tail = [line.strip() for line in recent_lines if line.strip()]
+    if not tail:
+        return ""
+    return _compact_error_detail(" | ".join(tail[-3:]), limit=500)
+
+
 def _approval_status_text(status: str) -> str:
+    if status == "inProgress":
+        return "in progress"
     if status == "timedOut":
         return "timed out"
     return status
@@ -1793,6 +1862,32 @@ def events_dir() -> Path:
     if configured is not None:
         return Path(configured)
     return Path.home() / ".hitch" / "codex_events"
+
+
+def worker_logs_dir() -> Path:
+    """Filesystem directory holding detached worker stderr logs."""
+    configured = getattr(settings, "CODEX_WORKER_LOG_DIR", None)
+    if configured is not None:
+        return Path(configured)
+    return events_dir() / "worker_logs"
+
+
+def worker_log_path(instance_id: int) -> Path:
+    """Return the durable stderr log path for a Codex worker."""
+    return worker_logs_dir() / f"{instance_id}.log"
+
+
+def worker_log_io_enabled() -> bool:
+    """Whether this process should touch worker diagnostic logs.
+
+    These logs are an optional visibility side channel; the CodexInstance row is
+    the lifecycle source of truth. Tests opt in with an explicit temp log dir so
+    assertions cannot depend on stale host files under ``~/.hitch``.
+    """
+    return not (
+        getattr(settings, "TESTING", False)
+        and getattr(settings, "CODEX_WORKER_LOG_DIR", None) is None
+    )
 
 
 def input_attachments_dir() -> Path:
@@ -2838,24 +2933,52 @@ def _launch_worker_process(
     )
 
     requested_isolation = _worker_isolation()
-    if requested_isolation == _WORKER_ISOLATION_DIRECT:
-        proc = _popen_detached(argv, env=env)
-        return WorkerLaunch(pid=proc.pid, proc=proc)
-    if requested_isolation not in (
-        _WORKER_ISOLATION_AUTO,
-        _WORKER_ISOLATION_SYSTEMD,
-    ):
-        raise ValueError(f"invalid CODEX_WORKER_ISOLATION: {requested_isolation!r}")
-    systemd_run = _systemd_run_for_isolation(requested_isolation)
-    if systemd_run is None:
-        proc = _popen_detached(argv, env=env)
-        return WorkerLaunch(pid=proc.pid, proc=proc)
-    return _launch_systemd_worker(
-        systemd_run=systemd_run,
-        scope_unit=_scope_unit_for_instance(instance_id),
-        worker_argv=argv,
-        env=env,
-    )
+    worker_log = _open_worker_log_file(instance_id)
+    try:
+        stderr: Any = worker_log if worker_log is not None else subprocess.DEVNULL
+        if requested_isolation == _WORKER_ISOLATION_DIRECT:
+            proc = _popen_detached(argv, env=env, stderr=stderr)
+            return WorkerLaunch(pid=proc.pid, proc=proc)
+        if requested_isolation not in (
+            _WORKER_ISOLATION_AUTO,
+            _WORKER_ISOLATION_SYSTEMD,
+        ):
+            raise ValueError(f"invalid CODEX_WORKER_ISOLATION: {requested_isolation!r}")
+        systemd_run = _systemd_run_for_isolation(requested_isolation)
+        if systemd_run is None:
+            proc = _popen_detached(argv, env=env, stderr=stderr)
+            return WorkerLaunch(pid=proc.pid, proc=proc)
+        return _launch_systemd_worker(
+            systemd_run=systemd_run,
+            scope_unit=_scope_unit_for_instance(instance_id),
+            worker_argv=argv,
+            env=env,
+            stderr=stderr,
+            stderr_capture=worker_log,
+        )
+    finally:
+        if worker_log is not None:
+            worker_log.close()
+
+
+def _open_worker_log_file(instance_id: int) -> BinaryIO | None:
+    if not worker_log_io_enabled():
+        return None
+    try:
+        log_path = worker_log_path(instance_id)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_file = log_path.open("a+b", buffering=0)
+    except OSError:
+        logger.exception("failed to open Codex worker log for instance %s", instance_id)
+        return None
+    _write_worker_log_marker(log_file, f"launcher pid={os.getpid()} starting worker")
+    return log_file
+
+
+def _write_worker_log_marker(log_file: BinaryIO, message: str) -> None:
+    line = f"{timezone.now().isoformat()} {message}\n".encode("utf-8", errors="replace")
+    with contextlib.suppress(Exception):
+        log_file.write(line)
 
 
 def _systemd_run_for_isolation(requested_isolation: str) -> str | None:
@@ -2893,8 +3016,28 @@ def _launch_systemd_worker(
     scope_unit: str,
     worker_argv: list[str],
     env: dict[str, str],
+    stderr: Any = subprocess.DEVNULL,
+    stderr_capture: BinaryIO | None = None,
 ) -> WorkerLaunch:
     _ensure_systemd_worker_slice()
+    if stderr_capture is not None:
+        stderr_offset = stderr_capture.tell()
+        proc = _popen_detached(
+            _systemd_scope_argv(
+                systemd_run=systemd_run,
+                scope_unit=scope_unit,
+                worker_argv=worker_argv,
+            ),
+            env=env,
+            stderr=stderr,
+        )
+        _raise_for_immediate_systemd_run_failure(
+            proc,
+            scope_unit,
+            stderr_capture,
+            stderr_offset=stderr_offset,
+        )
+        return WorkerLaunch(pid=proc.pid, proc=proc, scope_unit=scope_unit)
     with tempfile.TemporaryFile() as stderr_file:
         proc = _popen_detached(
             _systemd_scope_argv(
@@ -3309,7 +3452,11 @@ def _systemd_scope_argv(
 
 
 def _raise_for_immediate_systemd_run_failure(
-    proc: subprocess.Popen[bytes], scope_unit: str, stderr_file: Any
+    proc: subprocess.Popen[bytes],
+    scope_unit: str,
+    stderr_file: Any,
+    *,
+    stderr_offset: int = 0,
 ) -> None:
     try:
         returncode = proc.wait(timeout=0.25)
@@ -3317,7 +3464,7 @@ def _raise_for_immediate_systemd_run_failure(
         return
     if returncode == 0:
         return
-    stderr_file.seek(0)
+    stderr_file.seek(stderr_offset)
     stderr = stderr_file.read()
     if isinstance(stderr, bytes):
         detail = stderr.decode("utf-8", errors="replace").strip()
