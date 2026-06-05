@@ -7758,7 +7758,10 @@ class SpecCriticWorkflowTests(TestCase):
             status=CodexInstance.STATUS_FAILED,
             agent_kind=system_agents.PR_QA_AGENT_KIND,
             display_author=system_agents.QA_DISPLAY_AUTHOR,
-            error="worker process exited before reporting completion",
+            error=(
+                "worker process exited before reporting completion; "
+                "last event: command failed: `/bin/bash -lc \"which sqlite3\"`"
+            ),
             user_message_index=1,
         )
 
@@ -10522,6 +10525,166 @@ class AutonomousGoalWorkflowTests(TestCase):
             run.instance_id, expected_thread_id=run.thread_id
         )
 
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_dead_autonomous_goal_candidate_worker_is_retried_once(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Production issues",
+            goal="Inspect production logs and the main database.",
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={"autonomous_goal_id": autonomous_goal.pk},
+        )
+        instance = _instance(
+            thread_id="candidate-thread-1",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_FAILED,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            error=(
+                "worker process exited before reporting completion; "
+                "last event: command failed: `/bin/bash -lc \"which sqlite3\"`"
+            ),
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id="candidate-thread-1",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread-2",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        run.refresh_from_db()
+        workflow.refresh_from_db()
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertIn("which sqlite3", run.error)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(
+            workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING
+        )
+        self.assertEqual(
+            workflow.state[system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY],
+            {system_agents._AUTONOMOUS_GOAL_CANDIDATE_RETRY_KIND: 1},
+        )
+        self.assertEqual(
+            SystemAgentRun.objects.filter(
+                agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND
+            ).count(),
+            2,
+        )
+        self.assertFalse(ProposedSession.objects.exists())
+        mock_spawn.assert_called_once()
+        self.assertEqual(mock_spawn.call_args.kwargs["cwd"], "/repo")
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_dead_autonomous_goal_judge_worker_is_retried_once(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate_metadata = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo",
+            project=project,
+        )
+        candidate = {
+            "title": "Add parser coverage",
+            "implementation_direction": "Add focused rollout parser tests.",
+            "relevant_files": ["hitch/main/rollout.py"],
+        }
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING,
+            state={
+                "autonomous_goal_id": autonomous_goal.pk,
+                "candidate_session_id": candidate_metadata.pk,
+                "candidate": candidate,
+            },
+        )
+        instance = _instance(
+            thread_id="judge-thread-1",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_FAILED,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
+            error=(
+                "worker process exited before reporting completion; "
+                "last event: command failed: `/bin/bash -lc \"which sqlite3\"`"
+            ),
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
+            thread_id="judge-thread-1",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="judge-thread-2",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        run.refresh_from_db()
+        workflow.refresh_from_db()
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertIn("which sqlite3", run.error)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(
+            workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING
+        )
+        self.assertEqual(workflow.state["candidate"], candidate)
+        self.assertEqual(
+            workflow.state[system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY],
+            {system_agents._AUTONOMOUS_GOAL_JUDGE_RETRY_KIND: 1},
+        )
+        replacement_run = SystemAgentRun.objects.get(thread_id="judge-thread-2")
+        self.assertEqual(
+            replacement_run.agent_kind,
+            system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
+        )
+        self.assertEqual(replacement_run.status, SystemAgentRun.STATUS_RUNNING)
+        judge_metadata = SessionMetadata.objects.get(thread_id="judge-thread-2")
+        self.assertEqual(workflow.state["judge_session_id"], judge_metadata.pk)
+        mock_spawn.assert_called_once()
+        kwargs = mock_spawn.call_args.kwargs
+        self.assertEqual(
+            kwargs["agent_kind"], system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND
+        )
+        self.assertIn("Add parser coverage", kwargs["prompt"])
+
     @patch(
         "hitch.main.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
@@ -10797,6 +10960,9 @@ class AutonomousGoalWorkflowTests(TestCase):
                     ),
                     "relevant_files": ["hitch/main/rollout.py"],
                 },
+                system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {
+                    system_agents._AUTONOMOUS_GOAL_JUDGE_RETRY_KIND: 1
+                },
             },
         )
         instance = _instance(
@@ -10825,6 +10991,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
         self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED)
+        self.assertNotIn(
+            system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY,
+            workflow.state,
+        )
         proposal = ProposedSession.objects.get()
         self.assertEqual(proposal.title, "Add parser coverage")
         self.assertEqual(proposal.confidence, AutonomousGoal.CONFIDENCE_HIGH)

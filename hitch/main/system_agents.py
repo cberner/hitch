@@ -174,6 +174,11 @@ _WORKFLOW_TURN_DEATH_RETRY_LIMIT = 1
 _WORKER_EXITED_BEFORE_COMPLETION_ERROR = (
     "worker process exited before reporting completion"
 )
+_AUTONOMOUS_GOAL_CANDIDATE_RETRY_KIND = "autonomous_goal_candidate"
+_AUTONOMOUS_GOAL_JUDGE_RETRY_KIND = "autonomous_goal_judge"
+_AUTONOMOUS_GOAL_SPAWN_JUDGE_ACTION = "spawn_judge"
+_AUTONOMOUS_GOAL_RETRY_CANDIDATE_ACTION = "retry_candidate"
+_AUTONOMOUS_GOAL_RETRY_JUDGE_ACTION = "retry_judge"
 _PR_GATE_MERGE_CONFLICTS = "merge_conflicts"
 _PR_GATE_REVIEW = "review"
 _PR_GATE_CI = "ci"
@@ -1228,6 +1233,12 @@ class _AutonomousGoalAutoProposalStartSnapshot:
     auto_merge_to_local_branch: bool
     auto_merge_branch: str
     base_ref: str
+
+
+@dataclass(frozen=True)
+class _AutonomousGoalPostCommitAction:
+    kind: str
+    candidate: dict[str, Any] | None = None
 
 
 def _autonomous_goal_auto_proposal_start_snapshot(
@@ -2620,7 +2631,7 @@ def _retry_dead_system_feedback_worker(
     if (
         workflow.status != SystemWorkflow.STATUS_RUNNING
         or not retry_kind
-        or instance.error.strip() != _WORKER_EXITED_BEFORE_COMPLETION_ERROR
+        or not _is_worker_exited_before_completion_error(instance.error)
     ):
         return False
     retries = _feedback_worker_death_retries(workflow.state)
@@ -2668,14 +2679,21 @@ def _feedback_worker_retry_kind(workflow: SystemWorkflow) -> str:
 
 
 def _feedback_worker_death_retries(state: Mapping[str, Any]) -> dict[str, int]:
+    return {
+        key: value
+        for key, value in _workflow_turn_death_retries(state).items()
+        if key in ("qa_feedback", "pr_feedback")
+    }
+
+
+def _workflow_turn_death_retries(state: Mapping[str, Any]) -> dict[str, int]:
     raw = state.get(_WORKFLOW_TURN_DEATH_RETRY_STATE_KEY)
     if not isinstance(raw, dict):
         return {}
     retries: dict[str, int] = {}
-    for key in ("qa_feedback", "pr_feedback"):
-        value = raw.get(key)
+    for key, value in raw.items():
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-            retries[key] = value
+            retries[str(key)] = value
     return retries
 
 
@@ -2692,7 +2710,13 @@ def _clear_feedback_worker_death_retries(
 def _state_without_feedback_worker_death_retry(
     state: Mapping[str, Any], retry_kind: str
 ) -> dict[str, Any]:
-    retries = _feedback_worker_death_retries(state)
+    return _state_without_workflow_turn_death_retry(state, retry_kind)
+
+
+def _state_without_workflow_turn_death_retry(
+    state: Mapping[str, Any], retry_kind: str
+) -> dict[str, Any]:
+    retries = _workflow_turn_death_retries(state)
     if retry_kind not in retries:
         return dict(state)
     retries.pop(retry_kind, None)
@@ -2702,6 +2726,10 @@ def _state_without_feedback_worker_death_retry(
     else:
         updated.pop(_WORKFLOW_TURN_DEATH_RETRY_STATE_KEY, None)
     return updated
+
+
+def _is_worker_exited_before_completion_error(error: str) -> bool:
+    return error.strip().startswith(_WORKER_EXITED_BEFORE_COMPLETION_ERROR)
 
 
 def _handle_pr_qa_agent_finished(
@@ -4882,7 +4910,7 @@ def _handle_autonomous_goal_agent_finished(
     instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
 ) -> None:
     autonomous_goal_id = _state_int(workflow, "autonomous_goal_id")
-    judge_candidate: dict[str, Any] | None = None
+    post_commit_action: _AutonomousGoalPostCommitAction | None = None
     autonomous_goal: AutonomousGoal | None = None
     # Read and parse the agent's JSONL events file before taking the write
     # lock: doing it inside the IMMEDIATE/select_for_update transaction below
@@ -4917,11 +4945,27 @@ def _handle_autonomous_goal_agent_finished(
                 surface_to_thread=False,
             )
             return
-        judge_candidate = _handle_autonomous_goal_agent_finished_locked(
+        post_commit_action = _handle_autonomous_goal_agent_finished_locked(
             instance, run, workflow, autonomous_goal, raw_output
         )
-    if judge_candidate is not None and autonomous_goal is not None:
-        _spawn_autonomous_goal_judge_or_block(workflow, autonomous_goal, judge_candidate)
+    if post_commit_action is None or autonomous_goal is None:
+        return
+    if post_commit_action.kind == _AUTONOMOUS_GOAL_SPAWN_JUDGE_ACTION:
+        if post_commit_action.candidate is not None:
+            _spawn_autonomous_goal_judge_or_block(
+                workflow, autonomous_goal, post_commit_action.candidate
+            )
+        return
+    if post_commit_action.kind == _AUTONOMOUS_GOAL_RETRY_CANDIDATE_ACTION:
+        _spawn_autonomous_goal_candidate_or_block(workflow, autonomous_goal)
+        return
+    if (
+        post_commit_action.kind == _AUTONOMOUS_GOAL_RETRY_JUDGE_ACTION
+        and post_commit_action.candidate is not None
+    ):
+        _spawn_autonomous_goal_judge_or_block(
+            workflow, autonomous_goal, post_commit_action.candidate
+        )
 
 
 def _handle_autonomous_goal_agent_finished_locked(
@@ -4930,10 +4974,13 @@ def _handle_autonomous_goal_agent_finished_locked(
     workflow: SystemWorkflow,
     autonomous_goal: AutonomousGoal,
     raw_output: str,
-) -> dict[str, Any] | None:
+) -> _AutonomousGoalPostCommitAction | None:
     if workflow.status != SystemWorkflow.STATUS_RUNNING:
         return None
     if instance.status != CodexInstance.STATUS_COMPLETED:
+        retry_action = _retry_dead_autonomous_goal_worker(instance, run, workflow)
+        if retry_action is not None:
+            return retry_action
         _fail_autonomous_goal_run_and_block_workflow(
             run,
             autonomous_goal,
@@ -4956,6 +5003,9 @@ def _handle_autonomous_goal_agent_finished_locked(
         run.raw_output = raw_output
         run.save(update_fields=["status", "output", "raw_output", "updated_at"])
         _store_autonomous_goal_memory(autonomous_goal, workflow, candidate_output)
+        state = _state_without_workflow_turn_death_retry(
+            workflow.state, _AUTONOMOUS_GOAL_CANDIDATE_RETRY_KIND
+        )
         if candidate_output["proposal"] is None:
             message = str(candidate_output["message"])
             ProposedSession.objects.create(
@@ -4974,14 +5024,17 @@ def _handle_autonomous_goal_agent_finished_locked(
             _record_autonomous_goal_no_proposal(autonomous_goal, workflow)
             workflow.step = STEP_AUTONOMOUS_GOAL_SKIPPED
             workflow.status = SystemWorkflow.STATUS_COMPLETED
-            workflow.state = {**workflow.state, "candidate": candidate_output}
+            workflow.state = {**state, "candidate": candidate_output}
             workflow.save(update_fields=["status", "step", "state", "updated_at"])
             return None
         candidate = cast(dict[str, Any], candidate_output["proposal"])
         workflow.step = STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING
-        workflow.state = {**workflow.state, "candidate": candidate}
+        workflow.state = {**state, "candidate": candidate}
         workflow.save(update_fields=["step", "state", "updated_at"])
-        return candidate
+        return _AutonomousGoalPostCommitAction(
+            _AUTONOMOUS_GOAL_SPAWN_JUDGE_ACTION,
+            candidate,
+        )
 
     if workflow.step != STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING:
         return None
@@ -4999,6 +5052,9 @@ def _handle_autonomous_goal_agent_finished_locked(
     run.raw_output = raw_output
     run.save(update_fields=["status", "output", "raw_output", "updated_at"])
 
+    state = _state_without_workflow_turn_death_retry(
+        workflow.state, _AUTONOMOUS_GOAL_JUDGE_RETRY_KIND
+    )
     candidate = workflow.state.get("candidate")
     if not isinstance(candidate, dict):
         candidate = {}
@@ -5044,7 +5100,7 @@ def _handle_autonomous_goal_agent_finished_locked(
         )
         _record_autonomous_goal_proposal_created(autonomous_goal)
         workflow.state = {
-            **workflow.state,
+            **state,
             "judgment": judgment,
             "proposal_id": proposal.pk,
             "autonomy": autonomous_goal.autonomy,
@@ -5067,10 +5123,60 @@ def _handle_autonomous_goal_agent_finished_locked(
         )
         _record_autonomous_goal_no_proposal(autonomous_goal, workflow)
         workflow.step = STEP_AUTONOMOUS_GOAL_SKIPPED
+        workflow.state = state
     workflow.status = SystemWorkflow.STATUS_COMPLETED
     workflow.state = {**workflow.state, "judgment": judgment}
     workflow.save(update_fields=["status", "step", "state", "updated_at"])
     return None
+
+
+def _retry_dead_autonomous_goal_worker(
+    instance: CodexInstance,
+    run: SystemAgentRun,
+    workflow: SystemWorkflow,
+) -> _AutonomousGoalPostCommitAction | None:
+    retry_kind = _autonomous_goal_worker_retry_kind(workflow)
+    if (
+        workflow.status != SystemWorkflow.STATUS_RUNNING
+        or not retry_kind
+        or not _is_worker_exited_before_completion_error(instance.error)
+    ):
+        return None
+    candidate: dict[str, Any] | None = None
+    if retry_kind == _AUTONOMOUS_GOAL_CANDIDATE_RETRY_KIND:
+        action_kind = _AUTONOMOUS_GOAL_RETRY_CANDIDATE_ACTION
+    else:
+        raw_candidate = workflow.state.get("candidate")
+        if not isinstance(raw_candidate, dict):
+            return None
+        candidate = raw_candidate
+        action_kind = _AUTONOMOUS_GOAL_RETRY_JUDGE_ACTION
+
+    retries = _workflow_turn_death_retries(workflow.state)
+    retry_count = retries.get(retry_kind, 0)
+    if retry_count >= _WORKFLOW_TURN_DEATH_RETRY_LIMIT:
+        return None
+
+    run.status = SystemAgentRun.STATUS_FAILED
+    run.error = f"autonomous goal worker failed: {instance.error}"
+    run.save(update_fields=["status", "error", "updated_at"])
+    workflow.state = {
+        **workflow.state,
+        _WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {
+            **retries,
+            retry_kind: retry_count + 1,
+        },
+    }
+    workflow.save(update_fields=["state", "updated_at"])
+    return _AutonomousGoalPostCommitAction(action_kind, candidate)
+
+
+def _autonomous_goal_worker_retry_kind(workflow: SystemWorkflow) -> str:
+    if workflow.step == STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING:
+        return _AUTONOMOUS_GOAL_CANDIDATE_RETRY_KIND
+    if workflow.step == STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING:
+        return _AUTONOMOUS_GOAL_JUDGE_RETRY_KIND
+    return ""
 
 
 # Hidden QA subagents do not surface approval prompts in the main workflow UI.
@@ -6466,7 +6572,10 @@ def _autonomous_goal_candidate_prompt(
         f"{code_change_guidance}"
         "Focus on a concrete session that a user could accept and continue from. "
         "Use autonomous-goal memory to avoid repeating recently proposed, skipped, "
-        "or processed files unless repeating one is clearly the best next step.\n\n"
+        "or processed files unless repeating one is clearly the best next step. "
+        "Do not stop just because an optional host command is missing; use an "
+        "available fallback, such as Python standard-library tooling for SQLite, "
+        "or report the limitation in the JSON output.\n\n"
         f"Repository cwd: {session_cwd}\n"
         f"Autonomous goal title: {autonomous_goal.title}\n\n"
         "Autonomous goal objective:\n"
