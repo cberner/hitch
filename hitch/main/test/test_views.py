@@ -18166,6 +18166,17 @@ class AutonomousGoalViewTests(TestCase):
                     "goal": "Find useful docs increments.",
                     "ambition": AutonomousGoal.AMBITION_HIGH,
                     "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+                    "stacked_diff_depth": "several",
+                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
+                },
+                "stacked diff depth is invalid",
+            ),
+            (
+                {
+                    "title": "Improve docs",
+                    "goal": "Find useful docs increments.",
+                    "ambition": AutonomousGoal.AMBITION_HIGH,
+                    "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
                     "stacked_diff_depth": "2",
                     "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
                 },
