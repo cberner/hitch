@@ -18,9 +18,14 @@
     Autonomy
     <select name="autonomy" required data-autonomous-goal-autonomy>
         {% for value, label in autonomy_choices %}
-        <option value="{{ value }}"{% if value == default_autonomy %} selected{% endif %} data-auto-qa-supported="{% if value in auto_qa_supported_autonomies %}true{% else %}false{% endif %}" data-auto-qa-required="{% if value in auto_qa_required_autonomies %}true{% else %}false{% endif %}">{{ label }}</option>
+        <option value="{{ value }}"{% if value == default_autonomy %} selected{% endif %} data-auto-qa-supported="{% if value in auto_qa_supported_autonomies %}true{% else %}false{% endif %}" data-auto-qa-required="{% if value in auto_qa_required_autonomies %}true{% else %}false{% endif %}" data-stacked-diff-supported="{% if value in stacked_diff_supported_autonomies %}true{% else %}false{% endif %}">{{ label }}</option>
         {% endfor %}
     </select>
+</label>
+<label data-autonomous-goal-stacked-depth-field>
+    Stacked diff depth
+    <input type="number" name="stacked_diff_depth" min="{{ stacked_diff_depth_min }}" max="{{ stacked_diff_depth_max }}" step="1" value="{{ default_stacked_diff_depth }}" data-autonomous-goal-stacked-depth>
+    <span class="field-help">Allows the agent to continue working through additional candidate rounds to build a bigger proposal.</span>
 </label>
 <label class="checkbox-label" data-autonomous-goal-auto-qa-field>
     <span>Auto-QA</span>

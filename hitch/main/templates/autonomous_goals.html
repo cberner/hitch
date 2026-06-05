@@ -47,6 +47,7 @@
             }
         }
         * { box-sizing: border-box; }
+        [hidden] { display: none !important; }
         html, body { margin: 0; padding: 0; }
         body {
             font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -268,6 +269,12 @@
             gap: 0.35rem;
             font-size: 0.85rem;
             font-weight: 600;
+        }
+        .field-help {
+            color: var(--text-muted);
+            font-size: 0.78rem;
+            font-weight: 500;
+            line-height: 1.4;
         }
         label.checkbox-label {
             display: flex;
@@ -506,6 +513,7 @@
                                     data-autonomy="{{ goal.autonomy }}"
                                     data-auto-qa="{% if goal.auto_qa_enabled %}true{% else %}false{% endif %}"
                                     data-auto-proposal-enabled="{% if goal.auto_proposal_enabled %}true{% else %}false{% endif %}"
+                                    data-stacked-diff-depth="{{ goal.stacked_diff_depth }}"
                                     data-confidence-threshold="{{ goal.confidence_threshold }}"
                                     data-web-search-mode="{{ goal.web_search_mode }}"
                                     data-auto-merge-to-local-branch="{% if goal.auto_merge_to_local_branch %}true{% else %}false{% endif %}"
@@ -527,6 +535,9 @@
                     <div class="goal-meta">
                         <span class="meta">Ambition: {{ goal.get_ambition_display }}</span>
                         <span class="meta">Autonomy: {{ goal.get_autonomy_display }}</span>
+                        {% if goal.effective_stacked_diff_depth > 1 %}
+                        <span class="meta">Stack depth: {{ goal.effective_stacked_diff_depth }}</span>
+                        {% endif %}
                         <span class="meta">Auto-QA: {% if goal.autonomy in auto_qa_required_autonomies %}Required{% elif goal.effective_auto_qa_enabled %}On{% else %}Off{% endif %}</span>
                         <span class="meta">Auto-proposal: {% if goal.auto_proposal_enabled %}On{% else %}Off{% endif %}</span>
                         <span class="meta">Threshold: {{ goal.get_confidence_threshold_display }}</span>
@@ -627,9 +638,14 @@
                 Autonomy
                 <select name="autonomy" required data-edit-autonomous-goal-autonomy data-autonomous-goal-autonomy>
                     {% for value, label in autonomy_choices %}
-                    <option value="{{ value }}" data-auto-qa-supported="{% if value in auto_qa_supported_autonomies %}true{% else %}false{% endif %}" data-auto-qa-required="{% if value in auto_qa_required_autonomies %}true{% else %}false{% endif %}">{{ label }}</option>
+                    <option value="{{ value }}" data-auto-qa-supported="{% if value in auto_qa_supported_autonomies %}true{% else %}false{% endif %}" data-auto-qa-required="{% if value in auto_qa_required_autonomies %}true{% else %}false{% endif %}" data-stacked-diff-supported="{% if value in stacked_diff_supported_autonomies %}true{% else %}false{% endif %}">{{ label }}</option>
                     {% endfor %}
                 </select>
+            </label>
+            <label data-autonomous-goal-stacked-depth-field>
+                Stacked diff depth
+                <input type="number" name="stacked_diff_depth" min="{{ stacked_diff_depth_min }}" max="{{ stacked_diff_depth_max }}" step="1" value="{{ default_stacked_diff_depth }}" data-edit-autonomous-goal-stacked-depth data-autonomous-goal-stacked-depth>
+                <span class="field-help">Allows the agent to continue working through additional candidate rounds to build a bigger proposal.</span>
             </label>
             <label class="checkbox-label" data-autonomous-goal-auto-qa-field>
                 <span>Auto-QA</span>
@@ -688,6 +704,7 @@
             const editGoalAutonomy = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-autonomy]");
             const editGoalAutoQa = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-auto-qa]");
             const editGoalAutoProposal = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-auto-proposal]");
+            const editGoalStackedDepth = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-stacked-depth]");
             const editGoalConfidence = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-confidence-threshold]");
             const editGoalWebSearch = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-web-search-mode]");
             const editGoalAutoMerge = editGoalDialog && editGoalDialog.querySelector("[data-edit-autonomous-goal-auto-merge]");
@@ -711,6 +728,10 @@
             function selectedAutoQaRequired(autonomySelect) {
                 const option = autonomySelect && autonomySelect.selectedOptions && autonomySelect.selectedOptions[0];
                 return Boolean(option && option.dataset.autoQaRequired === "true");
+            }
+            function selectedStackedDiffSupported(autonomySelect) {
+                const option = autonomySelect && autonomySelect.selectedOptions && autonomySelect.selectedOptions[0];
+                return Boolean(option && option.dataset.stackedDiffSupported === "true");
             }
             function syncAutonomousGoalAutoQa(form) {
                 if (!form) return;
@@ -770,8 +791,24 @@
                 branch.required = autoQaEnabled && autoMerge.checked;
                 if (!autoMerge.checked) branch.value = "";
             }
+            function syncStackedDiffDepth(form) {
+                if (!form) return;
+                const autonomySelect = form.querySelector("select[name='autonomy']");
+                const field = form.querySelector("[data-autonomous-goal-stacked-depth-field]");
+                const input = form.querySelector("[data-autonomous-goal-stacked-depth]");
+                if (!autonomySelect || !field || !input) return;
+                const supported = selectedStackedDiffSupported(autonomySelect);
+                field.hidden = !supported;
+                input.disabled = !supported;
+                if (!supported) {
+                    input.value = "{{ default_stacked_diff_depth }}";
+                } else if (!input.value) {
+                    input.value = "{{ default_stacked_diff_depth }}";
+                }
+            }
             function syncAutonomousGoalAutomation(form) {
                 syncAutonomousGoalAutoQa(form);
+                syncStackedDiffDepth(form);
                 syncAutoMergeControls(form);
             }
             for (const form of document.querySelectorAll("[data-autonomous-goal-create-form], [data-edit-autonomous-goal-form]")) {
@@ -799,10 +836,12 @@
                     }
                     syncAutonomousGoalAutoQa(editGoalForm);
                     if (editGoalAutoProposal) editGoalAutoProposal.checked = button.dataset.autoProposalEnabled === "true";
+                    if (editGoalStackedDepth) editGoalStackedDepth.value = button.dataset.stackedDiffDepth || "{{ default_stacked_diff_depth }}";
                     if (editGoalConfidence) editGoalConfidence.value = button.dataset.confidenceThreshold || "";
                     if (editGoalWebSearch) editGoalWebSearch.value = button.dataset.webSearchMode || "";
                     if (editGoalAutoMerge) editGoalAutoMerge.checked = button.dataset.autoMergeToLocalBranch === "true";
                     if (editGoalAutoMergeBranch) editGoalAutoMergeBranch.value = button.dataset.autoMergeBranch || "";
+                    syncStackedDiffDepth(editGoalForm);
                     syncAutoMergeControls(editGoalForm);
                     showDialog(editGoalDialog);
                     if (editGoalTitle) editGoalTitle.focus();

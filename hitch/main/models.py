@@ -102,6 +102,11 @@ class AutonomousGoal(models.Model):
     AUTO_QA_REQUIRED_AUTONOMIES: ClassVar[frozenset[str]] = frozenset(
         {AUTONOMY_DRAFT_PR}
     )
+    STACKED_DIFF_AUTONOMIES: ClassVar[frozenset[str]] = frozenset(
+        {AUTONOMY_DRAFT_PATCH, AUTONOMY_DRAFT_PR}
+    )
+    STACKED_DIFF_DEPTH_MIN: ClassVar[int] = 1
+    STACKED_DIFF_DEPTH_MAX: ClassVar[int] = 5
 
     project = models.ForeignKey(
         Project,
@@ -136,6 +141,7 @@ class AutonomousGoal(models.Model):
     auto_proposal_last_no_proposal_sha = models.CharField(
         max_length=64, blank=True, default=""
     )
+    stacked_diff_depth = models.PositiveIntegerField(default=STACKED_DIFF_DEPTH_MIN)
     auto_merge_to_local_branch = models.BooleanField(default=False)
     auto_merge_branch = models.CharField(max_length=255, blank=True, default="")
     deleted_at = models.DateTimeField(null=True, blank=True, db_index=True)
@@ -160,11 +166,24 @@ class AutonomousGoal(models.Model):
     def auto_qa_required_for_autonomy(cls, autonomy: str) -> bool:
         return autonomy in cls.AUTO_QA_REQUIRED_AUTONOMIES
 
+    @classmethod
+    def stacked_diff_supported_for_autonomy(cls, autonomy: str) -> bool:
+        return autonomy in cls.STACKED_DIFF_AUTONOMIES
+
     @property
     def effective_auto_qa_enabled(self) -> bool:
         if self.auto_qa_required_for_autonomy(self.autonomy):
             return True
         return self.auto_qa_supported_for_autonomy(self.autonomy) and self.auto_qa_enabled
+
+    @property
+    def effective_stacked_diff_depth(self) -> int:
+        if not self.stacked_diff_supported_for_autonomy(self.autonomy):
+            return self.STACKED_DIFF_DEPTH_MIN
+        return min(
+            max(self.stacked_diff_depth, self.STACKED_DIFF_DEPTH_MIN),
+            self.STACKED_DIFF_DEPTH_MAX,
+        )
 
 
 class ProposedSession(models.Model):

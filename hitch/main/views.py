@@ -213,6 +213,7 @@ class AutonomousGoalValues(NamedTuple):
     autonomy: str
     auto_qa_enabled: bool
     auto_proposal_enabled: bool
+    stacked_diff_depth: int
     confidence_threshold: str
     web_search_mode: str
     auto_merge_to_local_branch: bool
@@ -3416,6 +3417,12 @@ def autonomous_goals(request: HttpRequest) -> HttpResponse:
                 AutonomousGoal.AUTO_QA_REQUIRED_AUTONOMIES
             ),
             "default_auto_proposal": False,
+            "stacked_diff_supported_autonomies": tuple(
+                AutonomousGoal.STACKED_DIFF_AUTONOMIES
+            ),
+            "default_stacked_diff_depth": AutonomousGoal.STACKED_DIFF_DEPTH_MIN,
+            "stacked_diff_depth_min": AutonomousGoal.STACKED_DIFF_DEPTH_MIN,
+            "stacked_diff_depth_max": AutonomousGoal.STACKED_DIFF_DEPTH_MAX,
             "confidence_choices": AutonomousGoal.CONFIDENCE_CHOICES,
             "default_confidence": AutonomousGoal.CONFIDENCE_HIGH,
             "web_search_mode_choices": _WEB_SEARCH_MODE_OPTIONS,
@@ -3449,6 +3456,7 @@ def create_autonomous_goal(request: HttpRequest) -> HttpResponse:
         autonomy=values.autonomy,
         auto_qa_enabled=values.auto_qa_enabled,
         auto_proposal_enabled=values.auto_proposal_enabled,
+        stacked_diff_depth=values.stacked_diff_depth,
         confidence_threshold=values.confidence_threshold,
         web_search_mode=values.web_search_mode,
         auto_merge_to_local_branch=values.auto_merge_to_local_branch,
@@ -3475,6 +3483,7 @@ def edit_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpR
         auto_qa_default=autonomous_goal.auto_qa_enabled,
         web_search_default=autonomous_goal.web_search_mode,
         auto_proposal_default=autonomous_goal.auto_proposal_enabled,
+        stacked_diff_depth_default=autonomous_goal.stacked_diff_depth,
         local_branches=local_branch_names(project.repo_path),
     )
     if error is not None:
@@ -3489,6 +3498,7 @@ def edit_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpR
         "autonomy",
         "auto_qa_enabled",
         "auto_proposal_enabled",
+        "stacked_diff_depth",
         "confidence_threshold",
         "web_search_mode",
         "auto_merge_to_local_branch",
@@ -3554,18 +3564,33 @@ def _dismiss_unresolved_autonomous_goal_proposals(
         .select_related("candidate_session")
         .filter(
             autonomous_goal=autonomous_goal,
-            outcome_status=ProposedSession.OUTCOME_UNSET,
         )
+        .filter(_autonomous_goal_cleanup_proposal_filter())
     )
     if proposals:
-        ProposedSession.objects.filter(
-            pk__in=[proposal.pk for proposal in proposals]
-        ).update(
-            outcome_status=ProposedSession.OUTCOME_DISMISSED,
-            outcome_notes=reason,
-            updated_at=now,
+        for proposal in proposals:
+            metadata = (
+                dict(proposal.outcome_metadata)
+                if isinstance(proposal.outcome_metadata, dict)
+                else {}
+            )
+            metadata["stacked_diff_hidden_until_complete"] = False
+            proposal.outcome_status = ProposedSession.OUTCOME_DISMISSED
+            proposal.outcome_notes = reason
+            proposal.outcome_metadata = metadata
+            proposal.updated_at = now
+        ProposedSession.objects.bulk_update(
+            proposals,
+            ["outcome_status", "outcome_notes", "outcome_metadata", "updated_at"],
         )
     return proposals
+
+
+def _autonomous_goal_cleanup_proposal_filter() -> Q:
+    return Q(outcome_status=ProposedSession.OUTCOME_UNSET) | Q(
+        outcome_status=ProposedSession.OUTCOME_DISMISSED,
+        outcome_metadata__stacked_diff_hidden_until_complete=True,
+    )
 
 
 @require_http_methods(["POST"])
@@ -3754,6 +3779,7 @@ def _validated_autonomous_goal_values(
     auto_qa_default: bool = False,
     web_search_default: str = AutonomousGoal.WEB_SEARCH_DEFAULT,
     auto_proposal_default: bool = False,
+    stacked_diff_depth_default: int = AutonomousGoal.STACKED_DIFF_DEPTH_MIN,
     local_branches: list[str] | None = None,
 ) -> tuple[AutonomousGoalValues | None, str | None]:
     title, error = _validated_autonomous_goal_title(request.POST.get("title", ""))
@@ -3791,6 +3817,15 @@ def _validated_autonomous_goal_values(
     )
     if auto_proposal_error is not None:
         return None, auto_proposal_error
+    stacked_diff_depth, stacked_diff_depth_error = (
+        _posted_autonomous_goal_stacked_diff_depth(
+            request.POST.get("stacked_diff_depth"),
+            default=stacked_diff_depth_default,
+            autonomy=autonomy,
+        )
+    )
+    if stacked_diff_depth_error is not None:
+        return None, stacked_diff_depth_error
     threshold = request.POST.get("confidence_threshold", "").strip()
     valid_thresholds = {value for value, _label in AutonomousGoal.CONFIDENCE_CHOICES}
     if threshold not in valid_thresholds:
@@ -3824,11 +3859,32 @@ def _validated_autonomous_goal_values(
         autonomy=autonomy,
         auto_qa_enabled=auto_qa_enabled,
         auto_proposal_enabled=auto_proposal_enabled,
+        stacked_diff_depth=stacked_diff_depth,
         confidence_threshold=threshold,
         web_search_mode=web_search_mode,
         auto_merge_to_local_branch=auto_merge_to_local_branch,
         auto_merge_branch=auto_merge_branch,
     ), None
+
+
+def _posted_autonomous_goal_stacked_diff_depth(
+    raw: str | None, *, default: int, autonomy: str
+) -> tuple[int, str | None]:
+    supported = AutonomousGoal.stacked_diff_supported_for_autonomy(autonomy)
+    if raw is None or not raw.strip():
+        return (default if supported else AutonomousGoal.STACKED_DIFF_DEPTH_MIN), None
+    try:
+        depth = int(raw.strip())
+    except ValueError:
+        return 0, "stacked diff depth is invalid"
+    if (
+        depth < AutonomousGoal.STACKED_DIFF_DEPTH_MIN
+        or depth > AutonomousGoal.STACKED_DIFF_DEPTH_MAX
+    ):
+        return 0, "stacked diff depth is invalid"
+    if not supported and depth != AutonomousGoal.STACKED_DIFF_DEPTH_MIN:
+        return 0, "stacked diff depth requires draft patch or draft PR"
+    return (depth if supported else AutonomousGoal.STACKED_DIFF_DEPTH_MIN), None
 
 
 def _posted_autonomous_goal_bool(
