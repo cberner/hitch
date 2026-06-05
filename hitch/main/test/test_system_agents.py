@@ -12784,16 +12784,52 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_SKIPPED)
         notice = ProposedSession.objects.get()
         self.assertEqual(notice.inbox_kind, ProposedSession.INBOX_KIND_NOTICE)
+        self.assertEqual(notice.title, "Skipped proposal: Maybe add tests")
         self.assertEqual(notice.candidate_session, candidate_metadata)
         self.assertEqual(notice.judge_session, judge_metadata)
-        self.assertEqual(notice.summary, "Useful but not certain.")
+        self.assertEqual(
+            notice.summary,
+            'Found candidate "Maybe add tests", but judge confidence was high '
+            "and this goal requires very high. Judge summary: Useful but not "
+            "certain.",
+        )
         self.assertEqual(notice.outcome_metadata["automation_status"], "skipped")
         self.assertEqual(
             notice.outcome_metadata["skip_reason"],
             "judge_confidence_below_threshold",
         )
+        self.assertEqual(notice.outcome_metadata["judge_confidence"], "high")
+        self.assertEqual(
+            notice.outcome_metadata["confidence_threshold"],
+            AutonomousGoal.CONFIDENCE_VERY_HIGH,
+        )
+        self.assertEqual(
+            notice.outcome_metadata["candidate_title"], "Maybe add tests"
+        )
         autonomous_goal.refresh_from_db()
         self.assertEqual(autonomous_goal.auto_proposal_last_no_proposal_sha, "a" * 40)
+
+    def test_below_threshold_notice_copy_handles_missing_candidate_title(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=AutonomousGoal.CONFIDENCE_VERY_HIGH,
+        )
+        judgment = {"confidence": "high", "summary": "", "rationale": ""}
+
+        self.assertEqual(
+            system_agents._below_threshold_notice_title({}, autonomous_goal),
+            "Skipped proposal from Improve tests",
+        )
+        self.assertEqual(
+            system_agents._below_threshold_notice_summary(
+                {}, judgment, autonomous_goal.confidence_threshold
+            ),
+            "Found a candidate, but judge confidence was high and this goal "
+            "requires very high.",
+        )
 
     def test_accepted_proposed_session_unhides_candidate_thread(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")

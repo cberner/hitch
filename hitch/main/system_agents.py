@@ -5181,14 +5181,16 @@ def _handle_autonomous_goal_agent_finished_locked(
         _create_autonomous_goal_skipped_notice(
             workflow,
             autonomous_goal,
-            title=f"No proposal from {autonomous_goal.title}"[
-                :_AUTONOMOUS_GOAL_TITLE_MAX_LEN
-            ],
-            summary=judgment["summary"],
+            title=_below_threshold_notice_title(candidate, autonomous_goal),
+            summary=_below_threshold_notice_summary(
+                candidate, judgment, autonomous_goal.confidence_threshold
+            ),
             metadata={
                 "automation_status": "skipped",
                 "skip_reason": "judge_confidence_below_threshold",
                 "judge_confidence": judgment["confidence"],
+                "confidence_threshold": autonomous_goal.confidence_threshold,
+                "candidate_title": _candidate_notice_title(candidate),
                 "judge_rationale": judgment["rationale"],
             },
         )
@@ -9198,6 +9200,50 @@ def _workflow_web_search_mode(workflow: SystemWorkflow) -> str | None:
 
 def _confidence_meets_threshold(confidence: str, threshold: str) -> bool:
     return _CONFIDENCE_RANK.get(confidence, 0) >= _CONFIDENCE_RANK.get(threshold, 0)
+
+
+def _below_threshold_notice_title(
+    candidate: dict[str, Any], autonomous_goal: AutonomousGoal
+) -> str:
+    candidate_title = _candidate_notice_title(candidate)
+    if candidate_title:
+        title = f"Skipped proposal: {candidate_title}"
+    else:
+        title = f"Skipped proposal from {autonomous_goal.title}"
+    return title[:_AUTONOMOUS_GOAL_TITLE_MAX_LEN]
+
+
+def _below_threshold_notice_summary(
+    candidate: dict[str, Any], judgment: dict[str, str], threshold: str
+) -> str:
+    confidence = _confidence_label(judgment["confidence"])
+    threshold_label = _confidence_label(threshold)
+    candidate_title = _candidate_notice_title(candidate)
+    if candidate_title:
+        prefix = (
+            f'Found candidate "{candidate_title}", but judge confidence was '
+            f"{confidence} and this goal requires {threshold_label}."
+        )
+    else:
+        prefix = (
+            f"Found a candidate, but judge confidence was {confidence} and "
+            f"this goal requires {threshold_label}."
+        )
+    summary = judgment["summary"].strip()
+    if not summary:
+        return prefix
+    return f"{prefix} Judge summary: {summary}"
+
+
+def _candidate_notice_title(candidate: dict[str, Any]) -> str:
+    title = candidate.get("title")
+    if not isinstance(title, str):
+        return ""
+    return " ".join(title.split())
+
+
+def _confidence_label(value: str) -> str:
+    return value.replace("_", " ") or "unknown"
 
 
 def _string_list(value: Any) -> list[str]:
