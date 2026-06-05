@@ -2631,6 +2631,13 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             pr_snapshot=log_pr_snapshot,
             workflow_pr_snapshot=workflow_pr_snapshot,
         )
+        stage_executing = stage.key == session_stage.IMPLEMENTATION.key and (
+            active_instance is not None
+            or (
+                stage_workflow is not None
+                and stage_workflow.status == SystemWorkflow.STATUS_RUNNING
+            )
+        )
         session["stage"] = _session_list_stage_context(
             stage,
             pr_snapshot=_session_list_pr_snapshot_for_stage(
@@ -2639,6 +2646,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
                 workflow_pr_snapshot=workflow_pr_snapshot,
             ),
             refreshing=badge_refreshing,
+            executing=stage_executing,
         )
         # The stage cache is keyed only on the rollout file's mtime, so it may
         # only hold stages that are a pure function of the rollout. A stage that
@@ -2719,8 +2727,14 @@ def _session_list_stage_context(
     *,
     pr_snapshot: Mapping[str, Any] | None = None,
     refreshing: bool = False,
+    executing: bool = False,
 ) -> dict[str, Any]:
     context: dict[str, Any] = dict(stage.as_context())
+    if stage.key == session_stage.IMPLEMENTATION.key:
+        if executing:
+            context["executing"] = True
+        else:
+            context["tone"] = "idle"
     if refreshing:
         context["refreshing"] = True
     if stage.key != session_stage.PR.key:
