@@ -158,6 +158,11 @@ _QA_DESIGN_SYNTHESIS_STATE_KEY = "qa_design_synthesis_gate"
 _QA_REVIEW_REVISION_STATE_KEY = "qa_review_revision"
 _WORKFLOW_FAILURE_OWNER_STATE_KEY = "failure_owner"
 _ARCHIVED_FROM_BLOCKED_STATE_KEY = "archived_from_blocked"
+# How long a blocked PR-QA workflow lingers before it is auto-archived off the
+# inbox Blocked stage. Shared by the maintenance scheduler (which applies the
+# archive) and the health dashboard (which previews the same cutoff), so both
+# agree on what "stale" means.
+STALE_BLOCKED_AGE = timedelta(days=7)
 _WORKFLOW_FAILURE_OWNER_QA = "qa"
 _WORKFLOW_FAILURE_OWNER_PR = "pr"
 _WORKFLOW_ROUTE_CLAIM_TIMEOUT = timedelta(minutes=10)

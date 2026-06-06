@@ -10,6 +10,7 @@ import time
 
 from django.conf import settings
 from django.db import close_old_connections
+from django.utils import timezone
 
 from hitch.main import codex_pool, disk_cleanup, system_agents
 
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 _WORKFLOW_MAINTENANCE_INTERVAL_SECONDS = 60
 _DISK_USAGE_CLEANUP_INTERVAL_SECONDS = 10 * 60
+_STALE_BLOCKED_ARCHIVE_INTERVAL_SECONDS = 60 * 60
 # Cap PR-stage refreshes per tick: each due session can spend up to the gh-pr-
 # view timeout, and this tick also owns reconcile_dead and PR-monitor backoff
 # polling, so an unbounded sweep over dozens of stale sessions would delay the
@@ -75,9 +77,17 @@ def _running_from_server_command() -> bool:
 
 def _workflow_maintenance_scheduler_loop() -> None:
     stop = threading.Event()
-    next_disk_cleanup_at = time.monotonic() + _DISK_USAGE_CLEANUP_INTERVAL_SECONDS
+    start = time.monotonic()
+    next_stale_blocked_archive_at = start + _STALE_BLOCKED_ARCHIVE_INTERVAL_SECONDS
+    next_disk_cleanup_at = start + _DISK_USAGE_CLEANUP_INTERVAL_SECONDS
     while True:
         _run_workflow_maintenance_scheduler_tick()
+        # Archive stale blocked workflows before disk cleanup on the same loop
+        # iteration: archiving moves them out of RUNNING/BLOCKED, which unpins
+        # their worktrees so the disk-cleanup tick that follows can reclaim them.
+        next_stale_blocked_archive_at = _run_due_stale_blocked_archive(
+            next_due_at=next_stale_blocked_archive_at
+        )
         next_disk_cleanup_at = _run_due_disk_usage_cleanup(
             next_due_at=next_disk_cleanup_at
         )
@@ -127,3 +137,38 @@ def _run_due_disk_usage_cleanup(
     finally:
         close_old_connections()
     return current + _DISK_USAGE_CLEANUP_INTERVAL_SECONDS
+
+
+def _run_due_stale_blocked_archive(
+    *,
+    next_due_at: float,
+    now: float | None = None,
+) -> float:
+    """Archive stale blocked PR-QA workflows when this hourly tick comes due.
+
+    Runs ahead of the disk-cleanup tick on the same loop iteration: archiving a
+    long-blocked workflow drops it out of the RUNNING/BLOCKED set that
+    ``disk_cleanup`` treats as pinning a worktree, so its worktree becomes
+    eligible for reclamation in the very next tick rather than the next hour.
+    """
+    current = time.monotonic() if now is None else now
+    if current < next_due_at:
+        return next_due_at
+
+    close_old_connections()
+    try:
+        cutoff = timezone.now() - system_agents.STALE_BLOCKED_AGE
+        archived_ids = system_agents.archive_stale_blocked_workflows(
+            older_than=cutoff, apply=True
+        )
+        if archived_ids:
+            logger.info(
+                "archived %s stale blocked PR-QA workflow(s): %s",
+                len(archived_ids),
+                ", ".join(str(workflow_id) for workflow_id in archived_ids),
+            )
+    except Exception:
+        logger.exception("failed to run scheduled stale blocked workflow archive")
+    finally:
+        close_old_connections()
+    return current + _STALE_BLOCKED_ARCHIVE_INTERVAL_SECONDS

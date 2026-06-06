@@ -50,14 +50,15 @@ _SEVERITY_LABEL = {
     SEVERITY_UNKNOWN: "Unknown",
 }
 
-# A running/starting turn legitimately owns ~1 app-server, plus a small warm
-# pool, so only flag a meaningful surplus as a likely leak.
-_APP_SERVER_LEAK_WARN = 5
-_APP_SERVER_LEAK_DANGER = 10
+# A running/starting turn legitimately owns ~1 app-server, plus a warm pool
+# bounded by codex_pool._SHARED_POOL_MAX, so only flag a surplus beyond that
+# healthy ceiling as a likely leak. (The app-server count is now per logical
+# app-server, not the doubled node-wrapper + native-child pid pair.)
+_APP_SERVER_LEAK_WARN = codex_pool._SHARED_POOL_MAX + 2
+_APP_SERVER_LEAK_DANGER = codex_pool._SHARED_POOL_MAX + 5
 # A turn still "running" after this long is almost certainly a leaked row whose
 # worker process is gone.
 _STUCK_TURN_AGE = timedelta(hours=6)
-_STALE_BLOCKED_AGE = timedelta(days=7)
 _RECENT_FAILURE_AGE = timedelta(hours=24)
 # Bound how often the (proc-scanning, disk-walking) report is rebuilt under load.
 _REPORT_CACHE_TTL = timedelta(seconds=15)
@@ -290,7 +291,7 @@ def _stuck_turn_count() -> int:
 
 
 def _stale_blocked_count() -> int:
-    cutoff = timezone.now() - _STALE_BLOCKED_AGE
+    cutoff = timezone.now() - system_agents.STALE_BLOCKED_AGE
     return len(system_agents.archive_stale_blocked_workflows(older_than=cutoff, apply=False))
 
 
@@ -339,8 +340,9 @@ def _backlog_section() -> HealthSection:
                 "Stale blocked PR-QA (>7d)",
                 _stale_blocked_count,
                 warn_at=1,
-                detail="Blocked PR-QA workflows older than 7 days. Clear with "
-                "the archive_stale_blocked_workflows command.",
+                detail="Blocked PR-QA workflows older than 7 days. Auto-cleared "
+                "hourly by the workflow maintenance scheduler; run the "
+                "archive_stale_blocked_workflows command to clear them now.",
             ),
             _count_metric(
                 "pr_monitors",
