@@ -338,6 +338,7 @@ _SANDBOX_POLICY_OPTIONS: tuple[tuple[str, str], ...] = (
     ("dangerFullAccess", "Danger - full access"),
 )
 _VALID_SANDBOX_POLICIES = {value for value, _ in _SANDBOX_POLICY_OPTIONS}
+_MANAGED_WORKTREE_DEFAULT_SANDBOX_POLICY = "workspaceWrite"
 
 # Approval modes the dialog offers. ``auto_review`` and ``deny_all`` map 1:1
 # onto the SDK's ``ApprovalMode`` enum. The ``prompt_user`` and
@@ -4514,7 +4515,12 @@ def _render_session_detail(
             "pending_user_prompt": _pending_user_prompt(active_instance),
             "pending_user_author": _pending_user_author(active_instance),
             "token_usage": token_usage,
-            "next_message_config": _next_message_config(settings, resumed, plan_model),
+            "next_message_config": _next_message_config(
+                settings,
+                resumed,
+                plan_model,
+                cwd=thread_cwd or "",
+            ),
             "input_image_accept": _INPUT_IMAGE_ACCEPT,
             "pr_slash_prompt": _PR_SLASH_PROMPT,
             "fix_pr_slash_command": _FIX_PR_SLASH_COMMAND,
@@ -6400,7 +6406,11 @@ def _chart_segment_percent(value: int, max_total: int) -> int:
 
 
 def _next_message_config(
-    settings: SettingsValues, resumed: Any, plan_model: str | None
+    settings: SettingsValues,
+    resumed: Any,
+    plan_model: str | None,
+    *,
+    cwd: str,
 ) -> list[dict[str, str]]:
     """Return the settings that will govern the next submitted message."""
     model = _string_value(getattr(resumed, "model", None))
@@ -6408,7 +6418,7 @@ def _next_message_config(
     plan_model_value = plan_model or "Unknown"
     sandbox_value = _option_label(
         _SANDBOX_POLICY_OPTIONS,
-        _effective_sandbox_policy(settings),
+        _effective_sandbox_policy_for_cwd(settings, cwd),
         default="Codex default",
     )
     approval_value = _option_label(
@@ -6445,6 +6455,26 @@ def _effective_sandbox_policy(settings: SettingsValues) -> str:
     if sandbox_policy and sandbox_policy not in _VALID_SANDBOX_POLICIES:
         return ""
     return sandbox_policy
+
+
+def _effective_sandbox_policy_for_cwd(
+    settings: SettingsValues,
+    cwd: str,
+    *,
+    managed_worktree: bool = False,
+) -> str:
+    sandbox_policy = _effective_sandbox_policy(settings)
+    if sandbox_policy:
+        return sandbox_policy
+    if managed_worktree or _is_managed_session_cwd(cwd):
+        return _MANAGED_WORKTREE_DEFAULT_SANDBOX_POLICY
+    return ""
+
+
+def _is_managed_session_cwd(cwd: str) -> bool:
+    if is_managed_worktree_path(cwd):
+        return True
+    return cwd in {str(path) for path in discover_managed_worktrees()}
 
 
 def _effective_approval_mode(settings: SettingsValues) -> str:
@@ -8986,6 +9016,7 @@ def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
         return HttpResponseBadRequest("thread has no cwd")
     if cwd not in _allowed_session_cwds():
         return HttpResponseBadRequest("thread cwd is not an allowed repository")
+    sandbox_policy = _effective_sandbox_policy_for_cwd(settings, cwd)
     try:
         with transaction.atomic():
             workflow = SystemWorkflow.objects.create(
@@ -9022,7 +9053,7 @@ def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
             thread_id=session_id,
             cwd=cwd,
             prompt=prompt,
-            sandbox_policy=_effective_sandbox_policy(settings) or None,
+            sandbox_policy=sandbox_policy or None,
             approval_mode=_effective_approval_mode(settings),
             web_search_mode=_valid_web_search_mode_or_default(
                 settings.web_search_mode
@@ -9338,7 +9369,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         # the cookies or every turn after the first silently reverts to Codex
         # defaults — which breaks multi-turn workflows that depend on
         # elevated permissions or stricter escalation handling.
-        sandbox_policy = _effective_sandbox_policy(settings)
+        sandbox_policy = _effective_sandbox_policy_for_cwd(settings, cwd)
         approval_mode = _effective_approval_mode(settings)
         previous_instance = codex_pool.latest_for_thread(session_id)
         session_project = None
@@ -10245,11 +10276,12 @@ def _start_candidate_proposal_session(
             auto_qa_enabled=auto_qa_enabled,
         )
     )
+    sandbox_policy = _effective_sandbox_policy_for_cwd(settings, candidate_cwd)
     if qa_workflow_activation:
         workflow_kwargs: dict[str, Any] = {
             "main_thread_id": candidate_session.thread_id,
             "cwd": candidate_cwd,
-            "sandbox_policy": settings.sandbox_policy or None,
+            "sandbox_policy": sandbox_policy or None,
             "approval_mode": settings.approval_mode,
             "model": settings.model or None,
             "reasoning_effort": settings.reasoning_effort or None,
@@ -10306,7 +10338,7 @@ def _start_candidate_proposal_session(
         "developer_instructions": developer_instructions or None,
         "model": settings.model or None,
         "reasoning_effort": settings.reasoning_effort or None,
-        "sandbox_policy": settings.sandbox_policy or None,
+        "sandbox_policy": sandbox_policy or None,
         "approval_mode": settings.approval_mode,
     }
     if input_image_paths:
@@ -10845,6 +10877,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         )
 
     session_cwd = cwd
+    sandbox_policy = _effective_sandbox_policy_for_cwd(settings, session_cwd)
     # QA workflows review the selected repo's current diff; a fresh managed
     # worktree would be clean and miss uncommitted changes.
     if qa_workflow_activation:
@@ -10898,7 +10931,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         workflow_kwargs: dict[str, Any] = {
             "main_thread_id": thread_id,
             "cwd": session_cwd,
-            "sandbox_policy": settings.sandbox_policy or None,
+            "sandbox_policy": sandbox_policy or None,
             "approval_mode": settings.approval_mode,
             "model": settings.model or None,
             "reasoning_effort": settings.reasoning_effort or None,
@@ -10955,6 +10988,11 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         except WorktreeCreationError as exc:
             return HttpResponseBadRequest(str(exc))
         session_cwd = str(managed_worktree.path)
+        sandbox_policy = _effective_sandbox_policy_for_cwd(
+            settings,
+            session_cwd,
+            managed_worktree=True,
+        )
     session_project = (
         None
         if target.project_cleared
@@ -10983,7 +11021,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         "developer_instructions": developer_instructions or None,
         "model": settings.model or None,
         "reasoning_effort": settings.reasoning_effort or None,
-        "sandbox_policy": settings.sandbox_policy or None,
+        "sandbox_policy": sandbox_policy or None,
         "approval_mode": settings.approval_mode,
     }
     if input_image_paths:
@@ -11048,7 +11086,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             "main_thread_id": thread_id,
             "cwd": session_cwd,
             "prompt": prompt,
-            "sandbox_policy": settings.sandbox_policy or None,
+            "sandbox_policy": sandbox_policy or None,
             "approval_mode": settings.approval_mode,
             "model": settings.model or None,
             "reasoning_effort": settings.reasoning_effort or None,

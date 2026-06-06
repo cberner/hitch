@@ -85,6 +85,7 @@ _WEBP_BYTES = b"RIFF\x0c\x00\x00\x00WEBPVP8 "
 
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _MODEL_COOKIE = "hitch_model"
+_SANDBOX_COOKIE = "hitch_sandbox_policy"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
@@ -488,6 +489,50 @@ class SessionDetailFastPathTests(TestCase):
         )
         self.assertContains(response, f'data-ts="{now.timestamp()}"')
         self.assertNotContains(response, "Jan. 5, 2025")
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
+    def test_session_detail_next_message_config_uses_managed_worktree_sandbox(
+        self,
+        mock_codex: MagicMock,
+        _start_models_refresh: MagicMock,
+        mock_managed_worktrees: MagicMock,
+    ) -> None:
+        worktree = "/repo-worktree"
+        rollout_path = _make_rollout(
+            self,
+            _basic_session_rollout_lines("Edit the app", "Done."),
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="managed",
+            cwd=worktree,
+            codex_path=str(rollout_path),
+            codex_name="Managed session",
+            codex_preview="Edit the app",
+            codex_created_at=now,
+            codex_updated_at=now,
+        )
+        CodexInstance.objects.create(
+            pid=1,
+            thread_id="managed",
+            cwd=worktree,
+            prompt="done",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+        mock_managed_worktrees.return_value = [Path(worktree)]
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "managed"}))
+
+        self.assertEqual(response.status_code, 200)
+        config = {
+            item["label"]: item["value"]
+            for item in response.context["next_message_config"]
+        }
+        self.assertEqual(config["sandbox"], "Workspace write")
         mock_codex.assert_not_called()
 
     @patch("hitch.main.views._start_models_refresh_thread")
@@ -10502,7 +10547,7 @@ class NewSessionViewTests(TestCase):
             developer_instructions=None,
             model=None,
             reasoning_effort=None,
-            sandbox_policy=None,
+            sandbox_policy="workspaceWrite",
             approval_mode="auto_review",
             auto_qa_enabled=True,
             stored_model=None,
@@ -10885,7 +10930,7 @@ class NewSessionViewTests(TestCase):
                 workflow_kwargs: dict[str, Any] = {
                     "main_thread_id": f"candidate-thread-{index}",
                     "cwd": "/repo-worktree",
-                    "sandbox_policy": None,
+                    "sandbox_policy": "workspaceWrite",
                     "approval_mode": "auto_review",
                     "model": None,
                     "reasoning_effort": None,
@@ -11028,7 +11073,7 @@ class NewSessionViewTests(TestCase):
         mock_start_workflow.assert_called_once_with(
             main_thread_id="candidate-thread",
             cwd="/repo-worktree",
-            sandbox_policy=None,
+            sandbox_policy="workspaceWrite",
             approval_mode="auto_review",
             model=None,
             reasoning_effort=None,
@@ -11113,7 +11158,7 @@ class NewSessionViewTests(TestCase):
             developer_instructions=None,
             model=None,
             reasoning_effort=None,
-            sandbox_policy=None,
+            sandbox_policy="workspaceWrite",
             approval_mode="auto_review",
         )
         mock_spec_critic_should_run.assert_not_called()
@@ -12366,9 +12411,45 @@ class NewSessionViewTests(TestCase):
             developer_instructions=None,
             model=None,
             reasoning_effort=None,
-            sandbox_policy=None,
+            sandbox_policy="workspaceWrite",
             approval_mode="auto_review",
         )
+
+    @patch("hitch.main.views.create_worktree_for_session")
+    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.views.codex_pool.spawn_new_session")
+    @patch("hitch.main.views.discover_repos")
+    def test_managed_worktree_respects_explicit_sandbox_setting(
+        self,
+        mock_discover: MagicMock,
+        mock_spawn: MagicMock,
+        mock_codex: MagicMock,
+        mock_create_worktree: MagicMock,
+    ) -> None:
+        worktree = Path("/home/user/.hitch/worktrees/proj/20260516120000-abcdef12")
+        mock_discover.return_value = [Path(self.REPO)]
+        mock_create_worktree.return_value = ManagedWorktree(
+            path=worktree,
+            branch="hitch/proj/20260516120000-abcdef12",
+            source_repo=Path(self.REPO),
+        )
+        mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
+        _setup_codex(mock_codex, models=[])
+        _seed_cookies(
+            self.client,
+            **{
+                _USE_WORKTREES_COOKIE: "true",
+                _SANDBOX_COOKIE: "readOnly",
+            },
+        )
+
+        response = self.client.post(
+            reverse("new_session"),
+            data={"prompt": "do thing", "cwd": self.REPO},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(mock_spawn.call_args.kwargs["sandbox_policy"], "readOnly")
 
     @patch("hitch.main.views.create_worktree_for_session")
     @patch("hitch.main.views.Codex")
@@ -12435,7 +12516,14 @@ class NewSessionViewTests(TestCase):
                     mock_create_worktree.assert_called_once_with(self.REPO)
                 else:
                     mock_create_worktree.assert_not_called()
-                self._assert_new_session_spawn(mock_spawn, cwd=expected_cwd)
+                expected_spawn = (
+                    {"sandbox_policy": "workspaceWrite"} if expected_create else {}
+                )
+                self._assert_new_session_spawn(
+                    mock_spawn,
+                    cwd=expected_cwd,
+                    **expected_spawn,
+                )
 
     @patch("hitch.main.views.cleanup_worktree")
     @patch("hitch.main.views.create_worktree_for_session")
@@ -13831,7 +13919,7 @@ class SendMessageViewTests(TestCase):
             thread_id="abc",
             cwd=worktree,
             prompt="hi",
-            sandbox_policy=None,
+            sandbox_policy="workspaceWrite",
             approval_mode="auto_review",
         )
 
@@ -15399,6 +15487,51 @@ class StartSessionDemoViewTests(TestCase):
         self.assertEqual(run.agent_kind, demo.DEMO_AGENT_KIND)
         self.assertEqual(run.thread_id, "abc")
         self.assertEqual(run.instance, spawned_instances[0])
+
+    @patch("hitch.main.views.demo.cleanup_unregistered_demo_containers")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
+    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.views.discover_repos", return_value=[])
+    @patch("hitch.main.views.codex_pool.run_borrowed_op_with_retry")
+    def test_requests_demo_agent_turn_uses_managed_worktree_sandbox(
+        self,
+        mock_run_borrowed: MagicMock,
+        _mock_discover: MagicMock,
+        mock_managed_worktrees: MagicMock,
+        _mock_workflow: MagicMock,
+        mock_spawn: MagicMock,
+        _mock_cleanup: MagicMock,
+    ) -> None:
+        worktree = "/repo-worktree"
+        mock_managed_worktrees.return_value = [Path(worktree)]
+        client = SimpleNamespace(
+            _client=SimpleNamespace(thread_resume=MagicMock())
+        )
+        client._client.thread_resume.return_value = SimpleNamespace(
+            thread=SimpleNamespace(cwd=worktree, turns=[])
+        )
+        mock_run_borrowed.side_effect = _run_borrowed_with(client)
+
+        def spawn_side_effect(**_kwargs: object) -> CodexInstance:
+            return CodexInstance.objects.create(
+                thread_id="abc",
+                cwd=worktree,
+                prompt="demo",
+                events_path="/tmp/events.jsonl",
+                status=CodexInstance.STATUS_RUNNING,
+                pid=123,
+                agent_kind=demo.DEMO_AGENT_KIND,
+            )
+
+        mock_spawn.side_effect = spawn_side_effect
+
+        response = self.client.post(
+            reverse("start_session_demo", kwargs={"session_id": "abc"})
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(mock_spawn.call_args.kwargs["sandbox_policy"], "workspaceWrite")
 
     @patch("hitch.main.views.demo.cleanup_demo_for_session")
     @patch("hitch.main.views.codex_pool.spawn_turn", side_effect=RuntimeError("spawn failed"))
