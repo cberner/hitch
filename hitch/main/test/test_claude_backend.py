@@ -1231,25 +1231,28 @@ class SteerPendingRollbackTests(TestCase):
             plan_mode=False,
         )
 
-    def test_failed_steer_query_rolls_back_pending(self) -> None:
+    def test_failed_steer_query_rolls_back_outstanding(self) -> None:
         from concurrent.futures import Future
 
+        # The loop already consumed the steer's count into ``outstanding`` (=2:
+        # the in-flight response plus this steer). A failed query must still roll
+        # it back so the loop won't await a response that can't arrive.
         runner = self._runner()
-        runner._steer_pending = 1
+        runner._outstanding_responses = 2
         future: Future[Any] = Future()
         future.set_exception(RuntimeError("client is closing"))
         runner._steer_query_done(future)
-        self.assertEqual(runner._steer_pending, 0)
+        self.assertEqual(runner._outstanding_responses, 1)
 
-    def test_successful_steer_query_keeps_pending(self) -> None:
+    def test_successful_steer_query_keeps_outstanding(self) -> None:
         from concurrent.futures import Future
 
         runner = self._runner()
-        runner._steer_pending = 1
+        runner._outstanding_responses = 2
         future: Future[Any] = Future()
         future.set_result(None)
         runner._steer_query_done(future)
-        self.assertEqual(runner._steer_pending, 1)
+        self.assertEqual(runner._outstanding_responses, 2)
 
 
 class DemoSandboxOverrideTests(TestCase):
@@ -3158,8 +3161,7 @@ class WorkerTurnTests(TestCase):
                         and self._scripts
                         and self._runner is not None
                     ):
-                        with self._runner._steer_lock:
-                            self._runner._steer_pending += 1
+                        self._runner._add_outstanding(1)
                     yield message
 
         with tempfile.TemporaryDirectory() as tmp:

@@ -291,11 +291,16 @@ class _TurnRunner:
         self._client: ClaudeSDKClient | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._steer_wakeup: asyncio.Event | None = None
-        # Count of steered follow-up queries issued mid-turn. Incremented in the
-        # steer thread before the query is scheduled, drained on the loop thread
-        # to decide whether more responses still need draining. The lock guards
-        # the cross-thread read/modify/write.
-        self._steer_pending = 0
+        # Responses the receive loop still expects: the initial query, plus one
+        # per steered follow-up query, minus each drained response and each
+        # steered query that failed to start. The steer thread bumps it before
+        # scheduling a query and the query-failure callback rolls it back, so the
+        # lock guards the cross-thread read/modify/write. The receive loop
+        # re-reads it at the top of every pass to decide whether to drain again --
+        # so a steer whose query is rejected just before the loop would re-enter
+        # ``receive_response`` exits cleanly instead of awaiting a response that
+        # can never arrive.
+        self._outstanding_responses = 0
         self._steer_lock = threading.Lock()
         self._cancelled = False
         self.session_id = instance.claude_session_id
@@ -334,34 +339,38 @@ class _TurnRunner:
             try:
                 # ``receive_response`` stops after one ResultMessage, but a steer
                 # issued mid-turn schedules another ``query`` whose response then
-                # needs its own drain. Loop until every issued query (the initial
-                # one plus any steered follow-ups) has produced its result, so a
+                # needs its own drain. Loop until every expected response (the
+                # initial query plus any steered follow-ups) has been drained, so a
                 # steered prompt's output is never dropped at context close.
-                outstanding = 1
-                while outstanding > 0:
+                self._outstanding_responses = 1
+                while self._get_outstanding() > 0:
                     async for message in client.receive_response():
                         self._capture_session_id(message)
                         for method, payload in self._translator.translate(message):
                             self._write_event(method, payload)
                         if isinstance(message, ResultMessage):
                             self._record_result(message)
-                    outstanding = outstanding - 1 + self._take_steer_pending()
-                    if outstanding == 0:
+                    if self._add_outstanding(-1) == 0:
                         # Let the tailer catch a steer that landed just as this
-                        # response drained, before we tear the turn down.
+                        # response drained, before we tear the turn down; such a
+                        # steer bumps the counter back up so the loop re-reads it
+                        # above and keeps draining.
                         await asyncio.sleep(_STEER_DRAIN_GRACE)
-                        outstanding += self._take_steer_pending()
             finally:
                 steer_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await steer_task
 
-    def _take_steer_pending(self) -> int:
-        """Return and reset the count of steered queries awaiting a drain."""
+    def _add_outstanding(self, delta: int) -> int:
+        """Apply ``delta`` to the expected-response count and return the new value."""
         with self._steer_lock:
-            pending = self._steer_pending
-            self._steer_pending = 0
-        return pending
+            self._outstanding_responses += delta
+            return self._outstanding_responses
+
+    def _get_outstanding(self) -> int:
+        """Return the count of responses the receive loop still expects."""
+        with self._steer_lock:
+            return self._outstanding_responses
 
     # -- options & prompt --------------------------------------------------
 
@@ -783,11 +792,10 @@ class _TurnRunner:
             text, image_paths = _steer_request(raw)
             if (text or image_paths) and self._client is not None and self._loop is not None:
                 query_input = _build_query_input(text, image_paths)
-                # Register the follow-up before scheduling so the loop thread
-                # can't finish draining the prior response and exit before it
-                # learns another response is coming.
-                with self._steer_lock:
-                    self._steer_pending += 1
+                # Register the expected response before scheduling so the loop
+                # thread can't finish draining the prior response and exit before
+                # it learns another response is coming.
+                self._add_outstanding(1)
                 future = asyncio.run_coroutine_threadsafe(
                     self._client.query(query_input), self._loop
                 )
@@ -795,22 +803,22 @@ class _TurnRunner:
         return offset + len(complete)
 
     def _steer_query_done(self, future: Any) -> None:
-        """Roll back the pending count if a scheduled steer query never ran.
+        """Roll back the expected-response count if a steer query never ran.
 
-        The pending response is registered eagerly above so the receive loop
-        can't tear the turn down before it learns a follow-up is coming. But if
-        the SDK rejects the scheduled ``query`` (the client is interrupting or
-        closing, or refuses a concurrent follow-up) no ``ResultMessage`` will
-        ever arrive for that registration, so drop it -- otherwise the loop's
-        outstanding-response accounting waits on a response that can't come. The
-        common case is an immediate rejection that completes before the loop
-        consumes the count, so the count nets back to zero and no phantom
-        response is ever awaited.
+        The response is registered eagerly above so the receive loop can't tear
+        the turn down before it learns a follow-up is coming. But if the SDK
+        rejects the scheduled ``query`` (the client is interrupting or closing, or
+        refuses a concurrent follow-up) no ``ResultMessage`` will ever arrive for
+        that registration, so drop it. Because the receive loop re-reads the
+        shared counter at the top of each pass, a rejection that lands before the
+        loop would re-enter ``receive_response`` makes it exit cleanly rather than
+        await a response that can't come. (A rejection that lands while the loop
+        is *already* blocked in ``receive_response`` is not covered here -- that
+        needs a cancellable drain.)
         """
         if future.cancelled() or future.exception() is None:
             return
-        with self._steer_lock:
-            self._steer_pending -= 1
+        self._add_outstanding(-1)
 
 
 def _is_external_mcp_tool(tool_name: str) -> bool:
