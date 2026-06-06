@@ -42,7 +42,7 @@ from django.utils import timezone
 from openai_codex import AppServerConfig, Codex, TransportClosedError
 from openai_codex.generated.v2_all import ThreadSource, WebSearchMode
 
-from hitch.main import rate_limit
+from hitch.main import claude_options, rate_limit
 from hitch.main.codex_tools import registered_dynamic_tool_specs
 from hitch.main.db import is_database_locked_error
 from hitch.main.models import (
@@ -293,6 +293,16 @@ def _spawn_claude_session(
         purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
         and agent_kind != demo.DEMO_AGENT_KIND
     )
+    if is_hidden_system and not (sandbox_policy or "").strip():
+        # A hidden Claude reviewer (QA/Spec/Autonomous/monitor) started from the
+        # empty "Codex default" sandbox has no app-server to resolve that choice
+        # the way Codex does server-side, and the worker only auto-runs Bash/file
+        # under a write sandbox -- so a default-settings reviewer otherwise can't
+        # run tests. Resolve the empty choice to workspace-write here. The worker
+        # still denies a truly-unsandboxed (None) hidden run as defense in depth,
+        # and visible user/feedback turns are left untouched (the worker defaults
+        # those, keeping the persisted CodexInstance.sandbox_policy unchanged).
+        sandbox_policy = claude_options.SANDBOX_WORKSPACE_WRITE
     session_index.upsert_local_session(
         thread_id=thread_id,
         cwd=cwd,

@@ -461,6 +461,58 @@ class SpawnClaudeSessionTests(TestCase):
         self.assertEqual(mock_launch.call_args.kwargs["backend"], CodexInstance.BACKEND_CLAUDE)
 
     @patch("hitch.main.codex_pool._launch_worker_process")
+    def test_hidden_claude_reviewer_defaults_to_workspace_write(
+        self, mock_launch: MagicMock
+    ) -> None:
+        mock_launch.return_value = codex_pool.WorkerLaunch(pid=1)
+        with (
+            tempfile.TemporaryDirectory() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            # Hidden reviewer with the empty "Codex default" sandbox: resolved to
+            # workspace-write so it can run tests like a Codex reviewer.
+            hidden = codex_pool.spawn_new_session(
+                cwd="/repo",
+                prompt="qa",
+                backend=CodexInstance.BACKEND_CLAUDE,
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                agent_kind="pr_qa",
+                sandbox_policy=None,
+            )
+            # A visible user turn with the empty sandbox is left untouched (the
+            # worker defaults those), so its persisted policy stays empty.
+            visible = codex_pool.spawn_new_session(
+                cwd="/repo",
+                prompt="hi",
+                backend=CodexInstance.BACKEND_CLAUDE,
+                purpose=CodexInstance.PURPOSE_USER,
+                sandbox_policy=None,
+            )
+        self.assertEqual(
+            hidden.sandbox_policy, claude_options.SANDBOX_WORKSPACE_WRITE
+        )
+        self.assertEqual(visible.sandbox_policy, "")
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
+    def test_hidden_claude_reviewer_keeps_explicit_sandbox(
+        self, mock_launch: MagicMock
+    ) -> None:
+        mock_launch.return_value = codex_pool.WorkerLaunch(pid=1)
+        with (
+            tempfile.TemporaryDirectory() as events_dir,
+            override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+        ):
+            instance = codex_pool.spawn_new_session(
+                cwd="/repo",
+                prompt="qa",
+                backend=CodexInstance.BACKEND_CLAUDE,
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                agent_kind="pr_qa",
+                sandbox_policy=claude_options.SANDBOX_READ_ONLY,
+            )
+        self.assertEqual(instance.sandbox_policy, claude_options.SANDBOX_READ_ONLY)
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
     def test_spawn_turn_inherits_backend_and_session_id(self, mock_launch: MagicMock) -> None:
         mock_launch.return_value = codex_pool.WorkerLaunch(pid=1)
         with (
