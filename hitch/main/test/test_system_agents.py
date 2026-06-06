@@ -3771,6 +3771,10 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(
             kwargs["display_author"], system_agents.PR_MONITOR_DISPLAY_AUTHOR
         )
+        # The monitor spawn forwards the workflow's sandbox and model so a user's
+        # read-only choice survives and a Claude monitor uses the right model.
+        self.assertEqual(kwargs["sandbox_policy"], "workspace-write")
+        self.assertEqual(kwargs["model"], "gpt-5.4")
         mock_observe.assert_called_once_with(workflow)
         run = SystemAgentRun.objects.get(workflow=workflow)
         self.assertEqual(run.thread_id, "monitor-thread")
@@ -13353,7 +13357,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(kwargs["agent_kind"], system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND)
         self.assertEqual(kwargs["web_search_mode"], AutonomousGoal.WEB_SEARCH_LIVE)
         # The judge only evaluates, so it is pinned read-only -- it must not be
-        # able to mutate the repo (it runs in the real repo cwd for no-code goals).
+        # promoted to workspace-write by the Claude spawn layer and mutate the repo.
         self.assertEqual(kwargs["sandbox_policy"], "readOnly")
         self.assertIn("Add parser coverage", kwargs["prompt"])
         self.assertTrue(SessionMetadata.objects.filter(thread_id="judge-thread").exists())

@@ -7000,9 +7000,9 @@ def _spawn_autonomous_goal_judge_run(
         approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
         # The judge only evaluates the candidate, so it never writes -- pin it
         # read-only. This matters for no-code goals where ``session_cwd`` is the
-        # user's real repo: an empty sandbox defaults to workspace-write at the
-        # app-server, which would let the evaluation step mutate the repo the
-        # no-code candidate was deliberately kept out of.
+        # user's real repo: an empty sandbox would be promoted to workspace-write
+        # by the Claude spawn layer, letting the judge mutate the repo the no-code
+        # candidate was deliberately kept out of.
         sandbox_policy="readOnly",
         web_search_mode=_workflow_web_search_mode(workflow),
         thread_source=ThreadSource.subagent,
@@ -7254,7 +7254,19 @@ def _spawn_pr_followup_monitor_run(workflow: SystemWorkflow) -> SystemAgentRun:
     instance = codex_pool.spawn_new_session(
         cwd=workflow.cwd,
         prompt=prompt,
+        base_instructions=_state_string(workflow, "base_instructions") or None,
+        developer_instructions=(
+            _state_string(workflow, "developer_instructions") or None
+        ),
+        model=_state_string(workflow, "model") or None,
+        reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
         approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
+        # Forward the workflow's sandbox (and model/instructions) like the QA/spec
+        # spawns do, so a user who chose read-only for ``/fix-pr`` keeps it. Without
+        # this the empty sandbox would be promoted to workspace-write by the Claude
+        # spawn layer, letting the monitor auto-run Bash/file with write access.
+        sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
+        enable_memories=_state_bool(workflow, "enable_memories"),
         web_search_mode=_workflow_web_search_mode(workflow),
         thread_source=ThreadSource.subagent,
         purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
