@@ -11162,6 +11162,103 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(notice.inbox_kind, ProposedSession.INBOX_KIND_NOTICE)
         self.assertEqual(notice.candidate_session, candidate_metadata)
 
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_dead_candidate_worker_retries_within_proposal_budget_after_death_retry(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Production issues",
+            goal="Inspect production logs and the main database.",
+        )
+        candidate_metadata = SessionMetadata.objects.create(
+            thread_id="candidate-thread-1",
+            cwd="/repo",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={
+                "autonomous_goal_id": autonomous_goal.pk,
+                "candidate_session_id": candidate_metadata.pk,
+                system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {
+                    system_agents._AUTONOMOUS_GOAL_CANDIDATE_RETRY_KIND: 1
+                },
+                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
+                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 400,
+                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY: {
+                    "candidate-thread-1": 400,
+                },
+            },
+        )
+        instance = _instance(
+            thread_id="candidate-thread-1",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_FAILED,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            error=(
+                "worker process exited before reporting completion; "
+                "last event: command failed"
+            ),
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id="candidate-thread-1",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+        retry_instance = _instance(
+            thread_id="candidate-thread-1",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        mock_spawn.return_value = retry_instance
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        run.refresh_from_db()
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(
+            workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING
+        )
+        self.assertEqual(
+            workflow.state[
+                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
+            ],
+            400,
+        )
+        self.assertEqual(
+            workflow.state[system_agents._AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY],
+            1,
+        )
+        self.assertEqual(
+            workflow.state[
+                system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY
+            ],
+            1,
+        )
+        failure = workflow.state[system_agents._AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY]
+        self.assertEqual(failure["reason"], "candidate_failed")
+        self.assertIn("worker process exited", failure["error"])
+        retry_run = SystemAgentRun.objects.get(instance=retry_instance)
+        self.assertEqual(retry_run.status, SystemAgentRun.STATUS_RUNNING)
+        self.assertEqual(retry_run.input["proposal_budget_tokens_used"], 400)
+        self.assertFalse(ProposedSession.objects.exists())
+        mock_spawn.assert_called_once()
+
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_dead_autonomous_goal_judge_worker_is_retried_once(
         self, mock_spawn: MagicMock
@@ -12547,6 +12644,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             cwd="/repo",
             state={
                 system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
+                system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY: 1,
             },
         )
         candidate = _instance(
@@ -12573,6 +12671,10 @@ class AutonomousGoalWorkflowTests(TestCase):
                 workflow, candidate, 300
             ),
             300,
+        )
+        self.assertNotIn(
+            system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY,
+            workflow.state,
         )
         self.assertEqual(
             system_agents._record_autonomous_goal_proposal_budget_tokens(
@@ -12641,9 +12743,22 @@ class AutonomousGoalWorkflowTests(TestCase):
             system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY,
             workflow.state,
         )
+        self.assertTrue(
+            system_agents._autonomous_goal_proposal_budget_allows_retry(
+                workflow, tokens_used=None, token_delta=0
+            )
+        )
+        workflow.state[system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY] = (
+            system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT
+        )
         self.assertFalse(
             system_agents._autonomous_goal_proposal_budget_allows_retry(
                 workflow, tokens_used=None, token_delta=0
+            )
+        )
+        self.assertTrue(
+            system_agents._autonomous_goal_proposal_budget_allows_retry(
+                workflow, tokens_used=101, token_delta=101
             )
         )
         self.assertIsNone(
@@ -12860,7 +12975,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    def test_candidate_budget_retry_requires_token_progress(
+    def test_candidate_budget_retries_without_new_token_progress(
         self, mock_spawn: MagicMock
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -12930,13 +13045,24 @@ class AutonomousGoalWorkflowTests(TestCase):
             instance=instance,
             status=SystemAgentRun.STATUS_RUNNING,
         )
+        retry_instance = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        mock_spawn.return_value = retry_instance
 
         system_agents.on_codex_instance_finished(instance)
 
         workflow.refresh_from_db()
         run.refresh_from_db()
         self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(
+            workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING
+        )
         self.assertEqual(
             workflow.state[
                 system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
@@ -12948,6 +13074,110 @@ class AutonomousGoalWorkflowTests(TestCase):
                 system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY
             ],
             {"candidate-thread": 350},
+        )
+        self.assertEqual(
+            workflow.state[system_agents._AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY],
+            1,
+        )
+        self.assertEqual(
+            workflow.state[
+                system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY
+            ],
+            1,
+        )
+        retry_run = SystemAgentRun.objects.get(instance=retry_instance)
+        self.assertEqual(retry_run.status, SystemAgentRun.STATUS_RUNNING)
+        self.assertEqual(retry_run.input["proposal_budget_tokens_used"], 350)
+        self.assertEqual(retry_run.input["retry_attempt"], 1)
+        self.assertFalse(ProposedSession.objects.exists())
+        mock_spawn.assert_called_once()
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
+    def test_candidate_budget_no_progress_retry_cap_blocks_loop(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate_metadata = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo",
+            project=project,
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={
+                "autonomous_goal_id": autonomous_goal.pk,
+                "candidate_session_id": candidate_metadata.pk,
+                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
+                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 350,
+                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY: {
+                    "candidate-thread": 350,
+                },
+                system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY: (
+                    system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT
+                ),
+            },
+        )
+        instance = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            events_path=_raw_events_file(
+                self,
+                [
+                    {
+                        "method": codex_events.GOAL_UPDATED_METHOD,
+                        "payload": {
+                            "threadId": "candidate-thread",
+                            "goal": {
+                                "objective": "Autonomous goal",
+                                "tokensUsed": 350,
+                            },
+                        },
+                    },
+                    {
+                        "method": "item/completed",
+                        "payload": {
+                            "item": {
+                                "id": "a1",
+                                "type": "agentMessage",
+                                "text": "not json",
+                            }
+                        },
+                    },
+                ],
+            ),
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id="candidate-thread",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        workflow.refresh_from_db()
+        run.refresh_from_db()
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(
+            workflow.state[
+                system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY
+            ],
+            system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT,
         )
         notice = ProposedSession.objects.get()
         self.assertEqual(notice.inbox_kind, ProposedSession.INBOX_KIND_NOTICE)

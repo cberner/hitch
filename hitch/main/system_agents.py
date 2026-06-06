@@ -154,6 +154,10 @@ _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY = (
 )
 _AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY = "proposal_budget_failed_attempts"
 _AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY = "proposal_budget_last_failure"
+_AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY = (
+    "proposal_budget_no_progress_retries"
+)
+_AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT = 1
 _QA_DESIGN_SYNTHESIS_STATE_KEY = "qa_design_synthesis_gate"
 _QA_REVIEW_REVISION_STATE_KEY = "qa_review_revision"
 _WORKFLOW_FAILURE_OWNER_STATE_KEY = "failure_owner"
@@ -4950,19 +4954,30 @@ def _handle_autonomous_goal_agent_finished_locked(
     if workflow.status != SystemWorkflow.STATUS_RUNNING:
         return None
     if instance.status != CodexInstance.STATUS_COMPLETED:
+        error = f"autonomous goal worker failed: {instance.error}"
         if _is_worker_exited_before_completion_error(instance.error):
             retry_action = _retry_dead_autonomous_goal_worker(instance, run, workflow)
+            if retry_action is not None:
+                return retry_action
+            retry_action = _retry_budgeted_failed_autonomous_goal_candidate(
+                run,
+                workflow,
+                error=error,
+                raw_output=raw_output,
+                tokens_used=tokens_used,
+                token_delta=token_delta,
+            )
             if retry_action is not None:
                 return retry_action
             return _fail_autonomous_goal_run_and_block_workflow(
                 run,
                 autonomous_goal,
-                f"autonomous goal worker failed: {instance.error}",
+                error,
             )
         retry_action = _retry_budgeted_failed_autonomous_goal_candidate(
             run,
             workflow,
-            error=f"autonomous goal worker failed: {instance.error}",
+            error=error,
             raw_output=raw_output,
             tokens_used=tokens_used,
             token_delta=token_delta,
@@ -5283,7 +5298,7 @@ def _record_autonomous_goal_proposal_budget_tokens(
     )
     thread_tokens = max(previous_tokens, tokens_used)
     token_delta = thread_tokens - previous_tokens
-    workflow.state = {
+    next_state = {
         **workflow.state,
         _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: (
             _autonomous_goal_proposal_budget_tokens_used(workflow) + token_delta
@@ -5293,6 +5308,9 @@ def _record_autonomous_goal_proposal_budget_tokens(
             instance.thread_id: thread_tokens,
         },
     }
+    if token_delta > 0:
+        next_state.pop(_AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY, None)
+    workflow.state = next_state
     return token_delta
 
 
@@ -5321,6 +5339,7 @@ def _retry_budgeted_failed_autonomous_goal_candidate(
         error=error,
         raw_output=raw_output,
         tokens_used=tokens_used,
+        token_delta=token_delta,
     )
     workflow.save(update_fields=["state", "updated_at"])
     return _AutonomousGoalPostCommitAction(
@@ -5351,6 +5370,7 @@ def _retry_budgeted_unaccepted_autonomous_goal_candidate(
         candidate=candidate,
         judgment=judgment,
         tokens_used=tokens_used,
+        token_delta=token_delta,
     )
     return _AutonomousGoalPostCommitAction(
         _AUTONOMOUS_GOAL_RETRY_CANDIDATE_CONTINUATION_ACTION
@@ -5360,16 +5380,25 @@ def _retry_budgeted_unaccepted_autonomous_goal_candidate(
 def _autonomous_goal_proposal_budget_allows_retry(
     workflow: SystemWorkflow, *, tokens_used: int | None, token_delta: int
 ) -> bool:
-    if _autonomous_goal_workflow_proposal_budget(workflow) <= 0:
+    budget = _autonomous_goal_workflow_proposal_budget(workflow)
+    if budget <= 0:
         return False
-    if tokens_used is None or tokens_used <= 0:
+    if _autonomous_goal_proposal_budget_tokens_used(workflow) >= budget:
         return False
-    if token_delta <= 0:
-        return False
+    if _autonomous_goal_budget_token_progressed(
+        tokens_used=tokens_used, token_delta=token_delta
+    ):
+        return True
     return (
-        _autonomous_goal_proposal_budget_tokens_used(workflow)
-        < _autonomous_goal_workflow_proposal_budget(workflow)
+        _autonomous_goal_no_progress_budget_retries(workflow)
+        < _AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT
     )
+
+
+def _autonomous_goal_budget_token_progressed(
+    *, tokens_used: int | None, token_delta: int
+) -> bool:
+    return tokens_used is not None and tokens_used > 0 and token_delta > 0
 
 
 def _record_autonomous_goal_failed_attempt(
@@ -5382,6 +5411,7 @@ def _record_autonomous_goal_failed_attempt(
     candidate: dict[str, Any] | None = None,
     judgment: dict[str, Any] | None = None,
     tokens_used: int | None = None,
+    token_delta: int = 0,
 ) -> None:
     failure: dict[str, object] = {
         "reason": reason,
@@ -5402,13 +5432,23 @@ def _record_autonomous_goal_failed_attempt(
         failure["candidate"] = _autonomous_goal_failed_candidate_context(candidate)
     if judgment is not None:
         failure["judgment"] = _autonomous_goal_failed_judgment_context(judgment)
-    workflow.state = {
+    next_state = {
         **workflow.state,
         _AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY: (
             _autonomous_goal_failed_attempts(workflow) + 1
         ),
         _AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY: failure,
     }
+    if _autonomous_goal_workflow_proposal_budget(workflow) > 0:
+        if _autonomous_goal_budget_token_progressed(
+            tokens_used=tokens_used, token_delta=token_delta
+        ):
+            next_state.pop(_AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY, None)
+        else:
+            next_state[_AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY] = (
+                _autonomous_goal_no_progress_budget_retries(workflow) + 1
+            )
+    workflow.state = next_state
 
 
 def _autonomous_goal_failed_candidate_context(
@@ -5454,6 +5494,10 @@ def _autonomous_goal_proposal_budget_tokens_used(workflow: SystemWorkflow) -> in
 
 def _autonomous_goal_failed_attempts(workflow: SystemWorkflow) -> int:
     return _state_int(workflow, _AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY)
+
+
+def _autonomous_goal_no_progress_budget_retries(workflow: SystemWorkflow) -> int:
+    return _state_int(workflow, _AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY)
 
 
 def _autonomous_goal_proposal_budget_metadata(
