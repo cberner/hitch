@@ -17520,6 +17520,157 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, 'data-run-status-log-url=""', count=1)
         self.assertNotContains(response, 'data-run-status-log-url="None"')
 
+    @patch(
+        "hitch.main.system_agents.default_branch_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_page_shows_not_running_run_status_reasons(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        mock_default_branch_commit_hash: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Manual goal",
+            goal="Run only when requested.",
+        )
+        pending_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Pending goal",
+            goal="Wait on proposal review.",
+            auto_proposal_enabled=True,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=pending_goal,
+            title="Review me",
+        )
+        AutonomousGoal.objects.create(
+            project=project,
+            title="No change goal",
+            goal="Wait for new commits.",
+            auto_proposal_enabled=True,
+            auto_proposal_last_no_proposal_sha="a" * 40,
+        )
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Advanced goal",
+            goal="Ready after branch changes.",
+            auto_proposal_enabled=True,
+            auto_proposal_last_no_proposal_sha="b" * 40,
+        )
+        skipped_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Skipped goal",
+            goal="Report no-op runs.",
+            auto_proposal_enabled=True,
+        )
+        SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                skipped_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_SKIPPED,
+            state={
+                "autonomous_goal_id": skipped_goal.pk,
+                "candidate": {"message": "No useful docs proposal was found."},
+            },
+        )
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-state="manual"')
+        self.assertContains(response, ">Manual</button>", html=False)
+        self.assertContains(
+            response,
+            "Auto-proposal is off. Use Run to start this goal manually.",
+        )
+        self.assertContains(response, 'data-state="review"')
+        self.assertContains(response, ">Review</button>", html=False)
+        self.assertContains(
+            response,
+            "Not running because a proposal from this goal is waiting in the inbox.",
+        )
+        self.assertContains(response, 'data-state="waiting"')
+        self.assertContains(response, ">No change</button>", html=False)
+        self.assertContains(
+            response,
+            "It will try again after that branch changes.",
+        )
+        self.assertContains(response, ">Ready</button>", html=False)
+        self.assertContains(
+            response,
+            "Auto-proposal is enabled. This goal will start when the scheduler runs "
+            "and quota allows.",
+        )
+        self.assertContains(response, 'data-state="skipped"')
+        self.assertContains(response, ">Skipped</button>", html=False)
+        self.assertContains(response, "No useful docs proposal was found.")
+        self.assertGreaterEqual(mock_default_branch_commit_hash.call_count, 2)
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_page_shows_queued_when_accepted_automation_is_in_flight(
+        self, mock_codex: MagicMock, mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Queued goal",
+            goal="Wait while project automation is active.",
+            auto_proposal_enabled=True,
+        )
+        blocker_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Accepted implementation",
+            goal="Run an accepted autonomous implementation.",
+        )
+        implementation = SessionMetadata.objects.create(
+            thread_id="implementation-thread",
+            cwd="/repo",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=blocker_goal,
+            title="Accepted autonomous proposal",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            accepted_session=implementation,
+            outcome_metadata={
+                "accepted_by": system_agents.AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY,
+            },
+        )
+        CodexInstance.objects.create(
+            pid=0,
+            thread_id=implementation.thread_id,
+            cwd="/repo",
+            prompt="run accepted implementation",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-state="queued"')
+        self.assertContains(response, ">Queued</button>", html=False)
+        self.assertContains(
+            response,
+            "Not running because accepted autonomous-goal automation "
+            "is still active for this project.",
+        )
+        self.assertNotContains(response, ">Ready</button>", html=False)
+
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_edit_form_sync_preserves_auto_qa_choice_when_required(
