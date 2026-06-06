@@ -3637,45 +3637,22 @@ class IterCodexAppServerPidsTests(SimpleTestCase):
 
         self.assertEqual(found, [100])
 
-    def test_dedupes_native_child_of_node_wrapper(self) -> None:
+    def test_yields_both_node_wrapper_and_native_child(self) -> None:
         # The codex CLI is a node wrapper that re-execs a native child; both
-        # carry the SDK app-server argv and our marker, so each logical
-        # app-server matches twice. Only the wrapper (whose parent is the
-        # worker, not another matched pid) should be yielded.
+        # carry the SDK app-server argv and our marker. The iterator drives the
+        # nuke sweep, so it must yield *both* halves -- SIGKILL is not delivered
+        # to children, and the native child is the lock-holder. Deduping to one
+        # logical app-server is the job of count_running_codex_app_servers.
         with tempfile.TemporaryDirectory() as tmp:
             proc_root = Path(tmp)
             # Worker (parent of the wrapper) -- not itself an app-server.
             self._write_proc(proc_root, 50, [b"python", b"manage.py"], ppid=1)
-            # node wrapper: parent is the worker.
+            # node wrapper (parent is the worker) + native re-exec child.
             self._write_proc(
-                proc_root,
-                100,
-                self._APP_SERVER_ARGV,
-                [self._MARKER],
-                ppid=50,
-            )
-            # native re-exec child: parent is the wrapper (itself matched).
-            self._write_proc(
-                proc_root,
-                200,
-                self._APP_SERVER_ARGV,
-                [self._MARKER],
-                ppid=100,
-            )
-            # A second independent logical app-server (wrapper + child).
-            self._write_proc(
-                proc_root,
-                300,
-                self._APP_SERVER_ARGV,
-                [self._MARKER],
-                ppid=51,
+                proc_root, 100, self._APP_SERVER_ARGV, [self._MARKER], ppid=50
             )
             self._write_proc(
-                proc_root,
-                400,
-                self._APP_SERVER_ARGV,
-                [self._MARKER],
-                ppid=300,
+                proc_root, 200, self._APP_SERVER_ARGV, [self._MARKER], ppid=100
             )
 
             found = sorted(
@@ -3684,22 +3661,7 @@ class IterCodexAppServerPidsTests(SimpleTestCase):
                 )
             )
 
-        self.assertEqual(found, [100, 300])
-
-    def test_missing_stat_keeps_pid(self) -> None:
-        # If ppid cannot be read (no stat file), the pid is kept rather than
-        # silently dropped -- degrade toward over-counting, never under-killing.
-        with tempfile.TemporaryDirectory() as tmp:
-            proc_root = Path(tmp)
-            self._write_proc(proc_root, 100, self._APP_SERVER_ARGV, [self._MARKER])
-
-            found = list(
-                codex_pool._iter_codex_app_server_pids(
-                    proc_root=proc_root, deployment_id=self._DEPLOYMENT
-                )
-            )
-
-        self.assertEqual(found, [100])
+        self.assertEqual(found, [100, 200])
 
     def test_unreadable_environ_is_not_matched(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3781,12 +3743,13 @@ class NukeCodexAppServersTests(SimpleTestCase):
         mock_kill.assert_any_call(222, signal.SIGKILL)
 
     @patch("hitch.main.codex_pool.os.kill")
-    def test_kills_one_pid_per_logical_app_server(
+    def test_signals_both_wrapper_and_native_child(
         self, mock_kill: MagicMock
     ) -> None:
-        # A logical app-server is a node wrapper plus a native re-exec child; the
-        # SIGKILL on the wrapper already takes the child down, so only the
-        # wrapper should be signaled and the kill total must not double-count.
+        # A logical app-server is a node wrapper plus a native re-exec child.
+        # SIGKILL is not delivered to children, and the native child holds the
+        # CODEX_HOME state-DB lock, so the sweep must signal both directly --
+        # killing only the wrapper would orphan the lock-holder.
         with tempfile.TemporaryDirectory() as tmp:
             proc_root = Path(tmp)
             self._write_app_server(proc_root, 111, ppid=50)
@@ -3794,8 +3757,9 @@ class NukeCodexAppServersTests(SimpleTestCase):
 
             killed = codex_pool.nuke_codex_app_servers(proc_root=proc_root)
 
-        self.assertEqual(killed, 1)
-        mock_kill.assert_called_once_with(111, signal.SIGKILL)
+        self.assertEqual(killed, 2)
+        mock_kill.assert_any_call(111, signal.SIGKILL)
+        mock_kill.assert_any_call(222, signal.SIGKILL)
 
     @patch("hitch.main.codex_pool.os.kill")
     def test_recycled_pid_failing_recheck_is_not_signaled(
@@ -3835,6 +3799,69 @@ class NukeCodexAppServersTests(SimpleTestCase):
             self.assertEqual(
                 codex_pool.nuke_codex_app_servers(proc_root=proc_root), 0
             )
+
+
+class CountRunningCodexAppServersTests(SimpleTestCase):
+    def _write_app_server(
+        self, proc_root: Path, pid: int, ppid: int | None = None
+    ) -> None:
+        marker = (
+            f"{codex_pool._APP_SERVER_DEPLOYMENT_ENV}="
+            f"{codex_pool._app_server_deployment_id()}"
+        ).encode()
+        pid_dir = proc_root / str(pid)
+        pid_dir.mkdir()
+        (pid_dir / "cmdline").write_bytes(
+            b"\0".join(
+                [b"/usr/local/bin/codex", b"app-server", b"--listen", b"stdio://"]
+            )
+            + b"\0"
+        )
+        (pid_dir / "environ").write_bytes(marker + b"\0")
+        if ppid is not None:
+            (pid_dir / "stat").write_text(f"{pid} (codex app) S {ppid} 0 0\n")
+
+    def test_counts_one_per_wrapper_child_pair(self) -> None:
+        # Two logical app-servers, each a node wrapper plus its native child, so
+        # four matched pids must collapse to a count of two.
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            self._write_app_server(proc_root, 100, ppid=50)  # wrapper A
+            self._write_app_server(proc_root, 200, ppid=100)  # native child A
+            self._write_app_server(proc_root, 300, ppid=51)  # wrapper B
+            self._write_app_server(proc_root, 400, ppid=300)  # native child B
+
+            count = codex_pool.count_running_codex_app_servers(proc_root=proc_root)
+
+        self.assertEqual(count, 2)
+
+    def test_missing_stat_counts_pid(self) -> None:
+        # ppid unknown (no stat) -> count it rather than silently drop, so a
+        # leaked app-server is never undercounted.
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            self._write_app_server(proc_root, 100)
+
+            self.assertEqual(
+                codex_pool.count_running_codex_app_servers(proc_root=proc_root), 1
+            )
+
+    def test_orphaned_native_child_is_counted(self) -> None:
+        # A native child whose wrapper already died (parent reparented to init,
+        # not in the matched set) is itself a leaked logical app-server.
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            self._write_app_server(proc_root, 200, ppid=1)
+
+            self.assertEqual(
+                codex_pool.count_running_codex_app_servers(proc_root=proc_root), 1
+            )
+
+    def test_no_proc_root_counts_zero(self) -> None:
+        missing = Path(tempfile.gettempdir()) / "definitely-not-here-13579"
+        self.assertEqual(
+            codex_pool.count_running_codex_app_servers(proc_root=missing), 0
+        )
 
 
 class InterruptActiveTests(TestCase):
