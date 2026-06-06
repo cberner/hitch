@@ -162,6 +162,36 @@ CODEX_WORKER_LOG_DIR = (
     Path(_CODEX_WORKER_LOG_DIR) if _CODEX_WORKER_LOG_DIR else None
 )
 
+# Codex keeps its own SQLite databases (state_5.sqlite, logs_2.sqlite) under
+# ``sqlite_home`` (default ``$CODEX_HOME``). Many app-servers sharing one home
+# serialize on a single SQLite writer lock and race the one-time init/backfill,
+# surfacing as "database is locked" (openai/codex#20213). We split the home by
+# role: in-process request + scheduler app-servers share ``web`` (so
+# ``use_state_db_only`` thread listing reads a populated index), while detached
+# per-turn workers shard across a bounded pool of homes. The databases are a
+# derived index over the rollout JSONL under CODEX_HOME, so relocating them here
+# loses nothing -- a fresh home is rebuilt by Codex's backfill on first use.
+CODEX_SQLITE_HOME_BASE = Path(
+    os.environ.get("HITCH_CODEX_SQLITE_HOME_BASE", HITCH_HOME_DIR / "codex_sqlite")
+)
+# Number of distinct ``sqlite_home`` directories detached workers round-robin
+# across. Defaults to 2x CPU cores: enough headroom that concurrent turns rarely
+# share a home (and so rarely contend on its writer lock) while keeping the
+# one-time backfill cost amortized across a small, reused set of homes.
+_CODEX_WORKER_SQLITE_POOL_SIZE = os.environ.get("HITCH_CODEX_WORKER_SQLITE_POOL_SIZE")
+CODEX_WORKER_SQLITE_POOL_SIZE = (
+    int(_CODEX_WORKER_SQLITE_POOL_SIZE)
+    if _CODEX_WORKER_SQLITE_POOL_SIZE
+    else max(1, 2 * (os.cpu_count() or 1))
+)
+# Codex's log DB is diagnostic and self-pruned per thread, but a shared worker
+# home accumulates rows across every worker that lands on it. After a worker
+# finishes its turn, Hitch deletes that home's log DB if it has grown past this
+# size so a hot home cannot grow without bound. The state DB is never touched.
+CODEX_WORKER_LOGS_DB_MAX_BYTES = int(
+    os.environ.get("HITCH_CODEX_WORKER_LOGS_DB_MAX_BYTES", str(100 * 1024 * 1024))
+)
+
 # Worker isolation policy: "auto" uses systemd scopes only when the user
 # manager is reachable, "systemd" fails closed, and "direct" preserves the
 # legacy process-group launch path for non-systemd environments. The defaults
