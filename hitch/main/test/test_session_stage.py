@@ -29,7 +29,9 @@ class SessionStageTests(SimpleTestCase):
                     step=step,
                 )
 
-                self.assertEqual(session_stage.derive_stage(workflow=workflow), expected_stage)
+                self.assertEqual(
+                    session_stage.derive_stage(workflow=workflow), expected_stage
+                )
 
     def test_archived_workflow_does_not_derive_blocked_stage(self) -> None:
         # Archived stale-blocked rows must drop out of the Blocked inbox stage.
@@ -63,7 +65,7 @@ class SessionStageTests(SimpleTestCase):
             awaiting_user_input=True,
         )
 
-        self.assertEqual(stage, session_stage.WAITING_FOR_USER)
+        self.assertEqual(stage, session_stage.AWAITING_INPUT)
 
     def test_pending_user_input_overrides_running_system_workflow(self) -> None:
         workflow = SystemWorkflow(
@@ -77,7 +79,13 @@ class SessionStageTests(SimpleTestCase):
             awaiting_user_input=True,
         )
 
-        self.assertEqual(stage, session_stage.WAITING_FOR_USER)
+        self.assertEqual(stage, session_stage.AWAITING_INPUT)
+
+    def test_legacy_waiting_for_user_key_maps_to_awaiting_input(self) -> None:
+        self.assertEqual(
+            session_stage.stage_for_key("waiting_for_user"),
+            session_stage.AWAITING_INPUT,
+        )
 
     def test_trailing_commentary_after_plan_stays_plan_stage(self) -> None:
         # The session-list stage runs against raw, un-collapsed rollout

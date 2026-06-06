@@ -2527,7 +2527,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
     ]
     workflows_by_thread_id = _latest_stage_workflows_by_thread_id(thread_ids)
     active_instances_by_thread_id = _active_instances_by_thread_id(thread_ids)
-    waiting_thread_ids = _thread_ids_waiting_for_user_input(thread_ids)
+    waiting_thread_ids = _thread_ids_awaiting_input(thread_ids)
     pr_stage_refreshes_remaining = _SESSION_LIST_PR_STAGE_REFRESH_LIMIT
     for session in sessions:
         session_id = session.get("id")
@@ -2779,30 +2779,45 @@ def _latest_stage_workflows_by_thread_id(
     return by_thread_id
 
 
-def _thread_ids_waiting_for_user_input(thread_ids: Iterable[str]) -> set[str]:
+def _thread_ids_awaiting_input(thread_ids: Iterable[str]) -> set[str]:
     ids = [thread_id for thread_id in dict.fromkeys(thread_ids) if thread_id]
     if not ids:
         return set()
     active_statuses = (CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING)
-    direct_thread_ids = UserInputRequest.objects.filter(
+    direct_input_thread_ids = UserInputRequest.objects.filter(
         response__isnull=True,
         instance__thread_id__in=ids,
         instance__status__in=active_statuses,
     ).values_list("instance__thread_id", flat=True)
-    workflow_thread_ids = UserInputRequest.objects.filter(
+    direct_approval_thread_ids = ApprovalRequest.objects.filter(
+        decision=ApprovalRequest.DECISION_PENDING,
+        instance__thread_id__in=ids,
+        instance__status__in=active_statuses,
+    ).values_list("instance__thread_id", flat=True)
+    workflow_input_thread_ids = UserInputRequest.objects.filter(
         response__isnull=True,
         instance__system_agent_runs__workflow__main_thread_id__in=ids,
         instance__system_agent_runs__workflow__status=SystemWorkflow.STATUS_RUNNING,
     ).values_list(
         "instance__system_agent_runs__workflow__main_thread_id", flat=True
     )
+    workflow_approval_thread_ids = ApprovalRequest.objects.filter(
+        decision=ApprovalRequest.DECISION_PENDING,
+        instance__system_agent_runs__workflow__main_thread_id__in=ids,
+        instance__system_agent_runs__workflow__status=SystemWorkflow.STATUS_RUNNING,
+    ).values_list(
+        "instance__system_agent_runs__workflow__main_thread_id", flat=True
+    )
     waiting_thread_ids: set[str] = set()
-    for thread_id in direct_thread_ids:
-        if isinstance(thread_id, str) and thread_id:
-            waiting_thread_ids.add(thread_id)
-    for thread_id in workflow_thread_ids:
-        if isinstance(thread_id, str) and thread_id:
-            waiting_thread_ids.add(thread_id)
+    for thread_ids_result in (
+        direct_input_thread_ids,
+        direct_approval_thread_ids,
+        workflow_input_thread_ids,
+        workflow_approval_thread_ids,
+    ):
+        for thread_id in thread_ids_result:
+            if isinstance(thread_id, str) and thread_id:
+                waiting_thread_ids.add(thread_id)
     return waiting_thread_ids
 
 
@@ -4246,9 +4261,7 @@ def _render_session_detail(
     )
     stage_context: dict[str, Any] | None = None
     if not read_only:
-        awaiting_user_input = session_id in _thread_ids_waiting_for_user_input(
-            [session_id]
-        )
+        awaiting_user_input = session_id in _thread_ids_awaiting_input([session_id])
         # Serve the last-known PR stage now and refresh off-request when due.
         # A synchronous ``gh pr view`` here shelled out on every detail render
         # (up to a 5s timeout) and dominated page latency; instead the badge is

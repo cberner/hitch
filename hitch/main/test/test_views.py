@@ -3186,6 +3186,73 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
+    @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.Codex")
+    def test_cached_session_list_flags_pending_active_approval(
+        self,
+        mock_codex: MagicMock,
+        mock_discover: MagicMock,
+        _worker_is_alive: MagicMock,
+    ) -> None:
+        client = _setup_codex(mock_codex)
+        client.thread_list.side_effect = AppServerError("thread list unavailable")
+        mock_discover.return_value = []
+        now = datetime.now(UTC)
+        rollout_path = _make_rollout(
+            self,
+            [
+                _rollout_line(
+                    "event_msg",
+                    {"type": "user_message", "message": "Continue the work."},
+                ),
+            ],
+        )
+        SessionIndexSyncState.objects.create(
+            source=SessionIndexSyncState.SOURCE_ACTIVE,
+            last_synced_at=now,
+            is_complete=True,
+        )
+        metadata = SessionMetadata.objects.create(
+            thread_id="approval-needed",
+            cwd="/repo",
+            codex_display_title="Approval needed",
+            codex_preview="Continue the work.",
+            codex_path=str(rollout_path),
+            codex_created_at=now,
+            codex_updated_at=now,
+            codex_last_synced_at=now,
+            derived_stage="implementation",
+            derived_stage_source_mtime_ns=rollout_path.stat().st_mtime_ns,
+        )
+        instance = CodexInstance.objects.create(
+            pid=os.getpid(),
+            thread_id="approval-needed",
+            cwd="/repo",
+            prompt="Continue the work.",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+        )
+        ApprovalRequest.objects.create(
+            instance=instance,
+            method="item/commandExecution/requestApproval",
+            params={"item": {"command": "git rebase --autostash origin/master"}},
+            decision=ApprovalRequest.DECISION_PENDING,
+        )
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Approval needed")
+        self.assertContains(
+            response,
+            '<span class="stage-badge" data-tone="warning">Awaiting Input</span>',
+        )
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.derived_stage, "implementation")
+        mock_codex.assert_not_called()
+        client.thread_list.assert_not_called()
+
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_flags_pending_spec_critic_input(
@@ -3259,7 +3326,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Needs input")
         self.assertContains(
             response,
-            '<span class="stage-badge" data-tone="warning">Waiting for User</span>',
+            '<span class="stage-badge" data-tone="warning">Awaiting Input</span>',
         )
         metadata.refresh_from_db()
         self.assertEqual(metadata.derived_stage, "implementation")
