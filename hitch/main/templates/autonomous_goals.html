@@ -437,7 +437,7 @@
                                     data-auto-qa="{% if goal.auto_qa_enabled %}true{% else %}false{% endif %}"
                                     data-auto-proposal-enabled="{% if goal.auto_proposal_enabled %}true{% else %}false{% endif %}"
                                     data-stacked-diff-depth="{{ goal.stacked_diff_depth }}"
-                                    data-proposal-budget="{{ goal.proposal_budget|default_if_none:'' }}"
+                                    data-proposal-budget="{{ goal.proposal_budget_form_value }}"
                                     data-confidence-threshold="{{ goal.confidence_threshold }}"
                                     data-web-search-mode="{{ goal.web_search_mode }}"
                                     data-auto-merge-to-local-branch="{% if goal.auto_merge_to_local_branch %}true{% else %}false{% endif %}"
@@ -463,7 +463,7 @@
                         <span class="meta">Stack depth: {{ goal.effective_stacked_diff_depth }}</span>
                         {% endif %}
                         {% if goal.proposal_budget %}
-                        <span class="meta">Proposal budget: {{ goal.proposal_budget }} tokens</span>
+                        <span class="meta">Proposal budget: {{ goal.proposal_budget_display }}</span>
                         {% endif %}
                         <span class="meta">Auto-QA: {% if goal.autonomy in auto_qa_required_autonomies %}Required{% elif goal.effective_auto_qa_enabled %}On{% else %}Off{% endif %}</span>
                         <span class="meta">Auto-proposal: {% if goal.auto_proposal_enabled %}On{% else %}Off{% endif %}</span>
@@ -479,6 +479,7 @@
                         {% endif %}
                         {% endif %}
                         {% if goal.run_running %}
+                        <span class="meta">Tokens used: {{ goal.run_tokens_used_display }}</span>
                         <button
                             type="button"
                             class="run-status"
@@ -576,8 +577,8 @@
             </label>
             <label>
                 Proposal budget
-                <input type="number" name="proposal_budget" min="1" step="1" data-edit-autonomous-goal-proposal-budget>
-                <span class="field-help">Tokens. Leave blank to stop after the first failed proposal attempt.</span>
+                <input type="number" name="proposal_budget" min="0.000001" step="any" data-edit-autonomous-goal-proposal-budget>
+                <span class="field-help">Millions of tokens. Leave blank to stop after the first failed proposal attempt.</span>
             </label>
             <label class="checkbox-label" data-autonomous-goal-auto-qa-field>
                 <span>Auto-QA</span>

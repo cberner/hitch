@@ -29,8 +29,8 @@
 </label>
 <label>
     Proposal budget
-    <input type="number" name="proposal_budget" min="1" step="1" value="{{ default_proposal_budget }}">
-    <span class="field-help">Tokens. Leave blank to stop after the first failed proposal attempt.</span>
+    <input type="number" name="proposal_budget" min="0.000001" step="any" value="{{ default_proposal_budget }}">
+    <span class="field-help">Millions of tokens. Leave blank to stop after the first failed proposal attempt.</span>
 </label>
 <label class="checkbox-label" data-autonomous-goal-auto-qa-field>
     <span>Auto-QA</span>
