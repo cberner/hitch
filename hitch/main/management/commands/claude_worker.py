@@ -84,7 +84,14 @@ _FILE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 # ``PowerShell`` could run commands under ``approve_all`` despite a read-only
 # session, since it is not in the auto-approved read-only tool list.
 _POWERSHELL_TOOL = "PowerShell"
-_COMMAND_TOOLS = frozenset({"Bash", _POWERSHELL_TOOL})
+# ``Monitor`` runs a background script under Bash permission rules, so it is
+# confined by the same bash sandbox and must follow the command-execution
+# approval/auto-review path (not the generic tool path) -- otherwise a hidden
+# workspace-write run would deny it instead of treating it like Bash, and a
+# visible approval would mislabel it as a generic tool. Unlike ``PowerShell`` it
+# *is* sandbox-confinable, so it is not in the ``_powershell_unconfined`` carve-out.
+_MONITOR_TOOL = "Monitor"
+_COMMAND_TOOLS = frozenset({"Bash", _POWERSHELL_TOOL, _MONITOR_TOOL})
 # Plan mode's approval boundary: the model calls ``ExitPlanMode`` to present its
 # plan and leave plan mode. It is deliberately kept out of ``allowed_tools`` so it
 # always reaches ``can_use_tool`` -- and must never be auto-approved (even under

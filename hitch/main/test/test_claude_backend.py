@@ -492,6 +492,12 @@ class ApprovalRoutingTests(TestCase):
             claude_worker._approval_method("Bash"),
             claude_worker._COMMAND_APPROVAL_METHOD,
         )
+        # ``Monitor`` runs a background script under Bash rules, so it follows the
+        # command-execution path -- not the generic tool path.
+        self.assertEqual(
+            claude_worker._approval_method("Monitor"),
+            claude_worker._COMMAND_APPROVAL_METHOD,
+        )
         self.assertEqual(
             claude_worker._approval_method("Edit"),
             claude_worker._FILE_APPROVAL_METHOD,
@@ -876,7 +882,9 @@ class HiddenAutoReviewApprovalTests(TestCase):
         import asyncio
 
         runner = self._runner(sandbox_policy="workspaceWrite")
-        for tool in ("Bash", "Edit", "Write", "MultiEdit", "NotebookEdit"):
+        # ``Monitor`` runs under Bash rules and is bash-sandbox-confinable, so a
+        # hidden write-sandbox run auto-approves it like Bash.
+        for tool in ("Bash", "Monitor", "Edit", "Write", "MultiEdit", "NotebookEdit"):
             result = asyncio.run(runner._can_use_tool(tool, {}, None))
             self.assertIsInstance(result, PermissionResultAllow, tool)
 
