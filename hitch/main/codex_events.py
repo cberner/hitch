@@ -177,6 +177,24 @@ def latest_task_plan_for_instance(instance: CodexInstance | None) -> TaskPlanSna
     )
 
 
+def latest_task_plan_for_thread(thread_id: str) -> TaskPlanSnapshot | None:
+    """Return the latest worker's task-plan snapshot for ``thread_id``.
+
+    Unlike goal objectives, a task plan belongs to a single turn: a later turn
+    that finishes without emitting ``turn/plan/updated`` leaves no plan, and the
+    widget must not resurrect an earlier turn's plan. So this scopes to the most
+    recently started worker rather than scanning every worker's log. Combined
+    with the active-worker lookup the view uses while a worker is running, the
+    plan only survives a reload when the latest turn actually produced one.
+    """
+    latest = (
+        CodexInstance.objects.filter(thread_id=thread_id)
+        .order_by("-started_at", "-pk")
+        .first()
+    )
+    return latest_task_plan_for_instance(latest)
+
+
 def latest_task_plan_from_event_paths(
     paths: Iterable[str | Path], *, thread_id: str
 ) -> TaskPlanSnapshot | None:

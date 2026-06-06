@@ -4880,8 +4880,13 @@ def _render_session_detail(
         rollout_state=_rollout_file_state_from_value(getattr(thread, "path", None)),
     )
     goal_objective = codex_events.latest_goal_for_thread(session_id)
+    # Scope the plan to the running worker, or to the latest worker on reload
+    # when none is running, so a turn that finished without emitting its own
+    # plan does not inherit an earlier turn's.
     task_plan = _task_plan_context(
         codex_events.latest_task_plan_for_instance(active_instance)
+        if active_instance is not None
+        else codex_events.latest_task_plan_for_thread(session_id)
     )
     thread_cwd = _thread_cwd(thread)
     diff_view = build_worktree_diff(thread_cwd)
