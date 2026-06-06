@@ -149,6 +149,13 @@ _AUTONOMOUS_GOAL_SESSION_CWD_STATE_KEY = "session_cwd"
 _AUTONOMOUS_GOAL_STACKED_DEPTH_STATE_KEY = "stacked_diff_depth"
 _AUTONOMOUS_GOAL_STACKED_ITERATION_STATE_KEY = "stacked_diff_iteration"
 _AUTONOMOUS_GOAL_STACKED_FORK_CWD_STATE_KEY = "stacked_diff_fork_from_cwd"
+_AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY = "proposal_budget"
+_AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY = "proposal_budget_tokens_used"
+_AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY = (
+    "proposal_budget_token_totals"
+)
+_AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY = "proposal_budget_failed_attempts"
+_AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY = "proposal_budget_last_failure"
 _QA_DESIGN_SYNTHESIS_STATE_KEY = "qa_design_synthesis_gate"
 _QA_REVIEW_REVISION_STATE_KEY = "qa_review_revision"
 _WORKFLOW_FAILURE_OWNER_STATE_KEY = "failure_owner"
@@ -183,6 +190,7 @@ _AUTONOMOUS_GOAL_JUDGE_RETRY_KIND = "autonomous_goal_judge"
 _AUTONOMOUS_GOAL_SPAWN_JUDGE_ACTION = "spawn_judge"
 _AUTONOMOUS_GOAL_SPAWN_NEXT_CANDIDATE_ACTION = "spawn_next_candidate"
 _AUTONOMOUS_GOAL_RETRY_CANDIDATE_ACTION = "retry_candidate"
+_AUTONOMOUS_GOAL_RETRY_CANDIDATE_CONTINUATION_ACTION = "retry_candidate_continuation"
 _AUTONOMOUS_GOAL_RETRY_JUDGE_ACTION = "retry_judge"
 _PR_GATE_MERGE_CONFLICTS = "merge_conflicts"
 _PR_GATE_REVIEW = "review"
@@ -1236,6 +1244,7 @@ class _AutonomousGoalAutoProposalStartSnapshot:
     autonomy: str
     auto_qa_enabled: bool
     stacked_diff_depth: int
+    proposal_budget: int | None
     auto_merge_to_local_branch: bool
     auto_merge_branch: str
     base_ref: str
@@ -1257,6 +1266,7 @@ def _autonomous_goal_auto_proposal_start_snapshot(
         autonomy=autonomous_goal.autonomy,
         auto_qa_enabled=autonomous_goal.auto_qa_enabled,
         stacked_diff_depth=autonomous_goal.effective_stacked_diff_depth,
+        proposal_budget=autonomous_goal.proposal_budget,
         auto_merge_to_local_branch=autonomous_goal.auto_merge_to_local_branch,
         auto_merge_branch=autonomous_goal.auto_merge_branch,
         base_ref=_autonomous_goal_auto_merge_base_ref(autonomous_goal),
@@ -1463,6 +1473,10 @@ def _create_autonomous_goal_workflow_record(
         "autonomous_goal_updated_at": autonomous_goal.updated_at.isoformat(),
         "web_search_mode": autonomous_goal.web_search_mode,
     }
+    if autonomous_goal.proposal_budget is not None:
+        state[_AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY] = (
+            autonomous_goal.proposal_budget
+        )
     if auto_proposal:
         default_branch_sha = default_branch_sha or (
             _autonomous_goal_auto_proposal_base_sha(autonomous_goal)
@@ -1515,6 +1529,27 @@ def _spawn_autonomous_goal_candidate_or_block(
         return
     workflow = _interrupt_spawned_autonomous_goal_run_if_inactive(run)
     _sync_workflow_instance(original_workflow, workflow)
+
+
+def _spawn_autonomous_goal_candidate_retry_or_block(
+    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
+) -> None:
+    workflow, locked_goal, should_spawn = _claim_active_autonomous_goal_workflow(
+        workflow_id=workflow.pk,
+        autonomous_goal_id=autonomous_goal.pk,
+    )
+    if not should_spawn or locked_goal is None:
+        return
+    try:
+        run = _spawn_autonomous_goal_candidate_retry_run(workflow, locked_goal)
+    except Exception as exc:
+        _block_autonomous_goal_spawn_failure_if_active(
+            workflow_id=workflow.pk,
+            autonomous_goal_id=locked_goal.pk,
+            error=f"failed to retry autonomous goal agent: {exc!r}",
+        )
+        return
+    _interrupt_spawned_autonomous_goal_run_if_inactive(run)
 
 
 def _claim_active_autonomous_goal_workflow(
@@ -4961,6 +4996,7 @@ def _handle_autonomous_goal_agent_finished(
     # read+parse. Mirrors the QA/spec-critic finish handlers, which all read
     # ``_final_agent_text`` before their locked section.
     raw_output = _final_agent_text(instance.events_path)
+    tokens_used = codex_events.latest_goal_tokens_for_instance(instance)
     with transaction.atomic():
         autonomous_goal = (
             AutonomousGoal.objects.select_related("project")
@@ -4988,8 +5024,17 @@ def _handle_autonomous_goal_agent_finished(
                 surface_to_thread=False,
             )
             return
+        token_delta = _record_autonomous_goal_proposal_budget_tokens(
+            workflow, instance, tokens_used
+        )
         post_commit_action = _handle_autonomous_goal_agent_finished_locked(
-            instance, run, workflow, autonomous_goal, raw_output
+            instance,
+            run,
+            workflow,
+            autonomous_goal,
+            raw_output,
+            tokens_used,
+            token_delta,
         )
     if post_commit_action is None:
         return
@@ -5005,6 +5050,9 @@ def _handle_autonomous_goal_agent_finished(
         return
     if post_commit_action.kind == _AUTONOMOUS_GOAL_RETRY_CANDIDATE_ACTION:
         _spawn_autonomous_goal_candidate_or_block(workflow, autonomous_goal)
+        return
+    if post_commit_action.kind == _AUTONOMOUS_GOAL_RETRY_CANDIDATE_CONTINUATION_ACTION:
+        _spawn_autonomous_goal_candidate_retry_or_block(workflow, autonomous_goal)
         return
     if (
         post_commit_action.kind == _AUTONOMOUS_GOAL_RETRY_JUDGE_ACTION
@@ -5024,11 +5072,29 @@ def _handle_autonomous_goal_agent_finished_locked(
     workflow: SystemWorkflow,
     autonomous_goal: AutonomousGoal,
     raw_output: str,
+    tokens_used: int | None,
+    token_delta: int,
 ) -> _AutonomousGoalPostCommitAction | None:
     if workflow.status != SystemWorkflow.STATUS_RUNNING:
         return None
     if instance.status != CodexInstance.STATUS_COMPLETED:
-        retry_action = _retry_dead_autonomous_goal_worker(instance, run, workflow)
+        if _is_worker_exited_before_completion_error(instance.error):
+            retry_action = _retry_dead_autonomous_goal_worker(instance, run, workflow)
+            if retry_action is not None:
+                return retry_action
+            return _fail_autonomous_goal_run_and_block_workflow(
+                run,
+                autonomous_goal,
+                f"autonomous goal worker failed: {instance.error}",
+            )
+        retry_action = _retry_budgeted_failed_autonomous_goal_candidate(
+            run,
+            workflow,
+            error=f"autonomous goal worker failed: {instance.error}",
+            raw_output=raw_output,
+            tokens_used=tokens_used,
+            token_delta=token_delta,
+        )
         if retry_action is not None:
             return retry_action
         return _fail_autonomous_goal_run_and_block_workflow(
@@ -5040,6 +5106,16 @@ def _handle_autonomous_goal_agent_finished_locked(
     if workflow.step == STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING:
         candidate_output = _parse_autonomous_goal_candidate_output(raw_output)
         if candidate_output is None:
+            retry_action = _retry_budgeted_failed_autonomous_goal_candidate(
+                run,
+                workflow,
+                error="autonomous goal candidate output was not valid JSON",
+                raw_output=raw_output,
+                tokens_used=tokens_used,
+                token_delta=token_delta,
+            )
+            if retry_action is not None:
+                return retry_action
             return _fail_autonomous_goal_run_and_block_workflow(
                 run,
                 autonomous_goal,
@@ -5056,8 +5132,24 @@ def _handle_autonomous_goal_agent_finished_locked(
         )
         if candidate_output["proposal"] is None:
             previous_proposal = _autonomous_goal_current_stack_proposal(workflow)
+            message = str(candidate_output["message"])
+            workflow.state = state
+            retry_action = _retry_budgeted_unaccepted_autonomous_goal_candidate(
+                workflow,
+                reason="candidate_no_proposal",
+                message=message,
+                tokens_used=tokens_used,
+                token_delta=token_delta,
+            )
+            if retry_action is not None:
+                workflow.step = STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING
+                workflow.state = _state_without_current_candidate_result(
+                    workflow.state
+                )
+                workflow.save(update_fields=["step", "state", "updated_at"])
+                return retry_action
             if previous_proposal is not None and _publish_current_stack_proposal(
-                previous_proposal
+                previous_proposal, workflow=workflow
             ):
                 cleanup_cwd = _candidate_session_cwd_from_state(
                     workflow, "candidate_session_id"
@@ -5073,7 +5165,6 @@ def _handle_autonomous_goal_agent_finished_locked(
                 return _AutonomousGoalPostCommitAction(
                     cleanup_candidate_cwds=((cleanup_cwd,) if cleanup_cwd else ())
                 )
-            message = str(candidate_output["message"])
             ProposedSession.objects.create(
                 project=autonomous_goal.project,
                 autonomous_goal=autonomous_goal,
@@ -5086,6 +5177,7 @@ def _handle_autonomous_goal_agent_finished_locked(
                 candidate_session=_session_metadata_from_state(
                     workflow, "candidate_session_id"
                 ),
+                outcome_metadata=_autonomous_goal_proposal_budget_metadata(workflow),
             )
             _record_autonomous_goal_no_proposal(autonomous_goal, workflow)
             workflow.step = STEP_AUTONOMOUS_GOAL_SKIPPED
@@ -5161,8 +5253,22 @@ def _handle_autonomous_goal_agent_finished_locked(
         workflow.step = STEP_AUTONOMOUS_GOAL_PROPOSED
     else:
         previous_proposal = _autonomous_goal_current_stack_proposal(workflow)
+        workflow.state = state
+        retry_action = _retry_budgeted_unaccepted_autonomous_goal_candidate(
+            workflow,
+            reason="judge_confidence_below_threshold",
+            candidate=candidate,
+            judgment=judgment,
+            tokens_used=tokens_used,
+            token_delta=token_delta,
+        )
+        if retry_action is not None:
+            workflow.step = STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING
+            workflow.state = _state_without_current_candidate_result(workflow.state)
+            workflow.save(update_fields=["step", "state", "updated_at"])
+            return retry_action
         if previous_proposal is not None and _publish_current_stack_proposal(
-            previous_proposal
+            previous_proposal, workflow=workflow
         ):
             cleanup_cwd = _candidate_session_cwd_from_state(
                 workflow, "candidate_session_id"
@@ -5260,6 +5366,7 @@ def _create_autonomous_goal_proposal(
             ).strip(),
             "verification": str(candidate.get("verification", "")).strip(),
             "rough_edges": str(candidate.get("rough_edges", "")).strip(),
+            **_autonomous_goal_proposal_budget_metadata(workflow),
         },
     )
 
@@ -5282,6 +5389,223 @@ def _autonomous_goal_current_stack_proposal(
     if _autonomous_goal_proposal_hidden_until_complete(proposal):
         return proposal
     return None
+
+
+def _record_autonomous_goal_proposal_budget_tokens(
+    workflow: SystemWorkflow, instance: CodexInstance, tokens_used: int | None
+) -> int:
+    if _autonomous_goal_workflow_proposal_budget(workflow) <= 0:
+        return 0
+    if tokens_used is None or tokens_used < 0:
+        return 0
+    token_totals = _state_dict(
+        workflow, _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY
+    )
+    previous_value = token_totals.get(instance.thread_id)
+    previous_tokens = (
+        previous_value
+        if isinstance(previous_value, int)
+        and not isinstance(previous_value, bool)
+        and previous_value >= 0
+        else 0
+    )
+    thread_tokens = max(previous_tokens, tokens_used)
+    token_delta = thread_tokens - previous_tokens
+    workflow.state = {
+        **workflow.state,
+        _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: (
+            _autonomous_goal_proposal_budget_tokens_used(workflow) + token_delta
+        ),
+        _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY: {
+            **token_totals,
+            instance.thread_id: thread_tokens,
+        },
+    }
+    return token_delta
+
+
+def _retry_budgeted_failed_autonomous_goal_candidate(
+    run: SystemAgentRun,
+    workflow: SystemWorkflow,
+    *,
+    error: str,
+    raw_output: str,
+    tokens_used: int | None,
+    token_delta: int,
+) -> _AutonomousGoalPostCommitAction | None:
+    if workflow.step != STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING:
+        return None
+    if not _autonomous_goal_proposal_budget_allows_retry(
+        workflow, tokens_used=tokens_used, token_delta=token_delta
+    ):
+        return None
+    run.status = SystemAgentRun.STATUS_FAILED
+    run.error = error
+    run.raw_output = raw_output
+    run.save(update_fields=["status", "error", "raw_output", "updated_at"])
+    _record_autonomous_goal_failed_attempt(
+        workflow,
+        reason="candidate_failed",
+        error=error,
+        raw_output=raw_output,
+        tokens_used=tokens_used,
+    )
+    workflow.save(update_fields=["state", "updated_at"])
+    return _AutonomousGoalPostCommitAction(
+        _AUTONOMOUS_GOAL_RETRY_CANDIDATE_CONTINUATION_ACTION
+    )
+
+
+def _retry_budgeted_unaccepted_autonomous_goal_candidate(
+    workflow: SystemWorkflow,
+    *,
+    reason: str,
+    tokens_used: int | None,
+    token_delta: int,
+    candidate: dict[str, Any] | None = None,
+    judgment: dict[str, Any] | None = None,
+    message: str = "",
+) -> _AutonomousGoalPostCommitAction | None:
+    if _session_metadata_from_state(workflow, "candidate_session_id") is None:
+        return None
+    if not _autonomous_goal_proposal_budget_allows_retry(
+        workflow, tokens_used=tokens_used, token_delta=token_delta
+    ):
+        return None
+    _record_autonomous_goal_failed_attempt(
+        workflow,
+        reason=reason,
+        message=message,
+        candidate=candidate,
+        judgment=judgment,
+        tokens_used=tokens_used,
+    )
+    return _AutonomousGoalPostCommitAction(
+        _AUTONOMOUS_GOAL_RETRY_CANDIDATE_CONTINUATION_ACTION
+    )
+
+
+def _autonomous_goal_proposal_budget_allows_retry(
+    workflow: SystemWorkflow, *, tokens_used: int | None, token_delta: int
+) -> bool:
+    if _autonomous_goal_workflow_proposal_budget(workflow) <= 0:
+        return False
+    if tokens_used is None or tokens_used <= 0:
+        return False
+    if token_delta <= 0:
+        return False
+    return (
+        _autonomous_goal_proposal_budget_tokens_used(workflow)
+        < _autonomous_goal_workflow_proposal_budget(workflow)
+    )
+
+
+def _record_autonomous_goal_failed_attempt(
+    workflow: SystemWorkflow,
+    *,
+    reason: str,
+    error: str = "",
+    raw_output: str = "",
+    message: str = "",
+    candidate: dict[str, Any] | None = None,
+    judgment: dict[str, Any] | None = None,
+    tokens_used: int | None = None,
+) -> None:
+    failure: dict[str, object] = {
+        "reason": reason,
+        "proposal_budget": _autonomous_goal_workflow_proposal_budget(workflow),
+        "proposal_budget_tokens_used": _autonomous_goal_proposal_budget_tokens_used(
+            workflow
+        ),
+    }
+    if tokens_used is not None:
+        failure["tokens_used"] = tokens_used
+    if error:
+        failure["error"] = _truncate_for_prompt(error, 800)
+    if message:
+        failure["message"] = _truncate_for_prompt(message, 1200)
+    if raw_output:
+        failure["raw_output"] = _truncate_for_prompt(raw_output, 2000)
+    if candidate is not None:
+        failure["candidate"] = _autonomous_goal_failed_candidate_context(candidate)
+    if judgment is not None:
+        failure["judgment"] = _autonomous_goal_failed_judgment_context(judgment)
+    workflow.state = {
+        **workflow.state,
+        _AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY: (
+            _autonomous_goal_failed_attempts(workflow) + 1
+        ),
+        _AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY: failure,
+    }
+
+
+def _autonomous_goal_failed_candidate_context(
+    candidate: dict[str, Any]
+) -> dict[str, object]:
+    context: dict[str, object] = {}
+    for key in (
+        "title",
+        "summary",
+        "impact",
+        "implemented_changes",
+        "implementation_direction",
+        "verification",
+        "rough_edges",
+    ):
+        value = candidate.get(key)
+        if isinstance(value, str) and value.strip():
+            context[key] = _truncate_for_prompt(value, 800)
+    files = _string_list(candidate.get("relevant_files"))
+    if files:
+        context["relevant_files"] = files[:20]
+    return context
+
+
+def _autonomous_goal_failed_judgment_context(
+    judgment: dict[str, Any]
+) -> dict[str, object]:
+    context: dict[str, object] = {}
+    for key in ("confidence", "summary", "rationale"):
+        value = judgment.get(key)
+        if isinstance(value, str) and value.strip():
+            context[key] = _truncate_for_prompt(value, 1200)
+    return context
+
+
+def _autonomous_goal_workflow_proposal_budget(workflow: SystemWorkflow) -> int:
+    return _state_int(workflow, _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY)
+
+
+def _autonomous_goal_proposal_budget_tokens_used(workflow: SystemWorkflow) -> int:
+    return _state_int(workflow, _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY)
+
+
+def _autonomous_goal_failed_attempts(workflow: SystemWorkflow) -> int:
+    return _state_int(workflow, _AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY)
+
+
+def _autonomous_goal_proposal_budget_metadata(
+    workflow: SystemWorkflow,
+) -> dict[str, object]:
+    budget = _autonomous_goal_workflow_proposal_budget(workflow)
+    if budget <= 0:
+        return {}
+    return {
+        "proposal_budget": budget,
+        "proposal_budget_tokens_used": _autonomous_goal_proposal_budget_tokens_used(
+            workflow
+        ),
+        "proposal_budget_failed_attempts": _autonomous_goal_failed_attempts(workflow),
+    }
+
+
+def _state_without_current_candidate_result(
+    state: Mapping[str, Any]
+) -> dict[str, Any]:
+    next_state = dict(state)
+    for key in ("candidate", "judgment", "judge_session_id", "history_files"):
+        next_state.pop(key, None)
+    return next_state
 
 
 def _retry_dead_autonomous_goal_worker(
@@ -5361,17 +5685,39 @@ def _dismiss_replaced_autonomous_goal_proposal(
     return (cleanup_cwd,) if applied and cleanup_cwd else ()
 
 
-def _publish_current_stack_proposal(proposal: ProposedSession) -> bool:
+def _publish_current_stack_proposal(
+    proposal: ProposedSession, *, workflow: SystemWorkflow | None = None
+) -> bool:
+    budget_metadata = (
+        _autonomous_goal_proposal_budget_metadata(workflow)
+        if workflow is not None
+        else {}
+    )
     if proposal.outcome_status == ProposedSession.OUTCOME_UNSET:
-        return ProposedSession.objects.filter(
-            pk=proposal.pk,
-            outcome_status=ProposedSession.OUTCOME_UNSET,
-        ).exists()
+        if not budget_metadata:
+            return ProposedSession.objects.filter(
+                pk=proposal.pk,
+                outcome_status=ProposedSession.OUTCOME_UNSET,
+            ).exists()
+        outcome_metadata = {
+            **_proposal_outcome_metadata(proposal, {}),
+            **budget_metadata,
+        }
+        return bool(
+            ProposedSession.objects.filter(
+                pk=proposal.pk,
+                outcome_status=ProposedSession.OUTCOME_UNSET,
+            ).update(
+                outcome_metadata=outcome_metadata,
+                updated_at=timezone.now(),
+            )
+        )
     if not _autonomous_goal_proposal_hidden_until_complete(proposal):
         return False
     outcome_metadata = {
         **_proposal_outcome_metadata(proposal, {}),
         "stacked_diff_hidden_until_complete": False,
+        **budget_metadata,
     }
     return bool(
         ProposedSession.objects.filter(
@@ -5391,7 +5737,9 @@ def _complete_autonomous_goal_with_current_stack_proposal(
     workflow: SystemWorkflow, *, error: str
 ) -> bool:
     proposal = _autonomous_goal_current_stack_proposal(workflow)
-    if proposal is None or not _publish_current_stack_proposal(proposal):
+    if proposal is None or not _publish_current_stack_proposal(
+        proposal, workflow=workflow
+    ):
         return False
     workflow.status = SystemWorkflow.STATUS_COMPLETED
     workflow.step = STEP_AUTONOMOUS_GOAL_PROPOSED
@@ -5803,6 +6151,54 @@ def _spawn_autonomous_goal_candidate_run(
                 "autonomous_goal_id": autonomous_goal.pk,
                 "memory_count": memory_context.count,
                 "memory_compacted": memory_context.compacted,
+            },
+        },
+    )
+    return run
+
+
+def _spawn_autonomous_goal_candidate_retry_run(
+    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
+) -> SystemAgentRun:
+    candidate_session = _session_metadata_from_state(workflow, "candidate_session_id")
+    if candidate_session is None:
+        raise RuntimeError("candidate session is unavailable")
+    session_cwd = candidate_session.cwd or _autonomous_goal_session_cwd(workflow)
+    prompt = _autonomous_goal_candidate_retry_prompt(workflow, autonomous_goal)
+    instance = codex_pool.spawn_turn(
+        thread_id=candidate_session.thread_id,
+        cwd=session_cwd,
+        prompt=prompt,
+        approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
+        sandbox_policy=(
+            AUTONOMOUS_GOAL_IMPLEMENTATION_SANDBOX_POLICY
+            if _autonomous_goal_candidate_allows_code_changes(workflow)
+            else None
+        ),
+        web_search_mode=_workflow_web_search_mode(workflow),
+        purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        workflow_id=workflow.pk,
+        agent_kind=AUTONOMOUS_GOAL_AGENT_KIND,
+        display_author=AUTONOMOUS_GOAL_DISPLAY_AUTHOR,
+        output_schema=_AUTONOMOUS_GOAL_CANDIDATE_OUTPUT_SCHEMA,
+    )
+    run, _created = SystemAgentRun.objects.get_or_create(
+        instance=instance,
+        defaults={
+            "workflow": workflow,
+            "agent_kind": AUTONOMOUS_GOAL_AGENT_KIND,
+            "thread_id": instance.thread_id,
+            "status": SystemAgentRun.STATUS_RUNNING,
+            "input": {
+                "cwd": session_cwd,
+                "autonomous_goal_id": autonomous_goal.pk,
+                "proposal_budget": _autonomous_goal_workflow_proposal_budget(
+                    workflow
+                ),
+                "proposal_budget_tokens_used": (
+                    _autonomous_goal_proposal_budget_tokens_used(workflow)
+                ),
+                "retry_attempt": _autonomous_goal_failed_attempts(workflow),
             },
         },
     )
@@ -6955,6 +7351,79 @@ def _autonomous_goal_candidate_prompt(
         f"{ambition.candidate_instruction}"
     )
     return prompt, memory_context
+
+
+def _autonomous_goal_candidate_retry_prompt(
+    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
+) -> str:
+    ambition = _autonomous_goal_ambition_guidance(autonomous_goal)
+    candidate_session = _session_metadata_from_state(workflow, "candidate_session_id")
+    session_cwd = (
+        candidate_session.cwd
+        if candidate_session is not None and candidate_session.cwd
+        else _autonomous_goal_session_cwd(workflow)
+    )
+    stacked_depth = _autonomous_goal_workflow_stacked_diff_depth(
+        workflow, autonomous_goal
+    )
+    stack_context = (
+        f"Stacked diff round: {_autonomous_goal_stack_iteration(workflow)} "
+        f"of {stacked_depth}\n"
+        if stacked_depth > 1
+        else ""
+    )
+    code_change_guidance = (
+        "Do not make code changes. "
+        if not _autonomous_goal_candidate_allows_code_changes(workflow)
+        else (
+            "Continue from the current checkout. Keep useful changes from the "
+            "prior attempt, revise or remove changes that caused the failure, "
+            "and leave the result in this hidden candidate checkout. Do not "
+            "push a branch or open a PR. "
+        )
+    )
+    return (
+        "You are Hitch's autonomous goal agent.\n\n"
+        "Continue this autonomous-goal candidate attempt from the current hidden "
+        "candidate thread and checkout. The last attempt did not produce an "
+        "accepted proposal. Use the failure context below to avoid repeating "
+        f"the same failure and find one way to make {ambition.candidate_progress} "
+        "toward the autonomous goal. "
+        f"{code_change_guidance}"
+        "Focus on a concrete session that a user could accept and continue from.\n\n"
+        f"Repository cwd: {session_cwd}\n"
+        f"{stack_context}"
+        f"Autonomous goal title: {autonomous_goal.title}\n"
+        f"Proposal budget: {_autonomous_goal_workflow_proposal_budget(workflow)} tokens\n"
+        "Proposal budget tokens used so far: "
+        f"{_autonomous_goal_proposal_budget_tokens_used(workflow)}\n"
+        f"Failed proposal attempts so far: {_autonomous_goal_failed_attempts(workflow)}\n\n"
+        "Autonomous goal objective:\n"
+        f"{autonomous_goal.goal}\n\n"
+        "Last failed attempt context:\n"
+        f"{_format_autonomous_goal_last_failure_context(workflow)}\n\n"
+        "Return only JSON matching this shape: "
+        '{"proposal": {"title": string, "summary": string, "impact": string, '
+        '"implemented_changes": string, "implementation_direction": string, '
+        '"verification": string, "rough_edges": string, '
+        '"suggested_continuation": string, "relevant_files": [string]} | null, '
+        '"message": string, "next_steps_summary": string, '
+        '"memory_relevant_files": [string]}. If you find a concrete proposal, '
+        'put it in "proposal" and leave "message" empty. If you still find '
+        'nothing worth proposing, set "proposal" to null and put a concise '
+        'user-facing explanation in "message". The next_steps_summary is '
+        "durable memory for future autonomous-goal runs: mention what failed, "
+        "what you changed or inspected on this retry, and what a future run "
+        "should try next. "
+        f"{ambition.candidate_instruction}"
+    )
+
+
+def _format_autonomous_goal_last_failure_context(workflow: SystemWorkflow) -> str:
+    failure = _state_dict(workflow, _AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY)
+    if not failure:
+        return "(none)"
+    return _truncate_for_prompt(json.dumps(failure, indent=2, sort_keys=True), 5000)
 
 
 @dataclass(frozen=True)
@@ -8724,6 +9193,9 @@ def _fail_autonomous_goal_run_and_block_workflow(
 def _block_autonomous_goal_workflow(
     workflow: SystemWorkflow, autonomous_goal: AutonomousGoal, error: str
 ) -> None:
+    # The finish handler may have recorded budget tokens on this locked instance.
+    # Persist them before _block_workflow re-reads the row.
+    workflow.save(update_fields=["state", "updated_at"])
     _create_autonomous_goal_failure_notice(workflow, autonomous_goal, error)
     _block_workflow(workflow, error, surface_to_thread=False)
 
@@ -8751,6 +9223,7 @@ def _create_autonomous_goal_failure_notice(
             "autonomous_goal_autonomy": autonomous_goal.autonomy,
             "automation_status": "failed",
             "automation_error": error,
+            **_autonomous_goal_proposal_budget_metadata(workflow),
         },
     )
 
@@ -8778,7 +9251,10 @@ def _create_autonomous_goal_skipped_notice(
         summary=summary,
         candidate_session=_session_metadata_from_state(workflow, "candidate_session_id"),
         judge_session=_session_metadata_from_state(workflow, "judge_session_id"),
-        outcome_metadata=metadata or {},
+        outcome_metadata={
+            **(metadata or {}),
+            **_autonomous_goal_proposal_budget_metadata(workflow),
+        },
     )
 
 

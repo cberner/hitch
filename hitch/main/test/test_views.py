@@ -16941,6 +16941,7 @@ class AutonomousGoalViewTests(TestCase):
             web_search_mode=AutonomousGoal.WEB_SEARCH_LIVE,
             auto_merge_to_local_branch=True,
             auto_merge_branch="main",
+            proposal_budget=25000,
         )
         AutonomousGoal.objects.create(
             project=other_project,
@@ -16999,6 +17000,7 @@ class AutonomousGoalViewTests(TestCase):
             'value="draft_pr" data-auto-qa-supported="false" data-auto-qa-required="true"',
         )
         self.assertContains(response, "Web search: Live")
+        self.assertContains(response, "Proposal budget: 25000 tokens")
         self.assertContains(response, "Auto-proposal: Off")
         self.assertContains(response, "Auto merge: main")
         self.assertContains(response, 'class="goal-menu" data-goal-menu')
@@ -17024,6 +17026,7 @@ class AutonomousGoalViewTests(TestCase):
             response, f'data-web-search-mode="{AutonomousGoal.WEB_SEARCH_LIVE}"'
         )
         self.assertContains(response, 'data-auto-proposal-enabled="false"')
+        self.assertContains(response, 'data-proposal-budget="25000"')
         self.assertContains(response, 'data-auto-merge-to-local-branch="true"')
         self.assertContains(response, 'data-auto-merge-branch="main"')
         self.assertContains(response, 'data-autonomous-goal-edit')
@@ -17783,6 +17786,7 @@ class AutonomousGoalViewTests(TestCase):
                 "auto_qa": "true",
                 "auto_proposal": "true",
                 "stacked_diff_depth": "3",
+                "proposal_budget": "25000",
                 "confidence_threshold": AutonomousGoal.CONFIDENCE_VERY_HIGH,
                 "web_search_mode": AutonomousGoal.WEB_SEARCH_LIVE,
             },
@@ -17796,6 +17800,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(goal.autonomy, AutonomousGoal.AUTONOMY_DRAFT_PR)
         self.assertFalse(goal.auto_qa_enabled)
         self.assertEqual(goal.stacked_diff_depth, 3)
+        self.assertEqual(goal.proposal_budget, 25000)
         self.assertEqual(goal.web_search_mode, AutonomousGoal.WEB_SEARCH_LIVE)
         self.assertTrue(goal.auto_proposal_enabled)
         self.assertEqual(
@@ -17840,6 +17845,7 @@ class AutonomousGoalViewTests(TestCase):
             auto_proposal_enabled=True,
             confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
             web_search_mode=AutonomousGoal.WEB_SEARCH_CACHED,
+            proposal_budget=10000,
         )
 
         response = self.client.post(
@@ -17852,6 +17858,7 @@ class AutonomousGoalViewTests(TestCase):
                 "auto_qa": "true",
                 "auto_proposal": "false",
                 "stacked_diff_depth": "4",
+                "proposal_budget": "30000",
                 "confidence_threshold": AutonomousGoal.CONFIDENCE_VERY_HIGH,
                 "web_search_mode": AutonomousGoal.WEB_SEARCH_DISABLED,
             },
@@ -17865,12 +17872,42 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(goal.autonomy, AutonomousGoal.AUTONOMY_DRAFT_PATCH)
         self.assertTrue(goal.auto_qa_enabled)
         self.assertEqual(goal.stacked_diff_depth, 4)
+        self.assertEqual(goal.proposal_budget, 30000)
         self.assertEqual(goal.web_search_mode, AutonomousGoal.WEB_SEARCH_DISABLED)
         self.assertFalse(goal.auto_proposal_enabled)
         self.assertEqual(
             goal.confidence_threshold,
             AutonomousGoal.CONFIDENCE_VERY_HIGH,
         )
+
+    def test_edit_autonomous_goal_clears_proposal_budget_when_blank(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            ambition=AutonomousGoal.AMBITION_INCREMENTAL,
+            autonomy=AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+            proposal_budget=10000,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+        )
+
+        response = self.client.post(
+            reverse("edit_autonomous_goal", args=[goal.pk]),
+            {
+                "title": "Improve tests",
+                "goal": "Find useful test coverage increments.",
+                "ambition": AutonomousGoal.AMBITION_INCREMENTAL,
+                "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+                "proposal_budget": "",
+                "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        goal.refresh_from_db()
+        self.assertIsNone(goal.proposal_budget)
 
     def test_edit_autonomous_goal_can_reset_web_search_to_codex_default(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
@@ -18202,6 +18239,28 @@ class AutonomousGoalViewTests(TestCase):
                     "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
                 },
                 "stacked diff depth is invalid",
+            ),
+            (
+                {
+                    "title": "Improve docs",
+                    "goal": "Find useful docs increments.",
+                    "ambition": AutonomousGoal.AMBITION_HIGH,
+                    "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+                    "proposal_budget": "0",
+                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
+                },
+                "proposal budget is invalid",
+            ),
+            (
+                {
+                    "title": "Improve docs",
+                    "goal": "Find useful docs increments.",
+                    "ambition": AutonomousGoal.AMBITION_HIGH,
+                    "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+                    "proposal_budget": "many",
+                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
+                },
+                "proposal budget is invalid",
             ),
             (
                 {

@@ -27,6 +27,11 @@
     <input type="number" name="stacked_diff_depth" min="{{ stacked_diff_depth_min }}" max="{{ stacked_diff_depth_max }}" step="1" value="{{ default_stacked_diff_depth }}" data-autonomous-goal-stacked-depth>
     <span class="field-help">Allows the agent to continue working through additional candidate rounds to build a bigger proposal.</span>
 </label>
+<label>
+    Proposal budget
+    <input type="number" name="proposal_budget" min="1" step="1" value="{{ default_proposal_budget }}">
+    <span class="field-help">Tokens. Leave blank to stop after the first failed proposal attempt.</span>
+</label>
 <label class="checkbox-label" data-autonomous-goal-auto-qa-field>
     <span>Auto-QA</span>
     <input type="hidden" name="auto_qa" value="false">
