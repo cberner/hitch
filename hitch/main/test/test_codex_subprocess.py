@@ -3587,12 +3587,17 @@ class IterCodexAppServerPidsTests(SimpleTestCase):
         pid: int,
         argv: list[bytes],
         environ: list[bytes] | None = None,
+        ppid: int | None = None,
     ) -> None:
         pid_dir = proc_root / str(pid)
         pid_dir.mkdir()
         (pid_dir / "cmdline").write_bytes(b"\0".join(argv) + b"\0")
         if environ is not None:
             (pid_dir / "environ").write_bytes(b"\0".join(environ) + b"\0")
+        if ppid is not None:
+            # Minimal /proc/<pid>/stat: "pid (comm) state ppid ...". The comm is
+            # deliberately given spaces and a ")" to exercise the parser.
+            (pid_dir / "stat").write_text(f"{pid} (codex app) S {ppid} 0 0\n")
 
     def test_matches_our_app_server_and_scopes_out_others(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3625,6 +3630,70 @@ class IterCodexAppServerPidsTests(SimpleTestCase):
             (proc_root / "105").mkdir()
 
             found = sorted(
+                codex_pool._iter_codex_app_server_pids(
+                    proc_root=proc_root, deployment_id=self._DEPLOYMENT
+                )
+            )
+
+        self.assertEqual(found, [100])
+
+    def test_dedupes_native_child_of_node_wrapper(self) -> None:
+        # The codex CLI is a node wrapper that re-execs a native child; both
+        # carry the SDK app-server argv and our marker, so each logical
+        # app-server matches twice. Only the wrapper (whose parent is the
+        # worker, not another matched pid) should be yielded.
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            # Worker (parent of the wrapper) -- not itself an app-server.
+            self._write_proc(proc_root, 50, [b"python", b"manage.py"], ppid=1)
+            # node wrapper: parent is the worker.
+            self._write_proc(
+                proc_root,
+                100,
+                self._APP_SERVER_ARGV,
+                [self._MARKER],
+                ppid=50,
+            )
+            # native re-exec child: parent is the wrapper (itself matched).
+            self._write_proc(
+                proc_root,
+                200,
+                self._APP_SERVER_ARGV,
+                [self._MARKER],
+                ppid=100,
+            )
+            # A second independent logical app-server (wrapper + child).
+            self._write_proc(
+                proc_root,
+                300,
+                self._APP_SERVER_ARGV,
+                [self._MARKER],
+                ppid=51,
+            )
+            self._write_proc(
+                proc_root,
+                400,
+                self._APP_SERVER_ARGV,
+                [self._MARKER],
+                ppid=300,
+            )
+
+            found = sorted(
+                codex_pool._iter_codex_app_server_pids(
+                    proc_root=proc_root, deployment_id=self._DEPLOYMENT
+                )
+            )
+
+        self.assertEqual(found, [100, 300])
+
+    def test_missing_stat_keeps_pid(self) -> None:
+        # If ppid cannot be read (no stat file), the pid is kept rather than
+        # silently dropped -- degrade toward over-counting, never under-killing.
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            self._write_proc(proc_root, 100, self._APP_SERVER_ARGV, [self._MARKER])
+
+            found = list(
                 codex_pool._iter_codex_app_server_pids(
                     proc_root=proc_root, deployment_id=self._DEPLOYMENT
                 )
@@ -3679,7 +3748,9 @@ class NukeCodexAppServersTests(SimpleTestCase):
     def _proc_root(self, tmp: str) -> Path:
         return Path(tmp)
 
-    def _write_app_server(self, proc_root: Path, pid: int) -> None:
+    def _write_app_server(
+        self, proc_root: Path, pid: int, ppid: int | None = None
+    ) -> None:
         marker = (
             f"{codex_pool._APP_SERVER_DEPLOYMENT_ENV}="
             f"{codex_pool._app_server_deployment_id()}"
@@ -3693,6 +3764,8 @@ class NukeCodexAppServersTests(SimpleTestCase):
             + b"\0"
         )
         (pid_dir / "environ").write_bytes(marker + b"\0")
+        if ppid is not None:
+            (pid_dir / "stat").write_text(f"{pid} (codex) S {ppid} 0 0\n")
 
     @patch("hitch.main.codex_pool.os.kill")
     def test_sigkills_each_app_server(self, mock_kill: MagicMock) -> None:
@@ -3706,6 +3779,23 @@ class NukeCodexAppServersTests(SimpleTestCase):
         self.assertEqual(killed, 2)
         mock_kill.assert_any_call(111, signal.SIGKILL)
         mock_kill.assert_any_call(222, signal.SIGKILL)
+
+    @patch("hitch.main.codex_pool.os.kill")
+    def test_kills_one_pid_per_logical_app_server(
+        self, mock_kill: MagicMock
+    ) -> None:
+        # A logical app-server is a node wrapper plus a native re-exec child; the
+        # SIGKILL on the wrapper already takes the child down, so only the
+        # wrapper should be signaled and the kill total must not double-count.
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_root = Path(tmp)
+            self._write_app_server(proc_root, 111, ppid=50)
+            self._write_app_server(proc_root, 222, ppid=111)
+
+            killed = codex_pool.nuke_codex_app_servers(proc_root=proc_root)
+
+        self.assertEqual(killed, 1)
+        mock_kill.assert_called_once_with(111, signal.SIGKILL)
 
     @patch("hitch.main.codex_pool.os.kill")
     def test_recycled_pid_failing_recheck_is_not_signaled(

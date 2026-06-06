@@ -1335,6 +1335,30 @@ def _proc_is_our_app_server(pid_dir: Path, deployment_id: str) -> bool:
     return marker in environ.split(b"\0")
 
 
+def _proc_ppid(pid_dir: Path) -> int | None:
+    """Parent pid from ``/proc/<pid>/stat`` field 4, or ``None`` if unreadable.
+
+    ``stat`` field 2 (``comm``) is wrapped in parentheses and may itself contain
+    spaces or a literal ``)``, so the positional fields are read from after the
+    final ``)`` -- the parsing the kernel docs prescribe. There ``state`` is the
+    first field and ``ppid`` the second.
+    """
+    try:
+        stat = (pid_dir / "stat").read_text()
+    except OSError:
+        return None
+    rparen = stat.rfind(")")
+    if rparen == -1:
+        return None
+    fields = stat[rparen + 1 :].split()
+    if len(fields) < 2:
+        return None
+    try:
+        return int(fields[1])
+    except ValueError:
+        return None
+
+
 def _iter_codex_app_server_pids(
     *, proc_root: Path = Path("/proc"), deployment_id: str | None = None
 ) -> Iterable[int]:
@@ -1346,20 +1370,33 @@ def _iter_codex_app_server_pids(
     meant to find, and it has no live DB row to locate it by. Scoping to this
     deployment is handled by ``_proc_is_our_app_server``. Linux-only; on a host
     without ``/proc`` it yields nothing.
+
+    One pid is yielded per *logical* app-server. The ``codex`` CLI is a node
+    wrapper that re-execs a native child; both inherit the SDK app-server argv
+    and our ``HITCH_CODEX_DEPLOYMENT`` marker, so a single app-server matches
+    twice. Any matched pid whose parent is itself matched is the native re-exec
+    child and is dropped, leaving just the wrapper -- so the count, and the
+    nuke sweep's kill total, reflect logical app-servers rather than double.
     """
     if not proc_root.exists():
         return
     if deployment_id is None:
         deployment_id = _app_server_deployment_id()
+    matched: dict[int, Path] = {}
     for entry in proc_root.iterdir():
         if not entry.name.isdigit():
             continue
         if not _proc_is_our_app_server(entry, deployment_id):
             continue
         try:
-            yield int(entry.name)
+            matched[int(entry.name)] = entry
         except ValueError:
             continue
+    for pid, entry in matched.items():
+        ppid = _proc_ppid(entry)
+        if ppid is not None and ppid in matched:
+            continue
+        yield pid
 
 
 def nuke_codex_app_servers(*, proc_root: Path = Path("/proc")) -> int:

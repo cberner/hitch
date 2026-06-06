@@ -162,6 +162,10 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
                 "hitch.main.workflow_maintenance._run_workflow_maintenance_scheduler_tick"
             ) as mock_tick,
             patch(
+                "hitch.main.workflow_maintenance._run_due_stale_blocked_archive",
+                return_value=999.0,
+            ) as mock_stale_archive,
+            patch(
                 "hitch.main.workflow_maintenance._run_due_disk_usage_cleanup",
                 return_value=999.0,
             ) as mock_disk_cleanup,
@@ -170,12 +174,119 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
             workflow_maintenance._workflow_maintenance_scheduler_loop()
 
         mock_tick.assert_called_once_with()
+        mock_stale_archive.assert_called_once_with(
+            next_due_at=10.0
+            + workflow_maintenance._STALE_BLOCKED_ARCHIVE_INTERVAL_SECONDS
+        )
         mock_disk_cleanup.assert_called_once_with(
             next_due_at=10.0
             + workflow_maintenance._DISK_USAGE_CLEANUP_INTERVAL_SECONDS
         )
         fake_stop.wait.assert_called_once_with(
             workflow_maintenance._WORKFLOW_MAINTENANCE_INTERVAL_SECONDS
+        )
+
+    def test_scheduler_loop_archives_stale_blocked_before_disk_cleanup(self) -> None:
+        # Archiving unpins worktrees, so it must run ahead of disk cleanup on the
+        # same loop iteration for the freed space to be reclaimable that tick.
+        class StopSchedulerError(Exception):
+            pass
+
+        order: list[str] = []
+
+        def record_archive(**_: object) -> float:
+            order.append("archive")
+            return 999.0
+
+        def record_disk(**_: object) -> float:
+            order.append("disk")
+            return 999.0
+
+        fake_stop = MagicMock()
+        fake_stop.wait.side_effect = StopSchedulerError
+        with (
+            patch(
+                "hitch.main.workflow_maintenance.threading.Event",
+                return_value=fake_stop,
+            ),
+            patch(
+                "hitch.main.workflow_maintenance.time.monotonic",
+                return_value=10.0,
+            ),
+            patch(
+                "hitch.main.workflow_maintenance._run_workflow_maintenance_scheduler_tick"
+            ),
+            patch(
+                "hitch.main.workflow_maintenance._run_due_stale_blocked_archive",
+                side_effect=record_archive,
+            ),
+            patch(
+                "hitch.main.workflow_maintenance._run_due_disk_usage_cleanup",
+                side_effect=record_disk,
+            ),
+            self.assertRaises(StopSchedulerError),
+        ):
+            workflow_maintenance._workflow_maintenance_scheduler_loop()
+
+        self.assertEqual(order, ["archive", "disk"])
+
+    @patch(
+        "hitch.main.workflow_maintenance.system_agents.archive_stale_blocked_workflows",
+        return_value=[],
+    )
+    def test_stale_blocked_archive_runs_every_hour(
+        self, mock_archive: MagicMock
+    ) -> None:
+        next_due = 100.0
+
+        next_due = workflow_maintenance._run_due_stale_blocked_archive(
+            next_due_at=next_due, now=99.0
+        )
+        self.assertEqual(next_due, 100.0)
+        mock_archive.assert_not_called()
+
+        frozen = datetime(2026, 6, 6, tzinfo=UTC)
+        with patch(
+            "hitch.main.workflow_maintenance.timezone.now", return_value=frozen
+        ):
+            next_due = workflow_maintenance._run_due_stale_blocked_archive(
+                next_due_at=next_due, now=100.0
+            )
+        self.assertEqual(
+            next_due,
+            100.0 + workflow_maintenance._STALE_BLOCKED_ARCHIVE_INTERVAL_SECONDS,
+        )
+        from hitch.main import system_agents
+
+        mock_archive.assert_called_once_with(
+            older_than=frozen - system_agents.STALE_BLOCKED_AGE, apply=True
+        )
+
+        # Still on cooldown an hour later minus a second.
+        workflow_maintenance._run_due_stale_blocked_archive(
+            next_due_at=next_due, now=next_due - 1.0
+        )
+        self.assertEqual(mock_archive.call_count, 1)
+
+    @patch("hitch.main.workflow_maintenance.logger.exception")
+    @patch(
+        "hitch.main.workflow_maintenance.system_agents.archive_stale_blocked_workflows",
+        side_effect=RuntimeError("archive failed"),
+    )
+    def test_stale_blocked_archive_failure_is_logged_and_rescheduled(
+        self, mock_archive: MagicMock, mock_log_exception: MagicMock
+    ) -> None:
+        next_due = workflow_maintenance._run_due_stale_blocked_archive(
+            next_due_at=100.0, now=100.0
+        )
+
+        self.assertEqual(
+            next_due,
+            100.0 + workflow_maintenance._STALE_BLOCKED_ARCHIVE_INTERVAL_SECONDS,
+        )
+        mock_archive.assert_called_once()
+        mock_log_exception.assert_called_once_with(
+            "failed to run scheduled stale blocked workflow archive"
         )
 
     @patch("hitch.main.workflow_maintenance.logger.exception")
