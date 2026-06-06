@@ -14,6 +14,7 @@ from django.core import signing
 from django.http import HttpResponse
 from django.test import Client, TestCase
 from django.urls import reverse
+from django.utils import timezone
 from openai_codex import Codex
 from openai_codex.errors import AppServerError
 
@@ -3125,6 +3126,185 @@ class SessionViewActiveWorkerTests(TestCase):
             response,
             '<span class="task-plan-current" data-task-plan-current>Render saved task plan</span>',
             html=False,
+        )
+
+    @patch("hitch.main.views.build_worktree_diff")
+    @patch("hitch.main.views.Codex")
+    def test_finished_worker_rebuilds_task_plan_on_page_load(
+        self, mock_codex: MagicMock, mock_diff: MagicMock
+    ) -> None:
+        # The task-plan widget must rebuild from the thread's persisted worker
+        # logs after a reload, when no worker is running, just as the goal
+        # objective does.
+        mock_diff.return_value = _diff_view()
+        _patch_thread(self, mock_codex, _thread([]))
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "method": codex_events.TASK_PLAN_UPDATED_METHOD,
+                        "payload": {
+                            "threadId": "thread-1",
+                            "explanation": "Persist plan past the worker",
+                            "plan": [
+                                {"step": "Inspect current live UI", "status": "completed"},
+                                {"step": "Render saved task plan", "status": "in_progress"},
+                            ],
+                        },
+                        "recordedAt": 30,
+                        "eventSeq": 3,
+                    }
+                )
+                + "\n"
+            )
+            events_path = fh.name
+        self.addCleanup(Path(events_path).unlink, missing_ok=True)
+        _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_COMPLETED,
+            prompt="finished work",
+            pid=0,
+            events_path=events_path,
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        body = response.content.decode()
+
+        # No active worker: the page renders without a live stream root.
+        self.assertNotContains(response, "data-live-root></div>")
+        self.assertContains(response, 'class="has-task-plan"')
+        self.assertContains(response, "Render saved task plan")
+        self.assertContains(response, 'class="plan-step inProgress"')
+        self.assertNotIn('aria-label="Current task plan" hidden', body)
+        self.assertContains(
+            response,
+            '<span class="task-plan-current" data-task-plan-current>Render saved task plan</span>',
+            html=False,
+        )
+
+    @patch("hitch.main.views.build_worktree_diff")
+    @patch("hitch.main.views.Codex")
+    def test_planless_latest_turn_does_not_resurrect_prior_task_plan(
+        self, mock_codex: MagicMock, mock_diff: MagicMock
+    ) -> None:
+        # A later turn that finished without emitting a plan must leave the
+        # widget empty on reload rather than resurrecting the earlier turn's
+        # plan; the lookup scopes to the most recently started worker.
+        mock_diff.return_value = _diff_view()
+        _patch_thread(self, mock_codex, _thread([]))
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "method": codex_events.TASK_PLAN_UPDATED_METHOD,
+                        "payload": {
+                            "threadId": "thread-1",
+                            "plan": [
+                                {"step": "Stale prior-turn task", "status": "in_progress"},
+                            ],
+                        },
+                        "recordedAt": 30,
+                        "eventSeq": 3,
+                    }
+                )
+                + "\n"
+            )
+            planned_path = fh.name
+        self.addCleanup(Path(planned_path).unlink, missing_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", delete=False
+        ) as planless_fh:
+            planless_path = planless_fh.name
+        self.addCleanup(Path(planless_path).unlink, missing_ok=True)
+        planned = _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_COMPLETED,
+            prompt="earlier turn",
+            pid=0,
+            events_path=planned_path,
+        )
+        planless = _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_COMPLETED,
+            prompt="later planless turn",
+            pid=0,
+            events_path=planless_path,
+        )
+        # ``started_at`` is auto-set on create; pin an explicit ordering so the
+        # planless worker is unambiguously the most recent.
+        CodexInstance.objects.filter(pk=planned.pk).update(
+            started_at=timezone.now() - timedelta(minutes=5)
+        )
+        CodexInstance.objects.filter(pk=planless.pk).update(started_at=timezone.now())
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        body = response.content.decode()
+
+        self.assertNotIn("Stale prior-turn task", body)
+        self.assertNotContains(response, 'class="has-task-plan"')
+        self.assertRegex(
+            body,
+            r'<aside class="task-plan"[\s\S]*?aria-label="Current task plan"\s+hidden>',
+        )
+
+    @patch("hitch.main.views.build_worktree_diff")
+    @patch("hitch.main.views.Codex")
+    def test_active_worker_does_not_inherit_prior_worker_task_plan(
+        self, mock_codex: MagicMock, mock_diff: MagicMock
+    ) -> None:
+        # A new turn whose worker has not emitted its own plan must not seed the
+        # widget from an earlier completed worker's plan; the thread-wide scan
+        # only applies when no worker is running.
+        mock_diff.return_value = _diff_view()
+        _patch_thread(self, mock_codex, _thread([]))
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", delete=False) as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "method": codex_events.TASK_PLAN_UPDATED_METHOD,
+                        "payload": {
+                            "threadId": "thread-1",
+                            "plan": [
+                                {"step": "Stale prior-turn task", "status": "in_progress"},
+                            ],
+                        },
+                        "recordedAt": 30,
+                        "eventSeq": 3,
+                    }
+                )
+                + "\n"
+            )
+            finished_path = fh.name
+        self.addCleanup(Path(finished_path).unlink, missing_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", delete=False
+        ) as active_fh:
+            active_path = active_fh.name
+        self.addCleanup(Path(active_path).unlink, missing_ok=True)
+        _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_COMPLETED,
+            prompt="finished work",
+            pid=0,
+            events_path=finished_path,
+        )
+        _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_RUNNING,
+            prompt="new turn",
+            pid=_LIVE_PID,
+            events_path=active_path,
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+        body = response.content.decode()
+
+        self.assertContains(response, 'data-stream-url="')
+        self.assertNotIn("Stale prior-turn task", body)
+        self.assertNotContains(response, 'class="has-task-plan"')
+        self.assertRegex(
+            body,
+            r'<aside class="task-plan"[\s\S]*?aria-label="Current task plan"\s+hidden>',
         )
 
     @patch("hitch.main.views.build_worktree_diff")
