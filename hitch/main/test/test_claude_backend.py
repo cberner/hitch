@@ -1766,7 +1766,13 @@ class ClaudeDanglingRequestCleanupTests(TestCase):
     session keeps rendering an actionable card for a dead worker and any user
     response is silently dropped (mirrors the Codex worker's failure path)."""
 
-    def _run_handle(self, *, messages: list[Any], raise_in_stream: bool) -> Any:
+    def _run_handle(
+        self,
+        *,
+        messages: list[Any],
+        raise_in_stream: bool,
+        stream_exc: type[BaseException] = RuntimeError,
+    ) -> Any:
         from hitch.main.management.commands import claude_worker
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1796,7 +1802,7 @@ class ClaudeDanglingRequestCleanupTests(TestCase):
                 @override
                 async def receive_response(self) -> Any:
                     if raise_in_stream:
-                        raise RuntimeError("events-file write failed")
+                        raise stream_exc("events-file write failed")
                         yield  # pragma: no cover - unreachable, marks a generator
                     for message in messages:
                         yield message
@@ -1814,7 +1820,7 @@ class ClaudeDanglingRequestCleanupTests(TestCase):
                 patch.object(claude_worker, "_build_query_input", return_value="do it"),
             ):
                 if raise_in_stream:
-                    with self.assertRaises(RuntimeError):
+                    with self.assertRaises(stream_exc):
                         claude_worker.Command().handle(
                             instance_id=instance.pk,
                             model=None,
@@ -1846,6 +1852,19 @@ class ClaudeDanglingRequestCleanupTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertEqual(approval.decision, ApprovalRequest.DECISION_CANCEL)
         self.assertIsNotNone(approval.decided_at)
+        self.assertEqual(user_input.response, {"answers": {}})
+
+    def test_base_exception_path_commits_and_resolves(self) -> None:
+        import asyncio
+
+        # On Python 3.13 ``asyncio.CancelledError`` is a ``BaseException``; it must
+        # still drive the terminal-status commit and dangling-row cleanup (and be
+        # re-raised) rather than slipping past an ``except Exception``.
+        instance, approval, user_input = self._run_handle(
+            messages=[], raise_in_stream=True, stream_exc=asyncio.CancelledError
+        )
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        self.assertEqual(approval.decision, ApprovalRequest.DECISION_CANCEL)
         self.assertEqual(user_input.response, {"answers": {}})
         self.assertIsNotNone(user_input.responded_at)
 

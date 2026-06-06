@@ -9490,6 +9490,12 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(
             mock_spawn.call_args.kwargs["backend"], CodexInstance.BACKEND_CLAUDE
         )
+        # No worktree here, so this is a proposal-only (no-code) candidate running
+        # in the real repo: it must be pinned read-only, not left to the spawn
+        # layer's empty -> workspace-write default for hidden Claude reviewers.
+        self.assertEqual(
+            mock_spawn.call_args.kwargs["sandbox_policy"], "readOnly"
+        )
 
     @patch("hitch.main.system_agents.spec_critic_should_run", return_value=True)
     @patch("hitch.main.system_agents.threading.Thread", side_effect=_synchronous_thread)
@@ -9571,8 +9577,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(kwargs["cwd"], "/repo")
         self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
         # No worktree: a proposal-only (no-code) candidate runs in the real repo
-        # cwd, so it is pinned read-only rather than left to default to
-        # workspace-write.
+        # cwd, so it is pinned read-only rather than left to the spawn layer's
+        # empty -> workspace-write default for hidden Claude reviewers.
         self.assertEqual(kwargs["sandbox_policy"], "readOnly")
         self.assertEqual(kwargs["web_search_mode"], AutonomousGoal.WEB_SEARCH_LIVE)
         self.assertEqual(kwargs["agent_kind"], system_agents.AUTONOMOUS_GOAL_AGENT_KIND)

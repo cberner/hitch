@@ -6852,14 +6852,16 @@ def _spawn_autonomous_goal_candidate_run(
             cwd=session_cwd,
             prompt=prompt,
             approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
+            # A no-code (proposal-only) candidate runs in the real repo cwd with no
+            # worktree, so it must not write: pin it read-only explicitly rather
+            # than passing an empty sandbox. An empty sandbox is no longer
+            # equivalent to "no writes" for a Claude reviewer -- the spawn layer now
+            # promotes an empty hidden-agent sandbox to workspace-write so reviewers
+            # can run tests -- which would otherwise let a proposal-only candidate
+            # mutate the user's real repo.
             sandbox_policy=(
                 AUTONOMOUS_GOAL_IMPLEMENTATION_SANDBOX_POLICY
                 if _autonomous_goal_candidate_allows_code_changes(workflow)
-                # A no-code (proposal-only) candidate runs in the user's real repo
-                # cwd with no worktree, so it must not write. An empty sandbox
-                # defaults to workspace-write at the app-server, which would let a
-                # misbehaving or prompt-injected run mutate the real repo despite
-                # the "do not make code changes" prompt -- pin it read-only.
                 else "readOnly"
             ),
             web_search_mode=_workflow_web_search_mode(workflow),

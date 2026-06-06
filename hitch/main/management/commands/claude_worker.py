@@ -179,7 +179,13 @@ class Command(BaseCommand):
                     plan_mode=options.get("plan_mode", False),
                 )
                 asyncio.run(runner.run())
-        except Exception as exc:  # noqa: BLE001 - record any failure, then re-raise
+        except BaseException as exc:  # noqa: BLE001 - record any failure, then re-raise
+            # BaseException, not Exception: on Python 3.13 ``asyncio.CancelledError``
+            # is a ``BaseException``, so a cancellation from ``ClaudeSDKClient`` /
+            # ``asyncio.run`` would otherwise exit without committing a terminal
+            # status, resolving dangling approval/input rows, notifying system
+            # agents, or cleaning Claude's inlined input images. Match the Codex
+            # worker: record the failed turn, run the cleanup below, then re-raise.
             instance.status = CodexInstance.STATUS_FAILED
             instance.ended_at = timezone.now()
             instance.error = repr(exc)
