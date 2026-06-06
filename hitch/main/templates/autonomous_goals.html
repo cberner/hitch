@@ -317,9 +317,24 @@
             border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
             color: var(--accent);
         }
-        .run-status[data-state="blocked"] {
+        .run-status[data-state="blocked"],
+        .run-status[data-state="failed"] {
             border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
             color: var(--danger);
+        }
+        .run-status[data-state="done"],
+        .run-status[data-state="ready"] {
+            border-color: color-mix(in srgb, var(--success) 45%, var(--border));
+            color: var(--success);
+        }
+        .run-status[data-state="manual"],
+        .run-status[data-state="queued"],
+        .run-status[data-state="review"],
+        .run-status[data-state="skipped"],
+        .run-status[data-state="waiting"],
+        .run-status[data-state="maxed"] {
+            border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+            color: var(--warn);
         }
         .run-status-detail {
             margin: 0;
@@ -472,34 +487,21 @@
                         {% if goal.auto_merge_to_local_branch %}
                         <span class="meta">Auto merge: {{ goal.auto_merge_branch }}</span>
                         {% endif %}
-                        {% if goal.latest_workflow %}
-                        <span class="meta">Last run: {{ goal.latest_workflow.get_status_display }}</span>
-                        {% if goal.run_log_url %}
-                        <a href="{{ goal.run_log_url }}">View log</a>
-                        {% endif %}
-                        {% endif %}
                         {% if goal.run_running %}
                         <span class="meta">Tokens used: {{ goal.run_tokens_used_display }}</span>
-                        <button
-                            type="button"
-                            class="run-status"
-                            data-state="running"
-                            data-run-status-open
-                            data-run-status-title="{{ goal.run_status_title }}"
-                            data-run-status-detail="{{ goal.run_status_detail }}"
-                            data-run-status-log-url="{{ goal.run_log_url }}"
-                        >Running</button>
                         {% endif %}
-                        {% if goal.run_blocked %}
+                        {% if goal.run_status_label %}
                         <button
                             type="button"
                             class="run-status"
-                            data-state="blocked"
+                            data-state="{{ goal.run_status_state }}"
                             data-run-status-open
                             data-run-status-title="{{ goal.run_status_title }}"
                             data-run-status-detail="{{ goal.run_status_detail }}"
                             data-run-status-log-url="{{ goal.run_log_url }}"
-                        >Blocked</button>
+                            title="{{ goal.run_status_detail }}"
+                            aria-label="{{ goal.run_status_title }}"
+                        >{{ goal.run_status_label }}</button>
                         {% endif %}
                     </div>
                 </li>
