@@ -4584,6 +4584,9 @@ def _render_session_detail(
     debug_chat_url = _debug_chat_new_session_url(
         session_id, session_project, projects, cwd=thread_cwd
     )
+    approval_mode = _effective_approval_mode_for_session(
+        settings, session_id, metadata
+    )
     response = render(
         request,
         "session.html",
@@ -4655,6 +4658,7 @@ def _render_session_detail(
                 resumed,
                 plan_model,
                 cwd=thread_cwd or "",
+                approval_mode=approval_mode,
             ),
             "input_image_accept": _INPUT_IMAGE_ACCEPT,
             "pr_slash_prompt": _PR_SLASH_PROMPT,
@@ -4676,6 +4680,7 @@ def _render_session_detail(
             "session_project": session_project,
             "session_project_id": session_project.pk if session_project is not None else "",
             "debug_chat_url": debug_chat_url,
+            **_session_approval_mode_context(settings, session_id, metadata),
             **settings_context,
         },
     )
@@ -6546,6 +6551,7 @@ def _next_message_config(
     plan_model: str | None,
     *,
     cwd: str,
+    approval_mode: str | None = None,
 ) -> list[dict[str, str]]:
     """Return the settings that will govern the next submitted message."""
     model = _string_value(getattr(resumed, "model", None))
@@ -6557,7 +6563,7 @@ def _next_message_config(
         default="Codex default",
     )
     approval_value = _option_label(
-        _APPROVAL_MODE_OPTIONS, _effective_approval_mode(settings)
+        _APPROVAL_MODE_OPTIONS, approval_mode or _effective_approval_mode(settings)
     )
     web_search_value = _web_search_mode_label(settings.web_search_mode)
     return [
@@ -6616,6 +6622,58 @@ def _effective_approval_mode(settings: SettingsValues) -> str:
     if settings.approval_mode not in _VALID_APPROVAL_MODES:
         return _DEFAULT_APPROVAL_MODE
     return settings.approval_mode
+
+
+def _session_approval_mode_override(
+    session_id: str, metadata: SessionMetadata | None = None
+) -> str:
+    if metadata is None:
+        value = (
+            SessionMetadata.objects.filter(thread_id=session_id)
+            .values_list("approval_mode", flat=True)
+            .first()
+            or ""
+        )
+    else:
+        value = metadata.approval_mode
+    return value if value in _VALID_APPROVAL_MODES else ""
+
+
+def _effective_approval_mode_for_session(
+    settings: SettingsValues,
+    session_id: str,
+    metadata: SessionMetadata | None = None,
+) -> str:
+    override = _session_approval_mode_override(session_id, metadata)
+    return override or _effective_approval_mode(settings)
+
+
+def _session_approval_mode_context(
+    settings: SettingsValues,
+    session_id: str,
+    metadata: SessionMetadata | None,
+) -> dict[str, Any]:
+    global_label = _option_label(
+        _APPROVAL_MODE_OPTIONS,
+        _effective_approval_mode(settings),
+    )
+    override = _session_approval_mode_override(session_id, metadata)
+    return {
+        "set_approval_mode_url": reverse(
+            "set_session_approval_mode", kwargs={"session_id": session_id}
+        ),
+        "session_approval_options": [
+            {
+                "id": "",
+                "display_name": f"Follow global ({global_label})",
+            },
+            *[
+                {"id": value, "display_name": label}
+                for value, label in _APPROVAL_MODE_OPTIONS
+            ],
+        ],
+        "current_session_approval_mode": override,
+    }
 
 
 def _effective_coding_agent(settings: SettingsValues) -> str:
@@ -8569,6 +8627,31 @@ def set_session_project(request: HttpRequest, session_id: str) -> HttpResponse:
     return redirect("session", session_id=session_id)
 
 
+@require_http_methods(["POST"])
+def set_session_approval_mode(request: HttpRequest, session_id: str) -> HttpResponse:
+    approval_mode = request.POST.get("approval_mode", "").strip()
+    if approval_mode and approval_mode not in _VALID_APPROVAL_MODES:
+        return HttpResponseBadRequest("invalid approval mode")
+    metadata = SessionMetadata.objects.filter(thread_id=session_id).first()
+    cwd = metadata.cwd if metadata is not None and metadata.cwd else ""
+    if not cwd:
+        settings = _stored_settings(request)
+        resumed = codex_pool.run_borrowed_op_with_retry(
+            Codex,
+            lambda codex: codex._client.thread_resume(session_id),
+            enable_memories=settings.enable_memories,
+        )
+        cwd = _thread_cwd(resumed.thread) or ""
+    SessionMetadata.objects.update_or_create(
+        thread_id=session_id,
+        defaults={
+            "cwd": cwd,
+            "approval_mode": approval_mode,
+        },
+    )
+    return redirect("session", session_id=session_id)
+
+
 def _validate_settings_against_models(
     model: str, effort: str, models_data: list[Any]
 ) -> str | None:
@@ -9189,7 +9272,7 @@ def start_session_demo(request: HttpRequest, session_id: str) -> HttpResponse:
             cwd=cwd,
             prompt=prompt,
             sandbox_policy=sandbox_policy or None,
-            approval_mode=_effective_approval_mode(settings),
+            approval_mode=_effective_approval_mode_for_session(settings, session_id),
             web_search_mode=_valid_web_search_mode_or_default(
                 settings.web_search_mode
             )
@@ -9505,7 +9588,9 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         # defaults — which breaks multi-turn workflows that depend on
         # elevated permissions or stricter escalation handling.
         sandbox_policy = _effective_sandbox_policy_for_cwd(settings, cwd)
-        approval_mode = _effective_approval_mode(settings)
+        approval_mode = _effective_approval_mode_for_session(
+            settings, session_id, metadata
+        )
         previous_instance = codex_pool.latest_for_thread(session_id)
         session_project = None
         if previous_instance is None:
@@ -10412,12 +10497,17 @@ def _start_candidate_proposal_session(
         )
     )
     sandbox_policy = _effective_sandbox_policy_for_cwd(settings, candidate_cwd)
+    approval_mode = _effective_approval_mode_for_session(
+        settings,
+        candidate_session.thread_id,
+        candidate_session,
+    )
     if qa_workflow_activation:
         workflow_kwargs: dict[str, Any] = {
             "main_thread_id": candidate_session.thread_id,
             "cwd": candidate_cwd,
             "sandbox_policy": sandbox_policy or None,
-            "approval_mode": settings.approval_mode,
+            "approval_mode": approval_mode,
             "model": settings.model or None,
             "reasoning_effort": settings.reasoning_effort or None,
             "developer_instructions": developer_instructions or None,
@@ -10474,7 +10564,7 @@ def _start_candidate_proposal_session(
         "model": settings.model or None,
         "reasoning_effort": settings.reasoning_effort or None,
         "sandbox_policy": sandbox_policy or None,
-        "approval_mode": settings.approval_mode,
+        "approval_mode": approval_mode,
     }
     if input_image_paths:
         spawn_kwargs["input_image_paths"] = input_image_paths

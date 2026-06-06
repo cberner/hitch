@@ -2014,6 +2014,7 @@
                     <a href="{{ debug_chat_url }}" role="menuitem">Debug chat</a>
                     {% if not read_only %}
                     <button type="button" role="menuitem" data-move-project-open>Move to project</button>
+                    <button type="button" role="menuitem" data-approval-mode-open>Approval mode</button>
                     <form method="post" action="{{ start_demo_url }}" role="none">
                         {% csrf_token %}
                         <button type="submit" role="menuitem" {% if demo_start_disabled %}disabled{% endif %}>Start demo</button>
@@ -2268,6 +2269,24 @@
             </div>
         </form>
     </dialog>
+    <dialog class="new-session" data-approval-mode-dialog aria-labelledby="approval-mode-title">
+        <form method="post" action="{{ set_approval_mode_url }}">
+            {% csrf_token %}
+            <h2 id="approval-mode-title">Approval mode</h2>
+            <label>
+                Mode
+                <select name="approval_mode">
+                    {% for option in session_approval_options %}
+                    <option value="{{ option.id }}" {% if option.id == current_session_approval_mode %}selected{% endif %}>{{ option.display_name }}</option>
+                    {% endfor %}
+                </select>
+            </label>
+            <div class="actions">
+                <button type="button" class="button secondary" data-approval-mode-cancel>Cancel</button>
+                <button type="submit" class="button">Save</button>
+            </div>
+        </form>
+    </dialog>
     {% endif %}
 
     {% if diff_view.has_changes %}
@@ -2491,6 +2510,9 @@
             const moveProjectButton = document.querySelector("[data-move-project-open]");
             const moveProjectDialog = document.querySelector("[data-move-project-dialog]");
             const moveProjectCancel = document.querySelector("[data-move-project-cancel]");
+            const approvalModeButton = document.querySelector("[data-approval-mode-open]");
+            const approvalModeDialog = document.querySelector("[data-approval-mode-dialog]");
+            const approvalModeCancel = document.querySelector("[data-approval-mode-cancel]");
             const menu = document.querySelector("[data-session-menu]");
             const menuButton = document.querySelector("[data-session-menu-open]");
             const menuPanel = document.querySelector("[data-session-menu-panel]");
@@ -2537,6 +2559,17 @@
             }
             if (moveProjectCancel && moveProjectDialog) {
                 moveProjectCancel.addEventListener("click", () => hideDialog(moveProjectDialog));
+            }
+            if (approvalModeButton && approvalModeDialog) {
+                approvalModeButton.addEventListener("click", () => {
+                    closeMenu();
+                    showDialog(approvalModeDialog);
+                    const select = approvalModeDialog.querySelector("select[name='approval_mode']");
+                    if (select) select.focus();
+                });
+            }
+            if (approvalModeCancel && approvalModeDialog) {
+                approvalModeCancel.addEventListener("click", () => hideDialog(approvalModeDialog));
             }
 
             const diffModal = document.querySelector("[data-diff-modal]");
