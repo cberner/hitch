@@ -45,6 +45,7 @@ from openai_codex.generated.v2_all import (
 )
 
 from hitch.main import (
+    codex_events,
     codex_pool,
     coding_agents,
     demo,
@@ -17141,7 +17142,7 @@ class AutonomousGoalViewTests(TestCase):
             web_search_mode=AutonomousGoal.WEB_SEARCH_LIVE,
             auto_merge_to_local_branch=True,
             auto_merge_branch="main",
-            proposal_budget=25000,
+            proposal_budget=25_000_000,
         )
         AutonomousGoal.objects.create(
             project=other_project,
@@ -17200,7 +17201,7 @@ class AutonomousGoalViewTests(TestCase):
             'value="draft_pr" data-auto-qa-supported="false" data-auto-qa-required="true"',
         )
         self.assertContains(response, "Web search: Live")
-        self.assertContains(response, "Proposal budget: 25000 tokens")
+        self.assertContains(response, "Proposal budget: 25M tokens")
         self.assertContains(response, "Auto-proposal: Off")
         self.assertContains(response, "Auto merge: main")
         self.assertContains(response, 'class="goal-menu" data-goal-menu')
@@ -17226,7 +17227,7 @@ class AutonomousGoalViewTests(TestCase):
             response, f'data-web-search-mode="{AutonomousGoal.WEB_SEARCH_LIVE}"'
         )
         self.assertContains(response, 'data-auto-proposal-enabled="false"')
-        self.assertContains(response, 'data-proposal-budget="25000"')
+        self.assertContains(response, 'data-proposal-budget="25"')
         self.assertContains(response, 'data-auto-merge-to-local-branch="true"')
         self.assertContains(response, 'data-auto-merge-branch="main"')
         self.assertContains(response, 'data-autonomous-goal-edit')
@@ -17287,13 +17288,60 @@ class AutonomousGoalViewTests(TestCase):
             instance=blocked_instance,
             status=SystemAgentRun.STATUS_FAILED,
         )
-        SystemWorkflow.objects.create(
+        with tempfile.NamedTemporaryFile(
+            prefix="autonomous-goal-events-",
+            suffix=".jsonl",
+            mode="w",
+            delete=False,
+        ) as running_events:
+            running_events.write(
+                json.dumps(
+                    {
+                        "method": codex_events.GOAL_UPDATED_METHOD,
+                        "payload": {
+                            "threadId": "running-agent-thread",
+                            "goal": {
+                                "objective": "Autonomous goal",
+                                "tokensUsed": 950_000,
+                            },
+                        },
+                    }
+                )
+                + "\n"
+            )
+            running_events_path = running_events.name
+        self.addCleanup(Path(running_events_path).unlink, missing_ok=True)
+        running_workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             main_thread_id=system_agents._autonomous_goal_main_thread_id(running_goal.pk),
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
-            state={"autonomous_goal_id": running_goal.pk},
+            state={
+                "autonomous_goal_id": running_goal.pk,
+                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 400_000,
+                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY: {
+                    "running-agent-thread": 100_000,
+                },
+            },
+        )
+        running_instance = CodexInstance.objects.create(
+            pid=0,
+            thread_id="running-agent-thread",
+            cwd="/repo",
+            prompt="run autonomous goal",
+            events_path=running_events_path,
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=running_workflow.pk,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=running_workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id=running_instance.thread_id,
+            instance=running_instance,
+            status=SystemAgentRun.STATUS_RUNNING,
         )
         SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
@@ -17326,9 +17374,14 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(
             response, 'data-run-status-title="Autonomous goal is running"'
         )
+        self.assertContains(response, "Tokens used: 1,250,000 tokens")
         self.assertContains(response, "This autonomous goal run is still working.")
         self.assertContains(response, "blocked before the run log was created")
-        self.assertContains(response, 'data-run-status-log-url=""', count=2)
+        self.assertContains(
+            response,
+            f'data-run-status-log-url="{reverse("autonomous_goal_run_log", args=[running_workflow.pk])}"',
+        )
+        self.assertContains(response, 'data-run-status-log-url=""', count=1)
         self.assertNotContains(response, 'data-run-status-log-url="None"')
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
@@ -17986,7 +18039,7 @@ class AutonomousGoalViewTests(TestCase):
                 "auto_qa": "true",
                 "auto_proposal": "true",
                 "stacked_diff_depth": "3",
-                "proposal_budget": "25000",
+                "proposal_budget": "25",
                 "confidence_threshold": AutonomousGoal.CONFIDENCE_VERY_HIGH,
                 "web_search_mode": AutonomousGoal.WEB_SEARCH_LIVE,
             },
@@ -18000,7 +18053,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(goal.autonomy, AutonomousGoal.AUTONOMY_DRAFT_PR)
         self.assertFalse(goal.auto_qa_enabled)
         self.assertEqual(goal.stacked_diff_depth, 3)
-        self.assertEqual(goal.proposal_budget, 25000)
+        self.assertEqual(goal.proposal_budget, 25_000_000)
         self.assertEqual(goal.web_search_mode, AutonomousGoal.WEB_SEARCH_LIVE)
         self.assertTrue(goal.auto_proposal_enabled)
         self.assertEqual(
@@ -18045,7 +18098,7 @@ class AutonomousGoalViewTests(TestCase):
             auto_proposal_enabled=True,
             confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
             web_search_mode=AutonomousGoal.WEB_SEARCH_CACHED,
-            proposal_budget=10000,
+            proposal_budget=10_000_000,
         )
 
         response = self.client.post(
@@ -18058,7 +18111,7 @@ class AutonomousGoalViewTests(TestCase):
                 "auto_qa": "true",
                 "auto_proposal": "false",
                 "stacked_diff_depth": "4",
-                "proposal_budget": "30000",
+                "proposal_budget": "30",
                 "confidence_threshold": AutonomousGoal.CONFIDENCE_VERY_HIGH,
                 "web_search_mode": AutonomousGoal.WEB_SEARCH_DISABLED,
             },
@@ -18072,7 +18125,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(goal.autonomy, AutonomousGoal.AUTONOMY_DRAFT_PATCH)
         self.assertTrue(goal.auto_qa_enabled)
         self.assertEqual(goal.stacked_diff_depth, 4)
-        self.assertEqual(goal.proposal_budget, 30000)
+        self.assertEqual(goal.proposal_budget, 30_000_000)
         self.assertEqual(goal.web_search_mode, AutonomousGoal.WEB_SEARCH_DISABLED)
         self.assertFalse(goal.auto_proposal_enabled)
         self.assertEqual(
@@ -18447,6 +18500,17 @@ class AutonomousGoalViewTests(TestCase):
                     "ambition": AutonomousGoal.AMBITION_HIGH,
                     "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
                     "proposal_budget": "0",
+                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
+                },
+                "proposal budget is invalid",
+            ),
+            (
+                {
+                    "title": "Improve docs",
+                    "goal": "Find useful docs increments.",
+                    "ambition": AutonomousGoal.AMBITION_HIGH,
+                    "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+                    "proposal_budget": "1e1000000",
                     "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
                 },
                 "proposal budget is invalid",

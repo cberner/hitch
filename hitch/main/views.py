@@ -14,6 +14,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal, DecimalException
 from functools import wraps
 from pathlib import Path
 from stat import S_ISREG
@@ -562,6 +563,11 @@ _VALID_PROJECT_AUTO_PR_MODES = {value for value, _label in Project.AUTO_PR_CHOIC
 # the ORM and surfaces as a backend-specific OverflowError/DataError
 # from ``objects.get`` — a 500 for what should be a clean 400.
 _MAX_BIGAUTOFIELD = 2**63 - 1
+_MAX_BIGAUTOFIELD_DECIMAL = Decimal(_MAX_BIGAUTOFIELD)
+_AUTONOMOUS_GOAL_PROPOSAL_BUDGET_UNIT = 1_000_000
+_MAX_AUTONOMOUS_GOAL_PROPOSAL_BUDGET_MILLIONS = _MAX_BIGAUTOFIELD_DECIMAL / Decimal(
+    _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_UNIT
+)
 _PLAN_SLASH_COMMAND = "/plan"
 _PLAN_APPROVAL_PROMPT = "Implement the plan."
 _PLAN_REVISION_PROMPT = "Revise the plan."
@@ -3413,6 +3419,7 @@ def autonomous_goals(request: HttpRequest) -> HttpResponse:
         else []
     )
     _attach_autonomous_goal_run_state(goals)
+    _attach_autonomous_goal_display_state(goals)
     settings_context = _settings_context(current_settings, models_data)
     response = render(
         request,
@@ -3925,9 +3932,24 @@ def _posted_autonomous_goal_proposal_budget(
     if not raw:
         return None, None
     try:
-        budget = int(raw)
-    except ValueError:
+        budget_millions = Decimal(raw)
+    except DecimalException:
         return None, "proposal budget is invalid"
+    if (
+        not budget_millions.is_finite()
+        or budget_millions <= 0
+        or budget_millions > _MAX_AUTONOMOUS_GOAL_PROPOSAL_BUDGET_MILLIONS
+    ):
+        return None, "proposal budget is invalid"
+    try:
+        budget_decimal = budget_millions * _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_UNIT
+    except DecimalException:
+        return None, "proposal budget is invalid"
+    if budget_decimal > _MAX_BIGAUTOFIELD_DECIMAL:
+        return None, "proposal budget is invalid"
+    if budget_decimal != budget_decimal.to_integral_value():
+        return None, "proposal budget is invalid"
+    budget = int(budget_decimal)
     if budget < 1 or budget > _MAX_BIGAUTOFIELD:
         return None, "proposal budget is invalid"
     return budget, None
@@ -3944,6 +3966,34 @@ def _posted_autonomous_goal_bool(
     if value == "true":
         return True, None
     return False, f"{setting_name} is invalid"
+
+
+def _attach_autonomous_goal_display_state(goals: list[AutonomousGoal]) -> None:
+    for goal in goals:
+        goal.proposal_budget_form_value = _autonomous_goal_budget_millions_value(  # type: ignore[attr-defined]
+            goal.proposal_budget
+        )
+        goal.proposal_budget_display = _autonomous_goal_budget_display(  # type: ignore[attr-defined]
+            goal.proposal_budget
+        )
+
+
+def _autonomous_goal_budget_millions_value(budget: int | None) -> str:
+    if budget is None:
+        return ""
+    return _trim_decimal_text(
+        format(Decimal(budget) / Decimal(_AUTONOMOUS_GOAL_PROPOSAL_BUDGET_UNIT), "f")
+    )
+
+
+def _autonomous_goal_budget_display(budget: int | None) -> str:
+    if budget is None:
+        return ""
+    return f"{_autonomous_goal_budget_millions_value(budget)}M tokens"
+
+
+def _trim_decimal_text(value: str) -> str:
+    return value.rstrip("0").rstrip(".") if "." in value else value
 
 
 def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
@@ -3963,7 +4013,11 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
     workflows_by_thread: dict[str, SystemWorkflow] = {}
     for workflow in workflows:
         workflows_by_thread.setdefault(workflow.main_thread_id, workflow)
-    log_urls_by_workflow_id = _autonomous_goal_log_urls(workflows_by_thread.values())
+    latest_workflows = list(workflows_by_thread.values())
+    log_urls_by_workflow_id = _autonomous_goal_log_urls(latest_workflows)
+    running_tokens_by_workflow_id = _autonomous_goal_running_token_counts(
+        latest_workflows
+    )
     for goal in goals:
         latest_workflow = workflows_by_thread.get(
             system_agents._autonomous_goal_main_thread_id(goal.pk)
@@ -3983,11 +4037,92 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
         goal.run_status_detail = _autonomous_goal_run_status_detail(  # type: ignore[attr-defined]
             latest_workflow
         )
+        goal.run_tokens_used_display = _autonomous_goal_run_tokens_used_display(  # type: ignore[attr-defined]
+            latest_workflow,
+            running_tokens_by_workflow_id,
+        )
         goal.run_log_url = (  # type: ignore[attr-defined]
             log_urls_by_workflow_id.get(latest_workflow.pk) or ""
             if latest_workflow is not None
             else ""
         )
+
+
+def _autonomous_goal_running_token_counts(
+    workflows: Iterable[SystemWorkflow],
+) -> dict[int, int]:
+    workflows_by_id = {
+        workflow.pk: workflow
+        for workflow in workflows
+        if workflow.status == SystemWorkflow.STATUS_RUNNING
+    }
+    if not workflows_by_id:
+        return {}
+    runs = (
+        SystemAgentRun.objects.select_related("instance")
+        .filter(
+            workflow_id__in=list(workflows_by_id),
+            status__in=(
+                SystemAgentRun.STATUS_STARTING,
+                SystemAgentRun.STATUS_RUNNING,
+            ),
+        )
+        .exclude(thread_id="")
+        .order_by("workflow_id", "-created_at", "-pk")
+    )
+    tokens_by_workflow_id: dict[int, int] = {}
+    for run in runs:
+        if run.workflow_id in tokens_by_workflow_id:
+            continue
+        workflow = workflows_by_id.get(run.workflow_id)
+        if workflow is not None:
+            tokens_by_workflow_id[run.workflow_id] = (
+                _autonomous_goal_running_token_count(workflow, run.instance)
+            )
+    return tokens_by_workflow_id
+
+
+def _autonomous_goal_running_token_count(
+    workflow: SystemWorkflow, instance: CodexInstance
+) -> int:
+    persisted_tokens = _workflow_state_int(
+        workflow, system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
+    )
+    current_tokens = codex_events.latest_goal_tokens_for_instance(instance)
+    if current_tokens is None:
+        return persisted_tokens
+    previous_tokens = _autonomous_goal_recorded_thread_tokens(workflow, instance)
+    return persisted_tokens + max(current_tokens - previous_tokens, 0)
+
+
+def _autonomous_goal_recorded_thread_tokens(
+    workflow: SystemWorkflow, instance: CodexInstance
+) -> int:
+    token_totals = workflow.state.get(
+        system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY
+    )
+    if not isinstance(token_totals, dict):
+        return 0
+    value = token_totals.get(instance.thread_id)
+    return (
+        value
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0
+        else 0
+    )
+
+
+def _autonomous_goal_run_tokens_used_display(
+    workflow: SystemWorkflow | None, running_tokens_by_workflow_id: Mapping[int, int]
+) -> str:
+    if workflow is None or workflow.status != SystemWorkflow.STATUS_RUNNING:
+        return ""
+    tokens = running_tokens_by_workflow_id.get(
+        workflow.pk,
+        _workflow_state_int(
+            workflow, system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
+        ),
+    )
+    return f"{_format_token_count(tokens)} tokens"
 
 
 def _autonomous_goal_run_status_title(workflow: SystemWorkflow | None) -> str:
