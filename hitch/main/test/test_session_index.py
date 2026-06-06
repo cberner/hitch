@@ -71,6 +71,58 @@ class SessionIndexRefreshTests(TestCase):
         self.assertFalse(metadata.codex_archived)
         self.assertIsNone(metadata.codex_archived_at)
 
+    def test_record_turn_activity_bumps_updated_at(self) -> None:
+        old = datetime(2026, 1, 1, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="active-thread",
+            cwd="/repo",
+            codex_created_at=old,
+            codex_updated_at=old,
+            codex_last_synced_at=old,
+        )
+
+        ended = datetime(2026, 6, 6, tzinfo=UTC)
+        session_index.record_turn_activity("active-thread", updated_at=ended)
+
+        metadata = SessionMetadata.objects.get(thread_id="active-thread")
+        self.assertEqual(metadata.codex_updated_at, ended)
+        assert metadata.codex_last_synced_at is not None
+        self.assertGreater(metadata.codex_last_synced_at, old)
+
+    def test_record_turn_activity_is_noop_without_row(self) -> None:
+        # A thread with no index row yet (a later refresh creates it) must not
+        # raise or create a partial row.
+        session_index.record_turn_activity("missing-thread")
+        self.assertFalse(
+            SessionMetadata.objects.filter(thread_id="missing-thread").exists()
+        )
+
+    def test_upsert_thread_does_not_regress_worker_bump(self) -> None:
+        # A worker turn on an isolated sqlite_home bumped the cached row; the web
+        # home still reports the pre-turn (older) updated_at. A DB-only refresh
+        # must not drag the session's recency back below the worker bump.
+        bumped = datetime(2026, 6, 6, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="bumped-thread",
+            cwd="/repo",
+            codex_created_at=datetime(2026, 1, 1, tzinfo=UTC),
+            codex_updated_at=bumped,
+            codex_last_synced_at=bumped,
+        )
+
+        session_index.upsert_thread(_thread("bumped-thread", updated_at=1), projects=[])
+
+        metadata = SessionMetadata.objects.get(thread_id="bumped-thread")
+        self.assertEqual(metadata.codex_updated_at, bumped)
+
+        # A genuinely newer web timestamp still advances it.
+        newer = int(datetime(2027, 1, 1, tzinfo=UTC).timestamp())
+        session_index.upsert_thread(
+            _thread("bumped-thread", updated_at=newer), projects=[]
+        )
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.codex_updated_at, datetime(2027, 1, 1, tzinfo=UTC))
+
     def test_active_window_resumes_from_cursor_without_marking_synced(self) -> None:
         # A mid-list window (more pages remain) must page from start_cursor and
         # must NOT advance the request-path SessionIndexSyncState cursor.

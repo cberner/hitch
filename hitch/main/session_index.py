@@ -327,6 +327,25 @@ def update_cached_archived(thread_id: str, *, archived: bool) -> None:
     )
 
 
+def record_turn_activity(thread_id: str, *, updated_at: datetime | None = None) -> None:
+    """Bump a session's recency after a worker turn completes.
+
+    Worker turns run against an isolated Codex ``sqlite_home`` (see
+    ``codex_pool``), so their thread-metadata writes never reach the web home's
+    state DB that ``thread_list(use_state_db_only=True)`` -- and hence the
+    background index refresh -- reads. Writing ``codex_updated_at`` straight to
+    the existing row keeps the session list ordered by real activity without
+    giving up either the DB-only listing speed or the per-worker isolation.
+    No-op when the row is absent (a later refresh creates it from the web home,
+    where the thread was registered at creation, and subsequent turns bump it).
+    """
+    now = timezone.now()
+    SessionMetadata.objects.filter(thread_id=thread_id).update(
+        codex_updated_at=updated_at or now,
+        codex_last_synced_at=now,
+    )
+
+
 def indexed_sessions() -> QuerySet[SessionMetadata]:
     return (
         SessionMetadata.objects.exclude(codex_updated_at__isnull=True)
@@ -501,6 +520,14 @@ def _codex_defaults(
         )
         if archived_at is None:
             archived_at = now
+    # Never regress recency. A worker turn on an isolated sqlite_home bumps the
+    # cached row directly (record_turn_activity), but the web home's
+    # thread.updated_at stays at pre-turn time, so a DB-only refresh would
+    # otherwise overwrite the fresher worker bump with that stale value and the
+    # session would fall back down the list right after completing.
+    codex_updated_at = updated_at or created_at or now
+    if existing is not None and existing.codex_updated_at is not None:
+        codex_updated_at = max(codex_updated_at, existing.codex_updated_at)
     return {
         "cwd": cwd,
         "codex_display_title": display_title_for(
@@ -509,7 +536,7 @@ def _codex_defaults(
         "codex_name": name_value,
         "codex_preview": preview_value,
         "codex_created_at": created_at or updated_at or now,
-        "codex_updated_at": updated_at or created_at or now,
+        "codex_updated_at": codex_updated_at,
         "codex_archived": archived,
         "codex_archived_at": archived_at,
         "codex_path": path if isinstance(path, str) else "",

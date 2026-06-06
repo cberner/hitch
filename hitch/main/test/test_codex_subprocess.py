@@ -62,6 +62,7 @@ from hitch.main.models import (
     ApprovalRequest,
     CodexInstance,
     SessionDemo,
+    SessionMetadata,
     SystemAgentRun,
     SystemWorkflow,
     UserInputRequest,
@@ -581,6 +582,181 @@ class SpawnNewSessionTests(TestCase):
             approval_mode=None,
             plan_mode=True,
         )
+
+
+class SqliteHomeTests(SimpleTestCase):
+    """Per-role ``sqlite_home`` isolation (openai/codex#20213 mitigation)."""
+
+    def test_concurrent_leases_fan_out_across_pool(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as base,
+            override_settings(
+                CODEX_SQLITE_HOME_BASE=Path(base),
+                CODEX_WORKER_SQLITE_POOL_SIZE=2,
+            ),
+        ):
+            # Hold the first lease while taking the second: the flock on
+            # worker-0 forces the second worker onto worker-1.
+            lease0 = codex_pool.acquire_worker_sqlite_home(10)
+            lease1 = codex_pool.acquire_worker_sqlite_home(11)
+            try:
+                self.assertEqual(lease0.home.name, "worker-0")
+                self.assertEqual(lease1.home.name, "worker-1")
+                self.assertFalse(lease0.overflow)
+                self.assertFalse(lease1.overflow)
+                self.assertTrue(lease0.home.is_dir())
+                self.assertTrue(lease1.home.is_dir())
+            finally:
+                lease0.release()
+                lease1.release()
+
+    def test_released_slot_is_reused(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as base,
+            override_settings(
+                CODEX_SQLITE_HOME_BASE=Path(base),
+                CODEX_WORKER_SQLITE_POOL_SIZE=2,
+            ),
+        ):
+            first = codex_pool.acquire_worker_sqlite_home(1)
+            first.release()
+            # With the slot free again, the next lease takes worker-0, not a
+            # fresh slot -- keeping the backfilled home reused.
+            second = codex_pool.acquire_worker_sqlite_home(2)
+            try:
+                self.assertEqual(first.home.name, "worker-0")
+                self.assertEqual(second.home.name, "worker-0")
+            finally:
+                second.release()
+
+    def test_overflow_home_when_pool_exhausted(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as base,
+            override_settings(
+                CODEX_SQLITE_HOME_BASE=Path(base),
+                CODEX_WORKER_SQLITE_POOL_SIZE=1,
+            ),
+        ):
+            slot = codex_pool.acquire_worker_sqlite_home(5)
+            overflow = codex_pool.acquire_worker_sqlite_home(6)
+            try:
+                self.assertEqual(slot.home.name, "worker-0")
+                self.assertFalse(slot.overflow)
+                self.assertTrue(overflow.overflow)
+                self.assertEqual(overflow.home.name, "worker-overflow-6")
+                self.assertTrue(overflow.home.is_dir())
+            finally:
+                slot.release()
+                overflow.release()
+            # The private overflow home is removed on release; the reused
+            # slot home is left in place.
+            self.assertFalse(overflow.home.exists())
+            self.assertTrue(slot.home.is_dir())
+
+    def test_web_home_is_distinct_and_created(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as base,
+            override_settings(CODEX_SQLITE_HOME_BASE=Path(base)),
+        ):
+            web = codex_pool.web_sqlite_home()
+            lease = codex_pool.acquire_worker_sqlite_home(0)
+            try:
+                self.assertEqual(web.name, "web")
+                self.assertTrue(web.is_dir())
+                self.assertNotEqual(web, lease.home)
+            finally:
+                lease.release()
+
+    def test_app_server_config_injects_explicit_sqlite_home(self) -> None:
+        config = codex_pool.app_server_config(sqlite_home="/srv/codex-state")
+        assert config.env is not None
+        self.assertEqual(
+            config.env.get(codex_pool._CODEX_SQLITE_HOME_ENV), "/srv/codex-state"
+        )
+
+    def test_app_server_config_defaults_to_web_home_outside_tests(self) -> None:
+        with tempfile.TemporaryDirectory() as base:
+            with override_settings(
+                CODEX_SQLITE_HOME_BASE=Path(base), TESTING=False
+            ):
+                config = codex_pool.app_server_config()
+            assert config.env is not None
+            self.assertEqual(
+                config.env.get(codex_pool._CODEX_SQLITE_HOME_ENV),
+                str(Path(base) / "web"),
+            )
+
+    def test_app_server_config_omits_sqlite_home_under_tests(self) -> None:
+        # The default request path must not create state dirs (or perturb the
+        # exact-env assertion) while running the suite.
+        config = codex_pool.app_server_config()
+        assert config.env is not None
+        self.assertNotIn(codex_pool._CODEX_SQLITE_HOME_ENV, config.env)
+
+    def test_codex_home_dir_fallback_overrides_inherited_env(self) -> None:
+        # The lease-failure degrade points at $CODEX_HOME explicitly so it
+        # overrides any CODEX_SQLITE_HOME the deployment exported (a bare omission
+        # would leave the inherited value in effect via the SDK's env merge).
+        with patch.dict(os.environ, {"CODEX_HOME": "/srv/codex"}):
+            self.assertEqual(codex_pool.codex_home_dir(), Path("/srv/codex"))
+            config = codex_pool.app_server_config(
+                sqlite_home=str(codex_pool.codex_home_dir())
+            )
+        assert config.env is not None
+        self.assertEqual(
+            config.env.get(codex_pool._CODEX_SQLITE_HOME_ENV), "/srv/codex"
+        )
+
+
+class PruneWorkerLogsDbTests(SimpleTestCase):
+    def _write(self, path: Path, size: int) -> None:
+        path.write_bytes(b"\0" * size)
+
+    def test_deletes_oversized_log_db_and_sidecars(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            home_path = Path(home)
+            logs = home_path / "logs_2.sqlite"
+            wal = home_path / "logs_2.sqlite-wal"
+            shm = home_path / "logs_2.sqlite-shm"
+            state = home_path / "state_5.sqlite"
+            self._write(logs, 80)
+            self._write(wal, 60)  # main+wal exceed the 100-byte cap
+            self._write(shm, 5)
+            self._write(state, 1000)
+
+            freed = codex_pool.prune_worker_logs_db(home_path, max_bytes=100)
+
+            self.assertEqual(freed, 145)
+            self.assertFalse(logs.exists())
+            self.assertFalse(wal.exists())
+            self.assertFalse(shm.exists())
+            # The state DB is never touched, even when much larger than the cap.
+            self.assertTrue(state.exists())
+
+    def test_keeps_log_db_under_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            logs = Path(home) / "logs_2.sqlite"
+            self._write(logs, 50)
+
+            freed = codex_pool.prune_worker_logs_db(home, max_bytes=100)
+
+            self.assertEqual(freed, 0)
+            self.assertTrue(logs.exists())
+
+    def test_uses_settings_default_threshold(self) -> None:
+        with tempfile.TemporaryDirectory() as home:
+            logs = Path(home) / "logs_2.sqlite"
+            self._write(logs, 200)
+            with override_settings(CODEX_WORKER_LOGS_DB_MAX_BYTES=100):
+                freed = codex_pool.prune_worker_logs_db(home)
+            self.assertEqual(freed, 200)
+            self.assertFalse(logs.exists())
+
+    def test_missing_home_is_noop(self) -> None:
+        freed = codex_pool.prune_worker_logs_db(
+            Path("/nonexistent/codex-home"), max_bytes=1
+        )
+        self.assertEqual(freed, 0)
 
 
 class SpawnFailureTests(TestCase):
@@ -5737,6 +5913,91 @@ class CodexWorkerCommandTests(TestCase):
         instance.refresh_from_db()
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertEqual(instance.error, "forcibly stopped by user")
+
+    @patch("hitch.main.management.commands.codex_worker._notify_system_agents")
+    @patch("hitch.main.management.commands.codex_worker._run_turn")
+    def test_worker_bumps_session_index_on_completion(
+        self, mock_run_turn: MagicMock, _mock_notify: MagicMock
+    ) -> None:
+        # Worker turns write to an isolated sqlite_home the web index never reads,
+        # so the worker must bump the session's recency directly on completion.
+        mock_run_turn.return_value = SimpleNamespace(status=TurnStatus.completed)
+        stale = timezone.now() - timedelta(days=3)
+        SessionMetadata.objects.create(
+            thread_id="thread-1",
+            cwd="/repo",
+            codex_created_at=stale,
+            codex_updated_at=stale,
+            codex_last_synced_at=stale,
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(Path(raw))
+            call_command("codex_worker", "--instance-id", str(instance.pk))
+
+        metadata = SessionMetadata.objects.get(thread_id="thread-1")
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
+        assert metadata.codex_updated_at is not None
+        self.assertGreater(metadata.codex_updated_at, stale)
+
+    @patch(
+        "hitch.main.management.commands.codex_worker.disk_cleanup"
+        ".run_finished_session_disk_cleanup"
+    )
+    @patch("hitch.main.management.commands.codex_worker._notify_system_agents")
+    @patch("hitch.main.management.commands.codex_worker._run_turn")
+    @patch("hitch.main.management.commands.codex_worker.acquire_worker_sqlite_home")
+    def test_worker_leases_and_releases_sqlite_home(
+        self,
+        mock_acquire: MagicMock,
+        mock_run_turn: MagicMock,
+        _mock_notify: MagicMock,
+        _mock_cleanup: MagicMock,
+    ) -> None:
+        mock_run_turn.return_value = SimpleNamespace(status=TurnStatus.completed)
+        with tempfile.TemporaryDirectory() as raw:
+            home = Path(raw) / "worker-0"
+            home.mkdir()
+            lease = MagicMock()
+            lease.home = home
+            mock_acquire.return_value = lease
+            instance = self._make_instance(Path(raw))
+            # TESTING=False takes the real lease path (the app-server is still
+            # mocked, and disk cleanup is patched out).
+            with override_settings(TESTING=False):
+                call_command("codex_worker", "--instance-id", str(instance.pk))
+
+        mock_acquire.assert_called_once_with(instance.pk)
+        lease.release.assert_called_once_with()
+        self.assertEqual(mock_run_turn.call_args.kwargs.get("sqlite_home"), str(home))
+
+    @patch(
+        "hitch.main.management.commands.codex_worker.disk_cleanup"
+        ".run_finished_session_disk_cleanup"
+    )
+    @patch("hitch.main.management.commands.codex_worker._notify_system_agents")
+    @patch("hitch.main.management.commands.codex_worker._run_turn")
+    @patch("hitch.main.management.commands.codex_worker.acquire_worker_sqlite_home")
+    def test_worker_inherits_codex_home_when_lease_fails(
+        self,
+        mock_acquire: MagicMock,
+        mock_run_turn: MagicMock,
+        _mock_notify: MagicMock,
+        _mock_cleanup: MagicMock,
+    ) -> None:
+        # A broken state-dir filesystem degrades to $CODEX_HOME, not the web home
+        # under the same (just-failed) base.
+        mock_acquire.side_effect = OSError("read-only file system")
+        mock_run_turn.return_value = SimpleNamespace(status=TurnStatus.completed)
+        with tempfile.TemporaryDirectory() as raw:
+            instance = self._make_instance(Path(raw))
+            with override_settings(TESTING=False):
+                call_command("codex_worker", "--instance-id", str(instance.pk))
+
+        self.assertEqual(
+            mock_run_turn.call_args.kwargs.get("sqlite_home"),
+            str(codex_pool.codex_home_dir()),
+        )
 
     @patch("hitch.main.management.commands.codex_worker.sys.stderr", new_callable=StringIO)
     @patch("hitch.main.management.commands.codex_worker._notify_system_agents")

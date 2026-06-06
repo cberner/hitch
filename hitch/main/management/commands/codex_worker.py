@@ -80,14 +80,18 @@ from openai_codex.generated.v2_all import (
 from openai_codex.models import Notification
 from pydantic import BaseModel
 
-from hitch.main import disk_cleanup
+from hitch.main import disk_cleanup, session_index
 from hitch.main.codex_events import GOAL_METHODS
 from hitch.main.codex_pool import (
+    WorkerSqliteHome,
+    acquire_worker_sqlite_home,
     app_server_config,
     cleanup_requested_input_images_for,
+    codex_home_dir,
     control_path_for,
     discard_input_attachment_paths,
     open_codex_resumed,
+    prune_worker_logs_db,
     resolve_dangling_requests_for_instance,
     worker_log_io_enabled,
 )
@@ -271,6 +275,24 @@ class Command(BaseCommand):
         collaboration_mode: str | None = options.get("collaboration_mode")
         plan_mode: bool = options.get("plan_mode", False)
         instance = CodexInstance.objects.get(pk=instance_id)
+        # Lease an exclusive Codex sqlite_home so this worker does not share a
+        # SQLite writer lock with the web pool or any sibling worker (the lease
+        # is released, and the OS drops the flock, when this process exits).
+        # Skipped under tests, where the app-server is mocked and a real home
+        # would only create stray state directories.
+        sqlite_lease: WorkerSqliteHome | None = None
+        sqlite_home: str | None = None
+        if not getattr(settings, "TESTING", False):
+            try:
+                sqlite_lease = acquire_worker_sqlite_home(instance_id)
+                sqlite_home = str(sqlite_lease.home)
+            except OSError:
+                # A broken state-dir filesystem should degrade to Codex's default
+                # $CODEX_HOME, not the web home (which lives under the same base
+                # that just failed). Pass it explicitly so it overrides any
+                # CODEX_SQLITE_HOME the deployment exported.
+                _worker_log(instance_id, "failed to lease sqlite_home; using CODEX_HOME")
+                sqlite_home = str(codex_home_dir())
 
         # Install the signal handlers before flipping to RUNNING so a Stop or
         # Steer request that lands the instant we transition can still be
@@ -306,6 +328,7 @@ class Command(BaseCommand):
                     collaboration_mode=collaboration_mode,
                     plan_mode=plan_mode,
                     output_schema=instance.output_schema,
+                    sqlite_home=sqlite_home,
                 )
         except BaseException as exc:  # noqa: BLE001 - record any failure, then re-raise
             _worker_log(instance_id, f"failed with {type(exc).__name__}: {exc!r}")
@@ -320,6 +343,25 @@ class Command(BaseCommand):
             cleanup_requested_input_images_for(instance)
             disk_cleanup.run_finished_session_disk_cleanup()
             raise
+        finally:
+            # Worker turns write thread metadata to an isolated home the web
+            # index never reads, so bump the session's recency directly to keep
+            # the list ordered by real activity. Best-effort: a failed bump must
+            # not fail an already-finished turn.
+            try:
+                session_index.record_turn_activity(
+                    instance.thread_id,
+                    updated_at=instance.ended_at or timezone.now(),
+                )
+            except Exception:
+                _worker_log(instance_id, "failed to record turn activity")
+            # _run_turn has closed the app-server (and its log-DB handle) by the
+            # time it returns or raises, so pruning only unlinks a released file;
+            # releasing then frees the leased slot (or removes an overflow home).
+            if sqlite_lease is not None:
+                with contextlib.suppress(Exception):
+                    prune_worker_logs_db(sqlite_lease.home)
+                sqlite_lease.release()
 
         instance.ended_at = timezone.now()
         # The TurnCompletedNotification carries the actual outcome — including
@@ -432,6 +474,7 @@ def _run_turn(
     collaboration_mode: str | None = None,
     plan_mode: bool = False,
     output_schema: dict[str, Any] | None = None,
+    sqlite_home: str | None = None,
 ) -> Turn | None:
     os.environ["HITCH_THREAD_ID"] = instance.thread_id
     os.environ["HITCH_CWD"] = instance.cwd
@@ -444,6 +487,7 @@ def _run_turn(
     config = app_server_config(
         enable_memories=enable_memories,
         web_search_mode=web_search_mode,
+        sqlite_home=sqlite_home,
     )
     effort: ReasoningEffort | None = None
     if reasoning_effort:

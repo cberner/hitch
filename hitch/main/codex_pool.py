@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import fcntl
 import json
 import logging
 import os
@@ -2149,24 +2150,190 @@ def _codex_bin() -> str | None:
     return shutil.which("codex")
 
 
+# Codex's native env var for relocating its SQLite databases away from
+# ``$CODEX_HOME`` (state/src/lib.rs SQLITE_HOME_ENV). The SDK merges
+# ``AppServerConfig.env`` onto the inherited environment, so setting it here is
+# authoritative for the app-server we spawn.
+_CODEX_SQLITE_HOME_ENV = "CODEX_SQLITE_HOME"
+
+
+def _sqlite_home_base() -> Path:
+    return Path(settings.CODEX_SQLITE_HOME_BASE)
+
+
+def _worker_sqlite_pool_size() -> int:
+    return max(1, int(getattr(settings, "CODEX_WORKER_SQLITE_POOL_SIZE", 1)))
+
+
+def web_sqlite_home() -> Path:
+    """Shared ``sqlite_home`` for in-process (request + scheduler) app-servers.
+
+    Keeping the request pool, keepalive, and scheduler on one home means the
+    ``use_state_db_only`` thread listing they drive reads a single, populated
+    state-DB index rather than a per-process one that would start empty.
+    """
+    home = _sqlite_home_base() / "web"
+    home.mkdir(parents=True, exist_ok=True)
+    return home
+
+
+def worker_sqlite_slot_home(slot: int) -> Path:
+    """Path of the ``slot``-th pooled worker ``sqlite_home`` (not created)."""
+    return _sqlite_home_base() / f"worker-{slot}"
+
+
+@dataclass
+class WorkerSqliteHome:
+    """An exclusively-leased (or private overflow) worker ``sqlite_home``.
+
+    While held, no other worker uses ``home``: the ``flock`` on ``_lock_fd`` is
+    kept for the worker's whole lifetime and the OS releases it even if the
+    worker crashes, so a turn has sole ownership of its home's SQLite writer
+    lock. ``release`` drops the lease; an *overflow* home -- allocated only when
+    every pooled slot was already leased -- is a private directory and is removed
+    on release rather than reused.
+    """
+
+    home: Path
+    _lock_fd: int | None
+    overflow: bool
+
+    def release(self) -> None:
+        if self._lock_fd is not None:
+            with contextlib.suppress(OSError):
+                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+            with contextlib.suppress(OSError):
+                os.close(self._lock_fd)
+            self._lock_fd = None
+        if self.overflow:
+            shutil.rmtree(self.home, ignore_errors=True)
+
+
+def acquire_worker_sqlite_home(instance_id: int) -> WorkerSqliteHome:
+    """Lease an exclusive ``sqlite_home`` for a detached worker's turn.
+
+    Scans the bounded pool of homes and takes the first whose lock file it can
+    ``flock(LOCK_EX | LOCK_NB)``, so concurrent workers never share a home (and
+    so never contend on each other's SQLite writer lock, openai/codex#20213)
+    while reuse of the low-numbered slots keeps each home's one-time backfill of
+    the shared ``CODEX_HOME`` rollouts amortized. When every slot is already
+    leased -- more concurrent turns than pool slots -- a private per-instance
+    overflow home is returned instead: still unshared, at the cost of its own
+    one-time backfill. The caller must ``release`` the returned lease.
+    """
+    base = _sqlite_home_base()
+    base.mkdir(parents=True, exist_ok=True)
+    for slot in range(_worker_sqlite_pool_size()):
+        lock_path = base / f"worker-{slot}.lock"
+        # PEP 446 makes this fd non-inheritable, so the app-server subprocess the
+        # worker spawns never holds the lease open past the worker's own exit.
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_CLOEXEC, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            continue
+        home = worker_sqlite_slot_home(slot)
+        home.mkdir(parents=True, exist_ok=True)
+        return WorkerSqliteHome(home=home, _lock_fd=fd, overflow=False)
+    home = base / f"worker-overflow-{instance_id}"
+    home.mkdir(parents=True, exist_ok=True)
+    return WorkerSqliteHome(home=home, _lock_fd=None, overflow=True)
+
+
+def _default_sqlite_home() -> Path | None:
+    # Under tests we leave ``sqlite_home`` unset so app-servers (which are mocked
+    # away) never create state directories, and the env assertion in
+    # test_codex_subprocess stays exact. Production callers that do not pass an
+    # explicit home are the in-process request/scheduler paths -> web home.
+    if getattr(settings, "TESTING", False):
+        return None
+    return web_sqlite_home()
+
+
+def codex_home_dir() -> Path:
+    """Codex's home directory: ``$CODEX_HOME`` if set, else ``~/.codex``.
+
+    Used as the deterministic fallback when a worker's home lease fails: passing
+    this as an explicit ``sqlite_home`` forces Codex's DBs back to ``$CODEX_HOME``
+    (its pre-isolation default), overriding any ``CODEX_SQLITE_HOME`` the
+    deployment exported -- which a bare omission would otherwise leave in effect.
+    """
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+
+
 def app_server_config(
-    *, enable_memories: bool = False, web_search_mode: str | None = None
+    *,
+    enable_memories: bool = False,
+    web_search_mode: str | None = None,
+    sqlite_home: str | os.PathLike[str] | None = None,
 ) -> AppServerConfig:
     memory_value = "true" if enable_memories else "false"
     overrides = [f"features.memories={memory_value}"]
     web_search_mode = _normalized_web_search_mode(web_search_mode)
     if web_search_mode:
         overrides.append(f"web_search={json.dumps(web_search_mode)}")
+    # Stamp every app-server we spawn with this deployment's id (merged onto the
+    # inherited environment by the SDK). The profile "nuke" sweep scopes its
+    # SIGKILLs to this marker so a second checkout sharing the resolved codex
+    # binary -- whose app-server command lines are otherwise identical -- is
+    # never swept.
+    env = {_APP_SERVER_DEPLOYMENT_ENV: _app_server_deployment_id()}
+    resolved_home = sqlite_home if sqlite_home is not None else _default_sqlite_home()
+    if resolved_home is not None:
+        env[_CODEX_SQLITE_HOME_ENV] = os.fspath(resolved_home)
     return AppServerConfig(
         codex_bin=_codex_bin(),
         config_overrides=tuple(overrides),
-        # Stamp every app-server we spawn with this deployment's id (merged onto
-        # the inherited environment by the SDK). The profile "nuke" sweep scopes
-        # its SIGKILLs to this marker so a second checkout sharing the resolved
-        # codex binary -- whose app-server command lines are otherwise identical
-        # -- is never swept.
-        env={_APP_SERVER_DEPLOYMENT_ENV: _app_server_deployment_id()},
+        env=env,
     )
+
+
+# Codex's diagnostic log DB filename (state/src/lib.rs LOGS_DB_FILENAME is
+# ``logs_2.sqlite``). Matched by glob so a Codex bump to ``logs_<n>.sqlite``
+# still gets pruned; the state DB (``state_*.sqlite``) is deliberately excluded.
+_CODEX_LOGS_DB_GLOB = "logs_*.sqlite"
+_CODEX_SQLITE_SIDECAR_SUFFIXES = ("-wal", "-shm")
+
+
+def prune_worker_logs_db(
+    sqlite_home: str | os.PathLike[str], *, max_bytes: int | None = None
+) -> int:
+    """Delete a worker home's Codex log DB once it exceeds ``max_bytes``.
+
+    Called after a worker's turn, when that worker's app-server is already
+    closed, so the file handle is released. Best-effort: a home may still be
+    shared by another in-flight worker, but the log DB is purely diagnostic and
+    Codex recreates it (``create_if_missing``) on the next open, so a racing
+    unlink only drops diagnostic rows -- it never risks the state DB, which is
+    left untouched. Returns the number of bytes freed.
+    """
+    if max_bytes is None:
+        max_bytes = int(getattr(settings, "CODEX_WORKER_LOGS_DB_MAX_BYTES", 0))
+    home = Path(sqlite_home)
+    freed = 0
+    for db_path in sorted(home.glob(_CODEX_LOGS_DB_GLOB)):
+        group = [db_path] + [
+            Path(f"{db_path}{suffix}") for suffix in _CODEX_SQLITE_SIDECAR_SUFFIXES
+        ]
+        sizes: dict[Path, int] = {}
+        for path in group:
+            try:
+                sizes[path] = path.stat().st_size
+            except OSError:
+                continue
+        if sum(sizes.values()) <= max_bytes:
+            continue
+        for path in group:
+            with contextlib.suppress(OSError):
+                path.unlink()
+                freed += sizes.get(path, 0)
+        logger.info(
+            "pruned oversized Codex log DB %s (%d bytes)",
+            db_path,
+            sum(sizes.values()),
+        )
+    return freed
 
 
 # Every ``Codex(config=config)`` spawns a ``codex app-server`` subprocess that
