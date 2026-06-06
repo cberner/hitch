@@ -18067,6 +18067,200 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, "No useful docs proposal was found.")
         self.assertGreaterEqual(mock_default_branch_commit_hash.call_count, 2)
 
+    @patch(
+        "hitch.main.system_agents.default_branch_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_page_treats_pending_stack_proposal_as_ready_to_continue(
+        self,
+        mock_codex: MagicMock,
+        _mock_discover: MagicMock,
+        _mock_default_branch_commit_hash: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+            auto_proposal_last_no_proposal_sha="a" * 40,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=3,
+        )
+        source_workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED,
+            state={"autonomous_goal_id": autonomous_goal.pk},
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            source_workflow=source_workflow,
+            title="Add parser coverage",
+            candidate_session=candidate,
+            outcome_metadata={
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 1,
+            },
+        )
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-state="ready"')
+        self.assertContains(response, ">Ready</button>", html=False)
+        self.assertNotContains(response, ">Done</button>", html=False)
+        self.assertNotContains(response, ">No change</button>", html=False)
+        self.assertNotContains(
+            response,
+            "Not running because a proposal from this goal is waiting in the inbox.",
+        )
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_page_shows_manual_goal_with_pending_stack_proposal_as_review(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=False,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=3,
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Add parser coverage",
+            candidate_session=candidate,
+            outcome_metadata={
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 1,
+            },
+        )
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-state="review"')
+        self.assertContains(response, ">Review</button>", html=False)
+        self.assertContains(
+            response,
+            "Not running because a proposal from this goal is waiting in the inbox.",
+        )
+        self.assertNotContains(
+            response,
+            "Auto-proposal is off. Use Run to start this goal manually.",
+        )
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_page_blocks_pending_proposal_without_stack_metadata(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=3,
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Ordinary proposal",
+            candidate_session=candidate,
+        )
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-state="review"')
+        self.assertContains(response, ">Review</button>", html=False)
+        self.assertContains(
+            response,
+            "Not running because a proposal from this goal is waiting in the inbox.",
+        )
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_page_blocks_stack_continuation_when_extra_pending_proposal_exists(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=3,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Older pending review",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Add parser coverage",
+            candidate_session=candidate,
+            outcome_metadata={
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 1,
+            },
+        )
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-state="review"')
+        self.assertContains(response, ">Review</button>", html=False)
+        self.assertContains(
+            response,
+            "Not running because a proposal from this goal is waiting in the inbox.",
+        )
+
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_page_shows_queued_when_accepted_automation_is_in_flight(
@@ -18295,6 +18489,85 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, "Judge log")
         self.assertContains(response, 'name="proposed_session"')
         self.assertNotContains(response, "Other proposal")
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_inbox_page_shows_autonomous_goal_stack_number(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            ambition=AutonomousGoal.AMBITION_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+            stacked_diff_depth=5,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Expand parser coverage",
+            summary="This builds on the first stack.",
+            confidence=AutonomousGoal.CONFIDENCE_HIGH,
+            outcome_metadata={
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 2,
+            },
+        )
+
+        response = self.client.get(reverse("inbox"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            "Improve tests - High ambition - High confidence - Stack 2 of 3",
+        )
+
+    def test_proposed_session_stack_label_omits_invalid_iteration(self) -> None:
+        proposed_session = ProposedSession(
+            outcome_metadata={
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 4,
+            }
+        )
+
+        self.assertEqual(views._proposed_session_stack_label(proposed_session), "")
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_inbox_page_omits_stack_label_without_stack_metadata(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            ambition=AutonomousGoal.AMBITION_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+            stacked_diff_depth=5,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Ordinary proposal",
+            summary="This is not a stack entry.",
+            confidence=AutonomousGoal.CONFIDENCE_HIGH,
+        )
+
+        response = self.client.get(reverse("inbox"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            "Improve tests - High ambition - High confidence",
+        )
+        self.assertNotContains(response, "Stack 1 of 5")
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")

@@ -147,6 +147,15 @@ _AUTONOMOUS_GOAL_SESSION_CWD_STATE_KEY = "session_cwd"
 _AUTONOMOUS_GOAL_STACKED_DEPTH_STATE_KEY = "stacked_diff_depth"
 _AUTONOMOUS_GOAL_STACKED_ITERATION_STATE_KEY = "stacked_diff_iteration"
 _AUTONOMOUS_GOAL_STACKED_FORK_CWD_STATE_KEY = "stacked_diff_fork_from_cwd"
+_AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY = (
+    "stacked_diff_continuation_stopped_reason"
+)
+_AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_ERROR_METADATA_KEY = (
+    "stacked_diff_continuation_error"
+)
+_AUTONOMOUS_GOAL_STACKED_HIDDEN_OUTCOME_NOTES = (
+    "Hidden while stacked diff workflow continues."
+)
 _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY = "proposal_budget"
 _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY = "proposal_budget_tokens_used"
 _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY = (
@@ -1140,11 +1149,23 @@ def _maybe_start_auto_proposal_workflow(autonomous_goal_id: int) -> bool:
             autonomous_goal, default_branch_sha
         ):
             return False
+        stack_continuation_proposal = (
+            _autonomous_goal_stack_continuation_proposal(autonomous_goal)
+        )
+        if stack_continuation_proposal is not None:
+            stack_continuation_proposal = (
+                _claim_autonomous_goal_stack_continuation_proposal(
+                    stack_continuation_proposal
+                )
+            )
+            if stack_continuation_proposal is None:
+                return False
         workflow, created = _create_autonomous_goal_workflow_record(
             autonomous_goal=autonomous_goal,
             auto_proposal=True,
             default_branch_sha=default_branch_sha,
             use_worktrees=True,
+            stack_continuation_proposal=stack_continuation_proposal,
         )
     if created:
         _spawn_autonomous_goal_candidate_or_block(workflow, autonomous_goal)
@@ -1154,7 +1175,10 @@ def _maybe_start_auto_proposal_workflow(autonomous_goal_id: int) -> bool:
 def _autonomous_goal_auto_proposal_db_allows_start(
     autonomous_goal: AutonomousGoal, current_sha: str
 ) -> bool:
-    if _autonomous_goal_pending_proposal_exists(autonomous_goal):
+    stack_continuation_proposal = _autonomous_goal_stack_continuation_proposal(
+        autonomous_goal
+    )
+    if _autonomous_goal_pending_proposal_blocks_start(autonomous_goal):
         return False
     if _autonomous_goal_unresolved_failure_notice_exists(autonomous_goal):
         return False
@@ -1164,6 +1188,8 @@ def _autonomous_goal_auto_proposal_db_allows_start(
         return False
     if _autonomous_goal_running_workflow_exists(autonomous_goal):
         return False
+    if stack_continuation_proposal is not None:
+        return True
     last_no_proposal_sha = autonomous_goal.auto_proposal_last_no_proposal_sha.strip()
     return not last_no_proposal_sha or last_no_proposal_sha != current_sha
 
@@ -1179,6 +1205,18 @@ class _AutonomousGoalAutoProposalStartSnapshot:
     auto_merge_to_local_branch: bool
     auto_merge_branch: str
     base_ref: str
+
+
+@dataclass(frozen=True)
+class _AutonomousGoalProposalStackMetadata:
+    depth: int
+    iteration: int
+
+
+@dataclass(frozen=True)
+class _AutonomousGoalPendingProposalState:
+    blocking_goal_ids: set[int]
+    continuable_stack_goal_ids: set[int]
 
 
 @dataclass(frozen=True)
@@ -1216,7 +1254,10 @@ def _autonomous_goal_auto_proposal_start_sha(
     *,
     start_snapshot: _AutonomousGoalAutoProposalStartSnapshot,
 ) -> str | None:
-    if _autonomous_goal_pending_proposal_exists(autonomous_goal):
+    stack_continuation_proposal = _autonomous_goal_stack_continuation_proposal(
+        autonomous_goal
+    )
+    if _autonomous_goal_pending_proposal_blocks_start(autonomous_goal):
         return None
     if _autonomous_goal_unresolved_failure_notice_exists(autonomous_goal):
         return None
@@ -1228,6 +1269,8 @@ def _autonomous_goal_auto_proposal_start_sha(
         return None
 
     current_sha = _autonomous_goal_auto_proposal_base_sha_for_snapshot(start_snapshot)
+    if stack_continuation_proposal is not None:
+        return current_sha or _AUTO_PROPOSAL_UNKNOWN_DEFAULT_BRANCH_SHA
     if not current_sha:
         return None
     last_no_proposal_sha = autonomous_goal.auto_proposal_last_no_proposal_sha.strip()
@@ -1263,11 +1306,199 @@ def _autonomous_goal_auto_merge_base_ref(
     return f"refs/heads/{auto_merge_branch}" if auto_merge_branch else ""
 
 
-def _autonomous_goal_pending_proposal_exists(autonomous_goal: AutonomousGoal) -> bool:
-    return autonomous_goal.proposed_sessions.filter(
-        inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL,
+def _autonomous_goal_pending_proposal_blocks_start(
+    autonomous_goal: AutonomousGoal,
+) -> bool:
+    return bool(_autonomous_goal_pending_proposal_blocking_ids([autonomous_goal]))
+
+
+def _autonomous_goal_pending_proposal_blocking_ids(
+    autonomous_goals: Iterable[AutonomousGoal],
+) -> set[int]:
+    return _autonomous_goal_pending_proposal_state(
+        autonomous_goals
+    ).blocking_goal_ids
+
+
+def _autonomous_goal_pending_proposal_state(
+    autonomous_goals: Iterable[AutonomousGoal],
+) -> _AutonomousGoalPendingProposalState:
+    goals_by_id = {goal.pk: goal for goal in autonomous_goals}
+    if not goals_by_id:
+        return _AutonomousGoalPendingProposalState(
+            blocking_goal_ids=set(),
+            continuable_stack_goal_ids=set(),
+        )
+    pending_by_goal_id: dict[int, list[ProposedSession]] = {
+        goal_id: [] for goal_id in goals_by_id
+    }
+    pending_proposal_rows = (
+        ProposedSession.objects.select_related("candidate_session", "source_workflow")
+        .filter(
+            autonomous_goal_id__in=list(goals_by_id),
+            inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL,
+            outcome_status=ProposedSession.OUTCOME_UNSET,
+        )
+        .order_by("autonomous_goal_id", "-created_at", "-id")
+    )
+    for proposal in pending_proposal_rows:
+        if proposal.autonomous_goal_id is not None:
+            pending_by_goal_id[proposal.autonomous_goal_id].append(proposal)
+    blocking_goal_ids: set[int] = set()
+    continuable_stack_goal_ids: set[int] = set()
+    for goal_id, pending_proposals in pending_by_goal_id.items():
+        if not pending_proposals:
+            continue
+        if (
+            _autonomous_goal_stack_continuation_proposal_from_pending(
+                pending_proposals, goals_by_id[goal_id]
+            )
+            is None
+        ):
+            blocking_goal_ids.add(goal_id)
+        else:
+            continuable_stack_goal_ids.add(goal_id)
+    return _AutonomousGoalPendingProposalState(
+        blocking_goal_ids=blocking_goal_ids,
+        continuable_stack_goal_ids=continuable_stack_goal_ids,
+    )
+
+
+def _autonomous_goal_stack_continuation_proposal(
+    autonomous_goal: AutonomousGoal,
+) -> ProposedSession | None:
+    return _autonomous_goal_stack_continuation_proposal_from_pending(
+        _autonomous_goal_pending_proposals(autonomous_goal), autonomous_goal
+    )
+
+
+def _autonomous_goal_pending_proposals(
+    autonomous_goal: AutonomousGoal,
+) -> list[ProposedSession]:
+    return list(
+        autonomous_goal.proposed_sessions.select_related(
+            "candidate_session", "source_workflow"
+        )
+        .filter(
+            inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL,
+            outcome_status=ProposedSession.OUTCOME_UNSET,
+        )
+        .order_by("-created_at", "-id")
+    )
+
+
+def _autonomous_goal_stack_continuation_proposal_from_pending(
+    pending_proposals: list[ProposedSession], autonomous_goal: AutonomousGoal
+) -> ProposedSession | None:
+    if len(pending_proposals) != 1:
+        return None
+    proposal = pending_proposals[0]
+    return (
+        proposal
+        if _autonomous_goal_proposal_allows_stack_continuation(
+            proposal, autonomous_goal
+        )
+        else None
+    )
+
+
+def _claim_autonomous_goal_stack_continuation_proposal(
+    proposal: ProposedSession,
+) -> ProposedSession | None:
+    outcome_metadata = {
+        **_proposal_outcome_metadata(proposal, {}),
+        "stacked_diff_hidden_until_complete": True,
+    }
+    applied = ProposedSession.objects.filter(
+        pk=proposal.pk,
         outcome_status=ProposedSession.OUTCOME_UNSET,
-    ).exists()
+    ).update(
+        outcome_status=ProposedSession.OUTCOME_DISMISSED,
+        outcome_notes=_AUTONOMOUS_GOAL_STACKED_HIDDEN_OUTCOME_NOTES,
+        outcome_metadata=outcome_metadata,
+        updated_at=timezone.now(),
+    )
+    if not applied:
+        return None
+    proposal.outcome_status = ProposedSession.OUTCOME_DISMISSED
+    proposal.outcome_notes = _AUTONOMOUS_GOAL_STACKED_HIDDEN_OUTCOME_NOTES
+    proposal.outcome_metadata = outcome_metadata
+    return proposal
+
+
+def _autonomous_goal_proposal_allows_stack_continuation(
+    proposal: ProposedSession, autonomous_goal: AutonomousGoal
+) -> bool:
+    if not autonomous_goal.auto_proposal_enabled:
+        return False
+    if proposal.outcome_status != ProposedSession.OUTCOME_UNSET:
+        return False
+    if proposal.inbox_kind != ProposedSession.INBOX_KIND_PROPOSAL:
+        return False
+    if proposal.candidate_session is None:
+        return False
+    candidate_cwd = proposal.candidate_session.cwd.strip()
+    if not candidate_cwd or candidate_cwd == autonomous_goal.project.repo_path:
+        return False
+    metadata = _proposal_outcome_metadata(proposal, {})
+    if metadata.get(_AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY):
+        return False
+    if _autonomous_goal_proposal_source_workflow_stopped_stack(proposal):
+        return False
+    return (
+        _autonomous_goal_proposal_stack_continuation_metadata(
+            proposal, autonomous_goal
+        )
+        is not None
+    )
+
+
+def _autonomous_goal_proposal_source_workflow_stopped_stack(
+    proposal: ProposedSession,
+) -> bool:
+    source_workflow = proposal.source_workflow
+    if source_workflow is None:
+        return False
+    state = source_workflow.state if isinstance(source_workflow.state, dict) else {}
+    return bool(
+        state.get("stacked_diff_stopped_reason")
+        or state.get(_AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_ERROR_METADATA_KEY)
+    )
+
+
+def _autonomous_goal_proposal_stack_continuation_metadata(
+    proposal: ProposedSession, autonomous_goal: AutonomousGoal
+) -> _AutonomousGoalProposalStackMetadata | None:
+    metadata = _proposal_outcome_metadata(proposal, {})
+    depth_value = metadata.get("stacked_diff_depth")
+    iteration_value = metadata.get("stacked_diff_iteration")
+    if not _valid_autonomous_goal_stack_metadata_int(
+        depth_value
+    ) or not _valid_autonomous_goal_stack_metadata_int(iteration_value):
+        return None
+    depth = min(
+        cast(int, depth_value),
+        autonomous_goal.effective_stacked_diff_depth,
+        AutonomousGoal.STACKED_DIFF_DEPTH_MAX,
+    )
+    if depth <= AutonomousGoal.STACKED_DIFF_DEPTH_MIN:
+        return None
+    iteration = cast(int, iteration_value)
+    if iteration < 1 or iteration >= depth:
+        return None
+    return _AutonomousGoalProposalStackMetadata(depth=depth, iteration=iteration)
+
+
+def _valid_autonomous_goal_stack_metadata_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _autonomous_goal_proposal_stack_iteration(proposal: ProposedSession) -> int:
+    metadata = (
+        proposal.outcome_metadata if isinstance(proposal.outcome_metadata, dict) else {}
+    )
+    value = metadata.get("stacked_diff_iteration")
+    return max(value, 1) if isinstance(value, int) else 1
 
 
 def _autonomous_goal_unresolved_failure_notice_exists(
@@ -1379,6 +1610,7 @@ def start_autonomous_goal_workflow(
             auto_proposal=auto_proposal,
             default_branch_sha=default_branch_sha,
             use_worktrees=use_worktrees,
+            stack_continuation_proposal=None,
         )
     if created:
         _spawn_autonomous_goal_candidate_or_block(workflow, autonomous_goal)
@@ -1391,6 +1623,7 @@ def _create_autonomous_goal_workflow_record(
     auto_proposal: bool,
     default_branch_sha: str | None,
     use_worktrees: bool,
+    stack_continuation_proposal: ProposedSession | None,
 ) -> tuple[SystemWorkflow, bool]:
     main_thread_id = _autonomous_goal_main_thread_id(autonomous_goal.pk)
     state: dict[str, Any] = {
@@ -1414,6 +1647,22 @@ def _create_autonomous_goal_workflow_record(
             or _AUTO_PROPOSAL_UNKNOWN_DEFAULT_BRANCH_SHA
         )
         state["default_branch_sha"] = default_branch_sha
+    if stack_continuation_proposal is not None:
+        stack_metadata = _autonomous_goal_proposal_stack_continuation_metadata(
+            stack_continuation_proposal, autonomous_goal
+        )
+        if stack_metadata is None:
+            raise ValueError("stack continuation proposal missing stack metadata")
+        state[_AUTONOMOUS_GOAL_STACKED_DEPTH_STATE_KEY] = stack_metadata.depth
+        state[_AUTONOMOUS_GOAL_STACKED_ITERATION_STATE_KEY] = (
+            stack_metadata.iteration + 1
+        )
+        state[_AUTONOMOUS_GOAL_STACKED_FORK_CWD_STATE_KEY] = (
+            stack_continuation_proposal.candidate_session.cwd
+            if stack_continuation_proposal.candidate_session is not None
+            else ""
+        )
+        state["proposal_id"] = stack_continuation_proposal.pk
     try:
         with transaction.atomic():
             workflow = SystemWorkflow.objects.create(
@@ -5041,7 +5290,9 @@ def _handle_autonomous_goal_agent_finished_locked(
                 workflow.save(update_fields=["step", "state", "updated_at"])
                 return retry_action
             if previous_proposal is not None and _publish_current_stack_proposal(
-                previous_proposal, workflow=workflow
+                previous_proposal,
+                workflow=workflow,
+                continuation_stopped_reason="candidate_no_proposal",
             ):
                 cleanup_cwd = _candidate_session_cwd_from_state(
                     workflow, "candidate_session_id"
@@ -5160,7 +5411,9 @@ def _handle_autonomous_goal_agent_finished_locked(
             workflow.save(update_fields=["step", "state", "updated_at"])
             return retry_action
         if previous_proposal is not None and _publish_current_stack_proposal(
-            previous_proposal, workflow=workflow
+            previous_proposal,
+            workflow=workflow,
+            continuation_stopped_reason="judge_confidence_below_threshold",
         ):
             cleanup_cwd = _candidate_session_cwd_from_state(
                 workflow, "candidate_session_id"
@@ -5239,7 +5492,7 @@ def _create_autonomous_goal_proposal(
             else ProposedSession.OUTCOME_DISMISSED
         ),
         outcome_notes=(
-            "" if publish else "Hidden while stacked diff workflow continues."
+            "" if publish else _AUTONOMOUS_GOAL_STACKED_HIDDEN_OUTCOME_NOTES
         ),
         outcome_metadata={
             "autonomous_goal_autonomy": autonomous_goal.autonomy,
@@ -5269,11 +5522,15 @@ def _autonomous_goal_current_stack_proposal(
     proposal_id = _state_int(workflow, "proposal_id")
     if not proposal_id:
         return None
-    proposal = (
-        ProposedSession.objects.select_related("candidate_session")
-        .filter(pk=proposal_id, source_workflow=workflow)
-        .first()
+    proposal_query = ProposedSession.objects.select_related("candidate_session").filter(
+        pk=proposal_id
     )
+    autonomous_goal_id = _state_int(workflow, "autonomous_goal_id")
+    if autonomous_goal_id:
+        proposal_query = proposal_query.filter(autonomous_goal_id=autonomous_goal_id)
+    else:
+        proposal_query = proposal_query.filter(source_workflow=workflow)
+    proposal = proposal_query.first()
     if proposal is None:
         return None
     if proposal.outcome_status == ProposedSession.OUTCOME_UNSET:
@@ -5607,15 +5864,23 @@ def _dismiss_replaced_autonomous_goal_proposal(
 
 
 def _publish_current_stack_proposal(
-    proposal: ProposedSession, *, workflow: SystemWorkflow | None = None
+    proposal: ProposedSession,
+    *,
+    workflow: SystemWorkflow | None = None,
+    continuation_stopped_reason: str = "",
+    continuation_stopped_error: str = "",
 ) -> bool:
     budget_metadata = (
         _autonomous_goal_proposal_budget_metadata(workflow)
         if workflow is not None
         else {}
     )
+    stop_metadata = _autonomous_goal_stack_continuation_stop_metadata(
+        reason=continuation_stopped_reason,
+        error=continuation_stopped_error,
+    )
     if proposal.outcome_status == ProposedSession.OUTCOME_UNSET:
-        if not budget_metadata:
+        if not budget_metadata and not stop_metadata:
             return ProposedSession.objects.filter(
                 pk=proposal.pk,
                 outcome_status=ProposedSession.OUTCOME_UNSET,
@@ -5623,6 +5888,7 @@ def _publish_current_stack_proposal(
         outcome_metadata = {
             **_proposal_outcome_metadata(proposal, {}),
             **budget_metadata,
+            **stop_metadata,
         }
         return bool(
             ProposedSession.objects.filter(
@@ -5639,6 +5905,7 @@ def _publish_current_stack_proposal(
         **_proposal_outcome_metadata(proposal, {}),
         "stacked_diff_hidden_until_complete": False,
         **budget_metadata,
+        **stop_metadata,
     }
     return bool(
         ProposedSession.objects.filter(
@@ -5654,12 +5921,28 @@ def _publish_current_stack_proposal(
     )
 
 
+def _autonomous_goal_stack_continuation_stop_metadata(
+    *, reason: str, error: str = ""
+) -> dict[str, object]:
+    if not reason:
+        return {}
+    metadata: dict[str, object] = {
+        _AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY: reason
+    }
+    if error:
+        metadata[_AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_ERROR_METADATA_KEY] = error
+    return metadata
+
+
 def _complete_autonomous_goal_with_current_stack_proposal(
     workflow: SystemWorkflow, *, error: str
 ) -> bool:
     proposal = _autonomous_goal_current_stack_proposal(workflow)
     if proposal is None or not _publish_current_stack_proposal(
-        proposal, workflow=workflow
+        proposal,
+        workflow=workflow,
+        continuation_stopped_reason="stacked_diff_continuation_failed",
+        continuation_stopped_error=error,
     ):
         return False
     workflow.status = SystemWorkflow.STATUS_COMPLETED

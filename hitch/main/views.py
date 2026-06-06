@@ -3427,7 +3427,7 @@ def autonomous_goals(request: HttpRequest) -> HttpResponse:
             AutonomousGoal.objects.filter(
                 project=current_project,
                 deleted_at__isnull=True,
-            )
+            ).select_related("project")
         )
         if current_project is not None
         else []
@@ -4019,7 +4019,10 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
     goal_ids = [goal.pk for goal in goals]
     if not goal_ids:
         return
-    pending_proposal_goal_ids = _autonomous_goal_pending_proposal_ids(goal_ids)
+    pending_proposal_state = system_agents._autonomous_goal_pending_proposal_state(
+        goals
+    )
+    pending_proposal_goal_ids = pending_proposal_state.blocking_goal_ids
     unresolved_failure_notice_goal_ids = _autonomous_goal_failure_notice_ids(goal_ids)
     project_running_auto_proposal_ids = _autonomous_goal_running_auto_proposal_project_ids(
         goals
@@ -4027,7 +4030,10 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
     project_in_flight_automation_ids = _autonomous_goal_in_flight_automation_project_ids(
         goals
     )
-    no_change_goal_ids = _autonomous_goal_no_change_ids(goals)
+    no_change_goal_ids = _autonomous_goal_no_change_ids(
+        goals,
+        continuable_stack_goal_ids=pending_proposal_state.continuable_stack_goal_ids,
+    )
     workflows = (
         SystemWorkflow.objects.filter(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
@@ -4067,6 +4073,9 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
             goal,
             latest_workflow,
             pending_proposal_goal_ids=pending_proposal_goal_ids,
+            continuable_stack_goal_ids=(
+                pending_proposal_state.continuable_stack_goal_ids
+            ),
             unresolved_failure_notice_goal_ids=unresolved_failure_notice_goal_ids,
             project_running_auto_proposal_ids=project_running_auto_proposal_ids,
             project_in_flight_automation_ids=project_in_flight_automation_ids,
@@ -4076,18 +4085,6 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
         goal.run_status_label = run_badge.label  # type: ignore[attr-defined]
         goal.run_status_title = run_badge.title  # type: ignore[attr-defined]
         goal.run_status_detail = run_badge.detail  # type: ignore[attr-defined]
-
-
-def _autonomous_goal_pending_proposal_ids(goal_ids: list[int]) -> set[int]:
-    return {
-        goal_id
-        for goal_id in ProposedSession.objects.filter(
-            autonomous_goal_id__in=goal_ids,
-            inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL,
-            outcome_status=ProposedSession.OUTCOME_UNSET,
-        ).values_list("autonomous_goal_id", flat=True)
-        if isinstance(goal_id, int)
-    }
 
 
 def _autonomous_goal_failure_notice_ids(goal_ids: list[int]) -> set[int]:
@@ -4187,11 +4184,17 @@ def _autonomous_goal_in_flight_automation_project_ids(
     return in_flight_project_ids
 
 
-def _autonomous_goal_no_change_ids(goals: list[AutonomousGoal]) -> set[int]:
+def _autonomous_goal_no_change_ids(
+    goals: list[AutonomousGoal], *, continuable_stack_goal_ids: set[int]
+) -> set[int]:
     no_change_goal_ids: set[int] = set()
     for goal in goals:
         last_no_proposal_sha = goal.auto_proposal_last_no_proposal_sha.strip()
-        if not goal.auto_proposal_enabled or not last_no_proposal_sha:
+        if (
+            not goal.auto_proposal_enabled
+            or goal.pk in continuable_stack_goal_ids
+            or not last_no_proposal_sha
+        ):
             continue
         current_sha = system_agents._autonomous_goal_auto_proposal_base_sha(goal)
         if current_sha == last_no_proposal_sha:
@@ -4204,6 +4207,7 @@ def _autonomous_goal_run_badge(
     workflow: SystemWorkflow | None,
     *,
     pending_proposal_goal_ids: set[int],
+    continuable_stack_goal_ids: set[int],
     unresolved_failure_notice_goal_ids: set[int],
     project_running_auto_proposal_ids: set[int],
     project_in_flight_automation_ids: set[int],
@@ -4294,6 +4298,13 @@ def _autonomous_goal_run_badge(
                 "Not running because the last auto-proposal found no useful proposal "
                 "for the tracked branch. It will try again after that branch changes."
             ),
+        )
+    if goal.auto_proposal_enabled and goal.pk in continuable_stack_goal_ids:
+        return AutonomousGoalRunBadge(
+            state="ready",
+            label="Ready",
+            title="Autonomous goal is ready",
+            detail="Auto-proposal is enabled. This goal will start when the scheduler runs and quota allows.",
         )
     if workflow is not None and workflow.status == SystemWorkflow.STATUS_COMPLETED:
         return _completed_autonomous_goal_run_badge(workflow)
@@ -4518,6 +4529,32 @@ def _attach_proposed_session_display_state(
         )
         proposed_session.accept_auto_pr = auto_pr_enabled  # type: ignore[attr-defined]
         proposed_session.accept_auto_qa = auto_qa_enabled  # type: ignore[attr-defined]
+        proposed_session.stack_label = _proposed_session_stack_label(  # type: ignore[attr-defined]
+            proposed_session
+        )
+
+
+def _proposed_session_stack_label(proposed_session: ProposedSession) -> str:
+    metadata = (
+        proposed_session.outcome_metadata
+        if isinstance(proposed_session.outcome_metadata, dict)
+        else {}
+    )
+    metadata_depth = metadata.get("stacked_diff_depth")
+    metadata_iteration = metadata.get("stacked_diff_iteration")
+    if (
+        isinstance(metadata_depth, int)
+        and not isinstance(metadata_depth, bool)
+        and isinstance(metadata_iteration, int)
+        and not isinstance(metadata_iteration, bool)
+        and metadata_depth > AutonomousGoal.STACKED_DIFF_DEPTH_MIN
+    ):
+        depth = min(metadata_depth, AutonomousGoal.STACKED_DIFF_DEPTH_MAX)
+        if metadata_iteration < 1 or metadata_iteration > depth:
+            return ""
+        iteration = metadata_iteration
+        return f"Stack {iteration} of {depth}"
+    return ""
 
 
 def _proposed_session_prompt(proposed_session: ProposedSession) -> str:

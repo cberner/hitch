@@ -53,6 +53,7 @@ _PROPOSAL_SESSION_ID_FIELDS = (
     "source_session_id",
     "accepted_session_id",
 )
+_ACTIVE_WORKFLOW_CWD_STATE_KEYS = ("session_cwd", "stacked_diff_fork_from_cwd")
 
 
 @dataclass(frozen=True)
@@ -210,7 +211,7 @@ def _cleanup_candidates(*, now: datetime) -> list[_CleanupCandidate]:
 class _CleanupContext:
     accepted_visible_thread_ids: frozenset[str]
     system_thread_ids: frozenset[str]
-    pending_proposal_session_ids: frozenset[int]
+    protected_proposal_session_ids: frozenset[int]
     active_thread_ids: frozenset[str]
     active_or_blocked_workflow_thread_ids: frozenset[str]
     protected_worktree_paths: frozenset[str]
@@ -218,7 +219,7 @@ class _CleanupContext:
 
 def _cleanup_context(*, now: datetime) -> _CleanupContext:
     accepted_visible_thread_ids = _accepted_visible_system_thread_ids()
-    pending_proposal_session_ids = _pending_proposal_session_ids()
+    protected_proposal_session_ids = _protected_proposal_session_ids()
     active_thread_ids = frozenset(
         CodexInstance.objects.filter(status__in=_ACTIVE_CODEX_STATUSES)
         .exclude(thread_id="")
@@ -247,13 +248,13 @@ def _cleanup_context(*, now: datetime) -> _CleanupContext:
     protected_paths = (
         active_codex_paths
         | active_workflow_paths
-        | _pending_proposal_worktree_paths(pending_proposal_session_ids)
+        | _pending_proposal_worktree_paths(protected_proposal_session_ids)
         | _protected_visible_user_worktree_paths(accepted_visible_thread_ids, now=now)
     )
     return _CleanupContext(
         accepted_visible_thread_ids=frozenset(accepted_visible_thread_ids),
         system_thread_ids=frozenset(_system_thread_ids()),
-        pending_proposal_session_ids=frozenset(pending_proposal_session_ids),
+        protected_proposal_session_ids=frozenset(protected_proposal_session_ids),
         active_thread_ids=active_thread_ids,
         active_or_blocked_workflow_thread_ids=active_or_blocked_workflow_thread_ids,
         protected_worktree_paths=frozenset(
@@ -281,7 +282,7 @@ def _session_metadata_rows() -> list[SessionMetadata]:
 def _safe_to_remove_worktree(
     metadata: SessionMetadata, context: _CleanupContext
 ) -> bool:
-    if metadata.pk in context.pending_proposal_session_ids:
+    if metadata.pk in context.protected_proposal_session_ids:
         return False
     if metadata.thread_id in context.active_thread_ids:
         return False
@@ -426,15 +427,21 @@ def _accepted_visible_system_thread_ids() -> set[str]:
     )
 
 
-def _pending_proposal_session_ids() -> set[int]:
-    pending = ProposedSession.objects.filter(
-        outcome_status=ProposedSession.OUTCOME_UNSET
+def _protected_proposal_session_ids() -> set[int]:
+    protected = ProposedSession.objects.filter(
+        models.Q(outcome_status=ProposedSession.OUTCOME_UNSET)
+        | models.Q(
+            outcome_status=ProposedSession.OUTCOME_DISMISSED,
+            outcome_metadata__stacked_diff_hidden_until_complete=True,
+        )
     )
     session_ids: set[int] = set()
     for field in _PROPOSAL_SESSION_ID_FIELDS:
         session_ids.update(
             value
-            for value in pending.exclude(**{field: None}).values_list(field, flat=True)
+            for value in protected.exclude(**{field: None}).values_list(
+                field, flat=True
+            )
             if isinstance(value, int)
         )
     return session_ids
@@ -461,9 +468,10 @@ def _active_workflow_paths(workflows: list[SystemWorkflow]) -> set[str]:
         if workflow.cwd:
             paths.add(workflow.cwd)
         state = workflow.state if isinstance(workflow.state, dict) else {}
-        session_cwd = state.get("session_cwd")
-        if isinstance(session_cwd, str) and session_cwd:
-            paths.add(session_cwd)
+        for key in _ACTIVE_WORKFLOW_CWD_STATE_KEYS:
+            cwd = state.get(key)
+            if isinstance(cwd, str) and cwd:
+                paths.add(cwd)
     return paths
 
 
