@@ -143,6 +143,7 @@ jobs:
         with:
           files: ./coverage.xml
           use_oidc: true
+          use_pypi: true
           fail_ci_if_error: true
 
       - name: Upload coverage reports

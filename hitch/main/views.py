@@ -214,6 +214,7 @@ class AutonomousGoalValues(NamedTuple):
     auto_qa_enabled: bool
     auto_proposal_enabled: bool
     stacked_diff_depth: int
+    proposal_budget: int | None
     confidence_threshold: str
     web_search_mode: str
     auto_merge_to_local_branch: bool
@@ -3423,6 +3424,7 @@ def autonomous_goals(request: HttpRequest) -> HttpResponse:
             "default_stacked_diff_depth": AutonomousGoal.STACKED_DIFF_DEPTH_MIN,
             "stacked_diff_depth_min": AutonomousGoal.STACKED_DIFF_DEPTH_MIN,
             "stacked_diff_depth_max": AutonomousGoal.STACKED_DIFF_DEPTH_MAX,
+            "default_proposal_budget": "",
             "confidence_choices": AutonomousGoal.CONFIDENCE_CHOICES,
             "default_confidence": AutonomousGoal.CONFIDENCE_HIGH,
             "web_search_mode_choices": _WEB_SEARCH_MODE_OPTIONS,
@@ -3457,6 +3459,7 @@ def create_autonomous_goal(request: HttpRequest) -> HttpResponse:
         auto_qa_enabled=values.auto_qa_enabled,
         auto_proposal_enabled=values.auto_proposal_enabled,
         stacked_diff_depth=values.stacked_diff_depth,
+        proposal_budget=values.proposal_budget,
         confidence_threshold=values.confidence_threshold,
         web_search_mode=values.web_search_mode,
         auto_merge_to_local_branch=values.auto_merge_to_local_branch,
@@ -3484,6 +3487,7 @@ def edit_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpR
         web_search_default=autonomous_goal.web_search_mode,
         auto_proposal_default=autonomous_goal.auto_proposal_enabled,
         stacked_diff_depth_default=autonomous_goal.stacked_diff_depth,
+        proposal_budget_default=autonomous_goal.proposal_budget,
         local_branches=local_branch_names(project.repo_path),
     )
     if error is not None:
@@ -3499,6 +3503,7 @@ def edit_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpR
         "auto_qa_enabled",
         "auto_proposal_enabled",
         "stacked_diff_depth",
+        "proposal_budget",
         "confidence_threshold",
         "web_search_mode",
         "auto_merge_to_local_branch",
@@ -3780,6 +3785,7 @@ def _validated_autonomous_goal_values(
     web_search_default: str = AutonomousGoal.WEB_SEARCH_DEFAULT,
     auto_proposal_default: bool = False,
     stacked_diff_depth_default: int = AutonomousGoal.STACKED_DIFF_DEPTH_MIN,
+    proposal_budget_default: int | None = None,
     local_branches: list[str] | None = None,
 ) -> tuple[AutonomousGoalValues | None, str | None]:
     title, error = _validated_autonomous_goal_title(request.POST.get("title", ""))
@@ -3826,6 +3832,12 @@ def _validated_autonomous_goal_values(
     )
     if stacked_diff_depth_error is not None:
         return None, stacked_diff_depth_error
+    proposal_budget, proposal_budget_error = _posted_autonomous_goal_proposal_budget(
+        request.POST.get("proposal_budget"),
+        default=proposal_budget_default,
+    )
+    if proposal_budget_error is not None:
+        return None, proposal_budget_error
     threshold = request.POST.get("confidence_threshold", "").strip()
     valid_thresholds = {value for value, _label in AutonomousGoal.CONFIDENCE_CHOICES}
     if threshold not in valid_thresholds:
@@ -3860,6 +3872,7 @@ def _validated_autonomous_goal_values(
         auto_qa_enabled=auto_qa_enabled,
         auto_proposal_enabled=auto_proposal_enabled,
         stacked_diff_depth=stacked_diff_depth,
+        proposal_budget=proposal_budget,
         confidence_threshold=threshold,
         web_search_mode=web_search_mode,
         auto_merge_to_local_branch=auto_merge_to_local_branch,
@@ -3885,6 +3898,23 @@ def _posted_autonomous_goal_stacked_diff_depth(
     if not supported and depth != AutonomousGoal.STACKED_DIFF_DEPTH_MIN:
         return 0, "stacked diff depth requires draft patch or draft PR"
     return (depth if supported else AutonomousGoal.STACKED_DIFF_DEPTH_MIN), None
+
+
+def _posted_autonomous_goal_proposal_budget(
+    raw: str | None, *, default: int | None
+) -> tuple[int | None, str | None]:
+    if raw is None:
+        return default, None
+    raw = raw.strip()
+    if not raw:
+        return None, None
+    try:
+        budget = int(raw)
+    except ValueError:
+        return None, "proposal budget is invalid"
+    if budget < 1 or budget > _MAX_BIGAUTOFIELD:
+        return None, "proposal budget is invalid"
+    return budget, None
 
 
 def _posted_autonomous_goal_bool(

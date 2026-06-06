@@ -142,6 +142,7 @@ class AutonomousGoal(models.Model):
         max_length=64, blank=True, default=""
     )
     stacked_diff_depth = models.PositiveIntegerField(default=STACKED_DIFF_DEPTH_MIN)
+    proposal_budget = models.PositiveBigIntegerField(null=True, blank=True)
     auto_merge_to_local_branch = models.BooleanField(default=False)
     auto_merge_branch = models.CharField(max_length=255, blank=True, default="")
     deleted_at = models.DateTimeField(null=True, blank=True, db_index=True)
