@@ -367,6 +367,21 @@ _VALID_APPROVAL_MODES = {value for value, _ in _APPROVAL_MODE_OPTIONS}
 # to this rather than to ``deny_all``, which would silently block the
 # agent from ever escalating.
 _DEFAULT_APPROVAL_MODE = "auto_review"
+_PROMPT_USER_MODE = "prompt_user"
+_APPROVE_ALL_MODE = "approve_all"
+_DENY_ALL_MODE = "deny_all"
+_LIVE_HANDLER_APPROVAL_MODES = frozenset(
+    {_PROMPT_USER_MODE, _APPROVE_ALL_MODE, _DENY_ALL_MODE}
+)
+# Non-interactive live modes must unblock workers already waiting on a row.
+_LIVE_PENDING_APPROVAL_DECISIONS_BY_MODE = {
+    _APPROVE_ALL_MODE: ApprovalRequest.DECISION_ACCEPT,
+    _DENY_ALL_MODE: ApprovalRequest.DECISION_DECLINE,
+}
+_LIVE_APPROVAL_INSTANCE_STATUSES = (
+    CodexInstance.STATUS_STARTING,
+    CodexInstance.STATUS_RUNNING,
+)
 
 _WEB_SEARCH_MODE_OPTIONS = AutonomousGoal.WEB_SEARCH_CHOICES
 _VALID_WEB_SEARCH_MODES = {
@@ -6962,6 +6977,119 @@ def _effective_approval_mode_for_session(
     return override or _effective_approval_mode(settings)
 
 
+@dataclass(frozen=True)
+class _ApprovalResolvedEvent:
+    events_path: str
+    request_id: int
+    method: str
+    decision: str
+
+
+def _apply_live_approval_mode_to_instances(
+    instances: QuerySet[CodexInstance], approval_mode: str
+) -> None:
+    if approval_mode not in _LIVE_HANDLER_APPROVAL_MODES:
+        return
+    instances = instances.filter(approval_mode_live_editable=True)
+    instance_ids = list(instances.values_list("pk", flat=True))
+    if not instance_ids:
+        return
+    resolved_events: list[_ApprovalResolvedEvent] = []
+    with transaction.atomic():
+        CodexInstance.objects.filter(pk__in=instance_ids).update(
+            approval_mode=approval_mode
+        )
+        pending_decision = _LIVE_PENDING_APPROVAL_DECISIONS_BY_MODE.get(approval_mode)
+        if pending_decision is not None:
+            resolved_events = _settle_live_pending_approval_requests(
+                instance_ids, pending_decision
+            )
+    _append_approval_resolved_events(resolved_events)
+
+
+def _settle_live_pending_approval_requests(
+    instance_ids: list[int], decision: str
+) -> list[_ApprovalResolvedEvent]:
+    pending = list(
+        ApprovalRequest.objects.filter(
+            instance_id__in=instance_ids,
+            decision=ApprovalRequest.DECISION_PENDING,
+        )
+        .order_by("created_at", "pk")
+        .values("pk", "method", "instance__events_path")
+    )
+    decided_at = timezone.now()
+    resolved_events: list[_ApprovalResolvedEvent] = []
+    for row in pending:
+        request_id = row["pk"]
+        updated = ApprovalRequest.objects.filter(
+            pk=request_id,
+            decision=ApprovalRequest.DECISION_PENDING,
+        ).update(
+            decision=decision,
+            decided_at=decided_at,
+        )
+        if not updated:
+            continue
+        events_path = row["instance__events_path"]
+        method = row["method"]
+        if isinstance(events_path, str) and isinstance(method, str) and events_path:
+            resolved_events.append(
+                _ApprovalResolvedEvent(
+                    events_path=events_path,
+                    request_id=request_id,
+                    method=method,
+                    decision=decision,
+                )
+            )
+    return resolved_events
+
+
+def _append_approval_resolved_events(events: Iterable[_ApprovalResolvedEvent]) -> None:
+    for event in events:
+        try:
+            codex_events.append_event(
+                event.events_path,
+                "approval/resolved",
+                {
+                    "id": event.request_id,
+                    "method": event.method,
+                    "decision": event.decision,
+                },
+            )
+        except OSError:
+            logger.warning(
+                "failed to append live approval resolved event for request %s",
+                event.request_id,
+                exc_info=True,
+            )
+
+
+def _apply_live_session_approval_mode(
+    session_id: str, effective_approval_mode: str
+) -> None:
+    _apply_live_approval_mode_to_instances(
+        CodexInstance.objects.filter(
+            thread_id=session_id,
+            status__in=_LIVE_APPROVAL_INSTANCE_STATUSES,
+        ),
+        effective_approval_mode,
+    )
+
+
+def _apply_live_global_approval_mode(effective_approval_mode: str) -> None:
+    explicit_override_thread_ids = SessionMetadata.objects.filter(
+        approval_mode__in=_VALID_APPROVAL_MODES
+    ).values("thread_id")
+    _apply_live_approval_mode_to_instances(
+        CodexInstance.objects.filter(
+            purpose=CodexInstance.PURPOSE_USER,
+            status__in=_LIVE_APPROVAL_INSTANCE_STATUSES,
+        ).exclude(thread_id__in=explicit_override_thread_ids),
+        effective_approval_mode,
+    )
+
+
 def _session_approval_mode_context(
     settings: SettingsValues,
     session_id: str,
@@ -8764,6 +8892,7 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         _save_disk_usage_max_percent(disk_usage_max_percent)
     if user is not None:
         _save_user_settings(user, values)
+    _apply_live_global_approval_mode(values.approval_mode)
     response = redirect(_safe_next_url(request) or "index")
     _apply_cookie_updates(response, _settings_cookie_updates(values))
     return response
@@ -8951,6 +9080,10 @@ def set_session_approval_mode(request: HttpRequest, session_id: str) -> HttpResp
             "approval_mode": approval_mode,
         },
     )
+    effective_approval_mode = approval_mode or _effective_approval_mode(
+        _stored_settings(request)
+    )
+    _apply_live_session_approval_mode(session_id, effective_approval_mode)
     return redirect("session", session_id=session_id)
 
 

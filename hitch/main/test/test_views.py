@@ -87,6 +87,7 @@ _WEBP_BYTES = b"RIFF\x0c\x00\x00\x00WEBPVP8 "
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
 _MODEL_COOKIE = "hitch_model"
 _SANDBOX_COOKIE = "hitch_sandbox_policy"
+_APPROVAL_COOKIE = "hitch_approval_mode"
 _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
@@ -7331,6 +7332,146 @@ class IndexViewTests(TestCase):
             _cookie_value(response, _VISIBLE_SESSION_PROJECTS_COOKIE),
             f"[{other.pk},{project.pk}]",
         )
+
+    def test_settings_approve_all_updates_live_global_sessions(self) -> None:
+        global_instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="global",
+            cwd="/repo",
+            prompt="hi",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            approval_mode="prompt_user",
+            approval_mode_live_editable=True,
+        )
+        global_pending = ApprovalRequest.objects.create(
+            instance=global_instance,
+            method="item/commandExecution/requestApproval",
+            params={"item": {"command": "cargo bench"}},
+            decision=ApprovalRequest.DECISION_PENDING,
+        )
+        SessionMetadata.objects.create(
+            thread_id="override",
+            cwd="/repo",
+            approval_mode="prompt_user",
+        )
+        override_instance = CodexInstance.objects.create(
+            pid=2,
+            thread_id="override",
+            cwd="/repo",
+            prompt="hi",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            approval_mode="prompt_user",
+            approval_mode_live_editable=True,
+        )
+        override_pending = ApprovalRequest.objects.create(
+            instance=override_instance,
+            method="item/commandExecution/requestApproval",
+            params={"item": {"command": "cargo test"}},
+            decision=ApprovalRequest.DECISION_PENDING,
+        )
+        system_instance = CodexInstance.objects.create(
+            pid=3,
+            thread_id="system",
+            cwd="/repo",
+            prompt="qa",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            approval_mode="auto_review",
+        )
+        system_pending = ApprovalRequest.objects.create(
+            instance=system_instance,
+            method="item/commandExecution/requestApproval",
+            params={"item": {"command": "cargo test"}},
+            decision=ApprovalRequest.DECISION_PENDING,
+        )
+
+        response = self.client.post(
+            reverse("update_settings"),
+            data={"approval_mode": "approve_all"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(_cookie_value(response, _APPROVAL_COOKIE), "approve_all")
+        global_instance.refresh_from_db()
+        self.assertEqual(global_instance.approval_mode, "approve_all")
+        global_pending.refresh_from_db()
+        self.assertEqual(global_pending.decision, ApprovalRequest.DECISION_ACCEPT)
+        self.assertIsNotNone(global_pending.decided_at)
+        override_instance.refresh_from_db()
+        self.assertEqual(override_instance.approval_mode, "prompt_user")
+        override_pending.refresh_from_db()
+        self.assertEqual(override_pending.decision, ApprovalRequest.DECISION_PENDING)
+        system_instance.refresh_from_db()
+        self.assertEqual(system_instance.approval_mode, "auto_review")
+        system_pending.refresh_from_db()
+        self.assertEqual(system_pending.decision, ApprovalRequest.DECISION_PENDING)
+
+    def test_settings_global_update_ignores_stale_session_override(self) -> None:
+        SessionMetadata.objects.create(
+            thread_id="stale-override",
+            cwd="/repo",
+            approval_mode="phantom",
+        )
+        instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="stale-override",
+            cwd="/repo",
+            prompt="hi",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            approval_mode="prompt_user",
+            approval_mode_live_editable=True,
+        )
+        pending = ApprovalRequest.objects.create(
+            instance=instance,
+            method="item/commandExecution/requestApproval",
+            params={"item": {"command": "cargo bench"}},
+            decision=ApprovalRequest.DECISION_PENDING,
+        )
+
+        response = self.client.post(
+            reverse("update_settings"),
+            data={"approval_mode": "approve_all"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        instance.refresh_from_db()
+        self.assertEqual(instance.approval_mode, "approve_all")
+        pending.refresh_from_db()
+        self.assertEqual(pending.decision, ApprovalRequest.DECISION_ACCEPT)
+
+    def test_settings_deny_all_declines_live_global_pending_approvals(self) -> None:
+        global_instance = CodexInstance.objects.create(
+            pid=1,
+            thread_id="global",
+            cwd="/repo",
+            prompt="hi",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            approval_mode="prompt_user",
+            approval_mode_live_editable=True,
+        )
+        global_pending = ApprovalRequest.objects.create(
+            instance=global_instance,
+            method="item/commandExecution/requestApproval",
+            params={"item": {"command": "cargo bench"}},
+            decision=ApprovalRequest.DECISION_PENDING,
+        )
+
+        response = self.client.post(
+            reverse("update_settings"),
+            data={"approval_mode": "deny_all"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        global_instance.refresh_from_db()
+        self.assertEqual(global_instance.approval_mode, "deny_all")
+        global_pending.refresh_from_db()
+        self.assertEqual(global_pending.decision, ApprovalRequest.DECISION_DECLINE)
+        self.assertIsNotNone(global_pending.decided_at)
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -15377,6 +15518,254 @@ class SetSessionApprovalModeViewTests(TestCase):
 
         self.assertEqual(response.status_code, 405)
 
+    def test_approve_all_updates_live_instances_and_pending_approvals(self) -> None:
+        SessionMetadata.objects.create(thread_id="abc", cwd="/repo")
+        running = CodexInstance.objects.create(
+            pid=1,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="hi",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            approval_mode="prompt_user",
+            approval_mode_live_editable=True,
+        )
+        pending = ApprovalRequest.objects.create(
+            instance=running,
+            method="item/commandExecution/requestApproval",
+            params={"item": {"command": "cargo bench"}},
+            decision=ApprovalRequest.DECISION_PENDING,
+        )
+        completed = CodexInstance.objects.create(
+            pid=2,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="done",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_COMPLETED,
+            approval_mode="auto_review",
+        )
+        completed_pending = ApprovalRequest.objects.create(
+            instance=completed,
+            method="item/commandExecution/requestApproval",
+            params={"item": {"command": "cargo test"}},
+            decision=ApprovalRequest.DECISION_PENDING,
+        )
+        url = reverse("set_session_approval_mode", kwargs={"session_id": "abc"})
+
+        response = self.client.post(url, data={"approval_mode": "approve_all"})
+
+        self.assertEqual(response.status_code, 302)
+        running.refresh_from_db()
+        self.assertEqual(running.approval_mode, "approve_all")
+        pending.refresh_from_db()
+        self.assertEqual(pending.decision, ApprovalRequest.DECISION_ACCEPT)
+        self.assertIsNotNone(pending.decided_at)
+        completed.refresh_from_db()
+        self.assertEqual(completed.approval_mode, "auto_review")
+        completed_pending.refresh_from_db()
+        self.assertEqual(completed_pending.decision, ApprovalRequest.DECISION_PENDING)
+
+    def test_approve_all_does_not_rewrite_live_deny_all_instance(self) -> None:
+        SessionMetadata.objects.create(thread_id="abc", cwd="/repo")
+        running = CodexInstance.objects.create(
+            pid=1,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="hi",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            approval_mode="deny_all",
+        )
+        pending = ApprovalRequest.objects.create(
+            instance=running,
+            method="item/commandExecution/requestApproval",
+            params={"item": {"command": "cargo bench"}},
+            decision=ApprovalRequest.DECISION_PENDING,
+        )
+        url = reverse("set_session_approval_mode", kwargs={"session_id": "abc"})
+
+        response = self.client.post(url, data={"approval_mode": "approve_all"})
+
+        self.assertEqual(response.status_code, 302)
+        metadata = SessionMetadata.objects.get(thread_id="abc")
+        self.assertEqual(metadata.approval_mode, "approve_all")
+        running.refresh_from_db()
+        self.assertEqual(running.approval_mode, "deny_all")
+        pending.refresh_from_db()
+        self.assertEqual(pending.decision, ApprovalRequest.DECISION_PENDING)
+
+    def test_approve_all_can_relax_live_editable_deny_all_instance(self) -> None:
+        SessionMetadata.objects.create(thread_id="abc", cwd="/repo")
+        running = CodexInstance.objects.create(
+            pid=1,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="hi",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            approval_mode="deny_all",
+            approval_mode_live_editable=True,
+        )
+        pending = ApprovalRequest.objects.create(
+            instance=running,
+            method="item/commandExecution/requestApproval",
+            params={"item": {"command": "cargo bench"}},
+            decision=ApprovalRequest.DECISION_PENDING,
+        )
+        url = reverse("set_session_approval_mode", kwargs={"session_id": "abc"})
+
+        response = self.client.post(url, data={"approval_mode": "approve_all"})
+
+        self.assertEqual(response.status_code, 302)
+        running.refresh_from_db()
+        self.assertEqual(running.approval_mode, "approve_all")
+        pending.refresh_from_db()
+        self.assertEqual(pending.decision, ApprovalRequest.DECISION_ACCEPT)
+
+    def test_deny_all_does_not_rewrite_fixed_auto_review_instance(self) -> None:
+        SessionMetadata.objects.create(thread_id="abc", cwd="/repo")
+        running = CodexInstance.objects.create(
+            pid=1,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="hi",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            approval_mode="auto_review",
+        )
+        pending = ApprovalRequest.objects.create(
+            instance=running,
+            method="item/commandExecution/requestApproval",
+            params={"item": {"command": "cargo bench"}},
+            decision=ApprovalRequest.DECISION_PENDING,
+        )
+        url = reverse("set_session_approval_mode", kwargs={"session_id": "abc"})
+
+        response = self.client.post(url, data={"approval_mode": "deny_all"})
+
+        self.assertEqual(response.status_code, 302)
+        running.refresh_from_db()
+        self.assertEqual(running.approval_mode, "auto_review")
+        pending.refresh_from_db()
+        self.assertEqual(pending.decision, ApprovalRequest.DECISION_PENDING)
+
+    def test_auto_review_does_not_rewrite_live_editable_instance(self) -> None:
+        SessionMetadata.objects.create(thread_id="abc", cwd="/repo")
+        running = CodexInstance.objects.create(
+            pid=1,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="hi",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            approval_mode="prompt_user",
+            approval_mode_live_editable=True,
+        )
+        pending = ApprovalRequest.objects.create(
+            instance=running,
+            method="item/commandExecution/requestApproval",
+            params={"item": {"command": "cargo bench"}},
+            decision=ApprovalRequest.DECISION_PENDING,
+        )
+        url = reverse("set_session_approval_mode", kwargs={"session_id": "abc"})
+
+        response = self.client.post(url, data={"approval_mode": "auto_review"})
+
+        self.assertEqual(response.status_code, 302)
+        metadata = SessionMetadata.objects.get(thread_id="abc")
+        self.assertEqual(metadata.approval_mode, "auto_review")
+        running.refresh_from_db()
+        self.assertEqual(running.approval_mode, "prompt_user")
+        pending.refresh_from_db()
+        self.assertEqual(pending.decision, ApprovalRequest.DECISION_PENDING)
+
+    def test_deny_all_updates_live_instances_and_pending_approvals(self) -> None:
+        SessionMetadata.objects.create(thread_id="abc", cwd="/repo")
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as events_file:
+            events_path = events_file.name
+        self.addCleanup(Path(events_path).unlink, missing_ok=True)
+        running = CodexInstance.objects.create(
+            pid=1,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="hi",
+            events_path=events_path,
+            status=CodexInstance.STATUS_RUNNING,
+            approval_mode="prompt_user",
+            approval_mode_live_editable=True,
+        )
+        pending = ApprovalRequest.objects.create(
+            instance=running,
+            method="item/commandExecution/requestApproval",
+            params={"item": {"command": "cargo bench"}},
+            decision=ApprovalRequest.DECISION_PENDING,
+        )
+        Path(events_path).write_text(
+            json.dumps(
+                {
+                    "method": "approval/requested",
+                    "payload": {
+                        "id": pending.pk,
+                        "method": pending.method,
+                        "params": pending.params,
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        url = reverse("set_session_approval_mode", kwargs={"session_id": "abc"})
+
+        response = self.client.post(url, data={"approval_mode": "deny_all"})
+
+        self.assertEqual(response.status_code, 302)
+        running.refresh_from_db()
+        self.assertEqual(running.approval_mode, "deny_all")
+        pending.refresh_from_db()
+        self.assertEqual(pending.decision, ApprovalRequest.DECISION_DECLINE)
+        self.assertIsNotNone(pending.decided_at)
+        events = [
+            json.loads(line)
+            for line in Path(events_path).read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertEqual(events[-1]["method"], "approval/resolved")
+        self.assertEqual(
+            events[-1]["payload"],
+            {
+                "id": pending.pk,
+                "method": "item/commandExecution/requestApproval",
+                "decision": ApprovalRequest.DECISION_DECLINE,
+            },
+        )
+
+    def test_reset_session_approval_mode_applies_global_to_live_instance(self) -> None:
+        SessionMetadata.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            approval_mode="approve_all",
+        )
+        running = CodexInstance.objects.create(
+            pid=1,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="hi",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            approval_mode="approve_all",
+            approval_mode_live_editable=True,
+        )
+        _seed_cookies(self.client, hitch_approval_mode="prompt_user")
+        url = reverse("set_session_approval_mode", kwargs={"session_id": "abc"})
+
+        response = self.client.post(url, data={"approval_mode": ""})
+
+        self.assertEqual(response.status_code, 302)
+        metadata = SessionMetadata.objects.get(thread_id="abc")
+        self.assertEqual(metadata.approval_mode, "")
+        running.refresh_from_db()
+        self.assertEqual(running.approval_mode, "prompt_user")
+
 
 class StartSessionDemoViewTests(TestCase):
     @patch("hitch.main.views.demo.request_demo_start")
@@ -19735,6 +20124,52 @@ class ResetStaleStageCacheMigrationTests(TransactionTestCase):
         empty = SessionMetadata.objects.get(thread_id="already-empty")
         self.assertEqual(empty.derived_stage, "")
         self.assertEqual(empty.derived_stage_source_mtime_ns, 0)
+
+
+class ApprovalModeLiveEditableMigrationTests(TransactionTestCase):
+    migrate_from = [("main", "0060_remove_qa_panel_settings")]
+    migrate_to = [("main", "0061_codexinstance_approval_mode_live_editable")]
+
+    def _migrate(self, targets: list[tuple[str, str]]) -> MigrationExecutor:
+        executor = MigrationExecutor(connection)
+        executor.loader.build_graph()
+        executor.migrate(targets)
+        return executor
+
+    def test_keeps_pre_existing_workers_not_live_editable(self) -> None:
+        leaf = MigrationExecutor(connection).loader.graph.leaf_nodes("main")
+        self.addCleanup(self._migrate, leaf)
+
+        old_apps = self._migrate(self.migrate_from).loader.project_state(
+            self.migrate_from
+        ).apps
+        CodexInstance = old_apps.get_model("main", "CodexInstance")
+        rows = [
+            ("active-prompt", "prompt_user", "running"),
+            ("active-approve", "approve_all", "starting"),
+            ("active-auto", "auto_review", "running"),
+            ("done-prompt", "prompt_user", "completed"),
+        ]
+        for idx, (thread_id, approval_mode, status) in enumerate(rows, start=1):
+            CodexInstance.objects.create(
+                pid=idx,
+                thread_id=thread_id,
+                cwd="/repo",
+                prompt="hi",
+                events_path="/dev/null",
+                status=status,
+                approval_mode=approval_mode,
+            )
+
+        new_apps = self._migrate(self.migrate_to).loader.project_state(
+            self.migrate_to
+        ).apps
+        CodexInstance = new_apps.get_model("main", "CodexInstance")
+
+        for thread_id, _approval_mode, _status in rows:
+            self.assertFalse(
+                CodexInstance.objects.get(thread_id=thread_id).approval_mode_live_editable
+            )
 
 
 class PrStageRefreshSchedulingTests(TestCase):

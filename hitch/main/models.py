@@ -546,6 +546,11 @@ class CodexInstance(models.Model):
         (PURPOSE_SYSTEM_AGENT, "system agent"),
         (PURPOSE_SYSTEM_FEEDBACK, "system feedback"),
     )
+    APPROVAL_MODE_PROMPT_USER = "prompt_user"
+    APPROVAL_MODE_APPROVE_ALL = "approve_all"
+    LIVE_EDITABLE_APPROVAL_MODES: ClassVar[frozenset[str]] = frozenset(
+        {APPROVAL_MODE_PROMPT_USER, APPROVAL_MODE_APPROVE_ALL}
+    )
 
     pid = models.IntegerField()
     systemd_scope_unit = models.CharField(max_length=128, blank=True, default="")
@@ -569,6 +574,8 @@ class CodexInstance(models.Model):
     reasoning_effort = models.CharField(max_length=32, blank=True, default="")
     sandbox_policy = models.CharField(max_length=32, blank=True, default="")
     approval_mode = models.CharField(max_length=32, blank=True, default="")
+    # True only for turns launched through the browser approval handler.
+    approval_mode_live_editable = models.BooleanField(default=False)
     web_search_mode = models.CharField(max_length=16, blank=True, default="")
     plan_mode = models.BooleanField(default=False)
     auto_pr_enabled = models.BooleanField(default=False)

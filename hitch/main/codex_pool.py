@@ -2834,6 +2834,9 @@ def _spawn_worker(
             or "",
             sandbox_policy=sandbox_policy or "",
             approval_mode=approval_mode or "",
+            approval_mode_live_editable=(
+                approval_mode in CodexInstance.LIVE_EDITABLE_APPROVAL_MODES
+            ),
             web_search_mode=web_search_mode or "",
             plan_mode=plan_mode,
             auto_pr_enabled=auto_pr_enabled,

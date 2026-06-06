@@ -52,6 +52,13 @@ _PR_DETAIL_LIMIT = 5
 _T = TypeVar("_T")
 
 
+def append_event(path: str | Path, method: str, payload: dict[str, Any]) -> None:
+    """Append a Hitch worker event frame to ``path``."""
+    event = {"method": method, "payload": payload}
+    with Path(path).open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(event) + "\n")
+
+
 @dataclass(frozen=True)
 class _GoalEvent:
     order: tuple[int, int, int]
