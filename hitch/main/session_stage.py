@@ -25,7 +25,8 @@ PLAN = SessionStage("plan", "Plan", "active")
 IMPLEMENTATION = SessionStage("implementation", "Implementation", "active")
 QA = SessionStage("qa", "QA", "active")
 PR = SessionStage("pr", "PR", "active")
-WAITING_FOR_USER = SessionStage("waiting_for_user", "Waiting for User", "warning")
+AWAITING_INPUT = SessionStage("awaiting_input", "Awaiting Input", "warning")
+WAITING_FOR_USER = AWAITING_INPUT
 BLOCKED = SessionStage("blocked", "Blocked", "warning")
 DONE_MERGED = SessionStage("done_merged", "Done: Merged", "done")
 DONE_CLOSED = SessionStage("done_closed", "Done: Closed", "done")
@@ -37,11 +38,14 @@ _STAGES_BY_KEY = {
         IMPLEMENTATION,
         QA,
         PR,
-        WAITING_FOR_USER,
+        AWAITING_INPUT,
         BLOCKED,
         DONE_MERGED,
         DONE_CLOSED,
     )
+}
+_LEGACY_STAGES_BY_KEY = {
+    "waiting_for_user": AWAITING_INPUT,
 }
 
 _STAGE_BY_WORKFLOW_STEP = {
@@ -81,7 +85,7 @@ def derive_stage(
     )
 
     if awaiting_user_input:
-        return WAITING_FOR_USER
+        return AWAITING_INPUT
 
     if workflow is not None and workflow.status == SystemWorkflow.STATUS_RUNNING:
         running_pr_snapshot = (
@@ -127,7 +131,7 @@ def merge_pr_snapshots(
 
 
 def stage_for_key(key: str) -> SessionStage | None:
-    return _STAGES_BY_KEY.get(key)
+    return _STAGES_BY_KEY.get(key) or _LEGACY_STAGES_BY_KEY.get(key)
 
 
 def _running_workflow_stage(
