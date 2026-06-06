@@ -2151,7 +2151,12 @@
             {% endfor %}
             {% if pending_user_prompt %}
             <div class="entry" data-pending-user>
-                <div class="entry-header"><span class="role">{% if pending_user_author %}{{ pending_user_author }}{% else %}User{% endif %}</span></div>
+                <div class="entry-header">
+                    <span class="role">{% if pending_user_author %}{{ pending_user_author }}{% else %}User{% endif %}</span>
+                    {% if pending_user_timestamp %}
+                    <time data-ts="{{ pending_user_timestamp }}">{{ pending_user_timestamp }}</time>
+                    {% endif %}
+                </div>
                 <div class="message user pending" data-copyable-message>
                     <div class="body">{{ pending_user_prompt }}</div>
                 </div>

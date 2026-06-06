@@ -2,7 +2,7 @@ import json
 import os
 import tempfile
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast, override
@@ -3005,6 +3005,34 @@ class SessionViewActiveWorkerTests(TestCase):
 
         self.assertContains(response, "QA agent working...1.2K tokens")
         self.assertContains(response, 'data-working-text="QA agent working...1.2K tokens"')
+
+    @patch("hitch.main.views.build_worktree_diff")
+    @patch("hitch.main.views.Codex")
+    def test_active_qa_feedback_message_renders_timestamp(
+        self, mock_codex: MagicMock, mock_diff: MagicMock
+    ) -> None:
+        mock_diff.return_value = _diff_view()
+        _patch_thread(self, mock_codex, _thread([]))
+        instance = _make_codex_instance(
+            thread_id="thread-1",
+            status=CodexInstance.STATUS_RUNNING,
+            prompt="Feedback from Hitch QA agent:\n\nFix this.",
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            display_author=system_agents.QA_DISPLAY_AUTHOR,
+            pid=_LIVE_PID,
+        )
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            started_at=datetime.fromtimestamp(1700000456, UTC)
+        )
+
+        response = self.client.get(reverse("session", kwargs={"session_id": "thread-1"}))
+
+        self.assertContains(response, '<span class="role">QA agent</span>')
+        self.assertContains(
+            response,
+            '<time data-ts="1700000456">1700000456</time>',
+            count=1,
+        )
 
     @patch("hitch.main.views.build_worktree_diff")
     @patch("hitch.main.views.Codex")

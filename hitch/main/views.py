@@ -4981,6 +4981,7 @@ def _render_session_detail(
             # bubble while the stream catches up.
             "pending_user_prompt": _pending_user_prompt(active_instance),
             "pending_user_author": _pending_user_author(active_instance),
+            "pending_user_timestamp": _pending_user_timestamp(active_instance),
             "token_usage": token_usage,
             "next_message_config": _next_message_config(
                 settings,
@@ -7595,6 +7596,12 @@ def _pending_user_author(active: CodexInstance | None) -> str:
     if active.agent_kind == demo.DEMO_AGENT_KIND:
         return active.display_author
     return active.display_author if active.purpose == CodexInstance.PURPOSE_SYSTEM_FEEDBACK else ""
+
+
+def _pending_user_timestamp(active: CodexInstance | None) -> int:
+    if active is None or active.agent_kind == demo.DEMO_AGENT_KIND:
+        return 0
+    return int(active.started_at.timestamp())
 
 
 def _workflow_status_text(workflow: Any | None) -> str:
