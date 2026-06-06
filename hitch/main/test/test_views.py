@@ -17254,6 +17254,16 @@ class AutonomousGoalViewTests(TestCase):
             title="Improve tests",
             goal="Find useful test coverage increments.",
         )
+        running_no_tokens_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve parser",
+            goal="Track persisted token usage.",
+        )
+        running_unrecorded_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve formatter",
+            goal="Track unrecorded token usage.",
+        )
         blocked_no_log_goal = AutonomousGoal.objects.create(
             project=project,
             title="Improve docs",
@@ -17288,29 +17298,38 @@ class AutonomousGoalViewTests(TestCase):
             instance=blocked_instance,
             status=SystemAgentRun.STATUS_FAILED,
         )
-        with tempfile.NamedTemporaryFile(
-            prefix="autonomous-goal-events-",
-            suffix=".jsonl",
-            mode="w",
-            delete=False,
-        ) as running_events:
-            running_events.write(
-                json.dumps(
-                    {
-                        "method": codex_events.GOAL_UPDATED_METHOD,
-                        "payload": {
-                            "threadId": "running-agent-thread",
-                            "goal": {
-                                "objective": "Autonomous goal",
-                                "tokensUsed": 950_000,
+
+        def make_goal_events_path(thread_id: str, tokens_used: int) -> str:
+            with tempfile.NamedTemporaryFile(
+                prefix="autonomous-goal-events-",
+                suffix=".jsonl",
+                mode="w",
+                delete=False,
+            ) as events:
+                events.write(
+                    json.dumps(
+                        {
+                            "method": codex_events.GOAL_UPDATED_METHOD,
+                            "payload": {
+                                "threadId": thread_id,
+                                "goal": {
+                                    "objective": "Autonomous goal",
+                                    "tokensUsed": tokens_used,
+                                },
                             },
-                        },
-                    }
+                        }
+                    )
+                    + "\n"
                 )
-                + "\n"
-            )
-            running_events_path = running_events.name
-        self.addCleanup(Path(running_events_path).unlink, missing_ok=True)
+                path = events.name
+            self.addCleanup(Path(path).unlink, missing_ok=True)
+            return path
+
+        running_events_path = make_goal_events_path("running-agent-thread", 950_000)
+        unrecorded_events_path = make_goal_events_path(
+            "unrecorded-agent-thread",
+            250_000,
+        )
         running_workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             main_thread_id=system_agents._autonomous_goal_main_thread_id(running_goal.pk),
@@ -17324,6 +17343,24 @@ class AutonomousGoalViewTests(TestCase):
                     "running-agent-thread": 100_000,
                 },
             },
+        )
+        older_running_instance = CodexInstance.objects.create(
+            pid=0,
+            thread_id="older-running-agent-thread",
+            cwd="/repo",
+            prompt="run autonomous goal",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=running_workflow.pk,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=running_workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id=older_running_instance.thread_id,
+            instance=older_running_instance,
+            status=SystemAgentRun.STATUS_RUNNING,
         )
         running_instance = CodexInstance.objects.create(
             pid=0,
@@ -17341,6 +17378,70 @@ class AutonomousGoalViewTests(TestCase):
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             thread_id=running_instance.thread_id,
             instance=running_instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+        no_tokens_workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                running_no_tokens_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={
+                "autonomous_goal_id": running_no_tokens_goal.pk,
+                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 700_000,
+            },
+        )
+        no_tokens_instance = CodexInstance.objects.create(
+            pid=0,
+            thread_id="no-tokens-agent-thread",
+            cwd="/repo",
+            prompt="run autonomous goal",
+            events_path="/dev/null",
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=no_tokens_workflow.pk,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=no_tokens_workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id=no_tokens_instance.thread_id,
+            instance=no_tokens_instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+        unrecorded_workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                running_unrecorded_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={
+                "autonomous_goal_id": running_unrecorded_goal.pk,
+                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY: [
+                    "not-a-dict"
+                ],
+            },
+        )
+        unrecorded_instance = CodexInstance.objects.create(
+            pid=0,
+            thread_id="unrecorded-agent-thread",
+            cwd="/repo",
+            prompt="run autonomous goal",
+            events_path=unrecorded_events_path,
+            status=CodexInstance.STATUS_RUNNING,
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=unrecorded_workflow.pk,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=unrecorded_workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id=unrecorded_instance.thread_id,
+            instance=unrecorded_instance,
             status=SystemAgentRun.STATUS_RUNNING,
         )
         SystemWorkflow.objects.create(
@@ -17375,6 +17476,8 @@ class AutonomousGoalViewTests(TestCase):
             response, 'data-run-status-title="Autonomous goal is running"'
         )
         self.assertContains(response, "Tokens used: 1,250,000 tokens")
+        self.assertContains(response, "Tokens used: 700,000 tokens")
+        self.assertContains(response, "Tokens used: 250,000 tokens")
         self.assertContains(response, "This autonomous goal run is still working.")
         self.assertContains(response, "blocked before the run log was created")
         self.assertContains(
@@ -18511,6 +18614,17 @@ class AutonomousGoalViewTests(TestCase):
                     "ambition": AutonomousGoal.AMBITION_HIGH,
                     "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
                     "proposal_budget": "1e1000000",
+                    "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
+                },
+                "proposal budget is invalid",
+            ),
+            (
+                {
+                    "title": "Improve docs",
+                    "goal": "Find useful docs increments.",
+                    "ambition": AutonomousGoal.AMBITION_HIGH,
+                    "autonomy": AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+                    "proposal_budget": "0.0000001",
                     "confidence_threshold": AutonomousGoal.CONFIDENCE_HIGH,
                 },
                 "proposal budget is invalid",
