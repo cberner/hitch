@@ -538,6 +538,55 @@ class SessionDetailFastPathTests(TestCase):
 
     @patch("hitch.main.views._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
+    def test_session_detail_uses_session_approval_mode_override(
+        self, mock_codex: MagicMock, _start_models_refresh: MagicMock
+    ) -> None:
+        rollout_path = _make_rollout(
+            self,
+            _basic_session_rollout_lines("Edit the app", "Done."),
+        )
+        now = datetime(2025, 1, 5, tzinfo=UTC)
+        SessionMetadata.objects.create(
+            thread_id="approval-session",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_name="Approval session",
+            codex_preview="Edit the app",
+            codex_created_at=now,
+            codex_updated_at=now,
+            approval_mode="prompt_user",
+        )
+        CodexInstance.objects.create(
+            pid=1,
+            thread_id="approval-session",
+            cwd="/repo",
+            prompt="done",
+            events_path="/tmp/events.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+        _seed_cookies(self.client, hitch_approval_mode="deny_all")
+
+        response = self.client.get(
+            reverse("session", kwargs={"session_id": "approval-session"})
+        )
+
+        self.assertEqual(response.status_code, 200)
+        config = {
+            item["label"]: item["value"]
+            for item in response.context["next_message_config"]
+        }
+        self.assertEqual(config["approval"], "Always prompt for approval")
+        self.assertContains(response, "data-approval-mode-open")
+        self.assertContains(
+            response,
+            f'action="{reverse("set_session_approval_mode", kwargs={"session_id": "approval-session"})}"',
+        )
+        self.assertContains(response, 'value="prompt_user" selected')
+        self.assertContains(response, "Follow global (Deny all escalations)")
+        mock_codex.assert_not_called()
+
+    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_uses_archived_rollout_for_stale_path(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
     ) -> None:
@@ -14003,6 +14052,38 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
+    def test_follow_up_uses_session_approval_mode_override(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        SessionMetadata.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            approval_mode="deny_all",
+        )
+        _seed_cookies(self.client, hitch_approval_mode="prompt_user")
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        mock_spawn.assert_called_once_with(
+            thread_id="abc",
+            cwd="/repo",
+            prompt="follow-up",
+            sandbox_policy=None,
+            approval_mode="deny_all",
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
     def test_follow_up_clears_previous_web_search_when_setting_is_default(
         self,
         mock_codex: MagicMock,
@@ -15343,6 +15424,46 @@ class SetSessionNameViewTests(TestCase):
                     response = self.client.get(url)
                 self.assertEqual(response.status_code, status)
         mock_codex.assert_not_called()
+
+
+class SetSessionApprovalModeViewTests(TestCase):
+    def test_updates_and_resets_session_approval_mode(self) -> None:
+        SessionMetadata.objects.create(thread_id="abc", cwd="/repo")
+        url = reverse("set_session_approval_mode", kwargs={"session_id": "abc"})
+
+        response = self.client.post(url, data={"approval_mode": "prompt_user"})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(
+            response.headers["Location"],
+            reverse("session", kwargs={"session_id": "abc"}),
+        )
+        metadata = SessionMetadata.objects.get(thread_id="abc")
+        self.assertEqual(metadata.approval_mode, "prompt_user")
+
+        response = self.client.post(url, data={"approval_mode": ""})
+
+        self.assertEqual(response.status_code, 302)
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.approval_mode, "")
+
+    def test_rejects_invalid_session_approval_mode(self) -> None:
+        metadata = SessionMetadata.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            approval_mode="deny_all",
+        )
+        url = reverse("set_session_approval_mode", kwargs={"session_id": "abc"})
+
+        response = self.client.post(url, data={"approval_mode": "phantom"})
+
+        self.assertEqual(response.status_code, 400)
+        metadata.refresh_from_db()
+        self.assertEqual(metadata.approval_mode, "deny_all")
+
+        response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 405)
 
 
 class StartSessionDemoViewTests(TestCase):

@@ -384,6 +384,7 @@ class SessionMetadata(models.Model):
     project_cleared = models.BooleanField(default=False)
     auto_pr_enabled = models.BooleanField(default=False)
     auto_qa_enabled = models.BooleanField(default=False)
+    approval_mode = models.CharField(max_length=32, blank=True, default="")
     auto_merge_to_local_branch = models.BooleanField(default=False)
     auto_merge_branch = models.CharField(max_length=255, blank=True, default="")
     codex_display_title = models.CharField(max_length=200, blank=True, default="")

@@ -114,6 +114,11 @@ urlpatterns = [
         name="set_session_project",
     ),
     path(
+        "sessions/<str:session_id>/approval-mode/",
+        hitch.main.views.set_session_approval_mode,
+        name="set_session_approval_mode",
+    ),
+    path(
         "sessions/<str:session_id>/message/",
         hitch.main.views.send_message,
         name="send_message",
