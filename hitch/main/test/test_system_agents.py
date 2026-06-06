@@ -7,8 +7,9 @@ from typing import Any, NamedTuple, override
 from unittest.mock import MagicMock, patch
 
 from django.core.management import call_command
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, connection, transaction
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from openai_codex.generated.v2_all import (
     AgentMessageThreadItem,
     GetAccountRateLimitsResponse,
@@ -9124,6 +9125,13 @@ class AutonomousGoalWorkflowTests(TestCase):
             workflow.state["stacked_diff_stopped_reason"],
             "judge_confidence_below_threshold",
         )
+        stop_reason_key = (
+            system_agents._AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY
+        )
+        self.assertEqual(
+            proposal.outcome_metadata[stop_reason_key],
+            "judge_confidence_below_threshold",
+        )
         mock_snapshot.assert_called_once_with("/repo-worktree-1")
         mock_cleanup.assert_called_once_with("/repo-worktree-2")
 
@@ -9593,6 +9601,705 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.state["session_cwd"], "/repo-worktree")
         self.mock_create_worktree.assert_called_with("/repo", base_ref="a" * 40)
         mock_spawn.assert_called_once()
+
+    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    @patch(
+        "hitch.main.system_agents.snapshot_worktree_to_commit",
+        return_value="c" * 40,
+    )
+    @patch(
+        "hitch.main.system_agents.default_branch_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_continues_from_pending_stack_proposal(
+        self,
+        mock_spawn: MagicMock,
+        _mock_default_sha: MagicMock,
+        mock_snapshot: MagicMock,
+        mock_cleanup: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+            auto_proposal_last_no_proposal_sha="a" * 40,
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=2,
+        )
+        candidate_session = SessionMetadata.objects.create(
+            thread_id="candidate-1",
+            cwd="/repo-worktree-1",
+            project=project,
+        )
+        previous_proposal = ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Add parser coverage",
+            summary="Cover parser edge cases.",
+            candidate_session=candidate_session,
+            outcome_metadata={
+                "stacked_diff_depth": 2,
+                "stacked_diff_iteration": 1,
+            },
+        )
+        self.mock_create_worktree.return_value = MagicMock(path=Path("/repo-worktree-2"))
+        candidate_2 = _instance(
+            thread_id="candidate-2",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        judge_2 = _instance(
+            thread_id="judge-2",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            events_path=_events_file(
+                self,
+                {
+                    "confidence": "high",
+                    "summary": "The second candidate is better.",
+                    "rationale": "It builds on the first candidate.",
+                },
+            ),
+            agent_kind=system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND,
+        )
+        mock_spawn.side_effect = [candidate_2, judge_2]
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 1)
+        workflow = SystemWorkflow.objects.get()
+        self.assertEqual(workflow.state["proposal_id"], previous_proposal.pk)
+        self.assertEqual(workflow.state["stacked_diff_iteration"], 2)
+        self.assertEqual(workflow.state["session_cwd"], "/repo-worktree-2")
+        self.assertEqual(workflow.state["default_branch_sha"], "a" * 40)
+        mock_snapshot.assert_called_once_with("/repo-worktree-1")
+        self.mock_create_worktree.assert_called_with("/repo", base_ref="c" * 40)
+        self.assertIn("candidate round 2 of 2", mock_spawn.call_args.kwargs["prompt"])
+        previous_proposal.refresh_from_db()
+        self.assertEqual(
+            previous_proposal.outcome_status, ProposedSession.OUTCOME_DISMISSED
+        )
+        self.assertEqual(
+            previous_proposal.outcome_notes,
+            system_agents._AUTONOMOUS_GOAL_STACKED_HIDDEN_OUTCOME_NOTES,
+        )
+        self.assertTrue(
+            previous_proposal.outcome_metadata["stacked_diff_hidden_until_complete"]
+        )
+
+        candidate_2.events_path = _events_file(
+            self,
+            {
+                "proposal": {
+                    "title": "Expand parser coverage",
+                    "summary": "Cover more parser edge cases.",
+                    "impact": "Even fewer regressions.",
+                    "implementation_direction": "Finish broader parser tests.",
+                    "relevant_files": ["hitch/main/rollout.py"],
+                },
+                "message": "",
+                "next_steps_summary": "Expanded parser coverage.",
+                "memory_relevant_files": [],
+            },
+        )
+        candidate_2.save(update_fields=["events_path"])
+        system_agents.on_codex_instance_finished(candidate_2)
+        system_agents.on_codex_instance_finished(judge_2)
+
+        workflow.refresh_from_db()
+        proposals = list(ProposedSession.objects.order_by("pk"))
+        self.assertEqual(len(proposals), 2)
+        self.assertEqual(proposals[0].pk, previous_proposal.pk)
+        self.assertEqual(proposals[0].outcome_status, ProposedSession.OUTCOME_DISMISSED)
+        self.assertEqual(
+            proposals[0].outcome_notes,
+            f"Replaced by stacked diff proposal #{proposals[1].pk}.",
+        )
+        self.assertEqual(proposals[1].outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertEqual(proposals[1].outcome_metadata["stacked_diff_iteration"], 2)
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED)
+        mock_cleanup.assert_called_once_with("/repo-worktree-1")
+
+    @patch("hitch.main.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_blocks_when_any_extra_pending_proposal_exists(
+        self, mock_spawn: MagicMock, mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=2,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Older pending review",
+        )
+        candidate_session = SessionMetadata.objects.create(
+            thread_id="candidate-1",
+            cwd="/repo-worktree-1",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Add parser coverage",
+            summary="Cover parser edge cases.",
+            candidate_session=candidate_session,
+            outcome_metadata={
+                "stacked_diff_depth": 2,
+                "stacked_diff_iteration": 1,
+            },
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 0)
+        self.assertFalse(SystemWorkflow.objects.exists())
+        mock_default_sha.assert_not_called()
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_blocks_pending_proposal_without_stack_metadata(
+        self, mock_spawn: MagicMock, mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=3,
+        )
+        candidate_session = SessionMetadata.objects.create(
+            thread_id="candidate-1",
+            cwd="/repo-worktree-1",
+            project=project,
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Ordinary proposal",
+            summary="This is not a stack entry.",
+            candidate_session=candidate_session,
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 0)
+        self.assertFalse(SystemWorkflow.objects.exists())
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertNotIn(
+            "stacked_diff_hidden_until_complete", proposal.outcome_metadata
+        )
+        mock_default_sha.assert_not_called()
+        mock_spawn.assert_not_called()
+
+    @patch("hitch.main.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    @patch("hitch.main.system_agents._claim_autonomous_goal_stack_continuation_proposal")
+    def test_auto_proposal_does_not_start_when_stack_claim_loses_race(
+        self,
+        mock_claim: MagicMock,
+        mock_spawn: MagicMock,
+        mock_default_sha: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=3,
+        )
+        candidate_session = SessionMetadata.objects.create(
+            thread_id="candidate-1",
+            cwd="/repo-worktree-1",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Stack proposal",
+            candidate_session=candidate_session,
+            outcome_metadata={
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 1,
+            },
+        )
+        mock_default_sha.return_value = "a" * 40
+        mock_claim.return_value = None
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 0)
+        self.assertFalse(SystemWorkflow.objects.exists())
+        mock_spawn.assert_not_called()
+
+    def test_pending_proposal_state_empty_input_has_no_blockers(self) -> None:
+        state = system_agents._autonomous_goal_pending_proposal_state([])
+
+        self.assertEqual(state.blocking_goal_ids, set())
+        self.assertEqual(state.continuable_stack_goal_ids, set())
+
+    def test_stack_continuation_helpers_reject_invalid_proposal_states(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=3,
+        )
+        candidate_session = SessionMetadata.objects.create(
+            thread_id="candidate-1",
+            cwd="/repo-worktree-1",
+            project=project,
+        )
+        dismissed_proposal = ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Dismissed stack proposal",
+            candidate_session=candidate_session,
+            outcome_status=ProposedSession.OUTCOME_DISMISSED,
+            outcome_metadata={
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 1,
+            },
+        )
+        self.assertFalse(
+            system_agents._autonomous_goal_proposal_allows_stack_continuation(
+                dismissed_proposal, autonomous_goal
+            )
+        )
+        self.assertIsNone(
+            system_agents._claim_autonomous_goal_stack_continuation_proposal(
+                dismissed_proposal
+            )
+        )
+
+        notice_proposal = ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Stack notice",
+            inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
+            candidate_session=candidate_session,
+            outcome_metadata={
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 1,
+            },
+        )
+        self.assertFalse(
+            system_agents._autonomous_goal_proposal_allows_stack_continuation(
+                notice_proposal, autonomous_goal
+            )
+        )
+
+        repo_candidate = SessionMetadata.objects.create(
+            thread_id="candidate-repo",
+            cwd="/repo",
+            project=project,
+        )
+        repo_cwd_proposal = ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Repo cwd proposal",
+            candidate_session=repo_candidate,
+            outcome_metadata={
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 1,
+            },
+        )
+        self.assertFalse(
+            system_agents._autonomous_goal_proposal_allows_stack_continuation(
+                repo_cwd_proposal, autonomous_goal
+            )
+        )
+
+        propose_only_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Propose only goal",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+            autonomy=AutonomousGoal.AUTONOMY_PROPOSE_ONLY,
+            stacked_diff_depth=3,
+        )
+        too_shallow_proposal = ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=propose_only_goal,
+            title="Too shallow stack proposal",
+            candidate_session=candidate_session,
+            outcome_metadata={
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 1,
+            },
+        )
+        self.assertIsNone(
+            system_agents._autonomous_goal_proposal_stack_continuation_metadata(
+                too_shallow_proposal, propose_only_goal
+            )
+        )
+
+        completed_stack_proposal = ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Completed stack proposal",
+            candidate_session=candidate_session,
+            outcome_metadata={
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 3,
+            },
+        )
+        self.assertIsNone(
+            system_agents._autonomous_goal_proposal_stack_continuation_metadata(
+                completed_stack_proposal, autonomous_goal
+            )
+        )
+        self.assertEqual(
+            system_agents._autonomous_goal_proposal_stack_iteration(
+                completed_stack_proposal
+            ),
+            3,
+        )
+        plain_proposal = ProposedSession(outcome_metadata={})
+        self.assertEqual(
+            system_agents._autonomous_goal_proposal_stack_iteration(plain_proposal),
+            1,
+        )
+
+    def test_create_workflow_record_rejects_invalid_stack_continuation_metadata(
+        self,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=3,
+        )
+        candidate_session = SessionMetadata.objects.create(
+            thread_id="candidate-1",
+            cwd="/repo-worktree-1",
+            project=project,
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Stack proposal without metadata",
+            candidate_session=candidate_session,
+        )
+
+        with self.assertRaisesRegex(
+            ValueError, "stack continuation proposal missing stack metadata"
+        ):
+            system_agents._create_autonomous_goal_workflow_record(
+                autonomous_goal=autonomous_goal,
+                auto_proposal=True,
+                default_branch_sha="a" * 40,
+                use_worktrees=True,
+                stack_continuation_proposal=proposal,
+            )
+
+        self.assertFalse(SystemWorkflow.objects.exists())
+
+    @patch("hitch.main.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_blocks_legacy_stopped_stack_proposal(
+        self, mock_spawn: MagicMock, mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=3,
+        )
+        source_workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED,
+            state={
+                "autonomous_goal_id": autonomous_goal.pk,
+                "stacked_diff_stopped_reason": "candidate_no_proposal",
+            },
+        )
+        candidate_session = SessionMetadata.objects.create(
+            thread_id="candidate-1",
+            cwd="/repo-worktree-1",
+            project=project,
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            source_workflow=source_workflow,
+            title="Stopped stack proposal",
+            summary="This stack has already stopped.",
+            candidate_session=candidate_session,
+            outcome_metadata={
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 1,
+            },
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 0)
+        self.assertFalse(SystemWorkflow.objects.exclude(pk=source_workflow.pk).exists())
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertNotIn(
+            "stacked_diff_hidden_until_complete", proposal.outcome_metadata
+        )
+        mock_default_sha.assert_not_called()
+        mock_spawn.assert_not_called()
+
+    def test_pending_proposal_blocking_ids_loads_pending_proposals_in_bulk(
+        self,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        continuable_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Continuable goal",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=2,
+        )
+        non_continuable_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Non-continuable goal",
+            goal="Wait for manual review.",
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=2,
+        )
+        extra_pending_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Extra pending goal",
+            goal="Resolve older pending proposals first.",
+            auto_proposal_enabled=True,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=2,
+        )
+        ordinary_pending_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Ordinary pending goal",
+            goal="Review the ordinary proposal.",
+            auto_proposal_enabled=True,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=2,
+        )
+        stopped_stack_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Stopped stack goal",
+            goal="Do not retry stopped stacks.",
+            auto_proposal_enabled=True,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=2,
+        )
+        manual_stack_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Manual stack goal",
+            goal="Wait for manual review.",
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=2,
+        )
+        for goal, thread_id in (
+            (continuable_goal, "candidate-1"),
+            (extra_pending_goal, "candidate-2"),
+            (manual_stack_goal, "candidate-3"),
+        ):
+            candidate = SessionMetadata.objects.create(
+                thread_id=thread_id,
+                cwd=f"/repo-worktree-{thread_id[-1]}",
+                project=project,
+            )
+            ProposedSession.objects.create(
+                project=project,
+                autonomous_goal=goal,
+                title=f"Stack proposal for {goal.title}",
+                candidate_session=candidate,
+                outcome_metadata={
+                    "stacked_diff_depth": 2,
+                    "stacked_diff_iteration": 1,
+                },
+            )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=non_continuable_goal,
+            title="Needs review",
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=extra_pending_goal,
+            title="Older pending review",
+        )
+        ordinary_candidate = SessionMetadata.objects.create(
+            thread_id="candidate-ordinary",
+            cwd="/repo-worktree-ordinary",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=ordinary_pending_goal,
+            title="Ordinary candidate proposal",
+            candidate_session=ordinary_candidate,
+        )
+        stopped_workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                stopped_stack_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED,
+            state={"stacked_diff_stopped_reason": "candidate_no_proposal"},
+        )
+        stopped_candidate = SessionMetadata.objects.create(
+            thread_id="candidate-stopped",
+            cwd="/repo-worktree-stopped",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=stopped_stack_goal,
+            source_workflow=stopped_workflow,
+            title="Stopped stack proposal",
+            candidate_session=stopped_candidate,
+            outcome_metadata={
+                "stacked_diff_depth": 2,
+                "stacked_diff_iteration": 1,
+            },
+        )
+
+        with CaptureQueriesContext(connection) as queries:
+            blocking_ids = system_agents._autonomous_goal_pending_proposal_blocking_ids(
+                [
+                    continuable_goal,
+                    non_continuable_goal,
+                    extra_pending_goal,
+                    ordinary_pending_goal,
+                    stopped_stack_goal,
+                    manual_stack_goal,
+                ]
+            )
+
+        self.assertEqual(
+            blocking_ids,
+            {
+                non_continuable_goal.pk,
+                extra_pending_goal.pk,
+                ordinary_pending_goal.pk,
+                stopped_stack_goal.pk,
+                manual_stack_goal.pk,
+            },
+        )
+        pending_proposal_queries = [
+            query
+            for query in queries.captured_queries
+            if 'FROM "main_proposedsession"' in query["sql"]
+        ]
+        self.assertEqual(len(pending_proposal_queries), 1)
+
+    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    @patch(
+        "hitch.main.system_agents.snapshot_worktree_to_commit",
+        return_value="c" * 40,
+    )
+    @patch(
+        "hitch.main.system_agents.default_branch_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_does_not_retry_stopped_stack_continuation(
+        self,
+        mock_spawn: MagicMock,
+        _mock_default_sha: MagicMock,
+        _mock_snapshot: MagicMock,
+        mock_cleanup: MagicMock,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=2,
+        )
+        candidate_session = SessionMetadata.objects.create(
+            thread_id="candidate-1",
+            cwd="/repo-worktree-1",
+            project=project,
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Add parser coverage",
+            summary="Cover parser edge cases.",
+            candidate_session=candidate_session,
+            outcome_metadata={
+                "stacked_diff_depth": 2,
+                "stacked_diff_iteration": 1,
+            },
+        )
+        self.mock_create_worktree.return_value = MagicMock(path=Path("/repo-worktree-2"))
+        candidate_2 = _instance(
+            thread_id="candidate-2",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            events_path=_events_file(
+                self,
+                {
+                    "proposal": None,
+                    "message": "No useful continuation was found.",
+                    "next_steps_summary": "Stop after checking parser coverage.",
+                    "memory_relevant_files": [],
+                },
+            ),
+        )
+        mock_spawn.return_value = candidate_2
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        system_agents.on_codex_instance_finished(candidate_2)
+        started_again = system_agents.maybe_start_auto_proposal_workflows(
+            project=project
+        )
+
+        self.assertEqual(started, 1)
+        self.assertEqual(started_again, 0)
+        self.assertEqual(SystemWorkflow.objects.count(), 1)
+        self.assertEqual(mock_spawn.call_count, 1)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        stop_reason_key = (
+            system_agents._AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY
+        )
+        self.assertEqual(
+            proposal.outcome_metadata[stop_reason_key],
+            "candidate_no_proposal",
+        )
+        mock_cleanup.assert_called_once_with("/repo-worktree-2")
 
     @patch(
         "hitch.main.system_agents.default_branch_commit_hash",
@@ -13485,6 +14192,29 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         self.assertEqual(
             budgeted.outcome_metadata["proposal_budget_failed_attempts"], 2
+        )
+
+    def test_current_stack_proposal_falls_back_to_source_workflow_for_legacy_state(
+        self,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id="autonomous-goal:1",
+            cwd="/repo",
+            state={},
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            title="Legacy stack proposal",
+            source_workflow=workflow,
+            outcome_status=ProposedSession.OUTCOME_UNSET,
+        )
+        workflow.state = {"proposal_id": proposal.pk}
+        workflow.save(update_fields=["state"])
+
+        self.assertEqual(
+            system_agents._autonomous_goal_current_stack_proposal(workflow), proposal
         )
 
     def test_below_threshold_notice_copy_handles_missing_candidate_title(self) -> None:
