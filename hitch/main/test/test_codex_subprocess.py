@@ -7930,13 +7930,13 @@ class StreamForInstanceTests(TestCase):
             "Spec Critic is analyzing the request...",
         )
 
-    def test_system_workflow_status_text_handles_panel_feedback_step(self) -> None:
+    def test_system_workflow_status_text_handles_qa_feedback_step(self) -> None:
         workflow = cast(
             SystemWorkflow,
             SimpleNamespace(
                 kind=SystemWorkflow.KIND_PR_QA,
                 step="feedback_running",
-                state={"qa_panel_enabled": True},
+                state={},
             ),
         )
 

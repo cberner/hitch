@@ -140,7 +140,6 @@ class SettingsValues(NamedTuple):
     use_worktrees: bool
     auto_pr_enabled: bool
     auto_qa_enabled: bool
-    qa_panel_enabled: bool
     spec_critic_enabled: bool
     web_search_mode: str
     show_archived_sessions: bool
@@ -380,7 +379,6 @@ _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
 _AUTO_QA_COOKIE = "hitch_auto_qa"
-_QA_PANEL_COOKIE = "hitch_qa_panel"
 _SPEC_CRITIC_COOKIE = "hitch_spec_critic"
 _WEB_SEARCH_COOKIE = "hitch_web_search_mode"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
@@ -768,7 +766,6 @@ def _settings_context(
         "current_use_worktrees": current_settings.use_worktrees,
         "current_auto_pr": current_settings.auto_pr_enabled,
         "current_auto_qa": current_settings.auto_qa_enabled,
-        "current_qa_panel": current_settings.qa_panel_enabled,
         "current_spec_critic": current_settings.spec_critic_enabled,
         "current_web_search": current_settings.web_search_mode,
         "current_enable_memories": current_settings.enable_memories,
@@ -7656,7 +7653,6 @@ def _stored_settings(request: HttpRequest) -> SettingsValues:
         use_worktrees=_read_cookie(request, _USE_WORKTREES_COOKIE) == "true",
         auto_pr_enabled=_read_cookie(request, _AUTO_PR_COOKIE) == "true",
         auto_qa_enabled=_read_cookie(request, _AUTO_QA_COOKIE) == "true",
-        qa_panel_enabled=_read_cookie(request, _QA_PANEL_COOKIE) == "true",
         spec_critic_enabled=_read_cookie(request, _SPEC_CRITIC_COOKIE) == "true",
         web_search_mode=_read_cookie(request, _WEB_SEARCH_COOKIE),
         show_archived_sessions=_read_cookie(request, _SHOW_ARCHIVED_COOKIE) == "true",
@@ -7686,7 +7682,6 @@ def _settings_values_for_user(settings: UserSettings) -> SettingsValues:
         use_worktrees=settings.use_worktrees,
         auto_pr_enabled=settings.auto_pr_enabled,
         auto_qa_enabled=settings.auto_qa_enabled,
-        qa_panel_enabled=settings.qa_panel_enabled,
         spec_critic_enabled=settings.spec_critic_enabled,
         web_search_mode=settings.web_search_mode,
         show_archived_sessions=settings.show_archived_sessions,
@@ -7718,7 +7713,6 @@ def _save_user_settings(user: Any, values: SettingsValues) -> UserSettings:
         ("use_worktrees", values.use_worktrees),
         ("auto_pr_enabled", values.auto_pr_enabled),
         ("auto_qa_enabled", values.auto_qa_enabled),
-        ("qa_panel_enabled", values.qa_panel_enabled),
         ("spec_critic_enabled", values.spec_critic_enabled),
         ("web_search_mode", values.web_search_mode),
         ("show_archived_sessions", values.show_archived_sessions),
@@ -7749,7 +7743,6 @@ def _settings_cookie_updates(values: SettingsValues) -> dict[str, str]:
         _USE_WORKTREES_COOKIE: "true" if values.use_worktrees else "false",
         _AUTO_PR_COOKIE: "true" if values.auto_pr_enabled else "false",
         _AUTO_QA_COOKIE: "true" if values.auto_qa_enabled else "false",
-        _QA_PANEL_COOKIE: "true" if values.qa_panel_enabled else "false",
         _SPEC_CRITIC_COOKIE: "true" if values.spec_critic_enabled else "false",
         _WEB_SEARCH_COOKIE: values.web_search_mode,
         _SHOW_ARCHIVED_COOKIE: "true" if values.show_archived_sessions else "false",
@@ -7821,9 +7814,6 @@ def _valid_cookie_setting_updates(
     auto_qa = _read_signed_cookie_if_present(request, _AUTO_QA_COOKIE)
     if auto_qa in {"true", "false"}:
         updates["auto_qa_enabled"] = auto_qa == "true"
-    qa_panel = _read_signed_cookie_if_present(request, _QA_PANEL_COOKIE)
-    if qa_panel in {"true", "false"}:
-        updates["qa_panel_enabled"] = qa_panel == "true"
     spec_critic = _read_signed_cookie_if_present(request, _SPEC_CRITIC_COOKIE)
     if spec_critic in {"true", "false"}:
         updates["spec_critic_enabled"] = spec_critic == "true"
@@ -8329,7 +8319,6 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     use_worktrees = request.POST.get("use_worktrees", "").strip()
     auto_pr = request.POST.get("auto_pr", "").strip()
     auto_qa = request.POST.get("auto_qa", "").strip()
-    qa_panel = request.POST.get("qa_panel", "").strip()
     spec_critic = request.POST.get("spec_critic", "").strip()
     web_search_mode = request.POST.get("web_search_mode", "").strip()
     posted_disk_usage_max_percent = request.POST.get("disk_usage_max_percent")
@@ -8384,9 +8373,6 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     if auto_qa not in {"", "true"}:
         return HttpResponseBadRequest("invalid auto-QA setting")
     auto_qa = "true" if auto_qa == "true" else "false"
-    if qa_panel not in {"", "true"}:
-        return HttpResponseBadRequest("invalid QA panel setting")
-    qa_panel = "true" if qa_panel == "true" else "false"
     if spec_critic not in {"", "true"}:
         return HttpResponseBadRequest("invalid Spec Critic setting")
     spec_critic = "true" if spec_critic == "true" else "false"
@@ -8441,7 +8427,6 @@ def update_settings(request: HttpRequest) -> HttpResponse:
         use_worktrees=use_worktrees == "true",
         auto_pr_enabled=auto_pr == "true",
         auto_qa_enabled=auto_qa == "true",
-        qa_panel_enabled=qa_panel == "true",
         spec_critic_enabled=spec_critic == "true",
         web_search_mode=web_search_mode,
         show_archived_sessions=(
@@ -9676,8 +9661,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                     **workflow_kwargs,
                 )
                 return redirect("session", session_id=session_id)
-            if settings.qa_panel_enabled:
-                workflow_kwargs["qa_panel_enabled"] = True
             if qa_activation:
                 workflow_kwargs["open_pr_on_lgtm"] = False
             # Honor the session's auto-merge target the same way auto_qa /
@@ -9720,8 +9703,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             spawn_kwargs["user_message_index"] = _count_user_entries(thread_entries)
             spawn_kwargs["stored_model"] = auto_review_model or None
             spawn_kwargs["stored_reasoning_effort"] = auto_review_reasoning_effort or None
-            if settings.qa_panel_enabled:
-                spawn_kwargs["qa_panel_enabled"] = True
             if auto_merge_to_local_branch:
                 spawn_kwargs["auto_merge_to_local_branch"] = True
                 spawn_kwargs["auto_merge_branch"] = auto_merge_branch
@@ -9775,8 +9756,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 spec_workflow_kwargs["base_instructions"] = base_instructions
             if should_forward_web_search_mode:
                 spec_workflow_kwargs["web_search_mode"] = web_search_mode
-            if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
-                spec_workflow_kwargs["qa_panel_enabled"] = True
             system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
             return redirect("session", session_id=session_id)
         codex_pool.spawn_turn(**spawn_kwargs)
@@ -10520,8 +10499,6 @@ def _start_candidate_proposal_session(
             workflow_kwargs["web_search_mode"] = web_search_mode
         if base_instructions:
             workflow_kwargs["base_instructions"] = base_instructions
-        if settings.qa_panel_enabled:
-            workflow_kwargs["qa_panel_enabled"] = True
         if qa_activation:
             workflow_kwargs["open_pr_on_lgtm"] = False
         if auto_merge_branch:
@@ -10586,8 +10563,6 @@ def _start_candidate_proposal_session(
         spawn_kwargs["user_message_index"] = _next_user_message_index_for_candidate_thread(
             candidate_session.thread_id, settings
         )
-        if settings.qa_panel_enabled:
-            spawn_kwargs["qa_panel_enabled"] = True
         if auto_merge_to_local_branch:
             spawn_kwargs["auto_merge_to_local_branch"] = True
             spawn_kwargs["auto_merge_branch"] = auto_merge_branch
@@ -11168,8 +11143,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             workflow_kwargs["web_search_mode"] = web_search_mode
         if base_instructions:
             workflow_kwargs["base_instructions"] = base_instructions
-        if settings.qa_panel_enabled:
-            workflow_kwargs["qa_panel_enabled"] = True
         if qa_activation:
             workflow_kwargs["open_pr_on_lgtm"] = False
         if auto_merge_branch:
@@ -11266,8 +11239,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         spawn_kwargs["auto_pr_enabled"] = True
     if auto_qa_enabled:
         spawn_kwargs["auto_qa_enabled"] = True
-    if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
-        spawn_kwargs["qa_panel_enabled"] = True
     if auto_merge_to_local_branch:
         spawn_kwargs["auto_merge_to_local_branch"] = True
         spawn_kwargs["auto_merge_branch"] = auto_merge_branch
@@ -11325,8 +11296,6 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             spec_workflow_kwargs["base_instructions"] = base_instructions
         if web_search_mode:
             spec_workflow_kwargs["web_search_mode"] = web_search_mode
-        if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
-            spec_workflow_kwargs["qa_panel_enabled"] = True
         try:
             system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
         except Exception:

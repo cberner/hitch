@@ -165,7 +165,7 @@ CODEX_WORKER_LOG_DIR = (
 # Worker isolation policy: "auto" uses systemd scopes only when the user
 # manager is reachable, "systemd" fails closed, and "direct" preserves the
 # legacy process-group launch path for non-systemd environments. The defaults
-# reserve memory for the Django server on a 16G host even when QA panel lanes run
+# reserve memory for the Django server on a 16G host even when system agents run
 # concurrently.
 CODEX_WORKER_ISOLATION = os.environ.get("HITCH_CODEX_WORKER_ISOLATION", "auto")
 CODEX_WORKER_SLICE = os.environ.get(

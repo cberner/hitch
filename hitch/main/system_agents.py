@@ -64,7 +64,6 @@ logger = logging.getLogger(__name__)
 
 PR_QA_AGENT_KIND = "pr_qa"
 PR_FOLLOWUP_MONITOR_AGENT_KIND = "pr_followup_monitor"
-PR_QA_PANEL_SYNTHESIZER_AGENT_KIND = "pr_qa_panel_synthesizer"
 AUTONOMOUS_GOAL_AGENT_KIND = SystemWorkflow.KIND_AUTONOMOUS_GOAL_RUN
 AUTONOMOUS_GOAL_JUDGE_AGENT_KIND = "autonomous_goal_judge"
 AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY = "autonomous_goal_autonomy"
@@ -77,7 +76,6 @@ SPEC_SYNTHESIZER_AGENT_KIND = "spec_critic_synthesizer"
 QA_DISPLAY_AUTHOR = "QA agent"
 PR_WORKFLOW_DISPLAY_AUTHOR = "PR workflow"
 PR_MONITOR_DISPLAY_AUTHOR = "PR monitor"
-QA_PANEL_DISPLAY_AUTHOR = "QA panel"
 AUTONOMOUS_GOAL_DISPLAY_AUTHOR = "Autonomous goal agent"
 AUTONOMOUS_GOAL_JUDGE_DISPLAY_AUTHOR = "Autonomous goal judge"
 AUTONOMOUS_GOAL_DELETED_ERROR = "Autonomous goal deleted by user"
@@ -660,30 +658,6 @@ _QA_OUTPUT_SCHEMA: dict[str, Any] = {
     },
 }
 
-_QA_PANEL_LANE_OUTPUT_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["summary", "findings", "lgtm"],
-    "properties": {
-        "summary": {"type": "string"},
-        "lgtm": {"type": "boolean"},
-        "findings": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["severity", "location", "title", "description"],
-                "properties": {
-                    "severity": {"type": "string", "enum": ["P0", "P1", "P2", "P3"]},
-                    "location": {"type": "string"},
-                    "title": {"type": "string"},
-                    "description": {"type": "string"},
-                },
-            },
-        },
-    },
-}
-
 _AUTONOMOUS_GOAL_CANDIDATE_OUTPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -866,71 +840,25 @@ _CODEX_REVIEW_GUIDANCE = (
 )
 
 
-@dataclass(frozen=True)
-class _QaPanelLane:
-    agent_kind: str
-    label: str
-    focus: str
-    brief: str
-
-
-_QA_PANEL_LANES: tuple[_QaPanelLane, ...] = (
-    _QaPanelLane(
-        agent_kind="pr_qa_correctness",
-        label="Correctness",
-        focus="correctness, data flow, state lifecycle, and concurrency",
-        brief=(
-            "Look for behavioral regressions, broken invariants, race conditions, "
-            "bad error handling, data-loss paths, and edge cases introduced by the diff."
-        ),
-    ),
-    _QaPanelLane(
-        agent_kind="pr_qa_tests",
-        label="Tests",
-        focus="test coverage, regression protection, and verification strategy",
-        brief=(
-            "Look for missing or weak tests, assertions that do not cover the changed "
-            "behavior, brittle fixtures, and important integration paths that should be "
-            "covered before this ships."
-        ),
-    ),
-    _QaPanelLane(
-        agent_kind="pr_qa_ux_manual",
-        label="UX/manual QA",
-        focus="user experience, browser/manual QA, and visible workflow behavior",
-        brief=(
-            "If the diff affects UI or an interactive workflow, manually exercise it. "
-            "For browser QA, run `just qa-browser-setup` if Playwright or Chromium is "
-            "missing, then use Playwright/Chromium to test the affected UI. If setup "
-            "fails, report the concrete setup failure. If no manual QA is relevant, "
-            "say why."
-        ),
-    ),
-    _QaPanelLane(
-        agent_kind="pr_qa_security",
-        label="Security",
-        focus="security, permissions, sandboxing, injection, secrets, and data exposure",
-        brief=(
-            "Look for authorization bypasses, unsafe path or shell handling, secret "
-            "exposure, injection risks, unsafe approval/sandbox behavior, and trust "
-            "boundary mistakes."
-        ),
-    ),
-    _QaPanelLane(
-        agent_kind="pr_qa_maintainability",
-        label="Maintainability",
-        focus="maintainability, architecture, migrations, and long-term clarity",
-        brief=(
-            "Look for confusing ownership boundaries, duplicated logic, migration or "
-            "persistence contract problems, hard-to-debug state transitions, and code "
-            "that will be risky to extend."
-        ),
-    ),
+_LEGACY_QA_PANEL_LANE_AGENT_KINDS = (
+    "pr_qa_correctness",
+    "pr_qa_tests",
+    "pr_qa_ux_manual",
+    "pr_qa_security",
+    "pr_qa_maintainability",
 )
-_QA_PANEL_LANE_KINDS = tuple(lane.agent_kind for lane in _QA_PANEL_LANES)
-_QA_VERDICT_AGENT_KINDS = (PR_QA_AGENT_KIND, PR_QA_PANEL_SYNTHESIZER_AGENT_KIND)
-_QA_INTERRUPTIBLE_AGENT_KINDS = _QA_VERDICT_AGENT_KINDS + _QA_PANEL_LANE_KINDS
-_QA_PANEL_SYNTHESIZER_STARTED_KEY = "qa_panel_synthesizer_started_iteration"
+_LEGACY_QA_PANEL_AGENT_KINDS = (
+    *_LEGACY_QA_PANEL_LANE_AGENT_KINDS,
+    "pr_qa_panel_synthesizer",
+)
+_LEGACY_QA_PANEL_CANCELLED_ERROR = (
+    "legacy QA panel run cancelled because the QA panel feature was removed"
+)
+_QA_VERDICT_AGENT_KINDS = (PR_QA_AGENT_KIND,)
+_QA_INTERRUPTIBLE_AGENT_KINDS = (
+    *_QA_VERDICT_AGENT_KINDS,
+    *_LEGACY_QA_PANEL_AGENT_KINDS,
+)
 
 
 def start_pr_qa_workflow(
@@ -947,7 +875,6 @@ def start_pr_qa_workflow(
     web_search_mode: str | None = None,
     initial_user_message_index: int = 0,
     open_pr_on_lgtm: bool = True,
-    qa_panel_enabled: bool = False,
     auto_merge_branch: str = "",
 ) -> SystemWorkflow:
     """Start a QA workflow before optionally running the work-agent PR prompt."""
@@ -978,7 +905,6 @@ def start_pr_qa_workflow(
                     "web_search_mode": web_search_mode or "",
                     "next_user_message_index": max(initial_user_message_index, 0),
                     "open_pr_on_lgtm": open_pr_on_lgtm,
-                    "qa_panel_enabled": qa_panel_enabled,
                     "auto_merge_branch": auto_merge_branch,
                 },
             )
@@ -993,10 +919,7 @@ def start_pr_qa_workflow(
         return existing_workflow
 
     try:
-        if qa_panel_enabled:
-            _spawn_pr_qa_panel_runs(workflow)
-        else:
-            _spawn_pr_qa_run(workflow)
+        _spawn_pr_qa_run(workflow)
     except Exception as exc:
         _block_workflow(workflow, f"failed to start QA agent: {exc!r}")
     return workflow
@@ -1042,7 +965,6 @@ def start_pr_monitor_workflow(
                     "web_search_mode": web_search_mode or "",
                     "next_user_message_index": max(initial_user_message_index, 0),
                     "open_pr_on_lgtm": True,
-                    "qa_panel_enabled": False,
                     "auto_merge_branch": "",
                     _PR_HANDOFF_STATE_KEY: pr_handoff,
                 },
@@ -1798,7 +1720,6 @@ def start_spec_critic_workflow(
     initial_user_message_index: int = 0,
     auto_pr_enabled: bool = False,
     auto_qa_enabled: bool = False,
-    qa_panel_enabled: bool = False,
     auto_merge_to_local_branch: bool = False,
     auto_merge_branch: str = "",
 ) -> SystemWorkflow:
@@ -1838,7 +1759,6 @@ def start_spec_critic_workflow(
                     "next_user_message_index": max(initial_user_message_index, 0),
                     "auto_pr_enabled": auto_pr_enabled,
                     "auto_qa_enabled": auto_qa_enabled,
-                    "qa_panel_enabled": qa_panel_enabled,
                     "auto_merge_to_local_branch": auto_merge_to_local_branch,
                     "auto_merge_branch": auto_merge_branch,
                 },
@@ -2495,8 +2415,6 @@ def _maybe_start_auto_review_workflow(instance: CodexInstance) -> None:
             "web_search_mode": instance.web_search_mode or None,
             "initial_user_message_index": (instance.user_message_index or 0) + 1,
         }
-        if instance.qa_panel_enabled:
-            workflow_kwargs["qa_panel_enabled"] = True
         if automation == "auto_qa":
             workflow_kwargs["open_pr_on_lgtm"] = False
         auto_merge_branch = (
@@ -2694,10 +2612,7 @@ def _handle_system_feedback_finished(instance: CodexInstance) -> None:
     workflow.step = STEP_QA_RUNNING
     workflow.save(update_fields=["step", "state", "updated_at"])
     try:
-        if _state_bool(workflow, "qa_panel_enabled"):
-            _spawn_pr_qa_panel_runs(workflow)
-        else:
-            _spawn_pr_qa_run(workflow)
+        _spawn_pr_qa_run(workflow)
     except Exception as exc:
         _block_workflow(workflow, f"failed to restart QA agent: {exc!r}")
 
@@ -2820,15 +2735,26 @@ def _handle_pr_qa_agent_finished(
             block_workflow=False,
         )
         return
+    if run.agent_kind in _LEGACY_QA_PANEL_AGENT_KINDS:
+        if (
+            workflow.status == SystemWorkflow.STATUS_RUNNING
+            and workflow.step == STEP_QA_RUNNING
+        ):
+            _fail_run_and_block_workflow(
+                run,
+                _LEGACY_QA_PANEL_CANCELLED_ERROR,
+            )
+        else:
+            _fail_run(
+                run,
+                _LEGACY_QA_PANEL_CANCELLED_ERROR,
+                block_workflow=False,
+            )
+        return
     if (
         workflow.status != SystemWorkflow.STATUS_RUNNING
         or workflow.step != STEP_QA_RUNNING
     ):
-        if run.agent_kind in _QA_PANEL_LANE_KINDS:
-            _finish_qa_panel_lane_run(instance, run, block_workflow=False)
-        return
-    if run.agent_kind in _QA_PANEL_LANE_KINDS:
-        _handle_qa_panel_lane_finished(instance, run, workflow)
         return
     if run.agent_kind not in _QA_VERDICT_AGENT_KINDS:
         _fail_run_and_block_workflow(
@@ -2837,52 +2763,6 @@ def _handle_pr_qa_agent_finished(
         )
         return
     _handle_qa_verdict_finished(instance, run, workflow)
-
-
-def _handle_qa_panel_lane_finished(
-    instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
-) -> None:
-    if not _finish_qa_panel_lane_run(instance, run, block_workflow=True):
-        return
-
-    if not _claim_qa_panel_synthesizer(workflow):
-        return
-    try:
-        _spawn_qa_panel_synthesizer_run(workflow)
-    except Exception as exc:
-        _block_workflow(workflow, f"failed to start QA panel synthesizer: {exc!r}")
-
-
-def _finish_qa_panel_lane_run(
-    instance: CodexInstance, run: SystemAgentRun, *, block_workflow: bool
-) -> bool:
-    lane = _qa_panel_lane_for_kind(run.agent_kind)
-    lane_label = lane.label if lane is not None else run.agent_kind
-    if instance.status != CodexInstance.STATUS_COMPLETED:
-        _fail_run(
-            run,
-            f"QA panel lane {lane_label} failed: {instance.error}",
-            block_workflow=block_workflow,
-        )
-        return False
-
-    raw_output = _final_agent_text(instance.events_path)
-    parsed = _parse_qa_panel_lane_output(raw_output)
-    if parsed is None:
-        _fail_run(
-            run,
-            f"QA panel lane {lane_label} output was not valid JSON",
-            raw_output=raw_output,
-            block_workflow=block_workflow,
-        )
-        return False
-
-    run_input = run.input if isinstance(run.input, dict) else {}
-    run.status = SystemAgentRun.STATUS_COMPLETED
-    run.output = {**parsed, "lane": run_input.get("lane") or lane_label}
-    run.raw_output = raw_output
-    run.save(update_fields=["status", "output", "raw_output", "updated_at"])
-    return True
 
 
 def _handle_qa_verdict_finished(
@@ -2895,12 +2775,7 @@ def _handle_qa_verdict_finished(
     raw_output = _final_agent_text(instance.events_path)
     parsed = _parse_qa_output(raw_output)
     if parsed is None:
-        label = (
-            "QA panel synthesizer"
-            if run.agent_kind == PR_QA_PANEL_SYNTHESIZER_AGENT_KIND
-            else "QA"
-        )
-        _fail_run_and_block_workflow(run, f"{label} output was not valid JSON", raw_output)
+        _fail_run_and_block_workflow(run, "QA output was not valid JSON", raw_output)
         return
 
     _complete_pr_qa_verdict(workflow, run, parsed, raw_output)
@@ -3062,10 +2937,7 @@ def _handle_user_steering_finished(
     workflow.step = STEP_QA_RUNNING
     workflow.save(update_fields=["step", "updated_at"])
     try:
-        if _state_bool(workflow, "qa_panel_enabled"):
-            _spawn_pr_qa_panel_runs(workflow)
-        else:
-            _spawn_pr_qa_run(workflow)
+        _spawn_pr_qa_run(workflow)
     except Exception as exc:
         _block_workflow(workflow, f"failed to restart QA agent: {exc!r}")
 
@@ -5870,56 +5742,6 @@ def _spawn_pr_qa_run(workflow: SystemWorkflow) -> SystemAgentRun:
     return run
 
 
-def _spawn_pr_qa_panel_runs(workflow: SystemWorkflow) -> list[SystemAgentRun]:
-    diff_text = _review_diff_text_for_workflow(workflow)
-    runs: list[SystemAgentRun] = []
-    try:
-        for lane in _QA_PANEL_LANES:
-            instance = codex_pool.spawn_new_session(
-                cwd=workflow.cwd,
-                prompt=_qa_panel_lane_prompt(workflow.cwd, diff_text, lane),
-                base_instructions=_state_string(workflow, "base_instructions") or None,
-                developer_instructions=(
-                    _state_string(workflow, "developer_instructions") or None
-                ),
-                model=_state_string(workflow, "model") or None,
-                reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
-                approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
-                sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
-                enable_memories=_state_bool(workflow, "enable_memories"),
-                web_search_mode=_workflow_web_search_mode(workflow),
-                thread_source=ThreadSource.subagent,
-                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-                workflow_id=workflow.pk,
-                agent_kind=lane.agent_kind,
-                display_author=QA_PANEL_DISPLAY_AUTHOR,
-                output_schema=_QA_PANEL_LANE_OUTPUT_SCHEMA,
-                user_message_index=_qa_review_revision(workflow),
-            )
-            run, _created = SystemAgentRun.objects.get_or_create(
-                instance=instance,
-                defaults={
-                    "workflow": workflow,
-                    "agent_kind": lane.agent_kind,
-                    "thread_id": instance.thread_id,
-                    "status": SystemAgentRun.STATUS_RUNNING,
-                    "input": {
-                        "cwd": workflow.cwd,
-                        "diff_chars": len(diff_text),
-                        "iteration": workflow.iteration,
-                        "qa_review_revision": _qa_review_revision(workflow),
-                        "lane": lane.label,
-                        "focus": lane.focus,
-                    },
-                },
-            )
-            runs.append(run)
-    except Exception:
-        _mark_running_panel_runs_failed(workflow, "QA panel failed to start")
-        raise
-    return runs
-
-
 def _review_diff_text_for_workflow(workflow: SystemWorkflow) -> str:
     auto_merge_branch = _state_string(workflow, "auto_merge_branch")
     if not auto_merge_branch:
@@ -5933,47 +5755,6 @@ def _review_diff_text_for_workflow(workflow: SystemWorkflow) -> str:
     }
     workflow.save(update_fields=["state", "updated_at"])
     return review_patch.patch
-
-
-def _spawn_qa_panel_synthesizer_run(workflow: SystemWorkflow) -> SystemAgentRun:
-    diff_text = _review_diff_text_for_workflow(workflow)
-    prompt = _qa_panel_synthesizer_prompt(workflow, diff_text)
-    instance = codex_pool.spawn_new_session(
-        cwd=workflow.cwd,
-        prompt=prompt,
-        base_instructions=_state_string(workflow, "base_instructions") or None,
-        developer_instructions=_state_string(workflow, "developer_instructions") or None,
-        model=_state_string(workflow, "model") or None,
-        reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
-        approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
-        sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
-        enable_memories=_state_bool(workflow, "enable_memories"),
-        web_search_mode=_workflow_web_search_mode(workflow),
-        thread_source=ThreadSource.subagent,
-        purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        workflow_id=workflow.pk,
-        agent_kind=PR_QA_PANEL_SYNTHESIZER_AGENT_KIND,
-        display_author=QA_PANEL_DISPLAY_AUTHOR,
-        output_schema=_QA_OUTPUT_SCHEMA,
-        user_message_index=_qa_review_revision(workflow),
-    )
-    run, _created = SystemAgentRun.objects.get_or_create(
-        instance=instance,
-        defaults={
-            "workflow": workflow,
-            "agent_kind": PR_QA_PANEL_SYNTHESIZER_AGENT_KIND,
-            "thread_id": instance.thread_id,
-            "status": SystemAgentRun.STATUS_RUNNING,
-            "input": {
-                "cwd": workflow.cwd,
-                "diff_chars": len(diff_text),
-                "iteration": workflow.iteration,
-                "qa_review_revision": _qa_review_revision(workflow),
-                "lane_count": len(_QA_PANEL_LANES),
-            },
-        },
-    )
-    return run
 
 
 def _prepare_autonomous_goal_candidate_cwd(
@@ -6415,7 +6196,6 @@ def _spawn_spec_critic_implementation_turn(
         user_message_index=_state_int(workflow, "next_user_message_index"),
         auto_pr_enabled=_state_bool(workflow, "auto_pr_enabled"),
         auto_qa_enabled=auto_qa_enabled,
-        qa_panel_enabled=_state_bool(workflow, "qa_panel_enabled"),
         auto_merge_to_local_branch=auto_merge_to_local_branch,
         auto_merge_branch=auto_merge_branch if auto_merge_to_local_branch else "",
     )
@@ -6617,12 +6397,11 @@ def _is_qa_workflow_failure(error: str) -> bool:
             "QA agent reached",
             "QA feedback worker failed",
             "QA output ",
-            "QA panel ",
             "QA worker ",
             "failed to restart QA agent",
             "failed to start QA agent",
             "failed to start QA feedback turn",
-            "failed to start QA panel synthesizer",
+            "legacy QA panel run cancelled",
             "unsupported PR QA agent kind",
         )
     )
@@ -6877,142 +6656,6 @@ def _pr_followup_feedback_prompt(workflow: SystemWorkflow, feedback: str) -> str
     )
 
 
-def _qa_panel_lane_prompt(cwd: str, diff_text: str, lane: _QaPanelLane) -> str:
-    diff = diff_text or "(No current worktree diff was detected.)"
-    return (
-        "You are one hidden lane in Hitch's Parallel QA Panel for a PR workflow.\n\n"
-        f"Lane: {lane.label}\n"
-        f"Focus: {lane.focus}\n\n"
-        f"{lane.brief}\n\n"
-        f"{_CODEX_REVIEW_GUIDANCE}\n"
-        "Stay within this lane's focus. Do not duplicate broad review boilerplate; "
-        "produce only findings that this lane is best suited to catch. If another "
-        "lane may also catch the issue, still report it when it is substantive.\n\n"
-        "Set lgtm to false when this lane finds substantive findings, missing "
-        "tests, manual-QA failures, or lane-specific verification gaps. Set lgtm "
-        "to true only when this lane has no substantive findings.\n\n"
-        f"Repository cwd: {cwd}\n\n"
-        "Current diff:\n"
-        "```diff\n"
-        f"{diff}\n"
-        "```\n\n"
-        "Return only JSON matching this shape: "
-        '{"summary": string, "findings": [{"severity": "P0" | "P1" | "P2" | '
-        '"P3", "location": string, "title": string, "description": string}], '
-        '"lgtm": boolean}. Use repo-relative file/line locations where possible. '
-        "Use an empty findings array and a concise no-findings summary when clean."
-    )
-
-
-def _qa_panel_synthesizer_prompt(workflow: SystemWorkflow, diff_text: str) -> str:
-    diff = diff_text or "(No current worktree diff was detected.)"
-    lane_outputs = _qa_panel_lane_outputs(workflow)
-    lane_json = json.dumps(lane_outputs, indent=2, sort_keys=True)
-    return (
-        "You are Hitch's final Parallel QA Panel synthesizer and judge.\n\n"
-        "Merge the hidden QA lane reports into one verdict for the existing Hitch "
-        "QA feedback loop. Deduplicate overlapping findings, preserve the highest "
-        "severity reported for each issue, and do not invent new issues that are "
-        "not supported by a lane report or the diff. If a lane reports a setup "
-        "failure that blocks required testing or manual QA, keep it as actionable "
-        "feedback.\n\n"
-        f"{_CODEX_REVIEW_GUIDANCE}\n"
-        "The final feedback must be concise but complete: group duplicate lane "
-        "reports into a single prioritized finding, include the useful file/line "
-        "reference, and mention which lane evidence supports it when helpful. "
-        "Set lgtm to false when any substantive finding, missing test, manual-QA "
-        "failure, or unresolved setup failure remains. Set lgtm to true only when "
-        "the consolidated panel verdict is clean.\n\n"
-        f"Repository cwd: {workflow.cwd}\n\n"
-        "Current diff:\n"
-        "```diff\n"
-        f"{diff}\n"
-        "```\n\n"
-        "Hidden lane reports:\n"
-        "```json\n"
-        f"{lane_json}\n"
-        "```\n\n"
-        "Return only JSON compatible with the existing QA loop: "
-        '{"feedback": string, "lgtm": boolean}.'
-    )
-
-
-def _qa_panel_lane_outputs(workflow: SystemWorkflow) -> list[dict[str, Any]]:
-    runs = (
-        workflow.agent_runs.filter(
-            agent_kind__in=_QA_PANEL_LANE_KINDS,
-            status=SystemAgentRun.STATUS_COMPLETED,
-        )
-        .order_by("created_at", "id")
-    )
-    outputs: list[dict[str, Any]] = []
-    for run in runs:
-        if (
-            _qa_panel_run_iteration(run) != workflow.iteration
-            or not _run_matches_current_qa_review(workflow, run)
-        ):
-            continue
-        output = run.output if isinstance(run.output, dict) else {}
-        lane = run.input.get("lane") if isinstance(run.input, dict) else ""
-        if not isinstance(lane, str) or not lane:
-            lane_definition = _qa_panel_lane_for_kind(run.agent_kind)
-            lane = lane_definition.label if lane_definition is not None else run.agent_kind
-        outputs.append(
-            {
-                "lane": lane,
-                "agent_kind": run.agent_kind,
-                "summary": output.get("summary", ""),
-                "lgtm": output.get("lgtm"),
-                "findings": output.get("findings", []),
-            }
-        )
-    return outputs
-
-
-def _qa_panel_lane_for_kind(agent_kind: str) -> _QaPanelLane | None:
-    for lane in _QA_PANEL_LANES:
-        if lane.agent_kind == agent_kind:
-            return lane
-    return None
-
-
-def _claim_qa_panel_synthesizer(workflow: SystemWorkflow) -> bool:
-    with transaction.atomic():
-        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
-        if (
-            locked.status != SystemWorkflow.STATUS_RUNNING
-            or locked.step != STEP_QA_RUNNING
-            or locked.state.get(_QA_PANEL_SYNTHESIZER_STARTED_KEY) == locked.iteration
-            or not _qa_panel_lanes_complete(locked)
-        ):
-            return False
-        locked.state = {
-            **locked.state,
-            _QA_PANEL_SYNTHESIZER_STARTED_KEY: locked.iteration,
-        }
-        locked.save(update_fields=["state", "updated_at"])
-        workflow.state = locked.state
-    return True
-
-
-def _qa_panel_lanes_complete(workflow: SystemWorkflow) -> bool:
-    completed_kinds = {
-        run.agent_kind
-        for run in workflow.agent_runs.filter(
-            agent_kind__in=_QA_PANEL_LANE_KINDS,
-            status=SystemAgentRun.STATUS_COMPLETED,
-        )
-        if _qa_panel_run_iteration(run) == workflow.iteration
-        and _run_matches_current_qa_review(workflow, run)
-    }
-    return completed_kinds == set(_QA_PANEL_LANE_KINDS)
-
-
-def _qa_panel_run_iteration(run: SystemAgentRun) -> int:
-    value = run.input.get("iteration") if isinstance(run.input, dict) else 0
-    return value if isinstance(value, int) and value >= 0 else 0
-
-
 def _qa_review_revision(workflow: SystemWorkflow) -> int:
     return _state_int(workflow, _QA_REVIEW_REVISION_STATE_KEY)
 
@@ -7026,16 +6669,6 @@ def _run_matches_current_qa_review(
     workflow: SystemWorkflow, run: SystemAgentRun
 ) -> bool:
     return _system_agent_run_qa_review_revision(run) == _qa_review_revision(workflow)
-
-
-def _mark_running_panel_runs_failed(workflow: SystemWorkflow, error: str) -> None:
-    runs = list(
-        workflow.agent_runs.filter(
-            agent_kind__in=_QA_PANEL_LANE_KINDS,
-            status=SystemAgentRun.STATUS_RUNNING,
-        ).select_related("instance")
-    )
-    _mark_system_agent_runs_failed(_interrupt_system_agent_runs(runs), error)
 
 
 def _claim_user_steering_turn(workflow: SystemWorkflow) -> bool:
@@ -7052,7 +6685,6 @@ def _claim_user_steering_turn(workflow: SystemWorkflow) -> bool:
             **locked.state,
             _QA_REVIEW_REVISION_STATE_KEY: next_revision,
         }
-        state.pop(_QA_PANEL_SYNTHESIZER_STARTED_KEY, None)
         locked.step = STEP_USER_STEERING_RUNNING
         locked.state = state
         locked.save(update_fields=["step", "state", "updated_at"])
@@ -7968,52 +7600,6 @@ def _parse_qa_output(raw_output: str) -> dict[str, Any] | None:
     if not isinstance(feedback, str) or not isinstance(lgtm, bool):
         return None
     return {"feedback": feedback, "lgtm": lgtm}
-
-
-def _parse_qa_panel_lane_output(raw_output: str) -> dict[str, Any] | None:
-    parsed = _parse_json_object(raw_output)
-    if parsed is None:
-        return None
-    summary = parsed.get("summary")
-    findings = parsed.get("findings")
-    lgtm = parsed.get("lgtm")
-    if (
-        not isinstance(summary, str)
-        or not isinstance(findings, list)
-        or not isinstance(lgtm, bool)
-    ):
-        return None
-    normalized_findings: list[dict[str, str]] = []
-    for finding in findings:
-        if not isinstance(finding, dict):
-            return None
-        severity = finding.get("severity")
-        location = finding.get("location")
-        title = finding.get("title")
-        description = finding.get("description")
-        if not isinstance(severity, str) or severity not in {"P0", "P1", "P2", "P3"}:
-            return None
-        if (
-            not isinstance(location, str)
-            or not isinstance(title, str)
-            or not isinstance(description, str)
-        ):
-            return None
-        if not title.strip() or not description.strip():
-            return None
-        normalized_findings.append(
-            {
-                "severity": severity,
-                "location": location.strip(),
-                "title": title.strip(),
-                "description": description.strip(),
-            }
-        )
-    return {
-        "summary": summary.strip(),
-        "findings": normalized_findings,
-        "lgtm": lgtm,
-    }
 
 
 def _parse_autonomous_goal_candidate_output(raw_output: str) -> dict[str, Any] | None:
@@ -9301,10 +8887,9 @@ def archive_stale_blocked_workflows(
 def _block_workflow(
     workflow: SystemWorkflow, error: str, *, surface_to_thread: bool = True
 ) -> None:
-    # Panel mode fans out into several concurrently-routed lane instances, so
-    # two lanes failing at once can drive this from different threads. Lock and
-    # re-read the row (as the Spec Critic equivalents do) so the state-column
-    # overwrite cannot lose a concurrent write.
+    # Hidden system-agent callbacks can race when multiple workers finish or
+    # fail together. Lock and re-read the row (as the Spec Critic equivalents
+    # do) so the state-column overwrite cannot lose a concurrent write.
     with transaction.atomic():
         locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
         failure_owner = _workflow_failure_owner(locked, error)
@@ -9327,13 +8912,9 @@ def _block_workflow(
 def _interrupt_orphaned_qa_review_runs(workflow: SystemWorkflow, error: str) -> None:
     """Stop hidden QA review subagents left running when the workflow ends.
 
-    A QA verdict or panel-lane worker only matters while the PR-QA workflow is
-    still collecting its review. When the workflow blocks before every peer has
-    finished -- for example because one panel lane failed or returned invalid
-    JSON while its siblings are still reviewing -- the survivors would otherwise
-    keep running to completion, burning model quota and touching the session
-    worktree for a review that can no longer be used. Interrupt and fail them so
-    blocking the workflow tears down its whole in-flight QA fan-out.
+    A QA worker only matters while the PR-QA workflow is still collecting its
+    review. When the workflow blocks, interrupt and fail any survivor so it
+    does not keep burning model quota or touching the session worktree.
     """
     if workflow.kind != SystemWorkflow.KIND_PR_QA:
         return
@@ -9347,14 +8928,22 @@ def _interrupt_orphaned_qa_review_runs(workflow: SystemWorkflow, error: str) -> 
     )
     if not runs:
         return
-    _mark_system_agent_runs_failed(_interrupt_system_agent_runs(runs), error)
+    interrupted_runs = _interrupt_system_agent_runs(runs)
+    _mark_system_agent_runs_failed(interrupted_runs, error)
+    interrupted_run_ids = {run.pk for run in interrupted_runs}
+    legacy_runs = [
+        run
+        for run in runs
+        if run.pk not in interrupted_run_ids
+        and run.agent_kind in _LEGACY_QA_PANEL_AGENT_KINDS
+    ]
+    _mark_system_agent_runs_failed(legacy_runs, error)
 
 
 def _surface_workflow_failure(workflow: SystemWorkflow, error: str) -> None:
-    # Make the check-then-set atomic per workflow so two concurrently-routed
-    # panel lanes that both fail cannot each spawn a failure turn (which would
-    # double-post the failure message and double-increment the user message
-    # index). Mirrors _surface_spec_critic_failure.
+    # Make the check-then-set atomic per workflow so concurrent failure routes
+    # cannot double-post the failure message or double-increment the user
+    # message index. Mirrors _surface_spec_critic_failure.
     with transaction.atomic():
         locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
         if locked.state.get("failure_surfaced") is True:
@@ -9803,8 +9392,4 @@ def _recovered_system_agent_run_input(
     run_input["qa_review_revision"] = (
         revision if revision is not None else 0
     )
-    if instance.agent_kind in _QA_PANEL_LANE_KINDS or (
-        instance.agent_kind == PR_QA_PANEL_SYNTHESIZER_AGENT_KIND
-    ):
-        run_input["iteration"] = workflow.iteration
     return run_input

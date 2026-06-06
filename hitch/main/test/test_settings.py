@@ -26,7 +26,6 @@ _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
 _AUTO_QA_COOKIE = "hitch_auto_qa"
-_QA_PANEL_COOKIE = "hitch_qa_panel"
 _SPEC_CRITIC_COOKIE = "hitch_spec_critic"
 _WEB_SEARCH_COOKIE = "hitch_web_search_mode"
 _SHOW_ARCHIVED_COOKIE = "hitch_show_archived_sessions"
@@ -487,8 +486,6 @@ class SettingsPageRenderTests(TestCase):
         self.assertContains(response, "Auto-PR")
         self.assertContains(response, 'name="auto_qa"')
         self.assertContains(response, "Auto-QA")
-        self.assertContains(response, 'name="qa_panel"')
-        self.assertContains(response, "Parallel QA panel")
         self.assertContains(response, 'name="spec_critic"')
         self.assertContains(response, "Spec Critic preflight")
         self.assertContains(response, 'name="web_search_mode"')
@@ -802,22 +799,6 @@ class SettingsPageRenderTests(TestCase):
 
         self.assertIn("checked", auto_pr_input)
         self.assertNotIn("checked", auto_qa_input)
-
-    @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.Codex")
-    def test_saved_qa_panel_setting_renders_checked(
-        self, mock_codex: MagicMock, mock_discover: MagicMock
-    ) -> None:
-        _seed_cookies(self.client, **{_QA_PANEL_COOKIE: "true"})
-        _configure_codex(
-            mock_codex,
-            models=[_model("gpt-5", is_default=True, display_name="GPT-5")],
-        )
-        mock_discover.return_value = []
-
-        response = self.client.get(reverse("update_settings"))
-
-        self.assertContains(response, 'name="qa_panel" value="true" checked')
 
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -1610,14 +1591,6 @@ class UpdateSettingsViewTests(TestCase):
             ),
             ("auto-QA disabled", {}, {}, _AUTO_QA_COOKIE, "false"),
             (
-                "QA panel enabled",
-                {"qa_panel": "true"},
-                {},
-                _QA_PANEL_COOKIE,
-                "true",
-            ),
-            ("QA panel disabled", {}, {}, _QA_PANEL_COOKIE, "false"),
-            (
                 "Spec Critic enabled",
                 {"spec_critic": "true"},
                 {},
@@ -1710,12 +1683,6 @@ class UpdateSettingsViewTests(TestCase):
                 _AUTO_QA_COOKIE,
                 "true",
                 {"auto_qa": "yes"},
-            ),
-            (
-                "QA panel setting",
-                _QA_PANEL_COOKIE,
-                "true",
-                {"qa_panel": "yes"},
             ),
             (
                 "Spec Critic setting",
