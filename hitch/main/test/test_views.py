@@ -15739,6 +15739,67 @@ class SetSessionApprovalModeViewTests(TestCase):
             },
         )
 
+    @patch("hitch.main.views.codex_events.append_event", side_effect=OSError("full"))
+    def test_live_pending_approval_append_failure_still_settles_row(
+        self, mock_append_event: MagicMock
+    ) -> None:
+        SessionMetadata.objects.create(thread_id="abc", cwd="/repo")
+        running = CodexInstance.objects.create(
+            pid=1,
+            thread_id="abc",
+            cwd="/repo",
+            prompt="hi",
+            events_path="/tmp/hitch-test-events.jsonl",
+            status=CodexInstance.STATUS_RUNNING,
+            approval_mode="prompt_user",
+            approval_mode_live_editable=True,
+        )
+        pending = ApprovalRequest.objects.create(
+            instance=running,
+            method="item/commandExecution/requestApproval",
+            params={"item": {"command": "cargo bench"}},
+            decision=ApprovalRequest.DECISION_PENDING,
+        )
+        url = reverse("set_session_approval_mode", kwargs={"session_id": "abc"})
+
+        with patch("hitch.main.views.logger.warning") as warning:
+            response = self.client.post(url, data={"approval_mode": "deny_all"})
+
+        self.assertEqual(response.status_code, 302)
+        pending.refresh_from_db()
+        self.assertEqual(pending.decision, ApprovalRequest.DECISION_DECLINE)
+        mock_append_event.assert_called_once()
+        warning.assert_called_once()
+
+    def test_live_pending_settlement_skips_rows_decided_by_race(self) -> None:
+        class PendingQuery:
+            def order_by(self, *_fields: str) -> "PendingQuery":
+                return self
+
+            def values(self, *_fields: str) -> list[dict[str, Any]]:
+                return [
+                    {
+                        "pk": 1,
+                        "method": "item/commandExecution/requestApproval",
+                        "instance__events_path": "/tmp/hitch-test-events.jsonl",
+                    }
+                ]
+
+        class UpdateQuery:
+            def update(self, **_fields: Any) -> int:
+                return 0
+
+        with patch(
+            "hitch.main.views.ApprovalRequest.objects.filter",
+            side_effect=[PendingQuery(), UpdateQuery()],
+        ):
+            resolved_events = views._settle_live_pending_approval_requests(
+                [1],
+                ApprovalRequest.DECISION_ACCEPT,
+            )
+
+        self.assertEqual(resolved_events, [])
+
     def test_reset_session_approval_mode_applies_global_to_live_instance(self) -> None:
         SessionMetadata.objects.create(
             thread_id="abc",

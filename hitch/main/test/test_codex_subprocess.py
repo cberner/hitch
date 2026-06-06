@@ -6478,6 +6478,33 @@ class ApprovalHandlerTests(TestCase):
         self.assertEqual(events, [])
         self.assertFalse(ApprovalRequest.objects.exists())
 
+    def test_handler_routes_dynamic_tool_calls(self) -> None:
+        instance = self._make_instance()
+        handler = _make_approval_handler(
+            instance=instance,
+            write_event=lambda _method, _payload: None,
+            approval_mode="prompt_user",
+        )
+
+        with (
+            patch(
+                "hitch.main.management.commands.codex_worker.is_dynamic_tool_call",
+                return_value=True,
+            ),
+            patch(
+                "hitch.main.management.commands.codex_worker.handle_dynamic_tool_call",
+                return_value={"result": "ok"},
+            ) as handle_dynamic_tool_call,
+        ):
+            result = handler("tool/dynamic", {"args": {"name": "value"}})
+
+        self.assertEqual(result, {"result": "ok"})
+        handle_dynamic_tool_call.assert_called_once()
+        params, context = handle_dynamic_tool_call.call_args.args
+        self.assertEqual(params, {"args": {"name": "value"}})
+        self.assertEqual(context.cwd, "/repo")
+        self.assertEqual(context.thread_id, "thread-approval")
+
     def test_handler_observes_live_approve_all_mode_change(self) -> None:
         instance = self._make_instance()
         events: list[tuple[str, object]] = []
@@ -6561,6 +6588,49 @@ class ApprovalHandlerTests(TestCase):
                 self.assertEqual(row.decision, decision)
                 self.assertIsNotNone(row.decided_at)
                 self.assertEqual(events, [])
+
+    def test_record_live_approval_decision_preserves_existing_payload(self) -> None:
+        instance = self._make_instance()
+        payload = {"decision": "accept", "execPolicy": {"mode": "workspace-write"}}
+        approval = ApprovalRequest.objects.create(
+            instance=instance,
+            method="item/commandExecution/requestApproval",
+            params={"item": {"command": "ls"}},
+            decision=ApprovalRequest.DECISION_ACCEPT,
+            decision_payload=payload,
+            decided_at=timezone.now(),
+        )
+
+        result = codex_worker_module._record_live_approval_decision(
+            approval.pk,
+            ApprovalRequest.DECISION_DECLINE,
+        )
+
+        self.assertEqual(result, payload)
+        approval.refresh_from_db()
+        self.assertEqual(approval.decision, ApprovalRequest.DECISION_ACCEPT)
+
+    def test_record_live_approval_decision_handles_deleted_row(self) -> None:
+        self.assertEqual(
+            codex_worker_module._record_live_approval_decision(
+                999_999,
+                ApprovalRequest.DECISION_DECLINE,
+            ),
+            ApprovalRequest.DECISION_DECLINE,
+        )
+
+    def test_current_approval_mode_uses_fallback_for_missing_instance(self) -> None:
+        instance = self._make_instance()
+        pk = instance.pk
+        instance.delete()
+
+        self.assertEqual(
+            codex_worker_module._current_approval_mode(
+                instance=CodexInstance(pk=pk),
+                fallback="prompt_user",
+            ),
+            "prompt_user",
+        )
 
     def test_interactive_handler_creates_row_and_emits_events(self) -> None:
         """The interactive handler creates an ApprovalRequest row, emits an
