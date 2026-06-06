@@ -118,7 +118,6 @@ def spawn_new_session(
     user_message_index: int | None = 0,
     auto_pr_enabled: bool = False,
     auto_qa_enabled: bool = False,
-    qa_panel_enabled: bool = False,
     auto_merge_to_local_branch: bool = False,
     auto_merge_branch: str = "",
 ) -> CodexInstance:
@@ -202,7 +201,6 @@ def spawn_new_session(
         user_message_index=user_message_index,
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
-        qa_panel_enabled=qa_panel_enabled,
         auto_merge_to_local_branch=auto_merge_to_local_branch,
         auto_merge_branch=auto_merge_branch,
     )
@@ -306,7 +304,6 @@ def spawn_turn(
     user_message_index: int | None = None,
     auto_pr_enabled: bool = False,
     auto_qa_enabled: bool = False,
-    qa_panel_enabled: bool = False,
     auto_merge_to_local_branch: bool = False,
     auto_merge_branch: str = "",
 ) -> CodexInstance:
@@ -349,7 +346,6 @@ def spawn_turn(
         user_message_index=user_message_index,
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
-        qa_panel_enabled=qa_panel_enabled,
         auto_merge_to_local_branch=auto_merge_to_local_branch,
         auto_merge_branch=auto_merge_branch,
     )
@@ -2802,7 +2798,6 @@ def _spawn_worker(
     user_message_index: int | None = None,
     auto_pr_enabled: bool = False,
     auto_qa_enabled: bool = False,
-    qa_panel_enabled: bool = False,
     auto_merge_to_local_branch: bool = False,
     auto_merge_branch: str = "",
 ) -> CodexInstance:
@@ -2843,7 +2838,6 @@ def _spawn_worker(
             plan_mode=plan_mode,
             auto_pr_enabled=auto_pr_enabled,
             auto_qa_enabled=auto_qa_enabled,
-            qa_panel_enabled=qa_panel_enabled,
             auto_merge_to_local_branch=auto_merge_to_local_branch,
             auto_merge_branch=auto_merge_branch,
             events_path="",

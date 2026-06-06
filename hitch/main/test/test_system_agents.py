@@ -49,7 +49,6 @@ def _instance(
     display_author: str = "",
     auto_pr_enabled: bool = False,
     auto_qa_enabled: bool = False,
-    qa_panel_enabled: bool = False,
     auto_merge_to_local_branch: bool = False,
     auto_merge_branch: str = "",
     plan_mode: bool = False,
@@ -78,7 +77,6 @@ def _instance(
         plan_mode=plan_mode,
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
-        qa_panel_enabled=qa_panel_enabled,
         auto_merge_to_local_branch=auto_merge_to_local_branch,
         auto_merge_branch=auto_merge_branch,
         events_path=events_path,
@@ -377,29 +375,6 @@ class PrQaWorkflowTests(TestCase):
         )
         self.assertIn("Hitch PR workflow could not complete.", kwargs["prompt"])
         self.assertNotIn("Hitch QA agent could not complete", kwargs["prompt"])
-
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    def test_qa_panel_synthesizer_start_failure_is_surfaced_as_qa_failure(
-        self, mock_spawn: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            state={"next_user_message_index": 1, "qa_panel_enabled": True},
-        )
-
-        system_agents._surface_workflow_failure(
-            workflow,
-            "failed to start QA panel synthesizer: RuntimeError('spawn failed')",
-        )
-
-        kwargs = mock_spawn.call_args.kwargs
-        self.assertEqual(kwargs["display_author"], system_agents.QA_DISPLAY_AUTHOR)
-        self.assertIn("Hitch QA agent could not complete", kwargs["prompt"])
-
 
 class SessionPrStageRefreshTests(TestCase):
     def _due_pr_workflow(self, thread_id: str, cwd: str) -> SystemWorkflow:
@@ -821,7 +796,6 @@ class SpecCriticWorkflowTests(TestCase):
             web_search_mode="cached",
             initial_user_message_index=2,
             auto_qa_enabled=True,
-            qa_panel_enabled=True,
             auto_merge_to_local_branch=True,
             auto_merge_branch="release",
         )
@@ -1619,7 +1593,6 @@ class SpecCriticWorkflowTests(TestCase):
                 "web_search_mode": "live",
                 "next_user_message_index": 4,
                 "auto_pr_enabled": True,
-                "qa_panel_enabled": True,
                 "clarification_answers": {"scope": "New session flow"},
             },
         )
@@ -1654,7 +1627,6 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(kwargs["thread_id"], "main-thread")
         self.assertNotIn("workflow_id", kwargs)
         self.assertTrue(kwargs["auto_pr_enabled"])
-        self.assertTrue(kwargs["qa_panel_enabled"])
         self.assertEqual(kwargs["user_message_index"], 4)
         self.assertEqual(kwargs["web_search_mode"], "live")
         self.assertIn("Hitch Spec Critic synthesized", kwargs["prompt"])
@@ -1872,401 +1844,72 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
         self.assertIn("no merge base", workflow.state["error"])
 
-    @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_parallel_qa_panel_starts_all_hidden_lanes(
-        self, mock_spawn: MagicMock, _mock_diff: MagicMock
-    ) -> None:
-        mock_spawn.side_effect = [
-            _instance(
-                thread_id=f"qa-lane-{index}",
-                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-                agent_kind=lane.agent_kind,
-            )
-            for index, lane in enumerate(system_agents._QA_PANEL_LANES)
-        ]
-
-        workflow = system_agents.start_pr_qa_workflow(
-            main_thread_id="main-thread",
-            cwd="/repo",
-            sandbox_policy="workspaceWrite",
-            approval_mode="prompt_user",
-            model="gpt-5.4",
-            reasoning_effort="high",
-            web_search_mode="cached",
-            qa_panel_enabled=True,
-        )
-
-        self.assertEqual(workflow.step, system_agents.STEP_QA_RUNNING)
-        self.assertTrue(workflow.state["qa_panel_enabled"])
-        self.assertEqual(workflow.state["web_search_mode"], "cached")
-        self.assertEqual(mock_spawn.call_count, len(system_agents._QA_PANEL_LANES))
-        agent_kinds = [call.kwargs["agent_kind"] for call in mock_spawn.call_args_list]
-        self.assertEqual(agent_kinds, list(system_agents._QA_PANEL_LANE_KINDS))
-        for call, lane in zip(
-            mock_spawn.call_args_list, system_agents._QA_PANEL_LANES, strict=True
-        ):
-            kwargs = call.kwargs
-            self.assertEqual(kwargs["thread_source"], ThreadSource.subagent)
-            self.assertEqual(kwargs["purpose"], CodexInstance.PURPOSE_SYSTEM_AGENT)
-            self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
-            self.assertEqual(kwargs["sandbox_policy"], "workspaceWrite")
-            self.assertEqual(kwargs["model"], "gpt-5.4")
-            self.assertEqual(kwargs["reasoning_effort"], "high")
-            self.assertEqual(kwargs["web_search_mode"], "cached")
-            self.assertEqual(kwargs["display_author"], system_agents.QA_PANEL_DISPLAY_AUTHOR)
-            self.assertEqual(kwargs["output_schema"], system_agents._QA_PANEL_LANE_OUTPUT_SCHEMA)
-            self.assertIn(lane.label, kwargs["prompt"])
-            self.assertIn(lane.focus, kwargs["prompt"])
-            self.assertIn("diff --git", kwargs["prompt"])
-
-        runs = list(SystemAgentRun.objects.filter(workflow=workflow).order_by("created_at"))
-        self.assertEqual(len(runs), len(system_agents._QA_PANEL_LANES))
-        self.assertEqual([run.agent_kind for run in runs], list(system_agents._QA_PANEL_LANE_KINDS))
-        self.assertEqual(runs[0].input["lane"], system_agents._QA_PANEL_LANES[0].label)
-
-    @patch(
-        "hitch.main.system_agents.build_auto_merge_review_patch",
-        side_effect=[
-            AutoMergeReviewPatch(
-                patch="diff --git strict lanes",
-                target_sha="base1",
-                base_sha="session-base1",
-            ),
-            AutoMergeReviewPatch(
-                patch="diff --git strict synth",
-                target_sha="base2",
-                base_sha="session-base2",
-            ),
-        ],
-    )
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_parallel_qa_panel_auto_merge_reviews_strict_patch(
-        self, mock_spawn: MagicMock, mock_patch: MagicMock
-    ) -> None:
-        lane_instances = [
-            _instance(
-                thread_id=f"qa-lane-{index}",
-                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-                events_path=_events_file(
-                    self,
-                    {
-                        "summary": f"{lane.label} clean",
-                        "findings": [],
-                        "lgtm": True,
-                    },
-                ),
-                agent_kind=lane.agent_kind,
-            )
-            for index, lane in enumerate(system_agents._QA_PANEL_LANES)
-        ]
-        synth_instance = _instance(
-            thread_id="qa-synth",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.PR_QA_PANEL_SYNTHESIZER_AGENT_KIND,
-        )
-        mock_spawn.side_effect = [*lane_instances, synth_instance]
-
-        workflow = system_agents.start_pr_qa_workflow(
-            main_thread_id="main-thread",
-            cwd="/repo",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            qa_panel_enabled=True,
-            auto_merge_branch="main",
-        )
-
-        lane_prompts = [
-            call.kwargs["prompt"]
-            for call in mock_spawn.call_args_list[: len(system_agents._QA_PANEL_LANES)]
-        ]
-        self.assertTrue(
-            all("diff --git strict lanes" in prompt for prompt in lane_prompts)
-        )
-        for instance in lane_instances:
-            system_agents.on_codex_instance_finished(instance)
-
-        self.assertIn("diff --git strict synth", mock_spawn.call_args.kwargs["prompt"])
-        workflow.refresh_from_db()
-        self.assertEqual(mock_patch.call_count, 2)
-        self.assertEqual(
-            workflow.state[system_agents.AUTO_MERGE_REVIEWED_DIFF_STATE_KEY],
-            "diff --git strict synth",
-        )
-        self.assertEqual(
-            workflow.state[system_agents.AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY],
-            "base2",
-        )
-        self.assertEqual(
-            workflow.state[system_agents.AUTO_MERGE_SESSION_BASE_SHA_STATE_KEY],
-            "session-base2",
-        )
-
-    @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_parallel_qa_panel_waits_for_lanes_then_starts_synthesizer(
-        self, mock_spawn: MagicMock, _mock_diff: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            state={
-                "qa_panel_enabled": True,
-                "approval_mode": "prompt_user",
-                "web_search_mode": "live",
-            },
-        )
-        lane_instances: list[CodexInstance] = []
-        for index, lane in enumerate(system_agents._QA_PANEL_LANES):
-            instance = _instance(
-                thread_id=f"qa-lane-{index}",
-                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-                workflow_id=workflow.pk,
-                events_path=_events_file(
-                    self,
-                    {
-                        "summary": f"{lane.label} summary",
-                        "findings": [
-                            {
-                                "severity": "P2",
-                                "location": "hitch/main/system_agents.py:1",
-                                "title": f"{lane.label} finding",
-                                "description": "The panel should preserve this issue.",
-                            }
-                        ],
-                        "lgtm": False,
-                    },
-                ),
-                agent_kind=lane.agent_kind,
-            )
-            lane_instances.append(instance)
-            SystemAgentRun.objects.create(
-                workflow=workflow,
-                agent_kind=lane.agent_kind,
-                thread_id=instance.thread_id,
-                instance=instance,
-                status=SystemAgentRun.STATUS_RUNNING,
-                input={"lane": lane.label},
-            )
-        mock_spawn.return_value = _instance(
-            thread_id="qa-synth",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents.PR_QA_PANEL_SYNTHESIZER_AGENT_KIND,
-        )
-
-        for instance in lane_instances[:-1]:
-            system_agents.on_codex_instance_finished(instance)
-        mock_spawn.assert_not_called()
-
-        system_agents.on_codex_instance_finished(lane_instances[-1])
-
-        mock_spawn.assert_called_once()
-        kwargs = mock_spawn.call_args.kwargs
-        self.assertEqual(kwargs["agent_kind"], system_agents.PR_QA_PANEL_SYNTHESIZER_AGENT_KIND)
-        self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
-        self.assertEqual(kwargs["web_search_mode"], "live")
-        self.assertEqual(kwargs["output_schema"], system_agents._QA_OUTPUT_SCHEMA)
-        self.assertIn("final Parallel QA Panel synthesizer", kwargs["prompt"])
-        self.assertIn("Deduplicate overlapping findings", kwargs["prompt"])
-        self.assertIn("preserve the highest severity", kwargs["prompt"])
-        self.assertIn("Correctness summary", kwargs["prompt"])
-        self.assertIn("diff --git", kwargs["prompt"])
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.state[system_agents._QA_PANEL_SYNTHESIZER_STARTED_KEY], 0)
-        synth_run = SystemAgentRun.objects.get(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_PANEL_SYNTHESIZER_AGENT_KIND,
-        )
-        self.assertEqual(synth_run.thread_id, "qa-synth")
-
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    def test_parallel_qa_panel_synthesizer_verdict_feeds_existing_loop(
-        self, mock_spawn: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            state={"qa_panel_enabled": True, "next_user_message_index": 2},
-        )
-        instance = _instance(
-            thread_id="qa-synth",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=_events_file(
-                self,
-                {"feedback": "[P1] Fix the consolidated issue.", "lgtm": False},
-            ),
-            agent_kind=system_agents.PR_QA_PANEL_SYNTHESIZER_AGENT_KIND,
-        )
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=system_agents.PR_QA_PANEL_SYNTHESIZER_AGENT_KIND,
-            thread_id="qa-synth",
-            instance=instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        run.refresh_from_db()
-        workflow.refresh_from_db()
-        self.assertEqual(run.status, SystemAgentRun.STATUS_COMPLETED)
-        self.assertEqual(workflow.step, system_agents.STEP_FEEDBACK_RUNNING)
-        self.assertEqual(workflow.iteration, 1)
-        self.assertEqual(workflow.state["last_feedback"], "[P1] Fix the consolidated issue.")
-        self.assertIn("Feedback from Hitch QA agent", mock_spawn.call_args.kwargs["prompt"])
-        self.assertEqual(mock_spawn.call_args.kwargs["user_message_index"], 2)
-
-    @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
     @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
-    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_parallel_qa_panel_interrupts_started_lanes_when_start_fails(
-        self,
-        mock_spawn_new: MagicMock,
-        mock_interrupt: MagicMock,
-        _mock_spawn_turn: MagicMock,
-        _mock_diff: MagicMock,
+    def test_legacy_qa_panel_run_cancels_in_flight_panel_workflow(
+        self, mock_interrupt: MagicMock, mock_spawn_turn: MagicMock
     ) -> None:
-        started = _instance(
-            thread_id="qa-lane-0",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            agent_kind=system_agents._QA_PANEL_LANES[0].agent_kind,
-        )
-        mock_spawn_new.side_effect = [started, RuntimeError("boom")]
-        mock_interrupt.return_value = started
-
-        workflow = system_agents.start_pr_qa_workflow(
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
             main_thread_id="main-thread",
             cwd="/repo",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            qa_panel_enabled=True,
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_QA_RUNNING,
+            state={"next_user_message_index": 1},
         )
+        finished_instance = _instance(
+            thread_id="legacy-panel-finished",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_COMPLETED,
+            agent_kind=system_agents._LEGACY_QA_PANEL_LANE_AGENT_KINDS[0],
+        )
+        sibling_instance = _instance(
+            thread_id="legacy-panel-running",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_COMPLETED,
+            agent_kind=system_agents._LEGACY_QA_PANEL_LANE_AGENT_KINDS[1],
+        )
+        finished_run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=finished_instance.agent_kind,
+            thread_id=finished_instance.thread_id,
+            instance=finished_instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+        sibling_run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=sibling_instance.agent_kind,
+            thread_id=sibling_instance.thread_id,
+            instance=sibling_instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+        mock_interrupt.return_value = None
+
+        system_agents.on_codex_instance_finished(finished_instance)
 
         workflow.refresh_from_db()
-        run = SystemAgentRun.objects.get(workflow=workflow)
+        finished_run.refresh_from_db()
+        sibling_run.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-        self.assertEqual(run.error, "QA panel failed to start")
+        self.assertEqual(
+            workflow.state["error"],
+            system_agents._LEGACY_QA_PANEL_CANCELLED_ERROR,
+        )
+        self.assertEqual(finished_run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertEqual(sibling_run.status, SystemAgentRun.STATUS_FAILED)
         mock_interrupt.assert_called_once_with(
-            started.pk, expected_thread_id="qa-lane-0"
+            sibling_instance.pk,
+            expected_thread_id=sibling_instance.thread_id,
         )
-
-    def test_parallel_qa_panel_finalizes_lane_after_workflow_blocks(self) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_BLOCKED,
-            step=system_agents.STEP_BLOCKED,
-            state={"qa_panel_enabled": True},
+        system_agents.on_codex_instance_finished(sibling_instance)
+        sibling_run.refresh_from_db()
+        self.assertEqual(sibling_run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertEqual(
+            mock_spawn_turn.call_args.kwargs["display_author"],
+            system_agents.QA_DISPLAY_AUTHOR,
         )
-        lane = system_agents._QA_PANEL_LANES[0]
-        instance = _instance(
-            thread_id="qa-lane-0",
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            workflow_id=workflow.pk,
-            events_path=_events_file(
-                self,
-                {
-                    "summary": "Clean after sibling failed.",
-                    "findings": [],
-                    "lgtm": True,
-                },
-            ),
-            agent_kind=lane.agent_kind,
-        )
-        run = SystemAgentRun.objects.create(
-            workflow=workflow,
-            agent_kind=lane.agent_kind,
-            thread_id=instance.thread_id,
-            instance=instance,
-            status=SystemAgentRun.STATUS_RUNNING,
-            input={"lane": lane.label},
-        )
-
-        system_agents.on_codex_instance_finished(instance)
-
-        run.refresh_from_db()
-        workflow.refresh_from_db()
-        self.assertEqual(run.status, SystemAgentRun.STATUS_COMPLETED)
-        self.assertEqual(run.output["lane"], lane.label)
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-
-    @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
-    def test_failed_panel_lane_interrupts_running_siblings(
-        self, mock_interrupt: MagicMock, _mock_spawn_turn: MagicMock
-    ) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            state={"qa_panel_enabled": True, "next_user_message_index": 1},
-        )
-        lane_runs: list[SystemAgentRun] = []
-        failing_instance: CodexInstance | None = None
-        for index, lane in enumerate(system_agents._QA_PANEL_LANES):
-            if index == 0:
-                # First lane returns invalid JSON, which fails the lane and
-                # blocks the whole workflow.
-                events_path = _agent_message_events_file(self, "not valid json")
-                status = CodexInstance.STATUS_COMPLETED
-            else:
-                events_path = "/dev/null"
-                status = CodexInstance.STATUS_RUNNING
-            instance = _instance(
-                thread_id=f"qa-lane-{index}",
-                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-                workflow_id=workflow.pk,
-                events_path=events_path,
-                status=status,
-                agent_kind=lane.agent_kind,
-            )
-            if index == 0:
-                failing_instance = instance
-            lane_runs.append(
-                SystemAgentRun.objects.create(
-                    workflow=workflow,
-                    agent_kind=lane.agent_kind,
-                    thread_id=instance.thread_id,
-                    instance=instance,
-                    status=SystemAgentRun.STATUS_RUNNING,
-                    input={"lane": lane.label},
-                )
-            )
-        assert failing_instance is not None
-        mock_interrupt.side_effect = lambda instance_id, *, expected_thread_id: (
-            CodexInstance.objects.get(pk=instance_id)
-        )
-
-        system_agents.on_codex_instance_finished(failing_instance)
-
-        workflow.refresh_from_db()
-        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
-        # The failing lane is marked failed; every still-running sibling lane is
-        # interrupted and failed too, instead of being orphaned to keep burning
-        # the user's Codex quota.
-        for run in lane_runs:
-            run.refresh_from_db()
-            self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
-        interrupted_threads = {
-            call.args[0] for call in mock_interrupt.call_args_list
-        }
-        sibling_instance_ids = {
-            run.instance_id for run in lane_runs[1:]
-        }
-        self.assertEqual(interrupted_threads, sibling_instance_ids)
-        self.assertNotIn(failing_instance.pk, interrupted_threads)
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_start_returns_existing_running_workflow(self, mock_spawn: MagicMock) -> None:
@@ -2482,7 +2125,6 @@ class SpecCriticWorkflowTests(TestCase):
         instance = _instance(
             thread_id="main-thread",
             auto_qa_enabled=True,
-            qa_panel_enabled=True,
             model="gpt-5.4",
             reasoning_effort="high",
             sandbox_policy="workspaceWrite",
@@ -2509,7 +2151,6 @@ class SpecCriticWorkflowTests(TestCase):
             enable_memories=True,
             web_search_mode=None,
             initial_user_message_index=3,
-            qa_panel_enabled=True,
             open_pr_on_lgtm=False,
         )
 
@@ -2582,16 +2223,6 @@ class SpecCriticWorkflowTests(TestCase):
                 instance.refresh_from_db()
                 self.assertIsNone(instance.auto_pr_triggered_at)
         mock_start.assert_not_called()
-
-    @patch("hitch.main.system_agents.start_pr_qa_workflow")
-    def test_auto_pr_forwards_parallel_qa_panel_setting(
-        self, mock_start: MagicMock
-    ) -> None:
-        instance = _instance(auto_pr_enabled=True, qa_panel_enabled=True)
-
-        system_agents.on_codex_instance_finished(instance)
-
-        self.assertTrue(mock_start.call_args.kwargs["qa_panel_enabled"])
 
     @patch("hitch.main.system_agents.start_pr_qa_workflow")
     def test_auto_pr_takes_precedence_over_auto_qa(self, mock_start: MagicMock) -> None:
@@ -7372,30 +7003,30 @@ class SpecCriticWorkflowTests(TestCase):
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_QA_RUNNING,
-            state={"qa_panel_enabled": True},
+            state={},
         )
         interrupted_instance = _instance(
-            thread_id="qa-lane-0",
+            thread_id="qa-thread-0",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
             status=CodexInstance.STATUS_RUNNING,
         )
         still_running_instance = _instance(
-            thread_id="qa-lane-1",
+            thread_id="qa-thread-1",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
             status=CodexInstance.STATUS_RUNNING,
         )
         interrupted_run = SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents._QA_PANEL_LANES[0].agent_kind,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
             thread_id=interrupted_instance.thread_id,
             instance=interrupted_instance,
             status=SystemAgentRun.STATUS_RUNNING,
         )
         still_running_run = SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents._QA_PANEL_LANES[1].agent_kind,
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
             thread_id=still_running_instance.thread_id,
             instance=still_running_instance,
             status=SystemAgentRun.STATUS_RUNNING,
@@ -8268,35 +7899,6 @@ class SpecCriticWorkflowTests(TestCase):
         )
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         self.assertEqual(workflow.step, system_agents.STEP_QA_RUNNING)
-
-    def test_qa_panel_completion_ignores_stale_review_revision(self) -> None:
-        workflow = SystemWorkflow.objects.create(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id="main-thread",
-            cwd="/repo",
-            status=SystemWorkflow.STATUS_RUNNING,
-            step=system_agents.STEP_QA_RUNNING,
-            state={system_agents._QA_REVIEW_REVISION_STATE_KEY: 1},
-        )
-        for lane in system_agents._QA_PANEL_LANES:
-            instance = _instance(
-                thread_id=f"{lane.agent_kind}-thread",
-                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-                workflow_id=workflow.pk,
-            )
-            SystemAgentRun.objects.create(
-                workflow=workflow,
-                agent_kind=lane.agent_kind,
-                thread_id=instance.thread_id,
-                instance=instance,
-                status=SystemAgentRun.STATUS_COMPLETED,
-                input={
-                    "iteration": workflow.iteration,
-                    "qa_review_revision": 0,
-                },
-            )
-
-        self.assertFalse(system_agents._qa_panel_lanes_complete(workflow))
 
     def test_final_agent_text_ignores_commentary_messages(self) -> None:
         with tempfile.NamedTemporaryFile(mode="w", delete=False) as fh:

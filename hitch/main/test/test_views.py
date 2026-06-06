@@ -91,7 +91,6 @@ _EXTRA_SYSTEM_PROMPT_COOKIE = "hitch_extra_system_prompt"
 _USE_WORKTREES_COOKIE = "hitch_use_worktrees"
 _AUTO_PR_COOKIE = "hitch_auto_pr"
 _AUTO_QA_COOKIE = "hitch_auto_qa"
-_QA_PANEL_COOKIE = "hitch_qa_panel"
 _SPEC_CRITIC_COOKIE = "hitch_spec_critic"
 _WEB_SEARCH_COOKIE = "hitch_web_search_mode"
 _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
@@ -11523,31 +11522,6 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
-    def test_new_session_auto_qa_forwards_qa_panel_to_spawn(
-        self,
-        mock_discover: MagicMock,
-        mock_spawn: MagicMock,
-        mock_codex: MagicMock,
-    ) -> None:
-        _setup_codex(mock_codex, models=[])
-        repo = f"{self.REPO}-auto-qa-panel"
-        _seed_cookies(self.client, **{_QA_PANEL_COOKIE: "true"})
-        mock_discover.return_value = [Path(repo)]
-        mock_spawn.return_value = SimpleNamespace(thread_id="auto-qa-panel-thread")
-
-        response = self.client.post(
-            reverse("new_session"),
-            data={"prompt": "do thing", "cwd": repo, "auto_qa": "true"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        kwargs = mock_spawn.call_args.kwargs
-        self.assertTrue(kwargs["auto_qa_enabled"])
-        self.assertTrue(kwargs["qa_panel_enabled"])
-
-    @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
     def test_new_session_project_routing_matrix(
         self,
         mock_discover: MagicMock,
@@ -14307,47 +14281,6 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
-    def test_auto_qa_session_forwards_qa_panel_to_follow_up_turn(
-        self,
-        mock_codex: MagicMock,
-        mock_spawn: MagicMock,
-        mock_discover: MagicMock,
-    ) -> None:
-        self._patch_codex(
-            mock_codex,
-            model="gpt-5.4",
-            reasoning_effort="high",
-        )
-        _seed_cookies(self.client, **{_QA_PANEL_COOKIE: "true"})
-        mock_discover.return_value = [Path("/repo")]
-        SessionMetadata.objects.create(
-            thread_id="abc",
-            cwd="/repo",
-            auto_qa_enabled=True,
-        )
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "follow-up"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        mock_spawn.assert_called_once_with(
-            thread_id="abc",
-            cwd="/repo",
-            prompt="follow-up",
-            sandbox_policy=None,
-            approval_mode="auto_review",
-            auto_qa_enabled=True,
-            user_message_index=0,
-            stored_model="gpt-5.4",
-            stored_reasoning_effort="high",
-            qa_panel_enabled=True,
-        )
-
-    @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.codex_pool.spawn_turn")
-    @patch("hitch.main.views.Codex")
     def test_plan_routing_to_spawn_matrix(
         self,
         mock_codex: MagicMock,
@@ -15034,27 +14967,6 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         base_instructions = mock_start_workflow.call_args.kwargs["base_instructions"]
         self.assertIn("You are running inside HITCH", base_instructions)
-
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
-    @patch("hitch.main.views.discover_repos")
-    @patch("hitch.main.views.Codex")
-    def test_qa_slash_command_forwards_parallel_panel_setting(
-        self,
-        mock_codex: MagicMock,
-        mock_discover: MagicMock,
-        mock_start_workflow: MagicMock,
-    ) -> None:
-        self._patch_codex(mock_codex, model="gpt-5.4")
-        mock_discover.return_value = [Path("/repo")]
-        _seed_cookies(self.client, **{_QA_PANEL_COOKIE: "true"})
-
-        response = self.client.post(
-            reverse("send_message", kwargs={"session_id": "abc"}),
-            data={"prompt": "/qa"},
-        )
-
-        self.assertEqual(response.status_code, 302)
-        self.assertTrue(mock_start_workflow.call_args.kwargs["qa_panel_enabled"])
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.discover_repos")

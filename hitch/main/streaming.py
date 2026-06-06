@@ -71,7 +71,6 @@ _IDLE_MAX_STREAM_SECONDS = 5 * 60
 _FILE_APPEAR_TIMEOUT = 30.0
 
 _QA_AGENT_DISPLAY_AUTHOR = "QA agent"
-_QA_PANEL_DISPLAY_AUTHOR = "QA panel"
 _QA_AGENT_KIND = "pr_qa"
 _PR_MONITOR_AGENT_KIND = "pr_followup_monitor"
 _STEP_QA_RUNNING = "qa_running"
@@ -84,8 +83,6 @@ _STEP_SPEC_CRITIC_CLASSIFYING = "spec_critic_classifying"
 _STEP_SPEC_CRITIC_ANALYZING = "spec_critic_analyzing"
 _STEP_SPEC_CRITIC_CLARIFYING = "spec_critic_clarifying"
 _STEP_SPEC_CRITIC_SYNTHESIZING = "spec_critic_synthesizing"
-_QA_PANEL_SYNTHESIZER_AGENT_KIND = "pr_qa_panel_synthesizer"
-_QA_PANEL_AGENT_KIND_PREFIX = "pr_qa_"
 _SPEC_CRITIC_WORKFLOW_KIND = "spec_critic"
 _COMPACT_TOKEN_UNITS = (
     (1_000_000_000, "B"),
@@ -482,11 +479,6 @@ def system_workflow_status_text(workflow: SystemWorkflow | None) -> str:
         if instance is not None and instance.agent_kind == _PR_MONITOR_AGENT_KIND:
             return "PR monitor is checking GitHub..."
         return "PR monitor is waiting..."
-    if (
-        workflow.step == _STEP_QA_RUNNING
-        and workflow.state.get("qa_panel_enabled") is True
-    ):
-        return _qa_panel_status_text(workflow)
     instance = _running_system_agent_instance(workflow.pk)
     status_text = qa_agent_status_text_for_instance(instance)
     return status_text or "QA agent working..."
@@ -495,66 +487,8 @@ def system_workflow_status_text(workflow: SystemWorkflow | None) -> str:
 def _is_qa_agent_instance(instance: CodexInstance) -> bool:
     return (
         instance.display_author == _QA_AGENT_DISPLAY_AUTHOR
-        or instance.display_author == _QA_PANEL_DISPLAY_AUTHOR
         or instance.agent_kind == _QA_AGENT_KIND
-        or instance.agent_kind == _QA_PANEL_SYNTHESIZER_AGENT_KIND
-        or instance.agent_kind.startswith(_QA_PANEL_AGENT_KIND_PREFIX)
     )
-
-
-def _qa_panel_status_text(workflow: SystemWorkflow) -> str:
-    try:
-        runs = list(
-            SystemAgentRun.objects.filter(workflow=workflow)
-            .select_related("instance")
-            .order_by("created_at", "id")
-        )
-    finally:
-        close_old_connections()
-    synthesizer = next(
-        (
-            run
-            for run in reversed(runs)
-            if run.agent_kind == _QA_PANEL_SYNTHESIZER_AGENT_KIND
-            and run.status == SystemAgentRun.STATUS_RUNNING
-            and _system_agent_run_iteration(run) == workflow.iteration
-        ),
-        None,
-    )
-    if synthesizer is not None:
-        tokens = codex_events.latest_goal_tokens_for_instance(synthesizer.instance)
-        token_text = (
-            f"{_format_compact_token_count(tokens)} tokens" if tokens is not None else ""
-        )
-        return "QA panel synthesizing..." + token_text
-
-    lane_runs = [
-        run
-        for run in runs
-        if run.agent_kind.startswith(_QA_PANEL_AGENT_KIND_PREFIX)
-        and run.agent_kind != _QA_PANEL_SYNTHESIZER_AGENT_KIND
-        and _system_agent_run_iteration(run) == workflow.iteration
-    ]
-    total = len(lane_runs)
-    completed = sum(1 for run in lane_runs if run.status == SystemAgentRun.STATUS_COMPLETED)
-    token_total = 0
-    has_tokens = False
-    for run in lane_runs:
-        tokens = codex_events.latest_goal_tokens_for_instance(run.instance)
-        if tokens is None:
-            continue
-        has_tokens = True
-        token_total += tokens
-    progress = f"{completed}/{total} lanes complete" if total else "starting"
-    token_text = (
-        f", {_format_compact_token_count(token_total)} tokens" if has_tokens else ""
-    )
-    return f"QA panel working...{progress}{token_text}"
-
-
-def _system_agent_run_iteration(run: SystemAgentRun) -> int:
-    value = run.input.get("iteration") if isinstance(run.input, dict) else 0
-    return value if isinstance(value, int) and value >= 0 else 0
 
 
 def _format_compact_token_count(value: int) -> str:
