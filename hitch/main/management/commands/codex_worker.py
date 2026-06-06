@@ -163,6 +163,7 @@ _STEER_CONTROL_POLL_INTERVAL = 0.2
 # client transport.
 _PROMPT_USER = "prompt_user"
 _APPROVE_ALL = "approve_all"
+_DENY_ALL = "deny_all"
 _USER_REVIEWER_APPROVAL_MODES = frozenset({_PROMPT_USER, _APPROVE_ALL})
 _PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium
 _DEFAULT_COLLABORATION_MODE = "default"
@@ -1187,16 +1188,16 @@ def _make_approval_handler(
 ) -> Callable[[str, dict[str, Any] | None], dict[str, Any]]:
     """Return an approval-handler closure bound to a single CodexInstance.
 
-    Two flavors:
+    ``approve_all`` mode auto-answers command/file escalations with
+    ``accept``. Any other mode creates an ``ApprovalRequest`` row, emits an
+    ``approval/requested`` event so the SSE stream surfaces it, and blocks
+    polling the row until the Django view records a decision via
+    ``POST /approval/<id>/``.
 
-    * ``approve_all`` mode: every escalation is auto-answered ``accept``.
-      This preserves the existing "approve everything" promise of that
-      mode without going through the interactive UI loop.
-    * Any other mode (including ``auto_review`` and ``prompt_user``): each
-      escalation creates an ``ApprovalRequest`` row, emits an
-      ``approval/requested`` event so the SSE stream surfaces it, and blocks
-      polling the row until the Django view records a decision via
-      ``POST /approval/<id>/``.
+    The approval mode can be changed from the session UI while this worker is
+    already running, so command/file approval handling reads the current
+    ``CodexInstance.approval_mode`` instead of relying solely on the mode
+    captured at worker startup.
 
     The handler runs on the SDK's reader thread (the same thread that reads
     JSON-RPC frames off codex's stdout), so it must:
@@ -1213,30 +1214,7 @@ def _make_approval_handler(
     server-to-client requests.
     """
 
-    if approval_mode == _APPROVE_ALL:
-
-        def _approve_all_handler(
-            method: str, _params: dict[str, Any] | None
-        ) -> dict[str, Any]:
-            if is_dynamic_tool_call(method):
-                return handle_dynamic_tool_call(
-                    _params,
-                    ToolContext(cwd=instance.cwd, thread_id=instance.thread_id),
-                )
-            if _is_user_input_request_method(method):
-                return _handle_user_input_request(
-                    instance=instance,
-                    write_event=write_event,
-                    method=method,
-                    params=_params or {},
-                )
-            if method not in _APPROVAL_METHODS:
-                return {}
-            return {"decision": ApprovalRequest.DECISION_ACCEPT}
-
-        return _approve_all_handler
-
-    def _interactive_handler(
+    def _handler(
         method: str, params: dict[str, Any] | None
     ) -> dict[str, Any]:
         if is_dynamic_tool_call(method):
@@ -1253,11 +1231,23 @@ def _make_approval_handler(
             )
         if method not in _APPROVAL_METHODS:
             return {}
+        current_approval_mode = _current_approval_mode(
+            instance=instance,
+            fallback=approval_mode,
+        )
+        live_decision = _approval_decision_for_mode(current_approval_mode)
+        if live_decision is not None:
+            return {"decision": live_decision}
         request_id = _create_pending_approval(
             instance_id=instance.pk,
             method=method,
             params=params or {},
         )
+        live_decision = _approval_decision_for_mode(
+            _current_approval_mode(instance=instance, fallback=approval_mode)
+        )
+        if live_decision is not None:
+            return {"decision": _record_live_approval_decision(request_id, live_decision)}
         # Surface the pending approval through the events file so the SSE
         # stream pushes it to the browser without a separate transport.
         # The ``id`` we emit is the row pk the POST endpoint expects.
@@ -1276,7 +1266,59 @@ def _make_approval_handler(
         )
         return {"decision": decision}
 
-    return _interactive_handler
+    return _handler
+
+
+def _approval_decision_for_mode(approval_mode: str | None) -> str | None:
+    if approval_mode == _APPROVE_ALL:
+        return ApprovalRequest.DECISION_ACCEPT
+    if approval_mode == _DENY_ALL:
+        return ApprovalRequest.DECISION_DECLINE
+    return None
+
+
+def _record_live_approval_decision(
+    request_id: int, decision: str
+) -> str | dict[str, Any]:
+    from django.db import connection
+    from django.utils import timezone as tz
+
+    try:
+        updated = ApprovalRequest.objects.filter(pk=request_id, decision="").update(
+            decision=decision,
+            decided_at=tz.now(),
+        )
+        if updated:
+            return decision
+        stored_decision, payload = ApprovalRequest.objects.values_list(
+            "decision", "decision_payload"
+        ).get(pk=request_id)
+        return _stored_approval_decision(stored_decision, payload)
+    except ApprovalRequest.DoesNotExist:
+        return decision
+    finally:
+        connection.close()
+
+
+def _current_approval_mode(
+    *, instance: CodexInstance, fallback: str | None
+) -> str | None:
+    """Return the live approval mode for ``instance``.
+
+    Called from the SDK reader thread, so release the per-thread Django
+    connection immediately after the short query.
+    """
+    from django.db import connection
+
+    try:
+        value = (
+            CodexInstance.objects.values_list("approval_mode", flat=True)
+            .filter(pk=instance.pk)
+            .first()
+        )
+        return value or fallback
+    finally:
+        connection.close()
 
 
 def _is_user_input_request_method(method: str) -> bool:

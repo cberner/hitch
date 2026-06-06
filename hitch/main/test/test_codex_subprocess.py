@@ -671,6 +671,33 @@ class SpawnTurnTests(TestCase):
         self.assertFalse(instance.auto_pr_enabled)
 
     @patch("hitch.main.codex_pool._launch_worker_process")
+    def test_spawn_turn_marks_only_user_reviewer_approval_modes_live_editable(
+        self, mock_launch: MagicMock
+    ) -> None:
+        mock_launch.return_value = SimpleNamespace(pid=1234)
+
+        for approval_mode, expected in (
+            ("prompt_user", True),
+            ("approve_all", True),
+            ("auto_review", False),
+            ("deny_all", False),
+            (None, False),
+        ):
+            with self.subTest(approval_mode=approval_mode):
+                with (
+                    _events_dir() as events_dir,
+                    override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
+                ):
+                    instance = codex_pool.spawn_turn(
+                        thread_id=f"thread-{approval_mode or 'default'}",
+                        cwd="/repo",
+                        prompt="follow-up",
+                        approval_mode=approval_mode,
+                    )
+
+                self.assertEqual(instance.approval_mode_live_editable, expected)
+
+    @patch("hitch.main.codex_pool._launch_worker_process")
     def test_plan_mode_turn_forwards_model_and_plan_flag(
         self, mock_launch: MagicMock
     ) -> None:
@@ -6433,7 +6460,10 @@ class ApprovalHandlerTests(TestCase):
         )
 
         self.assertEqual(
-            handler("item/commandExecution/requestApproval", {"item": {"command": "ls"}}),
+            handler(
+                "item/commandExecution/requestApproval",
+                {"item": {"command": "ls"}},
+            ),
             {"decision": "accept"},
         )
         self.assertEqual(
@@ -6447,6 +6477,90 @@ class ApprovalHandlerTests(TestCase):
         # need an approval prompt to render in this mode.
         self.assertEqual(events, [])
         self.assertFalse(ApprovalRequest.objects.exists())
+
+    def test_handler_observes_live_approve_all_mode_change(self) -> None:
+        instance = self._make_instance()
+        events: list[tuple[str, object]] = []
+        handler = _make_approval_handler(
+            instance=instance,
+            write_event=lambda method, payload: events.append((method, payload)),
+            approval_mode="auto_review",
+        )
+        CodexInstance.objects.filter(pk=instance.pk).update(approval_mode="approve_all")
+
+        self.assertEqual(
+            handler(
+                "item/commandExecution/requestApproval",
+                {"item": {"command": "ls"}},
+            ),
+            {"decision": "accept"},
+        )
+        self.assertEqual(events, [])
+        self.assertFalse(ApprovalRequest.objects.exists())
+
+    def test_handler_observes_live_deny_all_mode_change(self) -> None:
+        instance = self._make_instance()
+        events: list[tuple[str, object]] = []
+        handler = _make_approval_handler(
+            instance=instance,
+            write_event=lambda method, payload: events.append((method, payload)),
+            approval_mode="prompt_user",
+        )
+        CodexInstance.objects.filter(pk=instance.pk).update(approval_mode="deny_all")
+
+        self.assertEqual(
+            handler(
+                "item/commandExecution/requestApproval",
+                {"item": {"command": "ls"}},
+            ),
+            {"decision": "decline"},
+        )
+        self.assertEqual(events, [])
+        self.assertFalse(ApprovalRequest.objects.exists())
+
+    def test_handler_rechecks_live_mode_after_creating_approval_row(self) -> None:
+        def _recorder(events: list[tuple[str, object]]) -> Callable[[str, Any], None]:
+            def _record(method: str, payload: Any) -> None:
+                events.append((method, payload))
+
+            return _record
+
+        cases = [
+            ("approve_all", "accept"),
+            ("deny_all", "decline"),
+        ]
+        for mode, decision in cases:
+            with self.subTest(mode=mode):
+                instance = self._make_instance()
+                events: list[tuple[str, object]] = []
+                handler = _make_approval_handler(
+                    instance=instance,
+                    write_event=_recorder(events),
+                    approval_mode="prompt_user",
+                )
+
+                with (
+                    patch(
+                        "hitch.main.management.commands.codex_worker."
+                        "_current_approval_mode",
+                        side_effect=["prompt_user", mode],
+                    ),
+                    patch(
+                        "hitch.main.management.commands.codex_worker."
+                        "_wait_for_decision"
+                    ) as wait_for_decision,
+                ):
+                    result = handler(
+                        "item/commandExecution/requestApproval",
+                        {"item": {"command": "ls"}},
+                    )
+
+                self.assertEqual(result, {"decision": decision})
+                wait_for_decision.assert_not_called()
+                row = ApprovalRequest.objects.get(instance=instance)
+                self.assertEqual(row.decision, decision)
+                self.assertIsNotNone(row.decided_at)
+                self.assertEqual(events, [])
 
     def test_interactive_handler_creates_row_and_emits_events(self) -> None:
         """The interactive handler creates an ApprovalRequest row, emits an
