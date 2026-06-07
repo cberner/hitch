@@ -1887,10 +1887,77 @@ class ClaudeUsageRefreshTests(TestCase):
             views._usage_token_refresh_needed(self._metadata(), self._claude_cache())
         )
 
-    def test_missing_cache_still_needs_refresh(self) -> None:
+    def test_unidentified_empty_path_row_still_needs_refresh(self) -> None:
+        # Without a known Claude backend, an empty-path uncached row is treated
+        # as a fresh Codex thread awaiting path repair.
         from hitch.main import views
 
         self.assertTrue(views._usage_token_refresh_needed(self._metadata(), None))
+        self.assertTrue(
+            views._usage_token_cache_state(self._metadata(), None).refresh_pending
+        )
+
+    def test_uncached_claude_row_is_non_refreshable(self) -> None:
+        # A known Claude row has no rollout to repair (the worker writes its
+        # cache), so an uncached one must not be scheduled for Codex path repair
+        # nor reported as refresh-pending -- otherwise it re-probes forever.
+        from hitch.main import views
+
+        self.assertFalse(
+            views._usage_token_refresh_needed(self._metadata(), None, is_claude=True)
+        )
+        state = views._usage_token_cache_state(
+            self._metadata(), None, is_claude=True
+        )
+        self.assertFalse(state.refresh_pending)
+        self.assertFalse(state.cache_usable)
+
+    def test_claude_thread_ids_resolves_backends(self) -> None:
+        from hitch.main import views
+        from hitch.main.models import CodexInstance
+
+        def _instance(thread_id: str, backend: str) -> None:
+            CodexInstance.objects.create(
+                thread_id=thread_id,
+                cwd="/repo",
+                prompt="x",
+                events_path="x",
+                pid=0,
+                status=CodexInstance.STATUS_COMPLETED,
+                backend=backend,
+            )
+
+        _instance("claude-row", CodexInstance.BACKEND_CLAUDE)
+        _instance("codex-row", CodexInstance.BACKEND_CODEX)
+        self.assertEqual(
+            views._claude_thread_ids(
+                ["claude-row", "codex-row", "unknown-row", ""]
+            ),
+            {"claude-row"},
+        )
+
+    def test_uncached_claude_row_not_scheduled_for_path_repair(self) -> None:
+        # End to end: a Claude-backed empty-path candidate with no cache is
+        # neither selected for path repair nor left pending in the batcher.
+        from hitch.main import views
+        from hitch.main.models import CodexInstance
+
+        CodexInstance.objects.create(
+            thread_id="thread-claude-usage",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_COMPLETED,
+            backend=CodexInstance.BACKEND_CLAUDE,
+        )
+        candidate = views._UsageTokenRefreshCandidate(
+            thread_id="thread-claude-usage",
+            codex_path="",
+            usage_last_checked_at=None,
+        )
+        batches = list(views._usage_token_refresh_work_batches([candidate]))
+        self.assertEqual(batches, [])
 
 
 class ClaudeImageCleanupTests(TestCase):
@@ -3900,6 +3967,49 @@ class ClaudeFollowUpAutoQaTests(TestCase):
             )
         self.assertEqual(response.status_code, 400)
         mock_monitor.assert_not_called()
+
+    def test_workflows_honor_session_approval_mode_override(self) -> None:
+        # /qa, /pr, /fix-pr and the Spec Critic follow-up must honor a per-session
+        # approval override (as the Codex follow-up path does), not the global
+        # settings value -- otherwise their hidden Claude agents run under a
+        # different policy than the session header advertises.
+        from hitch.main import system_agents, views
+        from hitch.main.models import SessionMetadata
+
+        self._claude_instance(model="claude-sonnet-4-6")
+        SessionMetadata.objects.filter(thread_id="claude-thread").update(
+            approval_mode="deny_all"
+        )
+        settings = self._settings(model="claude-sonnet-4-6")  # global "auto_review"
+        pr_url = "https://github.com/cberner/hitch/pull/7"
+        with (
+            patch.object(views, "_is_allowed_session_cwd", return_value=True),
+            patch.object(views, "_claude_user_message_index", return_value=0),
+            patch.object(views, "_claude_fix_pr_url", return_value=pr_url),
+            patch.object(system_agents, "start_pr_qa_workflow") as mock_qa,
+            patch.object(system_agents, "start_pr_monitor_workflow") as mock_monitor,
+            patch.object(system_agents, "start_spec_critic_workflow") as mock_spec,
+        ):
+            views._start_claude_qa_workflow(
+                session_id="claude-thread",
+                qa_activation=True,
+                settings=settings,
+                input_image_paths=[],
+            )
+            views._start_claude_fix_pr_workflow(
+                session_id="claude-thread",
+                settings=settings,
+                input_image_paths=[],
+            )
+            views._start_claude_spec_critic_follow_up(
+                session_id="claude-thread",
+                prompt="add a feature",
+                settings=settings,
+                input_image_paths=[],
+            )
+        self.assertEqual(mock_qa.call_args.kwargs["approval_mode"], "deny_all")
+        self.assertEqual(mock_monitor.call_args.kwargs["approval_mode"], "deny_all")
+        self.assertEqual(mock_spec.call_args.kwargs["approval_mode"], "deny_all")
 
     def test_send_message_routes_fix_pr_to_monitor_not_qa(self) -> None:
         from django.http import HttpResponse

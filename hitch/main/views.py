@@ -10,7 +10,15 @@ import re
 import threading
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import (
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+)
+from collections.abc import (
+    Set as AbstractSet,
+)
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
@@ -5675,7 +5683,7 @@ def _start_claude_qa_workflow(
         "main_thread_id": session_id,
         "cwd": cwd,
         "sandbox_policy": _effective_sandbox_policy(settings) or None,
-        "approval_mode": _effective_approval_mode(settings),
+        "approval_mode": _effective_approval_mode_for_session(settings, session_id),
         "model": model,
         "reasoning_effort": settings.reasoning_effort or None,
         "developer_instructions": developer_instructions or None,
@@ -5774,7 +5782,7 @@ def _start_claude_fix_pr_workflow(
         "cwd": cwd,
         "pr_url": pr_url,
         "sandbox_policy": _effective_sandbox_policy(settings) or None,
-        "approval_mode": _effective_approval_mode(settings),
+        "approval_mode": _effective_approval_mode_for_session(settings, session_id),
         "model": model,
         "reasoning_effort": settings.reasoning_effort or None,
         "developer_instructions": developer_instructions or None,
@@ -5823,7 +5831,7 @@ def _start_claude_spec_critic_follow_up(
         "cwd": cwd,
         "prompt": prompt,
         "sandbox_policy": _effective_sandbox_policy(settings) or None,
-        "approval_mode": _effective_approval_mode(settings),
+        "approval_mode": _effective_approval_mode_for_session(settings, session_id),
         "model": model,
         "reasoning_effort": settings.reasoning_effort or None,
         "developer_instructions": developer_instructions or None,
@@ -6894,6 +6902,11 @@ def _lifetime_token_usage_for_metadata(
     cached_usage_by_thread_id = _token_usage_caches_by_thread_ids(
         metadata.thread_id for metadata in metadata_rows
     )
+    # Only empty-``codex_path`` rows are ambiguous between Claude and a fresh
+    # Codex thread, so resolve the backend for those alone.
+    claude_thread_ids = _claude_thread_ids(
+        metadata.thread_id for metadata in metadata_rows if not metadata.codex_path
+    )
     total_usage = _empty_lifetime_token_usage()
     session_usage = _empty_lifetime_token_usage()
     system_usage = _empty_lifetime_token_usage()
@@ -6903,7 +6916,9 @@ def _lifetime_token_usage_for_metadata(
     refresh_pending_count = 0
     for metadata in metadata_rows:
         cache = cached_usage_by_thread_id.get(metadata.thread_id)
-        cache_state = _usage_token_cache_state(metadata, cache)
+        cache_state = _usage_token_cache_state(
+            metadata, cache, is_claude=metadata.thread_id in claude_thread_ids
+        )
         if cache_state.refresh_pending:
             refresh_pending_count += 1
         if cache is None or not cache_state.cache_usable:
@@ -6959,13 +6974,19 @@ def _usage_token_refresh_candidates(
 
 
 def _usage_token_refresh_may_be_pending(
-    metadata: _UsageTokenRefreshSource, cache: ArchivedSessionTokenUsage | None
+    metadata: _UsageTokenRefreshSource,
+    cache: ArchivedSessionTokenUsage | None,
+    *,
+    is_claude: bool = False,
 ) -> bool:
-    return _usage_token_cache_state(metadata, cache).refresh_pending
+    return _usage_token_cache_state(metadata, cache, is_claude=is_claude).refresh_pending
 
 
 def _usage_token_cache_state(
-    metadata: _UsageTokenRefreshSource, cache: ArchivedSessionTokenUsage | None
+    metadata: _UsageTokenRefreshSource,
+    cache: ArchivedSessionTokenUsage | None,
+    *,
+    is_claude: bool = False,
 ) -> _UsageTokenCacheState:
     if not metadata.thread_id:
         return _UsageTokenCacheState(refresh_pending=False, cache_usable=False)
@@ -6975,10 +6996,13 @@ def _usage_token_cache_state(
         # from a file. Treat a usable one as current -- not a path-repair
         # candidate -- so ``/usage`` and ``/profile`` stop reporting it as
         # refresh-pending and the refresh worker stops probing the Codex
-        # app-server with a local Claude UUID.
+        # app-server with a local Claude UUID. A known Claude row stays
+        # non-pending even before its first cache: there is nothing to repair
+        # (the worker, not this path, writes the cache), whereas a freshly
+        # created Codex row with an empty path is still awaiting path repair.
         cache_usable = _claude_usage_cache_is_authoritative(cache)
         return _UsageTokenCacheState(
-            refresh_pending=not cache_usable,
+            refresh_pending=(False if is_claude else not cache_usable),
             cache_usable=cache_usable,
         )
     if cache is None:
@@ -7016,6 +7040,7 @@ def _usage_token_refresh_check_is_stale(checked_at: datetime | None) -> bool:
 def _usage_token_refresh_items(
     metadata_rows: Iterable[_UsageTokenRefreshSource],
     cached_usage_by_thread_id: Mapping[str, ArchivedSessionTokenUsage],
+    claude_thread_ids: AbstractSet[str] = frozenset(),
 ) -> list[_UsageTokenRefreshItem]:
     path_repair_candidates: list[_UsageTokenRefreshSource] = []
     file_backed_candidates: list[_UsageTokenRefreshSource] = []
@@ -7023,7 +7048,9 @@ def _usage_token_refresh_items(
         if not metadata.thread_id:
             continue
         cache = cached_usage_by_thread_id.get(metadata.thread_id)
-        if not _usage_token_refresh_needed(metadata, cache):
+        if not _usage_token_refresh_needed(
+            metadata, cache, is_claude=metadata.thread_id in claude_thread_ids
+        ):
             continue
         if _usage_token_refresh_needs_path_repair(metadata):
             path_repair_candidates.append(metadata)
@@ -7082,10 +7109,44 @@ def _claude_usage_cache_is_authoritative(
     )
 
 
+def _claude_thread_ids(thread_ids: Iterable[str]) -> set[str]:
+    """Of ``thread_ids``, those whose latest worker backend is Claude.
+
+    A Claude thread has no Codex rollout: its usage cache is written directly by
+    the worker at turn completion and is unrecoverable from the Codex app-server.
+    Callers use this to keep an uncached Claude row (empty ``codex_path``) -- which
+    is otherwise indistinguishable from a freshly-created Codex row -- out of Codex
+    path repair, where it would stay refresh-pending and re-probe forever.
+    """
+    ids = {thread_id for thread_id in thread_ids if thread_id}
+    if not ids:
+        return set()
+    latest_backend: dict[str, str] = {}
+    for thread_id, backend in (
+        CodexInstance.objects.filter(thread_id__in=ids)
+        .order_by("thread_id", "-started_at", "-pk")
+        .values_list("thread_id", "backend")
+    ):
+        latest_backend.setdefault(thread_id, backend)
+    return {
+        thread_id
+        for thread_id, backend in latest_backend.items()
+        if backend == CodexInstance.BACKEND_CLAUDE
+    }
+
+
 def _usage_token_refresh_needed(
-    metadata: _UsageTokenRefreshSource, cache: ArchivedSessionTokenUsage | None
+    metadata: _UsageTokenRefreshSource,
+    cache: ArchivedSessionTokenUsage | None,
+    *,
+    is_claude: bool = False,
 ) -> bool:
     if not metadata.codex_path:
+        # A known Claude row never needs a refresh: it has no rollout to repair
+        # and the worker writes its cache directly, so scheduling Codex path
+        # repair (the empty-path branch below) would only re-probe forever.
+        if is_claude:
+            return False
         # A Claude row (rollout_path == "") is authoritative and unrepairable, so
         # it never needs a refresh; only a genuinely empty/uncached row does.
         return not _claude_usage_cache_is_authoritative(cache)
@@ -7196,12 +7257,17 @@ def _usage_token_refresh_work_batches(
     if refresh_items:
         yield refresh_items
     remaining_candidates = candidates
+    # Resolve backends once for the empty-path candidates so an uncached Claude
+    # row is never scheduled for (futile) Codex path repair below.
+    claude_thread_ids = _claude_thread_ids(
+        candidate.thread_id for candidate in candidates if not candidate.codex_path
+    )
     while remaining_candidates:
         cached_usage_by_thread_id = _token_usage_caches_by_thread_ids(
             candidate.thread_id for candidate in remaining_candidates
         )
         selected_items = _usage_token_refresh_items(
-            remaining_candidates, cached_usage_by_thread_id
+            remaining_candidates, cached_usage_by_thread_id, claude_thread_ids
         )
         selected_thread_ids = {item.thread_id for item in selected_items}
         checked_thread_ids = {
@@ -7209,7 +7275,9 @@ def _usage_token_refresh_work_batches(
             for candidate in remaining_candidates
             if candidate.thread_id not in selected_thread_ids
             and not _usage_token_refresh_needed(
-                candidate, cached_usage_by_thread_id.get(candidate.thread_id)
+                candidate,
+                cached_usage_by_thread_id.get(candidate.thread_id),
+                is_claude=candidate.thread_id in claude_thread_ids,
             )
         }
         _mark_usage_token_refresh_checked_many(checked_thread_ids)
