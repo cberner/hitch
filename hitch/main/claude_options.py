@@ -277,6 +277,15 @@ def build_options(
         setting_sources=(
             ["user", "project", "local"] if load_filesystem_settings else []
         ),
+        # Hidden system-agent runs (which may target untrusted repos) must ignore
+        # *all* filesystem MCP config: ``setting_sources=[]`` drops ``.claude``
+        # settings, but a project ``.mcp.json`` (or user/plugin MCP) would still be
+        # launched -- a stdio server is an arbitrary command that runs before
+        # ``can_use_tool`` can deny anything. ``strict_mcp_config`` makes the CLI
+        # honor only the servers passed in ``mcp_servers`` (empty for hidden runs),
+        # so set it whenever filesystem settings are disabled. Visible user/feedback
+        # turns keep it off so the user's own trusted project MCP still loads.
+        strict_mcp_config=not load_filesystem_settings,
         can_use_tool=can_use_tool,
     )
     if can_use_tool is not None:

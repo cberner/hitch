@@ -323,6 +323,11 @@ class ClaudeOptionsTests(TestCase):
             cwd="/repo", model=None, load_filesystem_settings=False
         )
         self.assertEqual(hidden.setting_sources, [])
+        # Hidden runs must also ignore filesystem MCP (project .mcp.json / user /
+        # plugin), so a project stdio MCP server can't launch before can_use_tool;
+        # visible runs keep loading the user's own trusted project MCP.
+        self.assertTrue(hidden.strict_mcp_config)
+        self.assertFalse(visible.strict_mcp_config)
 
     @patch("hitch.main.claude_options.claude_bin", return_value="/usr/bin/claude")
     def test_build_options_first_run_fixes_session_id(self, _bin: MagicMock) -> None:
