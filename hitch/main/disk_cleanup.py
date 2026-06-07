@@ -32,7 +32,7 @@ from hitch.main.worktrees import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_ALLOWED_DISK_SPACE_PERCENT = 20.0
-ARCHIVED_USER_SESSION_MIN_AGE = timedelta(hours=48)
+ARCHIVED_USER_SESSION_MIN_AGE = timedelta(hours=1)
 _WORKTREE_DIR_TIMESTAMP_FORMAT = "%Y%m%d%H%M%S"
 _PR_DONE_STAGE_KEYS = frozenset({"done_merged", "done_closed"})
 _ACTIVE_CODEX_STATUSES = (
