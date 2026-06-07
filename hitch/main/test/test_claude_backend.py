@@ -1260,6 +1260,65 @@ class SteerPendingRollbackTests(TestCase):
         self.assertEqual(runner._outstanding_responses, 2)
 
 
+class ClaudeLiveApprovalModeTests(TransactionTestCase):
+    """A visible turn's approval mode can change mid-turn from the session/global
+    UI, so each tool decision re-reads the live ``CodexInstance.approval_mode``
+    row rather than the value captured at worker startup -- matching the Codex
+    approval handler. ``TransactionTestCase`` because the re-read runs on a worker
+    thread (via ``asyncio.to_thread``) that needs the committed row."""
+
+    def _runner(self, *, startup_mode: str) -> Any:
+        import io
+
+        from hitch.main.management.commands import claude_worker
+
+        instance = CodexInstance.objects.create(
+            thread_id="t",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_RUNNING,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            purpose=CodexInstance.PURPOSE_USER,
+            approval_mode=startup_mode,
+        )
+        return claude_worker._TurnRunner(
+            instance=instance,
+            events_file=io.StringIO(),
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=claude_options.SANDBOX_WORKSPACE_WRITE,
+            approval_mode=startup_mode,
+            web_search_mode=None,
+            plan_mode=False,
+        )
+
+    def test_live_deny_all_overrides_startup_value(self) -> None:
+        import asyncio
+
+        from claude_agent_sdk import PermissionResultDeny
+
+        # Turn started under prompt_user (so can_use_tool runs); the user then
+        # switched to deny_all mid-turn and the view updated the row.
+        runner = self._runner(startup_mode="prompt_user")
+        CodexInstance.objects.filter(pk=runner._instance.pk).update(
+            approval_mode=claude_options.APPROVAL_DENY_ALL
+        )
+        result = asyncio.run(runner._can_use_tool("Bash", {"command": "ls"}, None))
+        self.assertIsInstance(result, PermissionResultDeny)
+
+    def test_live_approve_all_overrides_startup_value(self) -> None:
+        import asyncio
+
+        runner = self._runner(startup_mode="prompt_user")
+        CodexInstance.objects.filter(pk=runner._instance.pk).update(
+            approval_mode=claude_options.APPROVAL_APPROVE_ALL
+        )
+        result = asyncio.run(runner._can_use_tool("Bash", {"command": "ls"}, None))
+        self.assertIsInstance(result, PermissionResultAllow)
+
+
 class DemoSandboxOverrideTests(TestCase):
     """A Claude demo run forces full host access regardless of the user's sandbox
     so its podman/shell container setup is neither blocked nor confined."""
@@ -3522,6 +3581,31 @@ class ClaudeFollowUpAutoQaTests(TestCase):
         kwargs = mock_spawn.call_args.kwargs
         self.assertTrue(kwargs["auto_qa_enabled"])
         self.assertEqual(kwargs["user_message_index"], 2)
+
+    def test_follow_up_uses_session_approval_mode_override(self) -> None:
+        from hitch.main import views
+        from hitch.main.models import SessionMetadata
+
+        self._claude_instance()
+        # A per-session approval override (set from the session header) must win
+        # over the global settings value, as the Codex follow-up path does.
+        SessionMetadata.objects.update_or_create(
+            thread_id="claude-thread",
+            defaults={"cwd": "/repo", "approval_mode": "deny_all"},
+        )
+        with (
+            patch.object(codex_pool, "spawn_turn") as mock_spawn,
+            patch.object(views, "_allowed_session_cwds", return_value={"/repo"}),
+            patch.object(views, "_claude_user_message_index", return_value=0),
+        ):
+            views._send_claude_follow_up(
+                session_id="claude-thread",
+                prompt="next",
+                plan_mode=False,
+                settings=self._settings(),  # global approval_mode is "auto_review"
+                input_image_paths=[],
+            )
+        self.assertEqual(mock_spawn.call_args.kwargs["approval_mode"], "deny_all")
 
     def test_follow_up_in_plan_mode_skips_auto_qa(self) -> None:
         from hitch.main import views

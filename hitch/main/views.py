@@ -5867,7 +5867,11 @@ def _send_claude_follow_up(
         "stored_model": model,
         "reasoning_effort": settings.reasoning_effort or None,
         "sandbox_policy": _effective_sandbox_policy(settings) or None,
-        "approval_mode": _effective_approval_mode(settings),
+        # Honor a per-session approval override (set from the session header), as
+        # the Codex follow-up path does -- otherwise a Claude thread pinned to
+        # deny_all/approve_all in the session UI would spawn follow-ups under the
+        # global default instead.
+        "approval_mode": _effective_approval_mode_for_session(settings, session_id),
         "plan_mode": plan_mode,
     }
     if input_image_paths:

@@ -502,6 +502,12 @@ class _TurnRunner:
             return claude_options.deny_result(
                 "Hidden runs cannot prompt the user for input."
             )
+        # A visible turn's approval mode can change mid-turn from the session/
+        # global UI (the view updates ``CodexInstance.approval_mode``), so decide
+        # each tool against the *live* value rather than the one captured at
+        # startup -- matching the Codex approval handler. Hidden runs are pinned to
+        # ``auto_review`` and the row never changes, so this is a no-op for them.
+        approval_mode = await asyncio.to_thread(self._live_approval_mode)
         # ``ExitPlanMode`` is the plan-review boundary: leaving plan mode is a
         # decision for the user, not an escalation, so a visible session always
         # reaches the interactive approval below regardless of approval mode --
@@ -512,7 +518,7 @@ class _TurnRunner:
             if self._instance.purpose != CodexInstance.PURPOSE_USER:
                 return claude_options.deny_result("Hidden runs cannot leave plan mode.")
         elif (
-            self._approval_mode == claude_options.APPROVAL_DENY_ALL
+            approval_mode == claude_options.APPROVAL_DENY_ALL
             and not self._is_demo_agent()
         ):
             # The trusted web-demo setup agent is exempted here and auto-approved
@@ -577,7 +583,7 @@ class _TurnRunner:
         # bounds what these runs can do.
         if (
             self._instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
-            and self._approval_mode == claude_options.APPROVAL_AUTO_REVIEW
+            and approval_mode == claude_options.APPROVAL_AUTO_REVIEW
         ):
             # Auto-approve the built-in mutating tools only under a write sandbox.
             # ``readOnly`` already blocks Bash/file via ``resolve_tool_lists``; a
@@ -600,7 +606,7 @@ class _TurnRunner:
                 "tools under a write sandbox."
             )
         if (
-            self._approval_mode == claude_options.APPROVAL_APPROVE_ALL
+            approval_mode == claude_options.APPROVAL_APPROVE_ALL
             and tool_name != _EXIT_PLAN_MODE_TOOL
             and not self._powershell_unconfined(tool_name)
             and not _is_external_mcp_tool(tool_name)
@@ -647,6 +653,27 @@ class _TurnRunner:
             self._instance.purpose == CodexInstance.PURPOSE_SYSTEM_AGENT
             and self._instance.agent_kind == demo.DEMO_AGENT_KIND
         )
+
+    def _live_approval_mode(self) -> str | None:
+        """Re-read this instance's current approval mode from the DB.
+
+        Mirrors the Codex worker's ``_current_approval_mode``: the session/global
+        UI can change a visible turn's approval mode mid-turn, so each approval
+        decision reads the live row value. Runs in a worker thread (via
+        ``asyncio.to_thread``). Any read failure (e.g. a transient DB lock) falls
+        back to the value captured at startup -- a best-effort live refresh must
+        never turn a brief DB hiccup into a failed tool decision.
+        """
+        try:
+            return (
+                CodexInstance.objects.values_list("approval_mode", flat=True)
+                .filter(pk=self._instance.pk)
+                .first()
+                or self._approval_mode
+            )
+        except Exception:
+            logger.exception("could not re-read live approval mode")
+            return self._approval_mode
 
     def _powershell_unconfined(self, tool_name: str) -> bool:
         """Whether this is a ``PowerShell`` call that can't be confined.
