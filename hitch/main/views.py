@@ -787,6 +787,18 @@ def _settings_context(
         if current_provider == coding_agents.PROVIDER_CLAUDE
         else codex_model_options
     )
+    # The effort dropdown must contain an option for every effort *any* provider
+    # accepts -- the per-option ``supported`` flag (and the JS effort filter) hide
+    # the ones the current model rejects. Codex's ``ReasoningEffort`` enum omits
+    # Claude's ``max``, so append the Claude-only efforts after it; otherwise
+    # ``max`` is advertised in a Claude model's ``data-supported-efforts`` but has
+    # no selectable option to render.
+    codex_effort_values = [effort.value for effort in ReasoningEffort]
+    effort_values = codex_effort_values + [
+        value
+        for value in sorted(claude_supported_efforts)
+        if value not in codex_effort_values
+    ]
     return {
         "settings_url": reverse("update_settings"),
         "new_project_url": reverse("new_project"),
@@ -800,10 +812,10 @@ def _settings_context(
         },
         "effort_options": [
             {
-                "value": effort.value,
-                "supported": not current_supported or effort.value in current_supported,
+                "value": value,
+                "supported": not current_supported or value in current_supported,
             }
-            for effort in ReasoningEffort
+            for value in effort_values
         ],
         "sandbox_options": [
             {"id": value, "display_name": label}
@@ -9486,7 +9498,13 @@ def update_settings(request: HttpRequest) -> HttpResponse:
     # too big for the cookie still saves correctly; don't block them on it.
     if user is None and not _extra_system_prompt_cookie_fits(extra_system_prompt):
         return HttpResponseBadRequest("extra system prompt is too long")
-    valid_efforts = {e.value for e in ReasoningEffort}
+    # Accept any effort some provider offers; the provider-specific checks below
+    # (Claude's set, or the Codex model catalog) do the precise rejection. Codex's
+    # enum omits Claude's ``max``, so a Claude POST of ``max`` must not 400 here
+    # before the Claude validation at ``provider == PROVIDER_CLAUDE`` runs.
+    valid_efforts = {
+        e.value for e in ReasoningEffort
+    } | claude_options.CLAUDE_REASONING_EFFORTS
     if effort and effort not in valid_efforts:
         return HttpResponseBadRequest("invalid reasoning effort")
     if sandbox and sandbox not in _VALID_SANDBOX_POLICIES:

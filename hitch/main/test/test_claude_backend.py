@@ -4316,6 +4316,33 @@ class ClaudeReasoningEffortSettingsTests(TestCase):
         )
         self.assertEqual(response.status_code, 302)
 
+    def test_settings_dialog_offers_claude_only_max_effort(self) -> None:
+        # ``max`` is a Claude-only effort (absent from Codex's ReasoningEffort
+        # enum); the dropdown must still render a selectable option for it, marked
+        # supported under the Claude provider.
+        from hitch.main import views
+
+        ctx = views._settings_context(self._claude_settings(), [])
+        supported = {o["value"]: o["supported"] for o in ctx["effort_options"]}
+        self.assertIn("max", supported)
+        self.assertTrue(supported["max"])
+
+    def test_update_settings_accepts_max_effort_for_claude(self) -> None:
+        # A direct POST of the Claude-only ``max`` must not 400 in the early
+        # (Codex-enum) effort guard before the Claude-specific validation runs.
+        from django.urls import reverse
+
+        response = self.client.post(
+            reverse("update_settings"),
+            data={
+                "provider": "claude",
+                "model": claude_options.DEFAULT_CLAUDE_MODEL,
+                "reasoning_effort": "max",
+                "approval_mode": "auto_review",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+
 
 class CandidateThreadIndexTests(TestCase):
     """A Claude candidate thread is local-only, so its user-message index must
