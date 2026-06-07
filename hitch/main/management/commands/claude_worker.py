@@ -497,7 +497,14 @@ class _TurnRunner:
         # have no UI, so the prompt is declined rather than parked on a surface no
         # one can answer.
         if tool_name == _ASK_USER_QUESTION_TOOL:
-            if self._instance.purpose == CodexInstance.PURPOSE_USER:
+            # System-feedback turns (QA/PR feedback continued in the user's
+            # session) are visible and surface approvals/input there, so let them
+            # ask clarifying questions like a user turn. Only hidden system-agent
+            # runs (no UI to answer) are declined.
+            if self._instance.purpose in (
+                CodexInstance.PURPOSE_USER,
+                CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            ):
                 return await self._ask_user_question(tool_input)
             return claude_options.deny_result(
                 "Hidden runs cannot prompt the user for input."

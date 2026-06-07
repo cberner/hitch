@@ -3232,6 +3232,23 @@ class ScopeHasLiveWorkerTests(SimpleTestCase):
             )
         )
 
+    def test_true_when_claude_worker_runs_in_scope(self) -> None:
+        # Claude rows run ``claude_worker`` under the same scope namespace, so a
+        # live one must also block reusing/reaping the scope.
+        proc_root = self._proc(
+            {
+                "150": {
+                    "cmdline": b"python\x00manage.py\x00claude_worker\x00",
+                    "cgroup": b"0::/u.slice/hitch-codex-worker-7.scope\n",
+                },
+            }
+        )
+        self.assertTrue(
+            codex_pool._scope_has_live_worker(
+                "hitch-codex-worker-7.scope", proc_root=proc_root
+            )
+        )
+
     def test_false_when_only_a_grandchild_runs_in_scope(self) -> None:
         # A leaked ``cargo bench`` is not a codex_worker, so the unit is still
         # ours to reap.

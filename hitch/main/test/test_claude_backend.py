@@ -898,6 +898,42 @@ class AskUserQuestionTests(TestCase):
         )
         self.assertIsInstance(result, PermissionResultDeny)
 
+    def test_feedback_turn_routes_to_input_ui(self) -> None:
+        # A QA/PR feedback turn runs visibly in the user's session, so a
+        # clarification must reach the input UI like a user turn, not be denied.
+        import asyncio
+
+        from claude_agent_sdk import PermissionResultAllow
+
+        from hitch.main.management.commands import claude_worker
+
+        runner = self._runner()
+        runner._instance.purpose = CodexInstance.PURPOSE_SYSTEM_FEEDBACK
+        tool_input = {
+            "questions": [
+                {
+                    "question": "Which?",
+                    "header": "Pick",
+                    "options": [{"label": "a", "description": ""}],
+                }
+            ]
+        }
+        with (
+            patch.object(
+                claude_worker, "_create_pending_user_input", return_value=9
+            ) as mock_create,
+            patch.object(
+                claude_worker,
+                "_wait_for_user_input_response",
+                return_value={"answers": {"q0": "a"}},
+            ),
+        ):
+            result = asyncio.run(
+                runner._can_use_tool("AskUserQuestion", tool_input, None)
+            )
+        mock_create.assert_called_once()
+        self.assertIsInstance(result, PermissionResultAllow)
+
 
 class HiddenAutoReviewApprovalTests(TestCase):
     """Hidden auto-review runs auto-approve built-in mutating tools only under a
