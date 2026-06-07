@@ -23,6 +23,33 @@ def _thread(thread_id: str, *, updated_at: int = 1) -> SimpleNamespace:
     )
 
 
+class SystemOwnedFlagTests(TestCase):
+    def test_authoritative_signal_sets_hidden_flag_when_heuristic_misses(
+        self,
+    ) -> None:
+        # _thread has a plain name/preview the heuristic would classify as a
+        # user session, but the spawn-time signal (passed in system_thread_ids)
+        # must win so the cached flag is reliable.
+        metadata = session_index.upsert_thread(
+            _thread("qa-thread"),
+            projects=[],
+            system_thread_ids={"qa-thread"},
+        )
+
+        assert metadata is not None
+        self.assertTrue(metadata.is_hidden_system_session)
+
+    def test_flag_stays_false_for_user_threads(self) -> None:
+        metadata = session_index.upsert_thread(
+            _thread("user-thread"),
+            projects=[],
+            system_thread_ids={"some-other-system-thread"},
+        )
+
+        assert metadata is not None
+        self.assertFalse(metadata.is_hidden_system_session)
+
+
 class SessionIndexRefreshTests(TestCase):
     def test_local_session_stores_and_preserves_codex_path(self) -> None:
         metadata = session_index.upsert_local_session(

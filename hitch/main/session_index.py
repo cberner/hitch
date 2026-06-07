@@ -223,7 +223,12 @@ def mark_synced(*, archived: bool, complete: bool, next_cursor: str = "") -> Non
     )
 
 
-def upsert_thread(thread: Any, *, projects: list[Project]) -> SessionMetadata | None:
+def upsert_thread(
+    thread: Any,
+    *,
+    projects: list[Project],
+    system_thread_ids: set[str] | None = None,
+) -> SessionMetadata | None:
     thread_id = getattr(thread, "id", None)
     if not isinstance(thread_id, str) or not thread_id:
         return None
@@ -241,6 +246,7 @@ def upsert_thread(thread: Any, *, projects: list[Project]) -> SessionMetadata | 
         path=getattr(thread, "path", None),
         thread_source=_metadata_value(getattr(thread, "thread_source", None)),
         existing=existing,
+        system_owned=system_thread_ids is not None and thread_id in system_thread_ids,
     )
     if existing is None:
         defaults["project"] = _project_for_cwd(cwd, projects)
@@ -429,6 +435,15 @@ def _refresh_source(
     pages = 0
     synced = 0
     seen_thread_ids: set[str] = set()
+    # Imported lazily to avoid a module-load import cycle (system_agents imports
+    # session_index). Computed once per refresh so the cached
+    # is_hidden_system_session flag converges to the authoritative spawn-time
+    # signals as threads stream in. Use the UI's hidden definition (the default
+    # params): demo agents stay visible, and feedback turns -- which reuse their
+    # parent user thread's id -- must not flag that thread hidden.
+    from hitch.main import system_agents
+
+    system_thread_ids = system_agents.system_owned_thread_ids()
     while max_pages is None or pages < max_pages:
         kwargs: dict[str, Any] = {
             "limit": THREAD_LIST_FETCH_LIMIT,
@@ -442,7 +457,11 @@ def _refresh_source(
             kwargs["cursor"] = cursor
         response = codex.thread_list(**kwargs)
         for thread in response.data:
-            if (metadata := upsert_thread(thread, projects=projects)) is not None:
+            if (
+                metadata := upsert_thread(
+                    thread, projects=projects, system_thread_ids=system_thread_ids
+                )
+            ) is not None:
                 seen_thread_ids.add(metadata.thread_id)
                 synced += 1
         pages += 1
@@ -507,6 +526,7 @@ def _codex_defaults(
     path: object,
     thread_source: str,
     existing: SessionMetadata | None,
+    system_owned: bool = False,
 ) -> dict[str, Any]:
     now = timezone.now()
     name_value = name.strip() if isinstance(name, str) else ""
@@ -542,7 +562,12 @@ def _codex_defaults(
         "codex_path": path if isinstance(path, str) else "",
         "codex_thread_source": thread_source,
         "codex_last_synced_at": now,
-        "is_hidden_system_session": hidden_system_session_from_metadata(
+        # The name/preview heuristic is best-effort; the authoritative
+        # spawn-time signals (SystemAgentRun / system-purpose CodexInstance,
+        # surfaced via ``system_owned``) make the cached flag reliable so a
+        # system thread cannot linger as a visible user session.
+        "is_hidden_system_session": system_owned
+        or hidden_system_session_from_metadata(
             name=name_value,
             preview=preview_value,
             thread_source=thread_source,
