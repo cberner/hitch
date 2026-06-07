@@ -7612,6 +7612,117 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("worker process exited", workflow.state["error"])
         mock_spawn.assert_called_once()
 
+    @patch(
+        "hitch.main.system_agents._pr_monitor_observation_from_gh",
+        return_value=_gh_monitor_observation(),
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_reconcile_recovers_stale_pr_monitor_without_run(
+        self, mock_spawn: MagicMock, mock_observe: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": "https://github.com/cberner/hitch/pull/169",
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 169,
+                    "state": "open",
+                },
+            },
+        )
+        stale_updated_at = (
+            datetime.now(UTC)
+            - system_agents._WORKFLOW_SPAWN_STALE_TIMEOUT
+            - timedelta(seconds=1)
+        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=stale_updated_at
+        )
+        mock_spawn.side_effect = lambda **_kwargs: _instance(
+            thread_id="monitor-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        )
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id="main-thread"
+        )
+
+        self.assertEqual(reconciled, 1)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+        run = SystemAgentRun.objects.get(workflow=workflow)
+        self.assertEqual(run.agent_kind, system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND)
+        self.assertEqual(run.thread_id, "monitor-thread")
+        self.assertEqual(run.status, SystemAgentRun.STATUS_RUNNING)
+        self.assertEqual(run.input["pr_handoff"]["pr_number"], 169)
+        self.assertEqual(run.input["gh_observation"], _gh_monitor_observation())
+        mock_observe.assert_called_once_with(workflow)
+        mock_spawn.assert_called_once()
+
+    @patch("hitch.main.system_agents._spawn_pr_followup_monitor_run")
+    def test_reconcile_stale_pr_monitor_waits_for_route_claimed_monitor(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": "https://github.com/cberner/hitch/pull/169",
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 169,
+                    "state": "open",
+                },
+            },
+        )
+        stale_updated_at = (
+            datetime.now(UTC)
+            - system_agents._WORKFLOW_SPAWN_STALE_TIMEOUT
+            - timedelta(seconds=1)
+        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=stale_updated_at
+        )
+        instance = _instance(
+            thread_id="monitor-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_COMPLETED,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        )
+        CodexInstance.objects.filter(pk=instance.pk).update(
+            workflow_routing_started_at=datetime.now(UTC)
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
+            thread_id=instance.thread_id,
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id="main-thread"
+        )
+
+        self.assertEqual(reconciled, 0)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
+        mock_spawn.assert_not_called()
+
     @patch("hitch.main.system_agents._handle_pr_qa_agent_finished")
     def test_system_agent_finish_claims_instance_before_routing(
         self, mock_route: MagicMock

@@ -2261,11 +2261,54 @@ def reconcile_terminal_workflow_instances(
         return 0
     reconciled = _reconcile_terminal_system_agent_instances(workflows)
     reconciled += _reconcile_terminal_workflow_turns(workflows)
+    reconciled += _reconcile_stale_pr_monitor_workflows(workflows)
     reconciled += _reconcile_stale_spec_critic_workflows(workflows)
     reconciled += _reconcile_orphaned_qa_spawns(workflows)
     reconciled += _reconcile_orphaned_pr_prompt_spawns(workflows)
     reconciled += _reconcile_zombie_workflow_turns(workflows)
     return reconciled
+
+
+def _reconcile_stale_pr_monitor_workflows(workflows: list[SystemWorkflow]) -> int:
+    """Recover PR monitor workflows orphaned before their monitor run was stored."""
+    stale_before = timezone.now() - _WORKFLOW_SPAWN_STALE_TIMEOUT
+    reconciled = 0
+    for workflow in workflows:
+        if workflow.kind != SystemWorkflow.KIND_PR_QA:
+            continue
+        if workflow.step != STEP_PR_MONITORING:
+            continue
+        locked = _claim_stale_pr_monitor_workflow(
+            workflow, stale_before=stale_before
+        )
+        if locked is None:
+            continue
+        try:
+            _spawn_pr_followup_monitor_run(locked)
+        except Exception as exc:
+            _block_workflow(
+                locked, f"failed to restart PR follow-up monitor: {exc!r}"
+            )
+        reconciled += 1
+    return reconciled
+
+
+def _claim_stale_pr_monitor_workflow(
+    workflow: SystemWorkflow, *, stale_before: datetime
+) -> SystemWorkflow | None:
+    with transaction.atomic():
+        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        if (
+            locked.status != SystemWorkflow.STATUS_RUNNING
+            or locked.step != STEP_PR_MONITORING
+            or locked.updated_at > stale_before
+            or isinstance(locked.state.get(_PR_MONITOR_BACKOFF_STATE_KEY), dict)
+            or not _pr_handoff_from_workflow(locked)
+            or _pr_monitor_has_unresolved_agent_work(locked)
+        ):
+            return None
+        locked.save(update_fields=["updated_at"])
+    return locked
 
 
 def _reconcile_orphaned_pr_prompt_spawns(workflows: list[SystemWorkflow]) -> int:
@@ -5154,6 +5197,30 @@ def _pr_monitor_backoff_claim_token(workflow: SystemWorkflow) -> str:
         return ""
     token = value.get("claim_token")
     return token if isinstance(token, str) else ""
+
+
+def _pr_monitor_has_unresolved_agent_work(workflow: SystemWorkflow) -> bool:
+    if workflow.agent_runs.filter(
+        agent_kind=PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        status=SystemAgentRun.STATUS_RUNNING,
+    ).exists():
+        return True
+    return CodexInstance.objects.filter(
+        workflow_id=workflow.pk,
+        purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        agent_kind=PR_FOLLOWUP_MONITOR_AGENT_KIND,
+        status__in=(
+            CodexInstance.STATUS_STARTING,
+            CodexInstance.STATUS_RUNNING,
+            CodexInstance.STATUS_COMPLETED,
+            CodexInstance.STATUS_FAILED,
+        ),
+    ).exclude(
+        system_agent_runs__status__in=(
+            SystemAgentRun.STATUS_COMPLETED,
+            SystemAgentRun.STATUS_FAILED,
+        )
+    ).exists()
 
 
 def _pr_monitor_has_active_agent_run(workflow: SystemWorkflow) -> bool:
