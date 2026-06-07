@@ -152,14 +152,48 @@ class EventTranslatorTests(TestCase):
         self.assertEqual(events[1][1]["item"]["type"], "userMessage")
         self.assertEqual(events[1][1]["item"]["text"], "hi there")
 
-    def test_image_only_user_message_records_image_marker(self) -> None:
-        # The SDK strips image blocks while parsing the echoed user message, so an
-        # image-only turn arrives empty; it must still produce a userMessage event
-        # so the turn is recorded and the auto-QA turn count stays accurate.
+    def test_empty_user_message_emits_nothing_without_suppression(self) -> None:
+        # The worker now records image turns itself (the SDK echo can't represent
+        # them), so the translator no longer invents an "[image]" marker for an
+        # empty echo -- an unsuppressed empty user message yields no event.
         translator = claude_translate.EventTranslator()
-        events = translator.translate(UserMessage(content=[]))
-        self.assertEqual(events[-1][1]["item"]["type"], "userMessage")
-        self.assertEqual(events[-1][1]["item"]["text"], "[image]")
+        self.assertEqual(translator.translate(UserMessage(content=[])), [])
+
+    def test_suppressed_user_prompt_echo_is_dropped(self) -> None:
+        # When the worker has emitted a turn's userMessage (an image turn), the
+        # matching SDK prompt echo -- empty (image-only) or text (mixed) -- is
+        # dropped so the turn is not recorded twice.
+        translator = claude_translate.EventTranslator()
+        translator.suppress_next_user_prompt()
+        self.assertEqual(translator.translate(UserMessage(content=[])), [])
+        translator.suppress_next_user_prompt()
+        self.assertEqual(
+            translator.translate(UserMessage(content=[TextBlock(text="hi")])), []
+        )
+        # Suppression is one-shot: a later prompt echo records normally again.
+        events = translator.translate(UserMessage(content="next"))
+        self.assertEqual(events[1][1]["item"]["text"], "next")
+
+    def test_suppression_does_not_swallow_tool_results(self) -> None:
+        # A pending suppression must skip only a user *prompt* echo, never a
+        # ToolResultBlock delivery (which also arrives as a UserMessage).
+        translator = claude_translate.EventTranslator()
+        translator.translate(
+            _assistant(ToolUseBlock(id="t1", name="Bash", input={"command": "ls"}))
+        )
+        translator.suppress_next_user_prompt()
+        events = translator.translate(
+            UserMessage(content=[ToolResultBlock(tool_use_id="t1", content="out")])
+        )
+        self.assertEqual(events[0][1]["item"]["status"], "completed")
+        # The prompt echo that follows is still suppressed.
+        self.assertEqual(translator.translate(UserMessage(content=[])), [])
+
+    def test_user_message_events_helper_shape(self) -> None:
+        events = claude_translate.user_message_events("uid:0", "text\n[image]")
+        self.assertEqual([m for m, _ in events], ["item/started", "item/completed"])
+        self.assertEqual(events[1][1]["item"]["type"], "userMessage")
+        self.assertEqual(events[1][1]["item"]["text"], "text\n[image]")
 
 
 class ClaudeOptionsTests(TestCase):
@@ -171,26 +205,19 @@ class ClaudeOptionsTests(TestCase):
             "plan",
         )
 
-    def test_approve_all_bypasses_only_under_danger_full_access(self) -> None:
-        # Only the deliberate full-access opt-out fully bypasses; under a
-        # confining sandbox approve_all stays on the callback so file edits are
-        # bounded (SandboxSettings only sandboxes bash).
-        self.assertEqual(
-            claude_options.resolve_permission_mode(
-                plan_mode=False,
-                sandbox_policy="dangerFullAccess",
-                approval_mode="approve_all",
-            ),
-            "bypassPermissions",
-        )
-        self.assertEqual(
-            claude_options.resolve_permission_mode(
-                plan_mode=False,
-                sandbox_policy="workspaceWrite",
-                approval_mode="approve_all",
-            ),
-            "default",
-        )
+    def test_approve_all_never_bypasses_permission_callback(self) -> None:
+        # The callback must stay live even under full-access + approve_all so
+        # AskUserQuestion can route to the input UI; "run everything" is preserved
+        # by auto-approving inside the callback instead. So no config bypasses.
+        for sandbox in ("dangerFullAccess", "workspaceWrite"):
+            self.assertEqual(
+                claude_options.resolve_permission_mode(
+                    plan_mode=False,
+                    sandbox_policy=sandbox,
+                    approval_mode="approve_all",
+                ),
+                "default",
+            )
 
     def test_danger_full_access_keeps_approval_gate(self) -> None:
         # Full filesystem access must not silently bypass the approval gate.
@@ -1264,6 +1291,86 @@ class WorkspaceWriteMcpGuardTests(TestCase):
             )
         mock_create.assert_not_called()
         self.assertIsInstance(result, PermissionResultAllow)
+
+
+class DangerFullAccessApproveAllTests(TestCase):
+    """``dangerFullAccess`` + ``approve_all`` no longer maps to
+    ``bypassPermissions`` (the callback must stay live so ``AskUserQuestion`` can
+    route to the input UI). The callback now makes such a turn "run everything":
+    external MCP and unconfined PowerShell auto-approve since the user opted into
+    full access -- but clarifications still surface."""
+
+    def _runner(self) -> Any:
+        import io
+
+        from hitch.main.management.commands import claude_worker
+
+        instance = CodexInstance(
+            thread_id="t",
+            cwd="/repo",
+            prompt="x",
+            events_path="x",
+            pid=0,
+            status=CodexInstance.STATUS_RUNNING,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            purpose=CodexInstance.PURPOSE_USER,
+        )
+        return claude_worker._TurnRunner(
+            instance=instance,
+            events_file=io.StringIO(),
+            model=None,
+            reasoning_effort=None,
+            sandbox_policy=claude_options.SANDBOX_DANGER_FULL_ACCESS,
+            approval_mode=claude_options.APPROVAL_APPROVE_ALL,
+            web_search_mode=None,
+            plan_mode=False,
+        )
+
+    def test_permission_mode_stays_default_not_bypass(self) -> None:
+        # The whole fix hinges on the callback firing at all.
+        self.assertEqual(
+            claude_options.resolve_permission_mode(
+                plan_mode=False,
+                sandbox_policy=claude_options.SANDBOX_DANGER_FULL_ACCESS,
+                approval_mode=claude_options.APPROVAL_APPROVE_ALL,
+            ),
+            "default",
+        )
+
+    def test_external_mcp_and_powershell_auto_approved(self) -> None:
+        import asyncio
+
+        from claude_agent_sdk import PermissionResultAllow
+
+        from hitch.main.management.commands import claude_worker
+
+        runner = self._runner()
+        with patch.object(claude_worker, "_create_pending_approval") as mock_create:
+            mcp = asyncio.run(
+                runner._can_use_tool("mcp__github__create_pr", {"title": "x"}, None)
+            )
+            shell = asyncio.run(
+                runner._can_use_tool("PowerShell", {"command": "Get-ChildItem"}, None)
+            )
+        mock_create.assert_not_called()
+        self.assertIsInstance(mcp, PermissionResultAllow)
+        self.assertIsInstance(shell, PermissionResultAllow)
+
+    def test_ask_user_question_still_routes_to_input_ui(self) -> None:
+        import asyncio
+
+        # The crux of the fix: clarifications reach the input UI instead of being
+        # bypassed and surfacing to no one.
+        runner = self._runner()
+        with patch.object(
+            runner, "_ask_user_question", return_value=claude_options.allow_result()
+        ) as mock_ask:
+            asyncio.run(
+                runner._can_use_tool(
+                    "AskUserQuestion", {"questions": [{"question": "?"}]}, None
+                )
+            )
+        mock_ask.assert_called_once()
 
 
 class SteerPendingRollbackTests(TestCase):
@@ -3334,6 +3441,30 @@ class WorkerTurnTests(TestCase):
         messages = [_assistant(TextBlock(text="oops")), _result(subtype="error", is_error=True)]
         runner, _written = self._run(messages)
         self.assertTrue(runner.failed)
+
+    def test_image_turn_records_one_marked_user_message(self) -> None:
+        # A mixed text+image turn: the worker records the turn itself (text plus an
+        # [image] marker) because the SDK drops the image and echoes only the text.
+        # The echo must be suppressed so the turn yields exactly one user entry.
+        from hitch.main.management.commands import claude_worker
+
+        messages = [
+            # The SDK's echoed prompt for the image turn (image stripped, text kept).
+            UserMessage(content=[TextBlock(text="please help")]),
+            _assistant(TextBlock(text="done")),
+            _result(),
+        ]
+        # A non-str query input is how _build_query_input signals image blocks.
+        with patch.object(claude_worker, "_build_query_input", return_value=["<stream>"]):
+            _runner, written = self._run(messages)
+        user_texts = [
+            json.loads(line)["payload"]["item"]["text"]
+            for line in written.splitlines()
+            if line.strip()
+            and json.loads(line)["method"] == "item/completed"
+            and json.loads(line)["payload"]["item"].get("type") == "userMessage"
+        ]
+        self.assertEqual(user_texts, ["please help\n[image]"])
 
     def test_pre_loop_sigterm_skips_the_turn(self) -> None:
         # A Stop that landed before the loop installed its handlers (recorded by

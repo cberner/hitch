@@ -49,6 +49,22 @@ class EventTranslator:
     def __init__(self) -> None:
         # Open tool items keyed by tool-use id, awaiting their result block.
         self._open_tools: dict[str, dict[str, Any]] = {}
+        # Number of upcoming user-prompt echoes to drop because the worker already
+        # emitted that turn's ``userMessage`` itself (see
+        # ``suppress_next_user_prompt``).
+        self._suppress_user_prompts = 0
+
+    def suppress_next_user_prompt(self) -> None:
+        """Drop the next echoed user prompt from the SDK stream.
+
+        The SDK's message parser silently drops image content blocks, so an
+        image-bearing user turn echoes back with no trace of the attachment (an
+        image-only turn even echoes empty). The worker -- which holds the
+        attachment paths -- records such a turn's ``userMessage`` itself (text
+        plus an ``[image]`` marker) and calls this so the matching SDK echo is
+        skipped, keeping exactly one user entry (and an accurate auto-QA count).
+        """
+        self._suppress_user_prompts += 1
 
     def translate(self, message: Any) -> list[Event]:
         if isinstance(message, AssistantMessage):
@@ -139,6 +155,16 @@ class EventTranslator:
 
     def _translate_user(self, message: UserMessage) -> list[Event]:
         content = message.content
+        # A user-prompt echo carries text (or, for an image-stripped turn, no
+        # blocks); tool results arrive as a ``UserMessage`` of ``ToolResultBlock``s
+        # and must never be suppressed. When the worker already emitted this turn's
+        # ``userMessage`` (an image turn), drop the matching prompt echo.
+        is_tool_result = isinstance(content, list) and any(
+            isinstance(block, ToolResultBlock) for block in content
+        )
+        if not is_tool_result and self._suppress_user_prompts > 0:
+            self._suppress_user_prompts -= 1
+            return []
         if isinstance(content, str):
             return _complete_text_item(_user_item_id(message, 0), "userMessage", content)
         events: list[Event] = []
@@ -151,16 +177,6 @@ class EventTranslator:
                         _user_item_id(message, index), "userMessage", block.text
                     )
                 )
-        # The SDK strips image blocks when parsing an echoed user message, so an
-        # image-only turn arrives with empty content. Emit an "[image]" marker so
-        # the turn is still recorded -- otherwise the transcript loses the user's
-        # input and auto-QA's user-message count comes up short by a turn.
-        if not content:
-            events.extend(
-                _complete_text_item(
-                    _user_item_id(message, 0), "userMessage", "[image]"
-                )
-            )
         return events
 
     def _close_tool(self, block: ToolResultBlock) -> list[Event]:
@@ -171,6 +187,15 @@ class EventTranslator:
         item["status"] = _STATUS_FAILED if block.is_error else _STATUS_COMPLETED
         item["result"] = _result_text(block.content)
         return [(ITEM_COMPLETED, {"item": item})]
+
+
+def user_message_events(item_id: str, text: str) -> list[Event]:
+    """Build the started/completed events for a worker-emitted ``userMessage``.
+
+    Used when the worker records a user turn itself (an image-bearing turn the
+    SDK echo can't represent) rather than translating it from the SDK stream.
+    """
+    return _complete_text_item(item_id, "userMessage", text)
 
 
 def _complete_text_item(

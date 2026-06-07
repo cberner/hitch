@@ -134,17 +134,18 @@ def resolve_permission_mode(
     """Map Hitch's plan/sandbox/approval knobs onto a Claude permission mode."""
     if plan_mode:
         return "plan"
-    # ``bypassPermissions`` skips ``can_use_tool`` entirely. ``SandboxSettings``
-    # only sandboxes *bash* -- the SDK's own Write/Edit tools are confined via the
-    # permission callback, not the sandbox -- so bypassing under ``workspaceWrite``
-    # would let approved file edits escape ``cwd``. Only the deliberate
-    # ``dangerFullAccess`` opt-out fully bypasses; otherwise keep ``can_use_tool``
-    # authoritative (it auto-approves under ``approve_all`` but confines edits).
-    if (
-        approval_mode == APPROVAL_APPROVE_ALL
-        and sandbox_policy == SANDBOX_DANGER_FULL_ACCESS
-    ):
-        return "bypassPermissions"
+    # Always keep ``can_use_tool`` authoritative ("default") rather than ever
+    # returning ``bypassPermissions``. The callback is where Hitch routes
+    # ``AskUserQuestion`` clarifications to the input UI and enforces the cwd
+    # guard, so a visible ``approve_all`` + ``dangerFullAccess`` turn -- the only
+    # config that would otherwise bypass -- must still reach it, or its
+    # clarifications would surface to no one. The callback auto-approves under
+    # ``approve_all`` (and, under ``dangerFullAccess``, the external-MCP and
+    # unconfined-PowerShell tools too), so the opted-in "run everything" behaviour
+    # is preserved without losing question routing. ``SandboxSettings`` only
+    # sandboxes *bash* anyway -- the SDK's Write/Edit tools are confined via the
+    # callback, not the sandbox -- so bypassing was never a safe way to run edits.
+    del sandbox_policy, approval_mode  # decision no longer depends on these
     return "default"
 
 

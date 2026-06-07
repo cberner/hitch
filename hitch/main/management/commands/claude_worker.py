@@ -294,6 +294,9 @@ class _TurnRunner:
         self._plan_mode = plan_mode
         self._translator = claude_translate.EventTranslator()
         self._seq: Callable[[], int] = itertools.count(1).__next__
+        # Unique-id source for worker-emitted user-message items (image turns the
+        # SDK echo can't represent); see ``_record_user_turn_with_image``.
+        self._user_image_seq: Callable[[], int] = itertools.count(1).__next__
         self._client: ClaudeSDKClient | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._steer_wakeup: asyncio.Event | None = None
@@ -340,7 +343,13 @@ class _TurnRunner:
                 self._cancelled = True
                 request_cancel()
                 return
-            await client.query(self._turn_input())
+            turn_input = self._turn_input()
+            await client.query(turn_input)
+            if not isinstance(turn_input, str):
+                # Image attachments: record the turn ourselves (the SDK echo drops
+                # the image), after the query so a rejected submit can't orphan the
+                # translator's suppression of the matching echo.
+                self._record_user_turn_with_image(self._instance.prompt)
             steer_task = asyncio.create_task(self._forward_steer_requests())
             try:
                 # ``receive_response`` stops after one ResultMessage, but a steer
@@ -439,6 +448,25 @@ class _TurnRunner:
         """
         instance = self._instance
         return _build_query_input(instance.prompt, instance.input_image_paths)
+
+    def _record_user_turn_with_image(self, text: str) -> None:
+        """Record an image-bearing user turn and suppress its (stripped) echo.
+
+        ``_build_query_input`` returns a streamed message (not a plain string)
+        only when valid image blocks are attached, and the SDK's parser drops
+        those blocks from the echoed user message -- so the worker records the
+        turn here, as a single ``userMessage`` of the text plus an ``[image]``
+        marker, and tells the translator to skip the matching echo. That keeps
+        exactly one user entry (and an accurate auto-QA turn count) while still
+        showing that the user supplied an image. Must run on the asyncio loop
+        thread so the event write and translator update are ordered with the
+        receive loop's own (the steer tailer runs on a separate thread).
+        """
+        marker = f"{text}\n[image]" if text else "[image]"
+        item_id = f"user-image:{self._user_image_seq()}"
+        for method, payload in claude_translate.user_message_events(item_id, marker):
+            self._write_event(method, payload)
+        self._translator.suppress_next_user_prompt()
 
     # -- streaming bookkeeping --------------------------------------------
 
@@ -611,26 +639,35 @@ class _TurnRunner:
                 "Hidden system-agent runs may only auto-run built-in Bash/file "
                 "tools under a write sandbox."
             )
+        full_access = (
+            self._sandbox_policy == claude_options.SANDBOX_DANGER_FULL_ACCESS
+        )
         if (
             approval_mode == claude_options.APPROVAL_APPROVE_ALL
             and tool_name != _EXIT_PLAN_MODE_TOOL
-            and not self._powershell_unconfined(tool_name)
-            and not _is_external_mcp_tool(tool_name)
+            and (
+                full_access
+                or (
+                    not self._powershell_unconfined(tool_name)
+                    and not _is_external_mcp_tool(tool_name)
+                )
+            )
         ):
-            # ``approve_all`` auto-approves without prompting. It only reaches the
-            # callback for a confining sandbox (``dangerFullAccess`` maps to
-            # ``bypassPermissions`` and skips it); the cwd guard above already
-            # bounded file edits, so the rest just proceeds. ``ExitPlanMode`` is
-            # excluded: leaving plan mode is the one boundary ``/plan`` must always
-            # surface for explicit review, so it falls through to the interactive
-            # approval below even under ``approve_all``. Unconfined ``PowerShell``
-            # is likewise excluded: the bash sandbox can't confine it, so a visible
-            # session routes it to interactive approval rather than auto-running it
-            # outside ``cwd``. External (project/user ``.claude``) MCP tools are
-            # also excluded: the sandbox confines only built-in Bash/file tools, so
-            # an external MCP side effect (e.g. ``mcp__github__create_pr``) would
-            # otherwise escape the chosen workspace confinement -- route it to
-            # interactive approval unless the user opted into ``dangerFullAccess``.
+            # ``approve_all`` auto-approves without prompting. ``dangerFullAccess``
+            # no longer maps to ``bypassPermissions`` (the callback must stay live
+            # so ``AskUserQuestion`` can route to the input UI), so this branch is
+            # now what makes a full-access + ``approve_all`` turn "run everything":
+            # under ``dangerFullAccess`` it auto-approves every tool reaching here.
+            # ``ExitPlanMode`` is still excluded: leaving plan mode is the one
+            # boundary ``/plan`` must always surface for explicit review, so it
+            # falls through to the interactive approval below even under
+            # ``approve_all``. Under a *confining* sandbox, unconfined ``PowerShell``
+            # and external (project/user ``.claude``) MCP tools are excluded: the
+            # bash sandbox can't confine them, so a side effect (e.g.
+            # ``mcp__github__create_pr``) would escape the chosen workspace
+            # confinement -- route those to interactive approval unless the user
+            # opted into ``dangerFullAccess``. The cwd guard above already bounded
+            # built-in file edits, so the rest just proceeds.
             return claude_options.allow_result()
         params = _approval_params(method, tool_name, tool_input)
         request_id = await asyncio.to_thread(
@@ -830,16 +867,36 @@ class _TurnRunner:
         for raw in complete.splitlines():
             text, image_paths = _steer_request(raw)
             if (text or image_paths) and self._client is not None and self._loop is not None:
-                query_input = _build_query_input(text, image_paths)
                 # Register the expected response before scheduling so the loop
                 # thread can't finish draining the prior response and exit before
                 # it learns another response is coming.
                 self._add_outstanding(1)
                 future = asyncio.run_coroutine_threadsafe(
-                    self._client.query(query_input), self._loop
+                    self._send_steered_query(text, image_paths), self._loop
                 )
                 future.add_done_callback(self._steer_query_done)
         return offset + len(complete)
+
+    async def _send_steered_query(self, text: str, image_paths: Any) -> None:
+        """Submit a steered follow-up query, recording an image turn if present.
+
+        Runs on the asyncio loop thread (the tailer that reads the control file
+        runs on a worker thread), so recording the user turn here is ordered with
+        the receive loop's own event writes and translator reads.
+        """
+        client = self._client
+        if client is None:
+            # The registered response can never arrive; release it so the receive
+            # loop can tear down instead of awaiting forever.
+            self._add_outstanding(-1)
+            return
+        query_input = _build_query_input(text, image_paths)
+        await client.query(query_input)
+        if not isinstance(query_input, str):
+            # Image attachments: record the turn ourselves (the SDK echo drops the
+            # image), after the query so a rejected submit can't orphan the
+            # translator's suppression of the matching echo.
+            self._record_user_turn_with_image(text)
 
     def _steer_query_done(self, future: Any) -> None:
         """Roll back the expected-response count if a steer query never ran.
