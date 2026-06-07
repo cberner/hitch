@@ -7669,6 +7669,46 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
 
     @patch("hitch.main.system_agents._spawn_pr_followup_monitor_run")
+    def test_reconcile_stale_pr_monitor_blocks_on_restart_failure(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        workflow = SystemWorkflow.objects.create(
+            kind=SystemWorkflow.KIND_PR_QA,
+            main_thread_id="main-thread",
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_PR_MONITORING,
+            state={
+                system_agents._PR_HANDOFF_STATE_KEY: {
+                    "url": "https://github.com/cberner/hitch/pull/169",
+                    "repository_full_name": "cberner/hitch",
+                    "pr_number": 169,
+                    "state": "open",
+                },
+            },
+        )
+        stale_updated_at = (
+            datetime.now(UTC)
+            - system_agents._WORKFLOW_SPAWN_STALE_TIMEOUT
+            - timedelta(seconds=1)
+        )
+        SystemWorkflow.objects.filter(pk=workflow.pk).update(
+            updated_at=stale_updated_at
+        )
+        mock_spawn.side_effect = RuntimeError("boom")
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id="main-thread"
+        )
+
+        self.assertEqual(reconciled, 1)
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
+        self.assertEqual(workflow.step, system_agents.STEP_BLOCKED)
+        self.assertIn("failed to restart PR follow-up monitor", workflow.state["error"])
+        self.assertIn("boom", workflow.state["error"])
+
+    @patch("hitch.main.system_agents._spawn_pr_followup_monitor_run")
     def test_reconcile_stale_pr_monitor_waits_for_route_claimed_monitor(
         self, mock_spawn: MagicMock
     ) -> None:
