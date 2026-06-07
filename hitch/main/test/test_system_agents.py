@@ -9509,9 +9509,9 @@ class AutonomousGoalWorkflowTests(TestCase):
         workflow.refresh_from_db()
         first_proposal = ProposedSession.objects.get()
         self.assertEqual(
-            first_proposal.outcome_status, ProposedSession.OUTCOME_DISMISSED
+            first_proposal.outcome_status, ProposedSession.OUTCOME_UNSET
         )
-        self.assertTrue(
+        self.assertFalse(
             first_proposal.outcome_metadata["stacked_diff_hidden_until_complete"]
         )
         self.assertEqual(
@@ -9566,6 +9566,510 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
         self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED)
         mock_cleanup.assert_called_once_with("/repo-worktree-1")
+
+    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    def test_accepted_stack_proposal_cancels_running_continuation_on_finish(
+        self, mock_cleanup: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=3,
+        )
+        accepted_candidate = SessionMetadata.objects.create(
+            thread_id="candidate-2",
+            cwd="/repo-worktree-2",
+            project=project,
+        )
+        running_candidate = SessionMetadata.objects.create(
+            thread_id="candidate-3",
+            cwd="/repo-worktree-3",
+            project=project,
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Expand parser coverage",
+            summary="Cover more parser edge cases.",
+            candidate_session=accepted_candidate,
+            accepted_session=accepted_candidate,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            outcome_metadata={
+                "accepted_by": "user",
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 2,
+                "stacked_diff_hidden_until_complete": False,
+            },
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={
+                "autonomous_goal_id": autonomous_goal.pk,
+                "proposal_id": proposal.pk,
+                "candidate_session_id": running_candidate.pk,
+                "session_cwd": "/repo-worktree-3",
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 3,
+            },
+        )
+        instance = _instance(
+            thread_id="candidate-3",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id="candidate-3",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        run.refresh_from_db()
+        workflow.refresh_from_db()
+        proposal.refresh_from_db()
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertEqual(
+            run.error, system_agents.AUTONOMOUS_GOAL_PROPOSAL_ACCEPTED_ERROR
+        )
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED)
+        self.assertEqual(
+            workflow.state["stacked_diff_stopped_reason"],
+            "proposal_accepted",
+        )
+        self.assertEqual(ProposedSession.objects.count(), 1)
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
+        self.assertEqual(proposal.accepted_session, accepted_candidate)
+        mock_cleanup.assert_called_once_with("/repo-worktree-3")
+
+    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    def test_rejected_stack_proposal_cancels_running_continuation_on_finish(
+        self, mock_cleanup: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=3,
+        )
+        running_candidate = SessionMetadata.objects.create(
+            thread_id="candidate-3",
+            cwd="/repo-worktree-3",
+            project=project,
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Expand parser coverage",
+            summary="Cover more parser edge cases.",
+            candidate_session=SessionMetadata.objects.create(
+                thread_id="candidate-2",
+                cwd="/repo-worktree-2",
+                project=project,
+            ),
+            outcome_status=ProposedSession.OUTCOME_REJECTED,
+            outcome_notes="Not the right direction.",
+            outcome_metadata={
+                "resolved_by": "user",
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 2,
+                "stacked_diff_hidden_until_complete": False,
+            },
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={
+                "autonomous_goal_id": autonomous_goal.pk,
+                "proposal_id": proposal.pk,
+                "candidate_session_id": running_candidate.pk,
+                "session_cwd": "/repo-worktree-3",
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 3,
+            },
+        )
+        instance = _instance(
+            thread_id="candidate-3",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id="candidate-3",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        system_agents.on_codex_instance_finished(instance)
+
+        run.refresh_from_db()
+        workflow.refresh_from_db()
+        proposal.refresh_from_db()
+        self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertEqual(
+            run.error, system_agents.AUTONOMOUS_GOAL_PROPOSAL_REJECTED_ERROR
+        )
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED)
+        self.assertEqual(
+            workflow.state["stacked_diff_stopped_reason"],
+            "proposal_rejected",
+        )
+        self.assertEqual(ProposedSession.objects.count(), 1)
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_REJECTED)
+        self.assertEqual(
+            [call.args[0] for call in mock_cleanup.call_args_list],
+            ["/repo-worktree-3", "/repo-worktree-2"],
+        )
+
+    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
+    def test_accepted_stack_proposal_stop_ignores_different_proposal(
+        self, mock_interrupt: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=3,
+        )
+        accepted_session = SessionMetadata.objects.create(
+            thread_id="accepted-thread",
+            cwd="/repo-worktree-1",
+            project=project,
+        )
+        accepted_proposal = ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Older parser coverage",
+            accepted_session=accepted_session,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            outcome_metadata={"accepted_by": "user"},
+        )
+        current_proposal = ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Current parser coverage",
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={
+                "autonomous_goal_id": autonomous_goal.pk,
+                "proposal_id": current_proposal.pk,
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 3,
+            },
+        )
+        instance = _instance(
+            thread_id="candidate-3",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id="candidate-3",
+            instance=instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        stopped = system_agents.stop_running_autonomous_goal_stack_after_proposal_resolution(
+            autonomous_goal.pk,
+            accepted_proposal.pk,
+            ProposedSession.OUTCOME_ACCEPTED,
+        )
+
+        self.assertTrue(stopped)
+        mock_interrupt.assert_not_called()
+        workflow.refresh_from_db()
+        run.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(run.status, SystemAgentRun.STATUS_RUNNING)
+
+    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
+    def test_stack_proposal_stop_cleans_worktree_between_agent_turns(
+        self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=3,
+        )
+        accepted_session = SessionMetadata.objects.create(
+            thread_id="candidate-2",
+            cwd="/repo-worktree-2",
+            project=project,
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Expand parser coverage",
+            accepted_session=accepted_session,
+            candidate_session=accepted_session,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            outcome_metadata={
+                "accepted_by": "user",
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 2,
+                "stacked_diff_hidden_until_complete": False,
+            },
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING,
+            state={
+                "autonomous_goal_id": autonomous_goal.pk,
+                "proposal_id": proposal.pk,
+                "session_cwd": "/repo-worktree-3",
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 3,
+            },
+        )
+        finished_instance = _instance(
+            thread_id="candidate-3",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_COMPLETED,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id=finished_instance.thread_id,
+            instance=finished_instance,
+            status=SystemAgentRun.STATUS_COMPLETED,
+        )
+
+        stopped = system_agents.stop_running_autonomous_goal_stack_after_proposal_resolution(
+            autonomous_goal.pk,
+            proposal.pk,
+            ProposedSession.OUTCOME_ACCEPTED,
+        )
+
+        self.assertTrue(stopped)
+        mock_interrupt.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED)
+        self.assertEqual(
+            workflow.state["stacked_diff_stopped_reason"],
+            "proposal_accepted",
+        )
+        mock_cleanup.assert_called_once_with("/repo-worktree-3")
+
+    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
+    def test_stack_proposal_stop_keeps_accepted_worktree_before_next_candidate(
+        self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=3,
+        )
+        accepted_session = SessionMetadata.objects.create(
+            thread_id="candidate-2",
+            cwd="/repo-worktree-2",
+            project=project,
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Expand parser coverage",
+            accepted_session=accepted_session,
+            candidate_session=accepted_session,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            outcome_metadata={
+                "accepted_by": "user",
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 2,
+                "stacked_diff_hidden_until_complete": False,
+            },
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={
+                "autonomous_goal_id": autonomous_goal.pk,
+                "proposal_id": proposal.pk,
+                "session_cwd": "/repo-worktree-2",
+                system_agents._AUTONOMOUS_GOAL_STACKED_FORK_CWD_STATE_KEY: (
+                    "/repo-worktree-2"
+                ),
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 3,
+            },
+        )
+
+        stopped = system_agents.stop_running_autonomous_goal_stack_after_proposal_resolution(
+            autonomous_goal.pk,
+            proposal.pk,
+            ProposedSession.OUTCOME_ACCEPTED,
+        )
+
+        self.assertTrue(stopped)
+        mock_interrupt.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
+        self.assertEqual(
+            workflow.state["stacked_diff_stopped_reason"],
+            "proposal_accepted",
+        )
+        mock_cleanup.assert_not_called()
+
+    @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.system_agents.codex_pool.interrupt_instance")
+    def test_accepted_stack_proposal_stop_leaves_live_uninterrupted_run(
+        self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            confidence_threshold=AutonomousGoal.CONFIDENCE_HIGH,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=3,
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Expand parser coverage",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            outcome_metadata={"accepted_by": "user"},
+        )
+        workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_RUNNING,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
+            state={
+                "autonomous_goal_id": autonomous_goal.pk,
+                "proposal_id": proposal.pk,
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 3,
+            },
+        )
+        interrupted_instance = _instance(
+            thread_id="candidate-3a",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        live_instance = _instance(
+            thread_id="candidate-3b",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            workflow_id=workflow.pk,
+            status=CodexInstance.STATUS_RUNNING,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+        interrupted_run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id=interrupted_instance.thread_id,
+            instance=interrupted_instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+        live_run = SystemAgentRun.objects.create(
+            workflow=workflow,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            thread_id=live_instance.thread_id,
+            instance=live_instance,
+            status=SystemAgentRun.STATUS_RUNNING,
+        )
+
+        def interrupt_side_effect(
+            _instance_id: int, *, expected_thread_id: str
+        ) -> CodexInstance | None:
+            if expected_thread_id == interrupted_instance.thread_id:
+                return interrupted_instance
+            return None
+
+        mock_interrupt.side_effect = interrupt_side_effect
+
+        stopped = system_agents.stop_running_autonomous_goal_stack_after_proposal_resolution(
+            autonomous_goal.pk,
+            proposal.pk,
+            ProposedSession.OUTCOME_ACCEPTED,
+        )
+
+        self.assertFalse(stopped)
+        workflow.refresh_from_db()
+        interrupted_run.refresh_from_db()
+        live_run.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(interrupted_run.status, SystemAgentRun.STATUS_FAILED)
+        self.assertEqual(
+            interrupted_run.error,
+            system_agents.AUTONOMOUS_GOAL_PROPOSAL_ACCEPTED_ERROR,
+        )
+        self.assertEqual(live_run.status, SystemAgentRun.STATUS_RUNNING)
+        mock_cleanup.assert_not_called()
+
+        interrupted_instance.status = CodexInstance.STATUS_COMPLETED
+        interrupted_instance.save(update_fields=["status"])
+
+        handled = system_agents.on_codex_instance_finished(interrupted_instance)
+
+        self.assertTrue(handled)
+        mock_cleanup.assert_not_called()
 
     @patch("hitch.main.system_agents.cleanup_managed_worktree_path")
     @patch(
@@ -9659,9 +10163,9 @@ class AutonomousGoalWorkflowTests(TestCase):
         system_agents.on_codex_instance_finished(judge_1)
         first_proposal = ProposedSession.objects.get()
         self.assertEqual(
-            first_proposal.outcome_status, ProposedSession.OUTCOME_DISMISSED
+            first_proposal.outcome_status, ProposedSession.OUTCOME_UNSET
         )
-        self.assertTrue(
+        self.assertFalse(
             first_proposal.outcome_metadata["stacked_diff_hidden_until_complete"]
         )
 
@@ -10254,13 +10758,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertIn("candidate round 2 of 2", mock_spawn.call_args.kwargs["prompt"])
         previous_proposal.refresh_from_db()
         self.assertEqual(
-            previous_proposal.outcome_status, ProposedSession.OUTCOME_DISMISSED
+            previous_proposal.outcome_status, ProposedSession.OUTCOME_UNSET
         )
-        self.assertEqual(
-            previous_proposal.outcome_notes,
-            system_agents._AUTONOMOUS_GOAL_STACKED_HIDDEN_OUTCOME_NOTES,
-        )
-        self.assertTrue(
+        self.assertEqual(previous_proposal.outcome_notes, "")
+        self.assertFalse(
             previous_proposal.outcome_metadata["stacked_diff_hidden_until_complete"]
         )
 
@@ -10678,8 +11179,8 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.state["session_cwd"], "/repo-worktree-2")
         mock_snapshot.assert_called_once_with("/repo-worktree-1")
         proposal.refresh_from_db()
-        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_DISMISSED)
-        self.assertTrue(
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
+        self.assertFalse(
             proposal.outcome_metadata["stacked_diff_hidden_until_complete"]
         )
         mock_spawn.assert_called_once()
@@ -11536,6 +12037,51 @@ class AutonomousGoalWorkflowTests(TestCase):
                 "accepted_by": "user",
                 "auto_qa_enabled": True,
             },
+        )
+        _instance(
+            thread_id="implementation-thread",
+            purpose=CodexInstance.PURPOSE_USER,
+            status=CodexInstance.STATUS_RUNNING,
+        )
+
+        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+
+        self.assertEqual(started, 0)
+        mock_spawn.assert_not_called()
+
+    @patch(
+        "hitch.main.system_agents.default_branch_commit_hash",
+        return_value="a" * 40,
+    )
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_auto_proposal_blocks_user_accepted_running_goal_session(
+        self, mock_spawn: MagicMock, _mock_default_sha: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        blocker_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve docs",
+            goal="Find useful documentation increments.",
+            auto_proposal_enabled=True,
+        )
+        implementation = SessionMetadata.objects.create(
+            thread_id="implementation-thread",
+            cwd="/repo",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=blocker_goal,
+            title="Accepted proposal",
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+            accepted_session=implementation,
+            outcome_metadata={"accepted_by": "user"},
         )
         _instance(
             thread_id="implementation-thread",

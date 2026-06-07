@@ -3738,11 +3738,16 @@ def update_proposed_session_outcome(
         # update() bypasses save(), so the auto_now updated_at must be set here.
         "updated_at": timezone.now(),
     }
+    outcome_metadata = _proposal_outcome_metadata(
+        proposed_session,
+        {"resolved_by": "user"},
+    )
     if outcome_status == ProposedSession.OUTCOME_ACCEPTED:
         update_values["accepted_session"] = proposed_session.candidate_session
-        update_values["outcome_metadata"] = _proposal_outcome_metadata(
+        outcome_metadata = _proposal_outcome_metadata(
             proposed_session,
             {
+                **outcome_metadata,
                 "accepted_by": "user",
                 "accepted_session_id": (
                     proposed_session.candidate_session_id
@@ -3756,6 +3761,7 @@ def update_proposed_session_outcome(
                 ),
             },
         )
+    update_values["outcome_metadata"] = outcome_metadata
     # Inbox decisions are one-way: only an undecided item may be resolved
     # (UNSET -> accepted/rejected/dismissed), matching the OUTCOME_UNSET filter
     # the new-session entry points already apply. Enforce it with a single
@@ -3776,6 +3782,9 @@ def update_proposed_session_outcome(
     # Mirror the committed values onto the instance for the cleanup side effect.
     for field, value in update_values.items():
         setattr(proposed_session, field, value)
+    stack_continuation_stopped = _stop_autonomous_goal_stack_after_proposal_resolution(
+        proposed_session
+    )
     if (
         outcome_status == ProposedSession.OUTCOME_ACCEPTED
         and proposed_session.candidate_session is not None
@@ -3788,7 +3797,7 @@ def update_proposed_session_outcome(
     if outcome_status in {
         ProposedSession.OUTCOME_DISMISSED,
         ProposedSession.OUTCOME_REJECTED,
-    }:
+    } and stack_continuation_stopped:
         _cleanup_proposed_session_candidate_worktree(proposed_session)
     return redirect("inbox")
 
@@ -3808,6 +3817,18 @@ def _cleanup_proposed_session_candidate_worktree(
             "failed to clean up candidate worktree for proposed session %s",
             proposed_session.pk,
         )
+
+
+def _stop_autonomous_goal_stack_after_proposal_resolution(
+    proposed_session: ProposedSession,
+) -> bool:
+    if proposed_session.autonomous_goal_id is None:
+        return True
+    return system_agents.stop_running_autonomous_goal_stack_after_proposal_resolution(
+        proposed_session.autonomous_goal_id,
+        proposed_session.pk,
+        proposed_session.outcome_status,
+    )
 
 
 def _validated_autonomous_goal_title(raw_title: str) -> tuple[str, str | None]:
@@ -9292,6 +9313,7 @@ def _accept_proposed_session_for_session(
         proposed_session,
         {
             "accepted_by": "user",
+            "resolved_by": "user",
             "accepted_session_id": session_metadata.pk,
             "accepted_thread_id": session_metadata.thread_id,
         },
@@ -9340,6 +9362,7 @@ def _reset_candidate_proposal_start_claim(
         proposed_session,
         {
             "accepted_by": None,
+            "resolved_by": None,
             "accepted_session_id": None,
             "accepted_thread_id": None,
         },
@@ -9371,6 +9394,7 @@ def _claim_new_session_proposal_start(
         proposed_session,
         {
             "accepted_by": "user",
+            "resolved_by": "user",
             "accepted_session_id": None,
             "accepted_thread_id": "",
             ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY: (
@@ -9405,6 +9429,7 @@ def _reset_new_session_proposal_start_claim(proposed_session: ProposedSession) -
         proposed_session,
         {
             "accepted_by": None,
+            "resolved_by": None,
             "accepted_session_id": None,
             "accepted_thread_id": None,
             ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY: None,
@@ -9440,6 +9465,7 @@ def _finish_new_session_proposal_start_claim(
         proposed_session,
         {
             "accepted_by": "user",
+            "resolved_by": "user",
             "accepted_session_id": session_metadata.pk,
             "accepted_thread_id": session_metadata.thread_id,
             ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY: None,
@@ -9459,6 +9485,7 @@ def _finish_new_session_proposal_start_claim(
         return
     proposed_session.accepted_session = session_metadata
     proposed_session.outcome_metadata = outcome_metadata
+    _stop_autonomous_goal_stack_after_proposal_resolution(proposed_session)
 
 
 def _new_session_proposal_start_claim_filter(
@@ -9498,6 +9525,7 @@ def _recover_stale_new_session_proposal_start_claims() -> None:
             proposed_session,
             {
                 "accepted_by": None,
+                "resolved_by": None,
                 "accepted_session_id": None,
                 "accepted_thread_id": None,
                 claim_key: None,
@@ -11017,7 +11045,7 @@ def _start_candidate_proposal_session(
         # Persist the proposal-derived auto-review configuration so subsequent
         # turns in this session keep honoring it. Hardcoding ``False`` here would
         # silently drop a goal's auto-QA/auto-merge settings after the first turn.
-        return _finish_candidate_proposal_start(
+        response = _finish_candidate_proposal_start(
             request=request,
             proposed_session=proposed_session,
             candidate_session=candidate_session,
@@ -11028,6 +11056,8 @@ def _start_candidate_proposal_session(
             auto_pr_enabled=auto_pr_enabled,
             auto_qa_enabled=auto_qa_enabled,
         )
+        _stop_autonomous_goal_stack_after_proposal_resolution(proposed_session)
+        return response
 
     input_image_paths, input_image_error = _save_posted_input_images(request)
     if input_image_error is not None:
@@ -11088,7 +11118,7 @@ def _start_candidate_proposal_session(
             _reset_candidate_proposal_start_claim(proposed_session, candidate_session)
         raise
 
-    return _finish_candidate_proposal_start(
+    response = _finish_candidate_proposal_start(
         request=request,
         proposed_session=proposed_session,
         candidate_session=candidate_session,
@@ -11099,6 +11129,8 @@ def _start_candidate_proposal_session(
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
     )
+    _stop_autonomous_goal_stack_after_proposal_resolution(proposed_session)
+    return response
 
 
 def _candidate_proposal_continuation_prompt(prompt: str) -> str:
