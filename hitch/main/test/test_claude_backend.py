@@ -1389,30 +1389,28 @@ class ClaudeMcpPrDetectionTests(TestCase):
         import json as _json
         import tempfile
 
-        fh = tempfile.NamedTemporaryFile(
+        event = _json.dumps(
+            {
+                "method": "item/completed",
+                "payload": {
+                    "item": {
+                        "id": "g1",
+                        "type": "mcpToolCall",
+                        "server": "github",
+                        "tool": "create_pull_request",
+                        "status": "completed",
+                        "result": result_json,
+                    }
+                },
+            }
+        )
+        with tempfile.NamedTemporaryFile(
             mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
-        )
-        fh.write(
-            _json.dumps(
-                {
-                    "method": "item/completed",
-                    "payload": {
-                        "item": {
-                            "id": "g1",
-                            "type": "mcpToolCall",
-                            "server": "github",
-                            "tool": "create_pull_request",
-                            "status": "completed",
-                            "result": result_json,
-                        }
-                    },
-                }
-            )
-            + "\n"
-        )
-        fh.close()
-        self.addCleanup(Path(fh.name).unlink, missing_ok=True)
-        return fh.name
+        ) as fh:
+            fh.write(event + "\n")
+            name = fh.name
+        self.addCleanup(Path(name).unlink, missing_ok=True)
+        return name
 
     def _claude_instance(self, events_path: str) -> None:
         CodexInstance.objects.create(
