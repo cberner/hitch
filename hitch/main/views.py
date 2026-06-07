@@ -4842,11 +4842,15 @@ def _render_session_detail(
         metadata_by_thread[session_id] = metadata
     session_project = _project_for_thread(thread, metadata_by_thread, projects)
     latest_pr_url = rollout_data.latest_pr_url if rollout_data is not None else None
-    pr_observation = (
-        rollout_data.pr_observation
-        if rollout_data is not None
-        else _pr_observation_result_for_thread(thread)
-    )
+    if rollout_data is not None:
+        pr_observation = rollout_data.pr_observation
+    elif _session_is_claude(session_id):
+        # Claude threads have no rollout; recover the PR from the thread's GitHub
+        # MCP calls so a PR opened outside the /pr workflow still surfaces on the
+        # badge (the synthetic thread's empty ``turns`` would otherwise find none).
+        pr_observation = _claude_pr_observation_for_session(session_id)
+    else:
+        pr_observation = _pr_observation_result_for_thread(thread)
     latest_pr_workflow = _latest_pr_workflow_for_thread(session_id)
     stage_workflow = active_system_workflow or latest_pr_workflow
     stage_pr_workflow = (
@@ -5693,14 +5697,42 @@ def _start_claude_qa_workflow(
     return redirect("session", session_id=session_id)
 
 
-def _claude_fix_pr_url(session_id: str) -> str | None:
-    """Resolve the open PR URL for a Claude ``/fix-pr`` from the PR workflow handoff.
+def _claude_pr_observation_for_session(
+    session_id: str,
+) -> codex_events.PrObservationResult:
+    """Recover a Claude thread's PR state from its worker event files.
 
-    Claude threads have no Codex rollout to scan for a PR link, so -- like the
-    Claude session detail -- the URL comes from the latest PR/QA workflow's
-    recorded handoff rather than ``_pr_url_for_thread``.
+    Claude has no Codex rollout to scan, so a PR opened through a GitHub MCP tool
+    -- even by a normal turn outside the ``/pr`` workflow -- is detected from the
+    ``mcpToolCall`` results recorded across the thread's instances' events. This
+    lets the PR badge and ``/fix-pr`` find a PR the same way the Codex rollout
+    scan does.
     """
-    pr_observation = codex_events.PrObservationResult(snapshot=None)
+    paths = [
+        path
+        for path in (
+            CodexInstance.objects.filter(
+                thread_id=session_id, backend=CodexInstance.BACKEND_CLAUDE
+            )
+            .order_by("started_at", "pk")
+            .values_list("events_path", flat=True)
+        )
+        if path
+    ]
+    snapshot = codex_events.latest_pr_snapshot_from_event_paths(
+        paths, thread_id=session_id
+    )
+    return codex_events.PrObservationResult(snapshot=snapshot)
+
+
+def _claude_fix_pr_url(session_id: str) -> str | None:
+    """Resolve the open PR URL for a Claude ``/fix-pr``.
+
+    Claude threads have no Codex rollout to scan, so the URL comes from the
+    thread's own GitHub MCP calls (recovered from its event files) and, failing
+    that, the latest PR/QA workflow's recorded handoff.
+    """
+    pr_observation = _claude_pr_observation_for_session(session_id)
     stage_pr_workflow = _workflow_after_main_lifecycle(
         _latest_pr_workflow_for_thread(session_id),
         pr_observation,

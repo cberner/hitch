@@ -372,7 +372,7 @@ class ClaudeOptionsTests(TestCase):
             base_instructions="Base guidance.",
             developer_instructions="Use repo conventions.",
         )
-        append = options.system_prompt["append"]
+        append = cast("dict[str, Any]", options.system_prompt)["append"]
         self.assertIn("Base guidance.", append)
         self.assertIn("Use repo conventions.", append)
 
@@ -385,8 +385,8 @@ class ClaudeOptionsTests(TestCase):
             model="claude-opus-4-8",
             developer_instructions="Use repo conventions.",
         )
-        self.assertIsInstance(options.system_prompt, dict)
-        self.assertIn("Use repo conventions.", options.system_prompt["append"])
+        system_prompt = cast("dict[str, Any]", options.system_prompt)
+        self.assertIn("Use repo conventions.", system_prompt["append"])
 
     @patch("hitch.main.claude_options.claude_bin", return_value=None)
     def test_build_options_with_mcp_server_and_schema_and_hook(self, _bin: MagicMock) -> None:
@@ -1378,6 +1378,74 @@ class ClaudeLiveApprovalModeTests(TransactionTestCase):
         )
         result = asyncio.run(runner._can_use_tool("Bash", {"command": "ls"}, None))
         self.assertIsInstance(result, PermissionResultAllow)
+
+
+class ClaudeMcpPrDetectionTests(TestCase):
+    """A PR opened via a GitHub MCP tool on a normal Claude turn (outside the /pr
+    workflow) is detected from the thread's event files, so the badge and
+    ``/fix-pr`` find it even though the synthetic thread has no rollout turns."""
+
+    def _events_file_with_pr(self, result_json: str) -> str:
+        import json as _json
+        import tempfile
+
+        fh = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
+        )
+        fh.write(
+            _json.dumps(
+                {
+                    "method": "item/completed",
+                    "payload": {
+                        "item": {
+                            "id": "g1",
+                            "type": "mcpToolCall",
+                            "server": "github",
+                            "tool": "create_pull_request",
+                            "status": "completed",
+                            "result": result_json,
+                        }
+                    },
+                }
+            )
+            + "\n"
+        )
+        fh.close()
+        self.addCleanup(Path(fh.name).unlink, missing_ok=True)
+        return fh.name
+
+    def _claude_instance(self, events_path: str) -> None:
+        CodexInstance.objects.create(
+            thread_id="claude-pr",
+            cwd="/repo",
+            prompt="open a pr",
+            events_path=events_path,
+            pid=0,
+            status=CodexInstance.STATUS_COMPLETED,
+            backend=CodexInstance.BACKEND_CLAUDE,
+            purpose=CodexInstance.PURPOSE_USER,
+        )
+
+    def test_fix_pr_url_detects_mcp_opened_pr(self) -> None:
+        from hitch.main import views
+
+        path = self._events_file_with_pr(
+            '{"url": "https://github.com/cberner/hitch/pull/500", '
+            '"state": "open", "number": 500}'
+        )
+        self._claude_instance(path)
+        self.assertEqual(
+            views._claude_fix_pr_url("claude-pr"),
+            "https://github.com/cberner/hitch/pull/500",
+        )
+
+    def test_observation_empty_without_pr_calls(self) -> None:
+        from hitch.main import views
+
+        path = self._events_file_with_pr("not json")
+        self._claude_instance(path)
+        observation = views._claude_pr_observation_for_session("claude-pr")
+        self.assertIsNone(observation.snapshot)
 
 
 class DemoSandboxOverrideTests(TestCase):
