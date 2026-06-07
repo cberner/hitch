@@ -184,6 +184,29 @@ _WORKFLOW_ROUTE_CLAIM_TIMEOUT = timedelta(minutes=10)
 # CLASSIFYING workflow whose timestamp is older than this; the window is well
 # above a normal classification (a few seconds) to avoid racing a live thread.
 _SPEC_CRITIC_CLASSIFY_STALE_TIMEOUT = timedelta(minutes=5)
+# A PR-QA workflow commits its next transient step (qa_running, feedback_running,
+# pr_prompt_running, ...) and *then* spawns the worker for it inside the
+# just-finished worker process (or the web request). If that process dies before
+# the worker's CodexInstance row is created -- e.g. the orphan-worker reaper
+# SIGKILLs its scope during a SQLite-lock storm -- the workflow zombies in that
+# step with no worker and nothing to route, because there is no instance for the
+# terminal-instance/turn reconcilers to find. Reconciliation recovers the
+# workflow once the row is older than this window (re-driving the QA review,
+# whose prompt is reconstructable, or surfacing a clear failure for a lost turn).
+# The window sits well above ``_WORKFLOW_ROUTE_CLAIM_TIMEOUT`` so a slow-but-live
+# spawn is never raced into a double review or a spurious failure.
+_WORKFLOW_SPAWN_STALE_TIMEOUT = timedelta(minutes=15)
+# Transient PR-QA steps whose worker is a visible coding/feedback turn spawned
+# right after the step is committed, and whose prompt is *not* reconstructable
+# (the QA feedback or the user's text is gone). A lost spawn here cannot be
+# re-driven, so the workflow is blocked with a surfaced explanation instead.
+# (pr_prompt_running is recovered separately by re-driving _spawn_pr_prompt,
+# whose prompt is reconstructable from state.)
+_ZOMBIE_TURN_STEP_MESSAGES = {
+    STEP_FEEDBACK_RUNNING: "QA feedback turn",
+    STEP_PR_FEEDBACK_RUNNING: "PR follow-up turn",
+    STEP_USER_STEERING_RUNNING: "coding turn",
+}
 _QA_DESIGN_SYNTHESIS_MIN_CATEGORY_OVERLAP = 2
 _QA_DESIGN_SYNTHESIS_RECENT_RUN_LIMIT = 50
 _QA_DESIGN_SYNTHESIS_MATCH_LIMIT = 3
@@ -2239,7 +2262,200 @@ def reconcile_terminal_workflow_instances(
     reconciled = _reconcile_terminal_system_agent_instances(workflows)
     reconciled += _reconcile_terminal_workflow_turns(workflows)
     reconciled += _reconcile_stale_spec_critic_workflows(workflows)
+    reconciled += _reconcile_orphaned_qa_spawns(workflows)
+    reconciled += _reconcile_orphaned_pr_prompt_spawns(workflows)
+    reconciled += _reconcile_zombie_workflow_turns(workflows)
     return reconciled
+
+
+def _reconcile_orphaned_pr_prompt_spawns(workflows: list[SystemWorkflow]) -> int:
+    """Recover PR-QA workflows stranded in ``pr_prompt_running`` by a dead spawn.
+
+    A QA-approved auto-PR workflow commits ``pr_prompt_running`` and *then* spawns
+    the PR-prompt turn. Unlike the QA-feedback or user-steering turns, this
+    prompt is reconstructable (``state['pr_prompt']`` or ``PR_SLASH_PROMPT`` via
+    ``_spawn_pr_prompt``), so a spawn killed before the turn existed can be
+    re-driven rather than blocked. ``_spawn_pr_prompt`` records its target index
+    (``QA_APPROVAL_INSERT_INDEX_STATE_KEY``) before launching the worker, so we
+    only re-drive when no PR-prompt turn was ever created -- never opening a
+    second PR for a turn that already ran (an off-by-one terminal turn is routed
+    by ``_reconcile_terminal_workflow_turns`` first, which moves the step).
+    """
+    stale_before = timezone.now() - _WORKFLOW_SPAWN_STALE_TIMEOUT
+    reconciled = 0
+    for workflow in workflows:
+        if workflow.kind != SystemWorkflow.KIND_PR_QA:
+            continue
+        if workflow.step != STEP_PR_PROMPT_RUNNING:
+            continue
+        if workflow.updated_at > stale_before:
+            continue
+        if _pr_prompt_turn_in_flight(workflow):
+            continue
+        locked = _claim_stale_workflow_step(
+            workflow, step=STEP_PR_PROMPT_RUNNING, stale_before=stale_before
+        )
+        if locked is None or _pr_prompt_turn_in_flight(locked):
+            continue
+        try:
+            _spawn_pr_prompt(locked)
+        except Exception as exc:
+            _block_workflow(
+                locked, f"failed to restart PR prompt after its spawn handler died: {exc!r}"
+            )
+        reconciled += 1
+    return reconciled
+
+
+def _pr_prompt_turn_in_flight(workflow: SystemWorkflow) -> bool:
+    """True if the PR-prompt turn was already created (so it must not re-spawn).
+
+    ``_spawn_pr_prompt`` persists the turn's index before launching the worker,
+    and the turn carries that exact ``user_message_index``; a starting/running
+    instance is also still live. Either way a re-drive would risk opening a
+    second PR, so defer to the terminal-turn reconciler / live worker instead.
+    """
+    insert_index = _state_int(workflow, QA_APPROVAL_INSERT_INDEX_STATE_KEY)
+    if CodexInstance.objects.filter(
+        workflow_id=workflow.pk,
+        purpose=CodexInstance.PURPOSE_USER,
+        user_message_index=insert_index,
+    ).exists():
+        return True
+    return CodexInstance.objects.filter(
+        workflow_id=workflow.pk,
+        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+    ).exists()
+
+
+def _reconcile_zombie_workflow_turns(workflows: list[SystemWorkflow]) -> int:
+    """Surface a clear failure for PR-QA workflows whose turn spawn died.
+
+    A turn step (feedback_running, pr_feedback_running, user_steering_running)
+    commits the step and *then* spawns a visible coding/feedback turn. If that
+    spawn's process is killed before the turn instance exists, the workflow
+    zombies in the step: no live worker, and nothing for the terminal-turn
+    reconciler to route. Unlike the QA review or the PR prompt, the turn cannot
+    be re-driven (its feedback or user prompt is gone), so once the row goes
+    stale with no worker settling we block it with a surfaced, owner-appropriate
+    error rather than letting it sit silently forever.
+    """
+    stale_before = timezone.now() - _WORKFLOW_SPAWN_STALE_TIMEOUT
+    reconciled = 0
+    for workflow in workflows:
+        if workflow.kind != SystemWorkflow.KIND_PR_QA:
+            continue
+        if workflow.step not in _ZOMBIE_TURN_STEP_MESSAGES:
+            continue
+        if workflow.updated_at > stale_before:
+            continue
+        if _workflow_turn_settling(workflow):
+            continue
+        locked = _claim_stale_workflow_step(
+            workflow, step=workflow.step, stale_before=stale_before
+        )
+        if locked is None or _workflow_turn_settling(locked):
+            continue
+        label = _ZOMBIE_TURN_STEP_MESSAGES[locked.step]
+        _block_workflow(
+            locked,
+            f"{label} never started: its spawn handler died before the worker "
+            "launched. Restart the workflow to continue.",
+        )
+        reconciled += 1
+    return reconciled
+
+
+def _workflow_turn_settling(workflow: SystemWorkflow) -> bool:
+    """True while a worker is live or a finished turn is still being routed.
+
+    A starting/running instance is a live (or reaper-bound) worker. A terminal
+    turn whose routing claim is still fresh is being handed off to its finish
+    handler right now; the terminal-turn reconciler (or the original finisher)
+    will advance the step. In either case the workflow is not yet a zombie.
+    """
+    instances = CodexInstance.objects.filter(workflow_id=workflow.pk)
+    if instances.filter(
+        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING)
+    ).exists():
+        return True
+    fresh_claim = timezone.now() - _WORKFLOW_ROUTE_CLAIM_TIMEOUT
+    return instances.filter(
+        purpose__in=(
+            CodexInstance.PURPOSE_USER,
+            CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+        ),
+        workflow_routing_started_at__gte=fresh_claim,
+    ).exists()
+
+
+def _reconcile_orphaned_qa_spawns(workflows: list[SystemWorkflow]) -> int:
+    """Recover PR-QA workflows stranded in ``qa_running`` by a dead spawn.
+
+    Every transition into ``qa_running`` (initial start, post-feedback restart,
+    post-user-steering restart) flips the step first and *then* calls
+    ``_spawn_pr_qa_run``. If that call's process is killed before the QA
+    CodexInstance row exists, no exception is raised in-process and no instance
+    is created, so neither the terminal-instance nor the terminal-turn
+    reconciler has anything to route: the workflow sits in ``qa_running`` with no
+    live worker. Once the row goes stale we re-drive the spawn. ``_spawn_pr_qa_run``
+    is idempotent against a live review because we only fire when no QA review is
+    in flight; a prior round's completed QA instance does not count.
+    """
+    stale_before = timezone.now() - _WORKFLOW_SPAWN_STALE_TIMEOUT
+    reconciled = 0
+    for workflow in workflows:
+        if workflow.kind != SystemWorkflow.KIND_PR_QA:
+            continue
+        if workflow.step != STEP_QA_RUNNING:
+            continue
+        if _qa_review_in_flight(workflow):
+            continue
+        locked = _claim_stale_workflow_step(
+            workflow, step=STEP_QA_RUNNING, stale_before=stale_before
+        )
+        if locked is None or _qa_review_in_flight(locked):
+            continue
+        try:
+            _spawn_pr_qa_run(locked)
+        except Exception as exc:
+            _block_workflow(
+                locked, f"failed to restart QA agent after its spawn handler died: {exc!r}"
+            )
+        reconciled += 1
+    return reconciled
+
+
+def _qa_review_in_flight(workflow: SystemWorkflow) -> bool:
+    """True while a QA review instance is live or still awaiting finish routing.
+
+    A starting/running QA instance is a live (or reaper-bound) worker; a terminal
+    QA instance whose run is not yet finalized is owned by the terminal-instance
+    reconciler. Either way the review is in flight and must not be re-spawned. A
+    prior feedback round's terminal-and-finalized instance shares the current
+    review revision, so it deliberately does not count here.
+    """
+    instances = CodexInstance.objects.filter(
+        workflow_id=workflow.pk,
+        purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+        agent_kind__in=_QA_INTERRUPTIBLE_AGENT_KINDS,
+    )
+    if instances.filter(
+        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING)
+    ).exists():
+        return True
+    return (
+        instances.filter(
+            status__in=(CodexInstance.STATUS_COMPLETED, CodexInstance.STATUS_FAILED)
+        )
+        .exclude(
+            system_agent_runs__status__in=(
+                SystemAgentRun.STATUS_COMPLETED,
+                SystemAgentRun.STATUS_FAILED,
+            )
+        )
+        .exists()
+    )
 
 
 def _reconcile_stale_spec_critic_workflows(workflows: list[SystemWorkflow]) -> int:
@@ -2259,7 +2475,7 @@ def _reconcile_stale_spec_critic_workflows(workflows: list[SystemWorkflow]) -> i
         if workflow.kind != SPEC_CRITIC_WORKFLOW_KIND:
             continue
         if workflow.step == STEP_SPEC_CRITIC_CLASSIFYING:
-            locked = _claim_stale_spec_critic_step(
+            locked = _claim_stale_workflow_step(
                 workflow, step=STEP_SPEC_CRITIC_CLASSIFYING, stale_before=stale_before
             )
             if locked is None:
@@ -2272,7 +2488,7 @@ def _reconcile_stale_spec_critic_workflows(workflows: list[SystemWorkflow]) -> i
             # reconciliation owns it (and re-spawning would duplicate agents).
             if workflow.agent_runs.exists():
                 continue
-            locked = _claim_stale_spec_critic_step(
+            locked = _claim_stale_workflow_step(
                 workflow, step=STEP_SPEC_CRITIC_ANALYZING, stale_before=stale_before
             )
             if locked is None or locked.agent_runs.exists():
@@ -2285,7 +2501,7 @@ def _reconcile_stale_spec_critic_workflows(workflows: list[SystemWorkflow]) -> i
             # is correct; the turn-exists guard keeps it from double-spawning.
             if not _state_bool(workflow, "skipped_classification"):
                 continue
-            locked = _claim_stale_spec_critic_step(
+            locked = _claim_stale_workflow_step(
                 workflow,
                 step=STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED,
                 stale_before=stale_before,
@@ -2297,7 +2513,7 @@ def _reconcile_stale_spec_critic_workflows(workflows: list[SystemWorkflow]) -> i
     return reconciled
 
 
-def _claim_stale_spec_critic_step(
+def _claim_stale_workflow_step(
     workflow: SystemWorkflow, *, step: str, stale_before: datetime
 ) -> SystemWorkflow | None:
     """Lock and claim a stale RUNNING workflow still at ``step``.
@@ -2400,18 +2616,24 @@ def _reconcile_terminal_workflow_turns(workflows: list[SystemWorkflow]) -> int:
         current_user_message_index = _state_int(workflow, "next_user_message_index") - 1
         if current_user_message_index < 0:
             continue
+        # ``_spawn_workflow_turn`` creates the turn *before* it saves the
+        # incremented ``next_user_message_index``. If the spawner dies in that
+        # gap, the durable turn carries ``next_user_message_index`` (one ahead of
+        # the value used here), so match both indices to route it rather than
+        # strand it. No turn is assigned the higher index in healthy states.
+        turn_indices = (current_user_message_index, current_user_message_index + 1)
         if workflow.step in (STEP_FEEDBACK_RUNNING, STEP_PR_FEEDBACK_RUNNING):
             filters |= models.Q(
                 workflow_id=workflow.pk,
                 purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-                user_message_index=current_user_message_index,
+                user_message_index__in=turn_indices,
             )
             has_turn_filter = True
         elif workflow.step in (STEP_USER_STEERING_RUNNING, STEP_PR_PROMPT_RUNNING):
             filters |= models.Q(
                 workflow_id=workflow.pk,
                 purpose=CodexInstance.PURPOSE_USER,
-                user_message_index=current_user_message_index,
+                user_message_index__in=turn_indices,
             )
             has_turn_filter = True
     if not has_turn_filter:
