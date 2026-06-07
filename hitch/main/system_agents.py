@@ -6220,7 +6220,12 @@ def _spawn_autonomous_goal_candidate_run(
             sandbox_policy=(
                 AUTONOMOUS_GOAL_IMPLEMENTATION_SANDBOX_POLICY
                 if _autonomous_goal_candidate_allows_code_changes(workflow)
-                else None
+                # A no-code (proposal-only) candidate runs in the user's real repo
+                # cwd with no worktree, so it must not write. An empty sandbox
+                # defaults to workspace-write at the app-server, which would let a
+                # misbehaving or prompt-injected run mutate the real repo despite
+                # the "do not make code changes" prompt -- pin it read-only.
+                else "readOnly"
             ),
             web_search_mode=_workflow_web_search_mode(workflow),
             thread_source=ThreadSource.subagent,
@@ -6281,7 +6286,10 @@ def _spawn_autonomous_goal_candidate_retry_run(
         sandbox_policy=(
             AUTONOMOUS_GOAL_IMPLEMENTATION_SANDBOX_POLICY
             if _autonomous_goal_candidate_allows_code_changes(workflow)
-            else None
+            # No-code candidate retry: same as the initial spawn, the run is in the
+            # real repo cwd and must not write -- pin it read-only rather than
+            # letting the empty sandbox default to workspace-write.
+            else "readOnly"
         ),
         web_search_mode=_workflow_web_search_mode(workflow),
         purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
@@ -6350,6 +6358,12 @@ def _spawn_autonomous_goal_judge_run(
         cwd=session_cwd,
         prompt=prompt,
         approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
+        # The judge only evaluates the candidate, so it never writes -- pin it
+        # read-only. This matters for no-code goals where ``session_cwd`` is the
+        # user's real repo: an empty sandbox defaults to workspace-write at the
+        # app-server, which would let the evaluation step mutate the repo the
+        # no-code candidate was deliberately kept out of.
+        sandbox_policy="readOnly",
         web_search_mode=_workflow_web_search_mode(workflow),
         thread_source=ThreadSource.subagent,
         purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,

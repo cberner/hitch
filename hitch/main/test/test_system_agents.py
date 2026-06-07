@@ -8713,7 +8713,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         kwargs = mock_spawn.call_args.kwargs
         self.assertEqual(kwargs["cwd"], "/repo")
         self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
-        self.assertIsNone(kwargs["sandbox_policy"])
+        # No worktree: a proposal-only (no-code) candidate runs in the real repo
+        # cwd, so it is pinned read-only rather than left to default to
+        # workspace-write.
+        self.assertEqual(kwargs["sandbox_policy"], "readOnly")
         self.assertEqual(kwargs["web_search_mode"], AutonomousGoal.WEB_SEARCH_LIVE)
         self.assertEqual(kwargs["agent_kind"], system_agents.AUTONOMOUS_GOAL_AGENT_KIND)
         self.assertEqual(kwargs["display_author"], system_agents.AUTONOMOUS_GOAL_DISPLAY_AUTHOR)
@@ -11583,6 +11586,9 @@ class AutonomousGoalWorkflowTests(TestCase):
         kwargs = mock_spawn.call_args.kwargs
         self.assertEqual(kwargs["agent_kind"], system_agents.AUTONOMOUS_GOAL_JUDGE_AGENT_KIND)
         self.assertEqual(kwargs["web_search_mode"], AutonomousGoal.WEB_SEARCH_LIVE)
+        # The judge only evaluates, so it is pinned read-only -- it must not be
+        # able to mutate the repo (it runs in the real repo cwd for no-code goals).
+        self.assertEqual(kwargs["sandbox_policy"], "readOnly")
         self.assertIn("Add parser coverage", kwargs["prompt"])
         self.assertTrue(SessionMetadata.objects.filter(thread_id="judge-thread").exists())
 
