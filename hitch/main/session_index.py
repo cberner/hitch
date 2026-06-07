@@ -528,6 +528,13 @@ def _codex_defaults(
     codex_updated_at = updated_at or created_at or now
     if existing is not None and existing.codex_updated_at is not None:
         codex_updated_at = max(codex_updated_at, existing.codex_updated_at)
+    is_hidden_system_session = hidden_system_session_from_metadata(
+        name=name_value,
+        preview=preview_value,
+        thread_source=thread_source,
+    )
+    if existing is not None and existing.is_hidden_system_session:
+        is_hidden_system_session = True
     return {
         "cwd": cwd,
         "codex_display_title": display_title_for(
@@ -542,11 +549,7 @@ def _codex_defaults(
         "codex_path": path if isinstance(path, str) else "",
         "codex_thread_source": thread_source,
         "codex_last_synced_at": now,
-        "is_hidden_system_session": hidden_system_session_from_metadata(
-            name=name_value,
-            preview=preview_value,
-            thread_source=thread_source,
-        ),
+        "is_hidden_system_session": is_hidden_system_session,
     }
 
 
