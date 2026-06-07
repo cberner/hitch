@@ -15,6 +15,7 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
+from hitch.main import demo
 from hitch.main.models import (
     CodexInstance,
     GlobalSettings,
@@ -44,10 +45,6 @@ _ACTIVE_CODEX_STATUSES = (
 # MAX_ITERATIONS_REACHED -- these are system workflows the user never interacts
 # with directly, so a failed one should not pin a worktree against cleanup.
 _ACTIVE_WORKFLOW_STATUSES = (SystemWorkflow.STATUS_RUNNING,)
-_SYSTEM_CODEX_PURPOSES = (
-    CodexInstance.PURPOSE_SYSTEM_AGENT,
-    CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-)
 _PROPOSAL_SESSION_ID_FIELDS = (
     "candidate_session_id",
     "judge_session_id",
@@ -211,7 +208,7 @@ def _cleanup_candidates(*, now: datetime) -> list[_CleanupCandidate]:
 @dataclass(frozen=True)
 class _CleanupContext:
     accepted_visible_thread_ids: frozenset[str]
-    system_thread_ids: frozenset[str]
+    hidden_system_thread_ids: frozenset[str]
     protected_proposal_session_ids: frozenset[int]
     active_thread_ids: frozenset[str]
     active_workflow_thread_ids: frozenset[str]
@@ -220,6 +217,7 @@ class _CleanupContext:
 
 def _cleanup_context(*, now: datetime) -> _CleanupContext:
     accepted_visible_thread_ids = _accepted_visible_system_thread_ids()
+    hidden_system_thread_ids = _hidden_system_thread_ids()
     protected_proposal_session_ids = _protected_proposal_session_ids()
     active_thread_ids = frozenset(
         CodexInstance.objects.filter(status__in=_ACTIVE_CODEX_STATUSES)
@@ -250,11 +248,15 @@ def _cleanup_context(*, now: datetime) -> _CleanupContext:
         active_codex_paths
         | active_workflow_paths
         | _pending_proposal_worktree_paths(protected_proposal_session_ids)
-        | _protected_visible_user_worktree_paths(accepted_visible_thread_ids, now=now)
+        | _protected_visible_user_worktree_paths(
+            accepted_visible_thread_ids,
+            hidden_system_thread_ids,
+            now=now,
+        )
     )
     return _CleanupContext(
         accepted_visible_thread_ids=frozenset(accepted_visible_thread_ids),
-        system_thread_ids=frozenset(_system_thread_ids()),
+        hidden_system_thread_ids=frozenset(hidden_system_thread_ids),
         protected_proposal_session_ids=frozenset(protected_proposal_session_ids),
         active_thread_ids=active_thread_ids,
         active_workflow_thread_ids=active_workflow_thread_ids,
@@ -296,7 +298,10 @@ def _safe_to_remove_worktree(
 def _is_system_session(
     metadata: SessionMetadata, context: _CleanupContext
 ) -> bool:
-    return metadata.is_hidden_system_session or metadata.thread_id in context.system_thread_ids
+    return (
+        metadata.is_hidden_system_session
+        or metadata.thread_id in context.hidden_system_thread_ids
+    )
 
 
 def _archived_pr_done_user_session(
@@ -448,15 +453,17 @@ def _protected_proposal_session_ids() -> set[int]:
     return session_ids
 
 
-def _system_thread_ids() -> set[str]:
+def _hidden_system_thread_ids() -> set[str]:
     thread_ids = set(
         SystemAgentRun.objects.exclude(thread_id="")
+        .exclude(agent_kind=demo.DEMO_AGENT_KIND)
         .values_list("thread_id", flat=True)
         .distinct()
     )
     thread_ids.update(
-        CodexInstance.objects.filter(purpose__in=_SYSTEM_CODEX_PURPOSES)
+        CodexInstance.objects.filter(purpose=CodexInstance.PURPOSE_SYSTEM_AGENT)
         .exclude(thread_id="")
+        .exclude(agent_kind=demo.DEMO_AGENT_KIND)
         .values_list("thread_id", flat=True)
         .distinct()
     )
@@ -488,6 +495,7 @@ def _pending_proposal_worktree_paths(session_ids: set[int]) -> set[str]:
 
 def _protected_visible_user_worktree_paths(
     accepted_visible_thread_ids: set[str],
+    hidden_system_thread_ids: set[str],
     *,
     now: datetime,
 ) -> set[str]:
@@ -498,9 +506,22 @@ def _protected_visible_user_worktree_paths(
             | models.Q(thread_id__in=accepted_visible_thread_ids)
         )
         .exclude(cwd="")
-        .only("cwd", "codex_archived", "codex_archived_at", "derived_stage")
+        .only(
+            "thread_id",
+            "cwd",
+            "codex_archived",
+            "codex_archived_at",
+            "is_hidden_system_session",
+            "derived_stage",
+        )
     )
     for metadata in rows:
+        is_system = (
+            metadata.is_hidden_system_session
+            or metadata.thread_id in hidden_system_thread_ids
+        )
+        if is_system and metadata.thread_id not in accepted_visible_thread_ids:
+            continue
         if not metadata.codex_archived or (
             metadata.derived_stage not in _PR_DONE_STAGE_KEYS
             and (

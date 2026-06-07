@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
-from hitch.main import disk_cleanup
+from hitch.main import demo, disk_cleanup
 from hitch.main.models import (
     CodexInstance,
     GlobalSettings,
@@ -515,6 +515,94 @@ class DiskCleanupTests(TestCase):
                 thread_id="system",
                 cwd=shared_path,
                 hidden_system=True,
+            )
+
+            cleaned = self._run_cleanup(
+                root=root,
+                sizes=[300],
+                mock_cleanup=mock_cleanup,
+            )
+
+        self.assertEqual(cleaned, 0)
+        mock_cleanup.assert_not_called()
+
+    def test_stale_visible_system_session_does_not_protect_worktree(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            patch(
+                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                return_value=True,
+            ) as mock_cleanup,
+        ):
+            root = Path(raw)
+            shared_path = self._managed_path(root, "shared")
+            self._session(thread_id="system", cwd=shared_path)
+            CodexInstance.objects.create(
+                pid=123,
+                thread_id="system",
+                cwd=shared_path,
+                events_path="/tmp/events.jsonl",
+                status=CodexInstance.STATUS_COMPLETED,
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            )
+
+            cleaned = self._run_cleanup(
+                root=root,
+                sizes=[300, 150],
+                mock_cleanup=mock_cleanup,
+            )
+
+        self.assertEqual(cleaned, 1)
+        mock_cleanup.assert_called_once_with(shared_path)
+
+    def test_system_feedback_on_visible_user_session_protects_worktree(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            patch(
+                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                return_value=True,
+            ) as mock_cleanup,
+        ):
+            root = Path(raw)
+            user_path = self._managed_path(root, "user")
+            self._session(thread_id="user", cwd=user_path)
+            CodexInstance.objects.create(
+                pid=123,
+                thread_id="user",
+                cwd=user_path,
+                events_path="/tmp/events.jsonl",
+                status=CodexInstance.STATUS_COMPLETED,
+                purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+            )
+
+            cleaned = self._run_cleanup(
+                root=root,
+                sizes=[300],
+                mock_cleanup=mock_cleanup,
+            )
+
+        self.assertEqual(cleaned, 0)
+        mock_cleanup.assert_not_called()
+
+    def test_demo_turn_on_visible_user_session_protects_worktree(self) -> None:
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            patch(
+                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                return_value=True,
+            ) as mock_cleanup,
+        ):
+            root = Path(raw)
+            user_path = self._managed_path(root, "user")
+            self._session(thread_id="user", cwd=user_path)
+            CodexInstance.objects.create(
+                pid=123,
+                thread_id="user",
+                cwd=user_path,
+                events_path="/tmp/events.jsonl",
+                status=CodexInstance.STATUS_COMPLETED,
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+                agent_kind=demo.DEMO_AGENT_KIND,
             )
 
             cleaned = self._run_cleanup(
