@@ -9707,6 +9707,17 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         candidate_2.save(update_fields=["events_path"])
         system_agents.on_codex_instance_finished(candidate_2)
+        workflow.refresh_from_db()
+        workflow.state = {
+            **workflow.state,
+            system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY: (
+                system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT
+            ),
+            system_agents._AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY: {
+                "reason": "judge_confidence_below_threshold"
+            },
+        }
+        workflow.save(update_fields=["state", "updated_at"])
         system_agents.on_codex_instance_finished(judge_2)
 
         workflow.refresh_from_db()
@@ -9722,6 +9733,14 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(proposals[1].outcome_metadata["stacked_diff_iteration"], 2)
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
         self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED)
+        self.assertNotIn(
+            system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY,
+            workflow.state,
+        )
+        self.assertNotIn(
+            system_agents._AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY,
+            workflow.state,
+        )
         mock_cleanup.assert_called_once_with("/repo-worktree-1")
 
     @patch("hitch.main.system_agents.default_branch_commit_hash")
@@ -10017,10 +10036,17 @@ class AutonomousGoalWorkflowTests(TestCase):
 
         self.assertFalse(SystemWorkflow.objects.exists())
 
+    @patch(
+        "hitch.main.system_agents.snapshot_worktree_to_commit",
+        return_value="c" * 40,
+    )
     @patch("hitch.main.system_agents.default_branch_commit_hash")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    def test_auto_proposal_blocks_legacy_stopped_stack_proposal(
-        self, mock_spawn: MagicMock, mock_default_sha: MagicMock
+    def test_auto_proposal_continues_legacy_stopped_stack_proposal_once(
+        self,
+        mock_spawn: MagicMock,
+        mock_default_sha: MagicMock,
+        mock_snapshot: MagicMock,
     ) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         autonomous_goal = AutonomousGoal.objects.create(
@@ -10061,18 +10087,28 @@ class AutonomousGoalWorkflowTests(TestCase):
                 "stacked_diff_iteration": 1,
             },
         )
+        mock_default_sha.return_value = "a" * 40
+        self.mock_create_worktree.return_value = MagicMock(path=Path("/repo-worktree-2"))
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-2",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
 
         started = system_agents.maybe_start_auto_proposal_workflows(project=project)
 
-        self.assertEqual(started, 0)
-        self.assertFalse(SystemWorkflow.objects.exclude(pk=source_workflow.pk).exists())
+        self.assertEqual(started, 1)
+        workflow = SystemWorkflow.objects.exclude(pk=source_workflow.pk).get()
+        self.assertEqual(workflow.state["proposal_id"], proposal.pk)
+        self.assertEqual(workflow.state["stacked_diff_iteration"], 2)
+        self.assertEqual(workflow.state["session_cwd"], "/repo-worktree-2")
+        mock_snapshot.assert_called_once_with("/repo-worktree-1")
         proposal.refresh_from_db()
-        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
-        self.assertNotIn(
-            "stacked_diff_hidden_until_complete", proposal.outcome_metadata
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_DISMISSED)
+        self.assertTrue(
+            proposal.outcome_metadata["stacked_diff_hidden_until_complete"]
         )
-        mock_default_sha.assert_not_called()
-        mock_spawn.assert_not_called()
+        mock_spawn.assert_called_once()
 
     def test_pending_proposal_blocking_ids_loads_pending_proposals_in_bulk(
         self,
@@ -10109,10 +10145,10 @@ class AutonomousGoalWorkflowTests(TestCase):
             autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
             stacked_diff_depth=2,
         )
-        stopped_stack_goal = AutonomousGoal.objects.create(
+        legacy_stopped_stack_goal = AutonomousGoal.objects.create(
             project=project,
-            title="Stopped stack goal",
-            goal="Do not retry stopped stacks.",
+            title="Legacy stopped stack goal",
+            goal="Self-heal a legacy stopped stack.",
             auto_proposal_enabled=True,
             autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
             stacked_diff_depth=2,
@@ -10168,7 +10204,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         stopped_workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             main_thread_id=system_agents._autonomous_goal_main_thread_id(
-                stopped_stack_goal.pk
+                legacy_stopped_stack_goal.pk
             ),
             cwd="/repo",
             status=SystemWorkflow.STATUS_COMPLETED,
@@ -10182,9 +10218,9 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         ProposedSession.objects.create(
             project=project,
-            autonomous_goal=stopped_stack_goal,
+            autonomous_goal=legacy_stopped_stack_goal,
             source_workflow=stopped_workflow,
-            title="Stopped stack proposal",
+            title="Legacy stopped stack proposal",
             candidate_session=stopped_candidate,
             outcome_metadata={
                 "stacked_diff_depth": 2,
@@ -10193,26 +10229,29 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
 
         with CaptureQueriesContext(connection) as queries:
-            blocking_ids = system_agents._autonomous_goal_pending_proposal_blocking_ids(
+            state = system_agents._autonomous_goal_pending_proposal_state(
                 [
                     continuable_goal,
                     non_continuable_goal,
                     extra_pending_goal,
                     ordinary_pending_goal,
-                    stopped_stack_goal,
+                    legacy_stopped_stack_goal,
                     manual_stack_goal,
                 ]
             )
 
         self.assertEqual(
-            blocking_ids,
+            state.blocking_goal_ids,
             {
                 non_continuable_goal.pk,
                 extra_pending_goal.pk,
                 ordinary_pending_goal.pk,
-                stopped_stack_goal.pk,
                 manual_stack_goal.pk,
             },
+        )
+        self.assertEqual(
+            state.continuable_stack_goal_ids,
+            {continuable_goal.pk, legacy_stopped_stack_goal.pk},
         )
         pending_proposal_queries = [
             query
