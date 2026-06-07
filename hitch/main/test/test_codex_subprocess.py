@@ -8371,6 +8371,267 @@ class StreamForInstanceTests(TestCase):
         self.assertTrue(frames[-1].startswith(b"event: end"))
         self.assertIn(b'"completed"', frames[-1])
 
+    def test_initial_backlog_skips_completed_agent_deltas(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            with open(events_path, "w", encoding="utf-8") as fh:
+                fh.write(
+                    json.dumps(
+                        {
+                            "method": "item/started",
+                            "payload": {
+                                "item": {
+                                    "id": "msg-1",
+                                    "text": "",
+                                    "type": "agentMessage",
+                                }
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+                fh.write(
+                    json.dumps(
+                        {
+                            "method": "item/agentMessage/delta",
+                            "payload": {"itemId": "msg-1", "delta": "Hel"},
+                        }
+                    )
+                    + "\n"
+                )
+                fh.write(
+                    json.dumps(
+                        {
+                            "method": "item/agentMessage/delta",
+                            "payload": {"itemId": "msg-1", "delta": "lo"},
+                        }
+                    )
+                    + "\n"
+                )
+                fh.write(
+                    json.dumps(
+                        {
+                            "method": "item/completed",
+                            "payload": {
+                                "item": {
+                                    "id": "msg-1",
+                                    "phase": "commentary",
+                                    "text": "Hello",
+                                    "type": "agentMessage",
+                                }
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+
+            instance = _make_streaming_instance(
+                events_path, status=CodexInstance.STATUS_COMPLETED
+            )
+            frames = list(streaming.stream_for_instance(instance))
+
+        body = b"".join(frames)
+        self.assertNotIn(b"item/agentMessage/delta", body)
+        self.assertNotIn(b"item/started", body)
+        self.assertIn(b"item/completed", body)
+        self.assertIn(b"Hello", body)
+
+    def test_initial_backlog_preserves_partial_agent_deltas(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            with open(events_path, "w", encoding="utf-8") as fh:
+                fh.write(
+                    json.dumps(
+                        {
+                            "method": "item/started",
+                            "payload": {
+                                "item": {
+                                    "id": "msg-1",
+                                    "text": "",
+                                    "type": "agentMessage",
+                                }
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+                fh.write(
+                    json.dumps(
+                        {
+                            "method": "item/agentMessage/delta",
+                            "payload": {"itemId": "msg-1", "delta": "Hel"},
+                        }
+                    )
+                    + "\n"
+                )
+                fh.write(
+                    json.dumps(
+                        {
+                            "method": "item/agentMessage/delta",
+                            "payload": {"itemId": "msg-1", "delta": "lo"},
+                        }
+                    )
+                    + "\n"
+                )
+
+            instance = _make_streaming_instance(
+                events_path, status=CodexInstance.STATUS_COMPLETED
+            )
+            frames = list(streaming.stream_for_instance(instance))
+
+        body = b"".join(frames)
+        self.assertIn(b"item/started", body)
+        self.assertIn(b'"delta": "Hel"', body)
+        self.assertIn(b'"delta": "lo"', body)
+        self.assertNotIn(b'"text":"Hello"', body)
+
+    def test_initial_backlog_skips_only_method_output_deltas(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            events_path = str(Path(raw) / "events.jsonl")
+            with open(events_path, "w", encoding="utf-8") as fh:
+                fh.write(
+                    json.dumps(
+                        {
+                            "method": "item/started",
+                            "payload": {
+                                "item": {
+                                    "id": "cmd-1",
+                                    "command": "rg outputDelta",
+                                    "status": "inProgress",
+                                    "type": "commandExecution",
+                                }
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+                fh.write(
+                    json.dumps(
+                        {
+                            "method": "item/commandExecution/outputDelta",
+                            "payload": {"itemId": "cmd-1", "delta": "ignored\n"},
+                        }
+                    )
+                    + "\n"
+                )
+                fh.write(
+                    json.dumps(
+                        {
+                            "method": "item/completed",
+                            "payload": {
+                                "item": {
+                                    "id": "cmd-1",
+                                    "command": "rg outputDelta",
+                                    "status": "completed",
+                                    "type": "commandExecution",
+                                }
+                            },
+                        }
+                    )
+                    + "\n"
+                )
+
+            instance = _make_streaming_instance(
+                events_path, status=CodexInstance.STATUS_COMPLETED
+            )
+            frames = list(streaming.stream_for_instance(instance))
+
+        body = b"".join(frames)
+        self.assertIn(b"item/started", body)
+        self.assertIn(b"item/completed", body)
+        self.assertIn(b"rg outputDelta", body)
+        self.assertNotIn(b"item/commandExecution/outputDelta", body)
+        self.assertNotIn(b"ignored", body)
+
+    def test_empty_initial_read_treats_next_agent_delta_as_live_tail(self) -> None:
+        live = (
+            json.dumps(
+                {
+                    "method": "item/started",
+                    "payload": {
+                        "item": {"id": "msg-1", "text": "", "type": "agentMessage"}
+                    },
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "method": "item/agentMessage/delta",
+                    "payload": {"itemId": "msg-1", "delta": "Hel"},
+                }
+            )
+            + "\n"
+        ).encode()
+        fake_file = MagicMock()
+        fake_file.__enter__.return_value = fake_file
+        fake_file.__exit__.return_value = False
+        fake_file.read.side_effect = [b"", live, b""]
+        instance = _make_streaming_instance(
+            "/tmp/hitch-test-empty-first-read.jsonl",
+            status=CodexInstance.STATUS_COMPLETED,
+        )
+
+        with (
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "open", return_value=fake_file),
+        ):
+            frames = list(streaming.stream_for_instance(instance))
+
+        body = b"".join(frames)
+        self.assertIn(b"item/started", body)
+        self.assertIn(b'"delta": "Hel"', body)
+        self.assertNotIn(b'"text":"Hel"', body)
+
+    def test_live_tail_agent_delta_still_streams_after_initial_backlog(self) -> None:
+        initial = (
+            json.dumps(
+                {
+                    "method": "item/started",
+                    "payload": {
+                        "item": {"id": "msg-1", "text": "", "type": "agentMessage"}
+                    },
+                }
+            )
+            + "\n"
+            + json.dumps(
+                {
+                    "method": "item/agentMessage/delta",
+                    "payload": {"itemId": "msg-1", "delta": "old"},
+                }
+            )
+            + "\n"
+        ).encode()
+        live = (
+            json.dumps(
+                {
+                    "method": "item/agentMessage/delta",
+                    "payload": {"itemId": "msg-1", "delta": "new"},
+                }
+            )
+            + "\n"
+        ).encode()
+        fake_file = MagicMock()
+        fake_file.__enter__.return_value = fake_file
+        fake_file.__exit__.return_value = False
+        fake_file.read.side_effect = [initial, b"", live, b""]
+        instance = _make_streaming_instance(
+            "/tmp/hitch-test-live-tail.jsonl", status=CodexInstance.STATUS_COMPLETED
+        )
+
+        with (
+            patch.object(Path, "exists", return_value=True),
+            patch.object(Path, "open", return_value=fake_file),
+        ):
+            frames = list(streaming.stream_for_instance(instance))
+
+        body = b"".join(frames)
+        self.assertIn(b"item/started", body)
+        self.assertIn(b'"delta": "old"', body)
+        self.assertIn(b'"delta": "new"', body)
+        self.assertNotIn(b'"text":"old"', body)
+
     def test_streams_tolerate_partial_multibyte_trailing_line(self) -> None:
         # The worker writes line-buffered UTF-8; a reader can observe a flush
         # that ends mid-multibyte-character. A strict text-mode read raised

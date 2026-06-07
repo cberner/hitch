@@ -138,16 +138,24 @@ def stream_for_instance(
     # finishes writing it.
     with path.open("rb") as fh:
         buffer = b""
+        initial_backlog = True
         deadline = time.monotonic() + _MAX_STREAM_SECONDS
         while True:
             chunk = fh.read()
             if chunk:
                 buffer += chunk
-                buffer = yield from _emit_complete_lines(buffer)
+                if initial_backlog:
+                    buffer = yield from _emit_initial_backlog(buffer)
+                    initial_backlog = False
+                else:
+                    buffer = yield from _emit_complete_lines(buffer)
                 if _demo_changed(instance.thread_id, demo_baseline):
                     yield _end_frame("demo")
                     return
                 continue
+
+            if initial_backlog:
+                initial_backlog = False
 
             if _demo_changed(instance.thread_id, demo_baseline):
                 yield _end_frame("demo")
@@ -161,7 +169,11 @@ def stream_for_instance(
                 chunk = fh.read()
                 if chunk:
                     buffer += chunk
-                buffer = yield from _emit_complete_lines(buffer)
+                if initial_backlog:
+                    buffer = yield from _emit_initial_backlog(buffer)
+                    initial_backlog = False
+                else:
+                    buffer = yield from _emit_complete_lines(buffer)
                 yield _end_frame(_current_status(instance.pk))
                 return
 
@@ -319,13 +331,156 @@ def _emit_complete_lines(buffer: bytes) -> Generator[bytes, None, bytes]:
     was observed during a partial flush — is returned untouched and completed by
     the next read instead of being decoded eagerly.
     """
-    while b"\n" in buffer:
-        line, buffer = buffer.split(b"\n", 1)
-        line = line.strip()
-        if not line:
+    lines, trailing = _split_complete_lines(buffer)
+    for line in lines:
+        yield _data_frame(line)
+    return trailing
+
+
+def _emit_initial_backlog(buffer: bytes) -> Generator[bytes, None, bytes]:
+    """Emit already-written worker events without replaying completed deltas.
+
+    A session page can attach to a long-running worker after thousands of events
+    already exist, or reconnect to the same worker while keeping its current DOM.
+    The stream can compact only items that reached ``item/completed`` inside the
+    replay window: incomplete items must keep their original started/delta
+    sequence because those deltas may be missed live updates for an existing DOM
+    node.
+    """
+    lines, trailing = _split_complete_lines(buffer)
+    methods = [_event_line_method(line) for line in lines]
+    events: list[dict[str, Any] | None] = [
+        _decode_backlog_event_line(method, line)
+        for method, line in zip(methods, lines, strict=True)
+    ]
+    completed_item_ids: set[str] = set()
+
+    for event in events:
+        if event is None:
             continue
-        yield b"data: " + line + b"\n\n"
-    return buffer
+        method = event.get("method")
+        payload = event.get("payload")
+        if not isinstance(method, str) or not isinstance(payload, dict):
+            continue
+        if method == "item/completed":
+            item_id = _event_item_id(payload)
+            if item_id:
+                completed_item_ids.add(item_id)
+
+    for line, method, event in zip(lines, methods, events, strict=True):
+        # The session JS does not render command output deltas, and backlog
+        # copies can be megabytes each; completed tool summaries arrive via
+        # item/completed. Check only the event method so command text like
+        # "rg outputDelta" does not make the owning item disappear.
+        if _is_item_output_delta(method):
+            continue
+        if event is None:
+            yield _data_frame(line)
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            yield _data_frame(line)
+            continue
+        if method == "item/started":
+            item_id = _event_item_id(payload)
+            if item_id in completed_item_ids:
+                continue
+        elif method in {"item/agentMessage/delta", "item/plan/delta"}:
+            item_id = _event_payload_item_id(payload)
+            if item_id in completed_item_ids:
+                continue
+        yield _data_frame(line)
+    return trailing
+
+
+def _split_complete_lines(buffer: bytes) -> tuple[list[bytes], bytes]:
+    if not buffer:
+        return [], b""
+    parts = buffer.split(b"\n")
+    trailing = parts.pop()
+    return [line.strip() for line in parts if line.strip()], trailing
+
+
+def _event_line_method(line: bytes) -> str:
+    offset = 0
+    while offset < len(line) and line[offset] in b" \t\r\n":
+        offset += 1
+    if offset >= len(line) or line[offset] != ord("{"):
+        return ""
+    offset += 1
+    while offset < len(line) and line[offset] in b" \t\r\n":
+        offset += 1
+    prefix = b'"method"'
+    if not line.startswith(prefix, offset):
+        return ""
+    offset += len(prefix)
+    while offset < len(line) and line[offset] in b" \t\r\n":
+        offset += 1
+    if offset >= len(line) or line[offset] != ord(":"):
+        return ""
+    offset += 1
+    while offset < len(line) and line[offset] in b" \t\r\n":
+        offset += 1
+    if offset >= len(line) or line[offset] != ord('"'):
+        return ""
+    offset += 1
+    end = line.find(b'"', offset)
+    if end < 0:
+        return ""
+    try:
+        return line[offset:end].decode("ascii")
+    except UnicodeDecodeError:
+        return ""
+
+
+def _decode_backlog_event_line(method: str, line: bytes) -> dict[str, Any] | None:
+    if (
+        method not in {"item/agentMessage/delta", "item/plan/delta"}
+        and not (
+            method in {"item/started", "item/completed"}
+            and _has_text_item_type(line)
+        )
+    ):
+        return None
+    return _decode_event_line(line)
+
+
+def _decode_event_line(line: bytes) -> dict[str, Any] | None:
+    try:
+        event = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return event if isinstance(event, dict) else None
+
+
+def _data_frame(line: bytes) -> bytes:
+    return b"data: " + line + b"\n\n"
+
+
+def _event_item_id(payload: dict[str, Any]) -> str:
+    item = payload.get("item")
+    if not isinstance(item, dict):
+        return ""
+    item_id = item.get("id")
+    return item_id if isinstance(item_id, str) else ""
+
+
+def _event_payload_item_id(payload: dict[str, Any]) -> str:
+    item_id = payload.get("itemId")
+    return item_id if isinstance(item_id, str) else ""
+
+
+def _is_item_output_delta(method: str) -> bool:
+    return method.startswith("item/") and method.endswith("/outputDelta")
+
+
+def _has_text_item_type(line: bytes) -> bool:
+    return (
+        b'"type": "agentMessage"' in line
+        or b'"type":"agentMessage"' in line
+        or b'"type": "plan"' in line
+        or b'"type":"plan"' in line
+    )
 
 
 def _end_frame(status: str) -> bytes:
