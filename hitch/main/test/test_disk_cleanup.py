@@ -590,6 +590,50 @@ class DiskCleanupTests(TestCase):
         self.assertEqual(cleaned, 1)
         mock_cleanup.assert_called_once_with(old_path)
 
+    def test_system_thread_shadow_row_does_not_pin_done_worktree(self) -> None:
+        # Regression: a worktree whose owner session is archived+merged still
+        # gets pinned forever by a sibling "shadow" row for a system thread
+        # (SystemAgentRun / system-purpose CodexInstance) whose cached
+        # is_hidden_system_session flag was never set. The protect query must
+        # honor the same system definition the UI and candidate classifier use,
+        # so such a row cannot masquerade as a live user session.
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            patch(
+                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                return_value=True,
+            ) as mock_cleanup,
+        ):
+            root = Path(raw)
+            shared_path = self._managed_path(root, "shared")
+            self._session(
+                thread_id="owner",
+                cwd=shared_path,
+                archived=True,
+                archived_at=timezone.now() - disk_cleanup.ARCHIVED_USER_SESSION_MIN_AGE,
+                stage="done_merged",
+            )
+            # Shadow row: a system thread, but the flag never got set, so it
+            # looks like a visible user session to a flag-only protect query.
+            self._session(thread_id="shadow", cwd=shared_path)
+            CodexInstance.objects.create(
+                pid=321,
+                thread_id="shadow",
+                cwd=shared_path,
+                events_path="/tmp/events.jsonl",
+                status=CodexInstance.STATUS_COMPLETED,
+                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            )
+
+            cleaned = self._run_cleanup(
+                root=root,
+                sizes=[300, 150, 50],
+                mock_cleanup=mock_cleanup,
+            )
+
+        self.assertEqual(cleaned, 1)
+        mock_cleanup.assert_called_once_with(shared_path)
+
     def test_old_orphaned_managed_worktree_is_cleanup_candidate(self) -> None:
         with (
             tempfile.TemporaryDirectory() as raw,

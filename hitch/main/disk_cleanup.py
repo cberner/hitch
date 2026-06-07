@@ -246,15 +246,18 @@ def _cleanup_context(*, now: datetime) -> _CleanupContext:
         .exclude(thread_id="")
         .values_list("thread_id", flat=True)
     )
+    system_thread_ids = _system_thread_ids()
     protected_paths = (
         active_codex_paths
         | active_workflow_paths
         | _pending_proposal_worktree_paths(protected_proposal_session_ids)
-        | _protected_visible_user_worktree_paths(accepted_visible_thread_ids, now=now)
+        | _protected_visible_user_worktree_paths(
+            accepted_visible_thread_ids, system_thread_ids, now=now
+        )
     )
     return _CleanupContext(
         accepted_visible_thread_ids=frozenset(accepted_visible_thread_ids),
-        system_thread_ids=frozenset(_system_thread_ids()),
+        system_thread_ids=frozenset(system_thread_ids),
         protected_proposal_session_ids=frozenset(protected_proposal_session_ids),
         active_thread_ids=active_thread_ids,
         active_workflow_thread_ids=active_workflow_thread_ids,
@@ -488,6 +491,7 @@ def _pending_proposal_worktree_paths(session_ids: set[int]) -> set[str]:
 
 def _protected_visible_user_worktree_paths(
     accepted_visible_thread_ids: set[str],
+    system_thread_ids: set[str],
     *,
     now: datetime,
 ) -> set[str]:
@@ -498,9 +502,22 @@ def _protected_visible_user_worktree_paths(
             | models.Q(thread_id__in=accepted_visible_thread_ids)
         )
         .exclude(cwd="")
-        .only("cwd", "codex_archived", "codex_archived_at", "derived_stage")
+        .only(
+            "thread_id", "cwd", "codex_archived", "codex_archived_at", "derived_stage"
+        )
     )
     for metadata in rows:
+        # ``is_hidden_system_session`` is only one of the signals that mark a
+        # thread as system-owned: SystemAgentRun rows and system-purpose
+        # CodexInstances do too (see ``hidden_thread_ids`` for the UI, and
+        # ``_is_system_session`` here). Honor the same definition so a system
+        # thread whose cached flag was never set cannot masquerade as a live
+        # user session and pin its worktree against cleanup.
+        if (
+            metadata.thread_id in system_thread_ids
+            and metadata.thread_id not in accepted_visible_thread_ids
+        ):
+            continue
         if not metadata.codex_archived or (
             metadata.derived_stage not in _PR_DONE_STAGE_KEYS
             and (
