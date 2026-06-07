@@ -452,18 +452,14 @@ def _protected_proposal_session_ids() -> set[int]:
 
 
 def _system_thread_ids() -> set[str]:
-    thread_ids = set(
-        SystemAgentRun.objects.exclude(thread_id="")
-        .values_list("thread_id", flat=True)
-        .distinct()
+    # Imported lazily to avoid a module-load import cycle (system_agents pulls in
+    # codex_pool, which pulls back into system_agents).
+    from hitch.main import system_agents
+
+    return system_agents.system_owned_thread_ids(
+        purposes=_SYSTEM_CODEX_PURPOSES,
+        include_demo=True,
     )
-    thread_ids.update(
-        CodexInstance.objects.filter(purpose__in=_SYSTEM_CODEX_PURPOSES)
-        .exclude(thread_id="")
-        .values_list("thread_id", flat=True)
-        .distinct()
-    )
-    return thread_ids
 
 
 def _active_workflow_paths(workflows: list[SystemWorkflow]) -> set[str]:

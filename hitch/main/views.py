@@ -30,7 +30,7 @@ from django.core.exceptions import SuspiciousOperation
 from django.core.files.uploadedfile import UploadedFile
 from django.core.files.uploadhandler import FileUploadHandler
 from django.db import IntegrityError, close_old_connections, transaction
-from django.db.models import Exists, OuterRef, Q, QuerySet
+from django.db.models import Q, QuerySet
 from django.http import (
     Http404,
     HttpRequest,
@@ -1583,31 +1583,14 @@ def _filter_visible_session_metadata_rows(
     *,
     accepted_visible_thread_ids: set[str],
 ) -> QuerySet[SessionMetadata]:
-    system_run_exists = (
-        SystemAgentRun.objects.filter(thread_id=OuterRef("thread_id"))
-        .exclude(thread_id="")
-        .exclude(agent_kind=demo.DEMO_AGENT_KIND)
+    # Excluding the shared system-owned set keeps this consistent with
+    # hidden_thread_ids and disk cleanup (one definition of "system-owned").
+    hidden = system_agents.system_owned_thread_ids(
+        exclude_thread_ids=accepted_visible_thread_ids
     )
-    system_instance_exists = (
-        CodexInstance.objects.filter(
-            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-            thread_id=OuterRef("thread_id"),
-        )
-        .exclude(thread_id="")
-        .exclude(agent_kind=demo.DEMO_AGENT_KIND)
-    )
-    rows = rows.annotate(
-        _has_system_run=Exists(system_run_exists),
-        _has_system_instance=Exists(system_instance_exists),
-    )
-    visible_filter = (
-        Q(is_hidden_system_session=False)
-        & Q(_has_system_run=False)
-        & Q(_has_system_instance=False)
-    )
-    if accepted_visible_thread_ids:
-        visible_filter |= Q(thread_id__in=accepted_visible_thread_ids)
-    return rows.filter(visible_filter)
+    if hidden:
+        rows = rows.exclude(thread_id__in=hidden)
+    return rows
 
 
 def _sorted_visible_index_rows(

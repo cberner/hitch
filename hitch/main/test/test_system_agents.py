@@ -14396,6 +14396,75 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertNotIn("implementation-thread", hidden_ids)
 
 
+class SystemOwnedThreadIdsTests(TestCase):
+    def test_each_signal_independently_marks_thread_system_owned(self) -> None:
+        SystemAgentRun.objects.create(
+            workflow=SystemWorkflow.objects.create(
+                kind=system_agents.PR_QA_AGENT_KIND,
+                main_thread_id="run-thread",
+                cwd="/repo",
+            ),
+            agent_kind=system_agents.PR_QA_AGENT_KIND,
+            thread_id="run-thread",
+            instance=_instance(thread_id="run-thread"),
+        )
+        _instance(
+            thread_id="instance-thread", purpose=CodexInstance.PURPOSE_SYSTEM_AGENT
+        )
+        SessionMetadata.objects.create(
+            thread_id="flag-thread", is_hidden_system_session=True
+        )
+
+        owned = system_agents.system_owned_thread_ids()
+
+        # The flag is a lagging cache; the run/instance signals are written at
+        # spawn, so all three must count even with the flag unset on two of them.
+        self.assertEqual(owned, {"run-thread", "instance-thread", "flag-thread"})
+
+    def test_demo_excluded_by_default_but_included_on_request(self) -> None:
+        _instance(
+            thread_id="demo-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=demo.DEMO_AGENT_KIND,
+        )
+
+        self.assertNotIn("demo-thread", system_agents.system_owned_thread_ids())
+        self.assertIn(
+            "demo-thread",
+            system_agents.system_owned_thread_ids(include_demo=True),
+        )
+
+    def test_purposes_and_exclude_thread_ids_narrow_the_set(self) -> None:
+        _instance(
+            thread_id="feedback-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+        )
+        _instance(
+            thread_id="agent-thread", purpose=CodexInstance.PURPOSE_SYSTEM_AGENT
+        )
+
+        # Feedback turns reuse the parent user thread, so the default (agent-only)
+        # purpose set must not pull them in.
+        self.assertEqual(
+            system_agents.system_owned_thread_ids(), {"agent-thread"}
+        )
+        self.assertEqual(
+            system_agents.system_owned_thread_ids(
+                purposes=(
+                    CodexInstance.PURPOSE_SYSTEM_AGENT,
+                    CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
+                )
+            ),
+            {"agent-thread", "feedback-thread"},
+        )
+        self.assertEqual(
+            system_agents.system_owned_thread_ids(
+                exclude_thread_ids={"agent-thread"}
+            ),
+            set(),
+        )
+
+
 class AutoReviewIntentionallySkippedTests(TestCase):
     def test_blocked_approval_mode_is_skipped(self) -> None:
         # A visible-approval mode means auto-review declines by design.

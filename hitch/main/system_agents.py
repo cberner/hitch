@@ -2156,31 +2156,51 @@ def accepted_visible_system_thread_ids() -> set[str]:
     )
 
 
-def hidden_thread_ids(
-    *, accepted_visible_thread_ids: set[str] | None = None
+def system_owned_thread_ids(
+    *,
+    purposes: tuple[str, ...] = (CodexInstance.PURPOSE_SYSTEM_AGENT,),
+    include_demo: bool = False,
+    exclude_thread_ids: set[str] | None = None,
 ) -> set[str]:
-    hidden_ids = set(
-        SystemAgentRun.objects.exclude(thread_id="")
-        .exclude(agent_kind="demo")
-        .values_list("thread_id", flat=True)
-        .distinct()
+    """Single source of truth for which Codex threads are system-owned.
+
+    A thread is system-owned when ANY of three signals holds: a SystemAgentRun
+    row, a CodexInstance with a system ``purpose``, or a SessionMetadata row
+    flagged ``is_hidden_system_session``. The flag is an async cache populated by
+    the session-index refresh and can lag spawn, so the first two -- written
+    synchronously when a system agent is spawned -- must be honored too; trusting
+    the flag alone lets a freshly spawned system thread masquerade as a user
+    session. Callers narrow the set via ``purposes`` (the session list hides only
+    PURPOSE_SYSTEM_AGENT so a feedback turn cannot hide its parent user session)
+    and ``include_demo`` (demo agents stay visible in the UI but their worktrees
+    are still cleanable as system-owned).
+    """
+    runs = SystemAgentRun.objects.exclude(thread_id="")
+    instances = CodexInstance.objects.filter(purpose__in=purposes).exclude(
+        thread_id=""
     )
-    hidden_ids.update(
-        CodexInstance.objects.filter(purpose=CodexInstance.PURPOSE_SYSTEM_AGENT)
-        .exclude(thread_id="")
-        .exclude(agent_kind=demo.DEMO_AGENT_KIND)
-        .values_list("thread_id", flat=True)
-        .distinct()
-    )
-    hidden_ids.update(
+    if not include_demo:
+        runs = runs.exclude(agent_kind=demo.DEMO_AGENT_KIND)
+        instances = instances.exclude(agent_kind=demo.DEMO_AGENT_KIND)
+    thread_ids = set(runs.values_list("thread_id", flat=True).distinct())
+    thread_ids.update(instances.values_list("thread_id", flat=True).distinct())
+    thread_ids.update(
         SessionMetadata.objects.filter(is_hidden_system_session=True)
         .exclude(thread_id="")
         .values_list("thread_id", flat=True)
         .distinct()
     )
+    if exclude_thread_ids:
+        thread_ids -= exclude_thread_ids
+    return thread_ids
+
+
+def hidden_thread_ids(
+    *, accepted_visible_thread_ids: set[str] | None = None
+) -> set[str]:
     if accepted_visible_thread_ids is None:
         accepted_visible_thread_ids = accepted_visible_system_thread_ids()
-    return hidden_ids - accepted_visible_thread_ids
+    return system_owned_thread_ids(exclude_thread_ids=accepted_visible_thread_ids)
 
 
 def hidden_thread_ids_from_threads(
