@@ -1,0 +1,30 @@
+<script>
+    (function () {
+        document.documentElement.classList.add("js");
+        const currentScript = document.currentScript;
+        const navMenu = currentScript && currentScript.previousElementSibling;
+        if (!navMenu || !navMenu.matches("[data-nav-menu]")) return;
+        const navMenuButton = navMenu.querySelector("[data-nav-menu-open]");
+        function closeNavMenu() {
+            if (!navMenuButton) return;
+            navMenuButton.setAttribute("aria-expanded", "false");
+        }
+        window.closePrimaryNavMenu = closeNavMenu;
+        if (!navMenuButton) return;
+        navMenuButton.addEventListener("click", (event) => {
+            event.preventDefault();
+            const willOpen = navMenuButton.getAttribute("aria-expanded") !== "true";
+            navMenuButton.setAttribute("aria-expanded", willOpen ? "true" : "false");
+        });
+        document.addEventListener("click", (event) => {
+            if (navMenu.contains(event.target)) return;
+            closeNavMenu();
+        });
+        document.addEventListener("keydown", (event) => {
+            if (event.key !== "Escape" || navMenuButton.getAttribute("aria-expanded") !== "true") return;
+            closeNavMenu();
+            navMenuButton.focus();
+        });
+        navMenu.classList.add("primary-nav-js");
+    })();
+</script>

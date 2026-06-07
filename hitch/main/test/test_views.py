@@ -2484,6 +2484,25 @@ class IndexViewTests(TestCase):
         self.assertIn("cursor=idx%3A", url)
         return url
 
+    @patch("hitch.main.views.discover_repos", return_value=[])
+    @patch("hitch.main.views.Codex")
+    def test_index_binds_primary_nav_before_collapsing_fallback(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex, threads=[])
+
+        response = self.client.get(reverse("index"))
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode()
+        nav_start = body.index('<nav class="primary-nav"')
+        nav_end = body.index("</nav>", nav_start)
+        initializer_start = body.index("window.closePrimaryNavMenu = closeNavMenu;")
+        self.assertGreater(initializer_start, nav_end)
+        self.assertLess(initializer_start, body.index("<main>"))
+        self.assertContains(response, ".primary-nav.primary-nav-js .primary-nav-panel")
+        self.assertNotContains(response, ":is(.js .primary-nav")
+
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_does_not_call_thread_list(
