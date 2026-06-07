@@ -18132,6 +18132,62 @@ class AutonomousGoalViewTests(TestCase):
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
+    def test_page_treats_legacy_stopped_stack_proposal_as_ready(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+            autonomy=AutonomousGoal.AUTONOMY_DRAFT_PATCH,
+            stacked_diff_depth=3,
+        )
+        source_workflow = SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED,
+            state={
+                "autonomous_goal_id": autonomous_goal.pk,
+                "stacked_diff_stopped_reason": "judge_confidence_below_threshold",
+            },
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            source_workflow=source_workflow,
+            title="Add parser coverage",
+            candidate_session=candidate,
+            outcome_metadata={
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 1,
+            },
+        )
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-state="ready"')
+        self.assertContains(response, ">Ready</button>", html=False)
+        self.assertNotContains(
+            response,
+            "Not running because a proposal from this goal is waiting in the inbox.",
+        )
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
     def test_page_shows_manual_goal_with_pending_stack_proposal_as_review(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
     ) -> None:

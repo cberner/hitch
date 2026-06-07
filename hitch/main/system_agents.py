@@ -1443,26 +1443,11 @@ def _autonomous_goal_proposal_allows_stack_continuation(
     metadata = _proposal_outcome_metadata(proposal, {})
     if metadata.get(_AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY):
         return False
-    if _autonomous_goal_proposal_source_workflow_stopped_stack(proposal):
-        return False
     return (
         _autonomous_goal_proposal_stack_continuation_metadata(
             proposal, autonomous_goal
         )
         is not None
-    )
-
-
-def _autonomous_goal_proposal_source_workflow_stopped_stack(
-    proposal: ProposedSession,
-) -> bool:
-    source_workflow = proposal.source_workflow
-    if source_workflow is None:
-        return False
-    state = source_workflow.state if isinstance(source_workflow.state, dict) else {}
-    return bool(
-        state.get("stacked_diff_stopped_reason")
-        or state.get(_AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_ERROR_METADATA_KEY)
     )
 
 
@@ -5373,6 +5358,7 @@ def _handle_autonomous_goal_agent_finished_locked(
             judgment,
             publish=not should_continue_stack,
         )
+        state = _state_after_autonomous_goal_proposal_progress(state)
         cleanup_cwds = _dismiss_replaced_autonomous_goal_proposal(
             previous_proposal, replacement=proposal
         )
@@ -5783,6 +5769,15 @@ def _state_without_current_candidate_result(
     next_state = dict(state)
     for key in ("candidate", "judgment", "judge_session_id", "history_files"):
         next_state.pop(key, None)
+    return next_state
+
+
+def _state_after_autonomous_goal_proposal_progress(
+    state: Mapping[str, Any],
+) -> dict[str, Any]:
+    next_state = dict(state)
+    next_state.pop(_AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY, None)
+    next_state.pop(_AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY, None)
     return next_state
 
 
