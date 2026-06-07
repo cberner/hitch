@@ -79,6 +79,9 @@ PR_MONITOR_DISPLAY_AUTHOR = "PR monitor"
 AUTONOMOUS_GOAL_DISPLAY_AUTHOR = "Autonomous goal agent"
 AUTONOMOUS_GOAL_JUDGE_DISPLAY_AUTHOR = "Autonomous goal judge"
 AUTONOMOUS_GOAL_DELETED_ERROR = "Autonomous goal deleted by user"
+AUTONOMOUS_GOAL_PROPOSAL_ACCEPTED_ERROR = "Autonomous goal proposal accepted by user"
+AUTONOMOUS_GOAL_PROPOSAL_REJECTED_ERROR = "Autonomous goal proposal rejected by user"
+AUTONOMOUS_GOAL_PROPOSAL_DISMISSED_ERROR = "Autonomous goal proposal dismissed by user"
 AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_AGENT_PROMPT_TITLE
 AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE = session_index.AUTONOMOUS_GOAL_JUDGE_PROMPT_TITLE
 SPEC_CRITIC_DISPLAY_AUTHOR = "Spec Critic"
@@ -155,6 +158,19 @@ _AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_ERROR_METADATA_KEY = (
 )
 _AUTONOMOUS_GOAL_STACKED_HIDDEN_OUTCOME_NOTES = (
     "Hidden while stacked diff workflow continues."
+)
+_AUTONOMOUS_GOAL_STACKED_PROPOSAL_STOP_REASONS = {
+    ProposedSession.OUTCOME_ACCEPTED: "proposal_accepted",
+    ProposedSession.OUTCOME_REJECTED: "proposal_rejected",
+    ProposedSession.OUTCOME_DISMISSED: "proposal_dismissed",
+}
+_AUTONOMOUS_GOAL_PROPOSAL_RESOLUTION_ERRORS = {
+    ProposedSession.OUTCOME_ACCEPTED: AUTONOMOUS_GOAL_PROPOSAL_ACCEPTED_ERROR,
+    ProposedSession.OUTCOME_REJECTED: AUTONOMOUS_GOAL_PROPOSAL_REJECTED_ERROR,
+    ProposedSession.OUTCOME_DISMISSED: AUTONOMOUS_GOAL_PROPOSAL_DISMISSED_ERROR,
+}
+_AUTONOMOUS_GOAL_PROPOSAL_RESOLUTION_ERROR_VALUES = frozenset(
+    _AUTONOMOUS_GOAL_PROPOSAL_RESOLUTION_ERRORS.values()
 )
 _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY = "proposal_budget"
 _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY = "proposal_budget_tokens_used"
@@ -1430,21 +1446,18 @@ def _claim_autonomous_goal_stack_continuation_proposal(
 ) -> ProposedSession | None:
     outcome_metadata = {
         **_proposal_outcome_metadata(proposal, {}),
-        "stacked_diff_hidden_until_complete": True,
+        "stacked_diff_hidden_until_complete": False,
     }
     applied = ProposedSession.objects.filter(
         pk=proposal.pk,
         outcome_status=ProposedSession.OUTCOME_UNSET,
+        accepted_session__isnull=True,
     ).update(
-        outcome_status=ProposedSession.OUTCOME_DISMISSED,
-        outcome_notes=_AUTONOMOUS_GOAL_STACKED_HIDDEN_OUTCOME_NOTES,
         outcome_metadata=outcome_metadata,
         updated_at=timezone.now(),
     )
     if not applied:
         return None
-    proposal.outcome_status = ProposedSession.OUTCOME_DISMISSED
-    proposal.outcome_notes = _AUTONOMOUS_GOAL_STACKED_HIDDEN_OUTCOME_NOTES
     proposal.outcome_metadata = outcome_metadata
     return proposal
 
@@ -1544,6 +1557,10 @@ def _autonomous_goal_in_flight_proposal_criteria() -> models.Q:
         models.Q(outcome_metadata__accepted_by=AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY)
         | models.Q(
             outcome_metadata__accepted_by=LEGACY_AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY
+        )
+        | models.Q(
+            autonomous_goal__isnull=False,
+            outcome_metadata__accepted_by="user",
         )
         | (
             models.Q(autonomous_goal__isnull=False)
@@ -2784,6 +2801,110 @@ def stop_running_autonomous_goal_workflow(autonomous_goal_id: int, error: str) -
     return True
 
 
+def stop_running_autonomous_goal_stack_after_proposal_resolution(
+    autonomous_goal_id: int,
+    proposal_id: int,
+    outcome_status: str,
+) -> bool:
+    """Stop background stack work after the user resolves the current proposal."""
+    error = _autonomous_goal_proposal_resolution_error(outcome_status)
+    if not error:
+        return True
+    main_thread_id = _autonomous_goal_main_thread_id(autonomous_goal_id)
+    reconcile_terminal_workflow_instances(main_thread_id=main_thread_id)
+    workflow = (
+        SystemWorkflow.objects.filter(
+            kind=AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=main_thread_id,
+            status=SystemWorkflow.STATUS_RUNNING,
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    if workflow is None:
+        return True
+    terminal_instance_returned = False
+    runs: list[SystemAgentRun] = []
+    cleanup_cwd = ""
+    with transaction.atomic():
+        # The proposal id and running-run set are one lifecycle boundary: a stale
+        # inbox decision must not complete a workflow that has advanced stacks.
+        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
+        if locked.status != SystemWorkflow.STATUS_RUNNING:
+            return True
+        if _state_int(locked, "proposal_id") != proposal_id:
+            return True
+        runs = list(
+            locked.agent_runs.select_for_update()
+            .filter(status=SystemAgentRun.STATUS_RUNNING)
+            .select_related("instance")
+            .order_by("-created_at")
+        )
+        if runs:
+            interrupted_runs, terminal_instance_returned = (
+                _interrupt_autonomous_goal_runs(runs)
+            )
+            if not interrupted_runs:
+                return False
+            _mark_system_agent_runs_failed(interrupted_runs, error)
+            if len(interrupted_runs) != len(runs):
+                return False
+        _complete_autonomous_goal_workflow_after_proposal_resolution(
+            locked,
+            outcome_status=outcome_status,
+        )
+        cleanup_cwd = _autonomous_goal_stack_resolution_continuation_cleanup_cwd(
+            locked,
+            proposal_id,
+        )
+        workflow = locked
+    if cleanup_cwd and (not runs or terminal_instance_returned):
+        _cleanup_autonomous_goal_candidate_cwd(cleanup_cwd)
+    return True
+
+
+def _autonomous_goal_proposal_resolution_error(outcome_status: str) -> str:
+    return _AUTONOMOUS_GOAL_PROPOSAL_RESOLUTION_ERRORS.get(outcome_status, "")
+
+
+def _autonomous_goal_stack_proposal_stop_reason(outcome_status: str) -> str:
+    return _AUTONOMOUS_GOAL_STACKED_PROPOSAL_STOP_REASONS.get(outcome_status, "")
+
+
+def _autonomous_goal_stack_resolution_continuation_cleanup_cwd(
+    workflow: SystemWorkflow, proposal_id: int
+) -> str:
+    session_cwd = _autonomous_goal_session_cwd(workflow)
+    if session_cwd == workflow.cwd:
+        return ""
+    # Between stack turns, session_cwd still belongs to the resolved proposal.
+    # Only this helper owns cleanup for a distinct continuation worktree.
+    protected_cwds = {
+        _state_string(workflow, _AUTONOMOUS_GOAL_STACKED_FORK_CWD_STATE_KEY),
+        _autonomous_goal_stack_proposal_candidate_cwd(workflow, proposal_id),
+    }
+    if session_cwd in protected_cwds:
+        return ""
+    return session_cwd
+
+
+def _autonomous_goal_stack_proposal_candidate_cwd(
+    workflow: SystemWorkflow, proposal_id: int
+) -> str:
+    proposal_query = ProposedSession.objects.select_related("candidate_session").filter(
+        pk=proposal_id
+    )
+    autonomous_goal_id = _state_int(workflow, "autonomous_goal_id")
+    if autonomous_goal_id:
+        proposal_query = proposal_query.filter(autonomous_goal_id=autonomous_goal_id)
+    else:
+        proposal_query = proposal_query.filter(source_workflow=workflow)
+    proposal = proposal_query.first()
+    if proposal is None or proposal.candidate_session is None:
+        return ""
+    return proposal.candidate_session.cwd or ""
+
+
 def start_user_steering_turn(
     workflow: SystemWorkflow, *, prompt: str
 ) -> CodexInstance | None:
@@ -3041,7 +3162,7 @@ def _route_system_agent_finished(
     instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
 ) -> None:
     if run.status in (SystemAgentRun.STATUS_COMPLETED, SystemAgentRun.STATUS_FAILED):
-        _cleanup_deleted_autonomous_goal_terminal_run(instance, run, workflow)
+        _cleanup_cancelled_autonomous_goal_terminal_run(instance, run, workflow)
         return
     if workflow.kind == AUTONOMOUS_GOAL_AGENT_KIND:
         _handle_autonomous_goal_agent_finished(instance, run, workflow)
@@ -5371,14 +5492,22 @@ def _fail_unsupported_system_agent_run(
     run.save(update_fields=["status", "error", "updated_at"])
 
 
-def _cleanup_deleted_autonomous_goal_terminal_run(
+def _cleanup_cancelled_autonomous_goal_terminal_run(
     instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
 ) -> None:
     if workflow.kind != AUTONOMOUS_GOAL_AGENT_KIND:
         return
     if run.status != SystemAgentRun.STATUS_FAILED:
         return
-    if run.error != AUTONOMOUS_GOAL_DELETED_ERROR:
+    if (
+        run.error != AUTONOMOUS_GOAL_DELETED_ERROR
+        and run.error not in _AUTONOMOUS_GOAL_PROPOSAL_RESOLUTION_ERROR_VALUES
+    ):
+        return
+    if (
+        run.error in _AUTONOMOUS_GOAL_PROPOSAL_RESOLUTION_ERROR_VALUES
+        and workflow.agent_runs.filter(status=SystemAgentRun.STATUS_RUNNING).exists()
+    ):
         return
     if instance.status not in (
         CodexInstance.STATUS_COMPLETED,
@@ -5386,6 +5515,21 @@ def _cleanup_deleted_autonomous_goal_terminal_run(
     ):
         return
     _cleanup_autonomous_goal_workflow_worktree(workflow)
+
+
+def _complete_autonomous_goal_workflow_after_proposal_resolution(
+    workflow: SystemWorkflow, *, outcome_status: str
+) -> None:
+    reason = _autonomous_goal_stack_proposal_stop_reason(outcome_status)
+    if not reason:
+        return
+    workflow.status = SystemWorkflow.STATUS_COMPLETED
+    workflow.step = STEP_AUTONOMOUS_GOAL_PROPOSED
+    workflow.state = {
+        **workflow.state,
+        "stacked_diff_stopped_reason": reason,
+    }
+    workflow.save(update_fields=["status", "step", "state", "updated_at"])
 
 
 def _handle_autonomous_goal_agent_finished(
@@ -5481,6 +5625,31 @@ def _handle_autonomous_goal_agent_finished_locked(
 ) -> _AutonomousGoalPostCommitAction | None:
     if workflow.status != SystemWorkflow.STATUS_RUNNING:
         return None
+    (
+        proposal_outcome,
+        resolved_proposal_cleanup_cwd,
+    ) = _autonomous_goal_current_stack_proposal_resolution(workflow)
+    if proposal_outcome:
+        run.status = SystemAgentRun.STATUS_FAILED
+        run.error = _autonomous_goal_proposal_resolution_error(proposal_outcome)
+        run.save(update_fields=["status", "error", "updated_at"])
+        _complete_autonomous_goal_workflow_after_proposal_resolution(
+            workflow,
+            outcome_status=proposal_outcome,
+        )
+        cleanup_cwd = _candidate_session_cwd_from_state(
+            workflow, "candidate_session_id"
+        )
+        resolution_cleanup_cwds = tuple(
+            dict.fromkeys(
+                cwd
+                for cwd in (cleanup_cwd, resolved_proposal_cleanup_cwd)
+                if cwd
+            )
+        )
+        return _AutonomousGoalPostCommitAction(
+            cleanup_candidate_cwds=resolution_cleanup_cwds
+        )
     if instance.status != CodexInstance.STATUS_COMPLETED:
         error = f"autonomous goal worker failed: {instance.error}"
         if _is_worker_exited_before_completion_error(instance.error):
@@ -5645,7 +5814,6 @@ def _handle_autonomous_goal_agent_finished_locked(
             autonomous_goal,
             candidate,
             judgment,
-            publish=not should_continue_stack,
         )
         state = _state_after_autonomous_goal_proposal_progress(state)
         cleanup_cwds = _dismiss_replaced_autonomous_goal_proposal(
@@ -5813,6 +5981,47 @@ def _autonomous_goal_current_stack_proposal(
     if _autonomous_goal_proposal_hidden_until_complete(proposal):
         return proposal
     return None
+
+
+def _autonomous_goal_current_stack_proposal_resolution(
+    workflow: SystemWorkflow,
+) -> tuple[str, str]:
+    proposal_id = _state_int(workflow, "proposal_id")
+    if not proposal_id:
+        return "", ""
+    proposal_query = ProposedSession.objects.select_related("candidate_session").filter(
+        pk=proposal_id
+    )
+    autonomous_goal_id = _state_int(workflow, "autonomous_goal_id")
+    if autonomous_goal_id:
+        proposal_query = proposal_query.filter(autonomous_goal_id=autonomous_goal_id)
+    else:
+        proposal_query = proposal_query.filter(source_workflow=workflow)
+    proposal = proposal_query.first()
+    if proposal is None:
+        return "", ""
+    if _autonomous_goal_proposal_hidden_until_complete(proposal):
+        return "", ""
+    if _autonomous_goal_proposal_resolution_error(proposal.outcome_status):
+        return (
+            proposal.outcome_status,
+            _resolved_stack_proposal_candidate_cleanup_cwd(proposal),
+        )
+    return "", ""
+
+
+def _resolved_stack_proposal_candidate_cleanup_cwd(
+    proposal: ProposedSession,
+) -> str:
+    if proposal.outcome_status not in {
+        ProposedSession.OUTCOME_DISMISSED,
+        ProposedSession.OUTCOME_REJECTED,
+    }:
+        return ""
+    if proposal.accepted_session_id is not None:
+        return ""
+    candidate = proposal.candidate_session
+    return candidate.cwd if candidate is not None and candidate.cwd else ""
 
 
 def _record_autonomous_goal_proposal_budget_tokens(
@@ -6256,6 +6465,9 @@ def _autonomous_goal_should_continue_stack(
     workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
 ) -> bool:
     if not _autonomous_goal_candidate_allows_code_changes(workflow):
+        return False
+    budget = _autonomous_goal_workflow_proposal_budget(workflow)
+    if budget > 0 and _autonomous_goal_proposal_budget_tokens_used(workflow) >= budget:
         return False
     return _autonomous_goal_stack_iteration(
         workflow

@@ -10346,6 +10346,10 @@ class NewSessionViewTests(TestCase):
                 mock_spawn.assert_not_called()
                 mock_start_workflow.assert_not_called()
 
+    @patch(
+        "hitch.main.views.system_agents."
+        "stop_running_autonomous_goal_stack_after_proposal_resolution"
+    )
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
@@ -10354,6 +10358,7 @@ class NewSessionViewTests(TestCase):
         mock_discover: MagicMock,
         mock_spawn: MagicMock,
         mock_codex: MagicMock,
+        mock_stop_stack: MagicMock,
     ) -> None:
         _setup_codex(mock_codex, models=[])
         project = Project.objects.create(name="Hitch", repo_path=self.REPO)
@@ -10397,6 +10402,11 @@ class NewSessionViewTests(TestCase):
         proposal.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
         self.assertEqual(proposal.accepted_session, metadata)
+        mock_stop_stack.assert_called_once_with(
+            goal.pk,
+            proposal.pk,
+            ProposedSession.OUTCOME_ACCEPTED,
+        )
         self.assertNotIn(
             ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY,
             proposal.outcome_metadata,
@@ -10461,6 +10471,10 @@ class NewSessionViewTests(TestCase):
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_REJECTED)
         self.assertIsNone(proposal.accepted_session)
 
+    @patch(
+        "hitch.main.views.system_agents."
+        "stop_running_autonomous_goal_stack_after_proposal_resolution"
+    )
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.discover_repos")
@@ -10469,6 +10483,7 @@ class NewSessionViewTests(TestCase):
         mock_discover: MagicMock,
         mock_spawn: MagicMock,
         mock_codex: MagicMock,
+        mock_stop_stack: MagicMock,
     ) -> None:
         _setup_codex(mock_codex, models=[])
         project = Project.objects.create(name="Hitch", repo_path=self.REPO)
@@ -10501,6 +10516,7 @@ class NewSessionViewTests(TestCase):
             ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY,
             proposal.outcome_metadata,
         )
+        mock_stop_stack.assert_not_called()
 
     def test_new_session_finish_ignores_replaced_start_claim(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path=self.REPO)
@@ -10680,6 +10696,10 @@ class NewSessionViewTests(TestCase):
         mock_start_spec_critic.assert_not_called()
 
     @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
+    @patch(
+        "hitch.main.views.system_agents."
+        "stop_running_autonomous_goal_stack_after_proposal_resolution"
+    )
     @patch("hitch.main.views.discover_managed_worktrees")
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -10692,6 +10712,7 @@ class NewSessionViewTests(TestCase):
         mock_codex: MagicMock,
         mock_discover: MagicMock,
         mock_managed_worktrees: MagicMock,
+        mock_stop_stack: MagicMock,
         mock_spec_critic_should_run: MagicMock,
     ) -> None:
         mock_discover.return_value = [Path(self.REPO)]
@@ -10775,6 +10796,11 @@ class NewSessionViewTests(TestCase):
         self.assertTrue(candidate.auto_qa_enabled)
         self.assertTrue(candidate.auto_merge_to_local_branch)
         self.assertEqual(candidate.auto_merge_branch, "release")
+        mock_stop_stack.assert_called_once_with(
+            goal.pk,
+            proposal.pk,
+            ProposedSession.OUTCOME_ACCEPTED,
+        )
         codex._client.thread_set_name.assert_called_once_with(
             "candidate-thread", "Add parser coverage"
         )
@@ -11158,6 +11184,10 @@ class NewSessionViewTests(TestCase):
                 self.assertFalse(candidate.auto_pr_enabled)
                 self.assertFalse(candidate.auto_qa_enabled)
 
+    @patch(
+        "hitch.main.views.system_agents."
+        "stop_running_autonomous_goal_stack_after_proposal_resolution"
+    )
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.discover_managed_worktrees")
     @patch("hitch.main.views.discover_repos")
@@ -11170,6 +11200,7 @@ class NewSessionViewTests(TestCase):
         mock_discover: MagicMock,
         mock_managed_worktrees: MagicMock,
         mock_start_workflow: MagicMock,
+        mock_stop_stack: MagicMock,
     ) -> None:
         mock_discover.return_value = [Path(self.REPO)]
         mock_managed_worktrees.return_value = [Path("/repo-worktree")]
@@ -11213,6 +11244,7 @@ class NewSessionViewTests(TestCase):
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
         self.assertIsNone(proposal.accepted_session)
         self.assertTrue(candidate.is_hidden_system_session)
+        mock_stop_stack.assert_not_called()
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.discover_managed_worktrees")
@@ -18664,6 +18696,7 @@ class AutonomousGoalViewTests(TestCase):
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             outcome_metadata={
                 "accepted_by": "user",
+                "resolved_by": "user",
                 "accepted_thread_id": "",
                 ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY: (
                     stale_claimed_at.isoformat()
@@ -18682,6 +18715,7 @@ class AutonomousGoalViewTests(TestCase):
             ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY,
             proposal.outcome_metadata,
         )
+        self.assertNotIn("resolved_by", proposal.outcome_metadata)
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
@@ -18884,6 +18918,7 @@ class AutonomousGoalViewTests(TestCase):
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             outcome_metadata={
                 "accepted_by": "user",
+                "resolved_by": "user",
                 "accepted_thread_id": "",
                 ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY: (
                     stale_claimed_at.isoformat()
@@ -18904,6 +18939,7 @@ class AutonomousGoalViewTests(TestCase):
             ProposedSession.ACCEPTED_SESSION_START_CLAIMED_AT_METADATA_KEY,
             proposal.outcome_metadata,
         )
+        self.assertNotIn("resolved_by", proposal.outcome_metadata)
 
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
@@ -20260,6 +20296,171 @@ class AutonomousGoalViewTests(TestCase):
         codex._client.thread_set_name.assert_called_once_with(
             "candidate-thread", "Add parser coverage"
         )
+
+    @patch(
+        "hitch.main.views.system_agents."
+        "stop_running_autonomous_goal_stack_after_proposal_resolution"
+    )
+    @patch("hitch.main.views.Codex")
+    def test_accept_proposed_session_stops_background_stack(
+        self, mock_codex: MagicMock, mock_stop_stack: MagicMock
+    ) -> None:
+        _setup_codex(mock_codex, models=[])
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo",
+            project=project,
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            title="Add parser coverage",
+        )
+
+        response = self.client.post(
+            reverse("update_proposed_session_outcome", args=[proposal.pk]),
+            {"outcome_status": ProposedSession.OUTCOME_ACCEPTED},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_ACCEPTED)
+        mock_stop_stack.assert_called_once_with(
+            goal.pk,
+            proposal.pk,
+            ProposedSession.OUTCOME_ACCEPTED,
+        )
+
+    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    @patch(
+        "hitch.main.views.system_agents."
+        "stop_running_autonomous_goal_stack_after_proposal_resolution"
+    )
+    def test_resolving_visible_stack_proposal_stops_background_stack_before_cleanup(
+        self, mock_stop_stack: MagicMock, mock_cleanup: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        mock_stop_stack.return_value = True
+        calls: list[str] = []
+
+        def record_stop(*_args: object) -> bool:
+            calls.append("stop")
+            return True
+
+        def record_cleanup(*_args: object) -> None:
+            calls.append("cleanup")
+
+        for outcome_status in (
+            ProposedSession.OUTCOME_REJECTED,
+            ProposedSession.OUTCOME_DISMISSED,
+        ):
+            with self.subTest(outcome_status=outcome_status):
+                calls.clear()
+                mock_stop_stack.reset_mock()
+                mock_cleanup.reset_mock()
+                mock_stop_stack.side_effect = record_stop
+                mock_cleanup.side_effect = record_cleanup
+                candidate = SessionMetadata.objects.create(
+                    thread_id=f"candidate-{outcome_status}",
+                    cwd=f"/repo-worktree-{outcome_status}",
+                    project=project,
+                )
+                proposal = ProposedSession.objects.create(
+                    project=project,
+                    autonomous_goal=goal,
+                    candidate_session=candidate,
+                    title="Add parser coverage",
+                    outcome_metadata={
+                        "stacked_diff_depth": 3,
+                        "stacked_diff_iteration": 1,
+                        "stacked_diff_hidden_until_complete": False,
+                    },
+                )
+                data = {"outcome_status": outcome_status}
+                if outcome_status == ProposedSession.OUTCOME_REJECTED:
+                    data["reason"] = "Not the right direction."
+
+                response = self.client.post(
+                    reverse("update_proposed_session_outcome", args=[proposal.pk]),
+                    data,
+                )
+
+                self.assertEqual(response.status_code, 302)
+                proposal.refresh_from_db()
+                self.assertEqual(proposal.outcome_status, outcome_status)
+                self.assertEqual(proposal.outcome_metadata["resolved_by"], "user")
+                mock_stop_stack.assert_called_once_with(
+                    goal.pk,
+                    proposal.pk,
+                    outcome_status,
+                )
+                mock_cleanup.assert_called_once_with(candidate.cwd)
+                self.assertEqual(calls, ["stop", "cleanup"])
+
+    @patch("hitch.main.views.cleanup_managed_worktree_path")
+    @patch(
+        "hitch.main.views.system_agents."
+        "stop_running_autonomous_goal_stack_after_proposal_resolution",
+        return_value=False,
+    )
+    def test_reject_visible_stack_proposal_keeps_worktree_when_stop_fails(
+        self, mock_stop_stack: MagicMock, mock_cleanup: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="candidate-thread",
+            cwd="/repo-worktree",
+            project=project,
+        )
+        proposal = ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=goal,
+            candidate_session=candidate,
+            title="Add parser coverage",
+            outcome_metadata={
+                "stacked_diff_depth": 3,
+                "stacked_diff_iteration": 1,
+                "stacked_diff_hidden_until_complete": False,
+            },
+        )
+
+        response = self.client.post(
+            reverse("update_proposed_session_outcome", args=[proposal.pk]),
+            {
+                "outcome_status": ProposedSession.OUTCOME_REJECTED,
+                "reason": "Not the right direction.",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        proposal.refresh_from_db()
+        self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_REJECTED)
+        mock_stop_stack.assert_called_once_with(
+            goal.pk,
+            proposal.pk,
+            ProposedSession.OUTCOME_REJECTED,
+        )
+        mock_cleanup.assert_not_called()
 
     def test_dismiss_notice_updates_outcome(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
