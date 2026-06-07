@@ -39,10 +39,11 @@ _ACTIVE_CODEX_STATUSES = (
     CodexInstance.STATUS_STARTING,
     CodexInstance.STATUS_RUNNING,
 )
-_ACTIVE_WORKFLOW_STATUSES = (
-    SystemWorkflow.STATUS_RUNNING,
-    SystemWorkflow.STATUS_BLOCKED,
-)
+# Only a RUNNING workflow is still doing work that needs its worktree. BLOCKED
+# is a failure state (set by ``_block_workflow`` on error), as are FAILED and
+# MAX_ITERATIONS_REACHED -- these are system workflows the user never interacts
+# with directly, so a failed one should not pin a worktree against cleanup.
+_ACTIVE_WORKFLOW_STATUSES = (SystemWorkflow.STATUS_RUNNING,)
 _SYSTEM_CODEX_PURPOSES = (
     CodexInstance.PURPOSE_SYSTEM_AGENT,
     CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
@@ -213,7 +214,7 @@ class _CleanupContext:
     system_thread_ids: frozenset[str]
     protected_proposal_session_ids: frozenset[int]
     active_thread_ids: frozenset[str]
-    active_or_blocked_workflow_thread_ids: frozenset[str]
+    active_workflow_thread_ids: frozenset[str]
     protected_worktree_paths: frozenset[str]
 
 
@@ -236,7 +237,7 @@ def _cleanup_context(*, now: datetime) -> _CleanupContext:
         )
     )
     active_workflow_paths = set(_active_workflow_paths(active_workflows))
-    active_or_blocked_workflow_thread_ids = frozenset(
+    active_workflow_thread_ids = frozenset(
         workflow.main_thread_id
         for workflow in active_workflows
         if workflow.main_thread_id
@@ -256,7 +257,7 @@ def _cleanup_context(*, now: datetime) -> _CleanupContext:
         system_thread_ids=frozenset(_system_thread_ids()),
         protected_proposal_session_ids=frozenset(protected_proposal_session_ids),
         active_thread_ids=active_thread_ids,
-        active_or_blocked_workflow_thread_ids=active_or_blocked_workflow_thread_ids,
+        active_workflow_thread_ids=active_workflow_thread_ids,
         protected_worktree_paths=frozenset(
             _normalized_managed_paths(path for path in protected_paths if path)
         ),
@@ -286,7 +287,7 @@ def _safe_to_remove_worktree(
         return False
     if metadata.thread_id in context.active_thread_ids:
         return False
-    if metadata.thread_id in context.active_or_blocked_workflow_thread_ids:
+    if metadata.thread_id in context.active_workflow_thread_ids:
         return False
     normalized = _normalized_managed_path(metadata.cwd)
     return normalized is not None and normalized not in context.protected_worktree_paths

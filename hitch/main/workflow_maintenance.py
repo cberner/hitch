@@ -82,9 +82,9 @@ def _workflow_maintenance_scheduler_loop() -> None:
     next_disk_cleanup_at = start + _DISK_USAGE_CLEANUP_INTERVAL_SECONDS
     while True:
         _run_workflow_maintenance_scheduler_tick()
-        # Archive stale blocked workflows before disk cleanup on the same loop
-        # iteration: archiving moves them out of RUNNING/BLOCKED, which unpins
-        # their worktrees so the disk-cleanup tick that follows can reclaim them.
+        # Archive stale blocked PR-QA workflows so they stop surfacing a stale
+        # "Blocked" badge in the inbox. Disk cleanup no longer depends on this:
+        # blocked workflows are a failure state and no longer pin their worktrees.
         next_stale_blocked_archive_at = _run_due_stale_blocked_archive(
             next_due_at=next_stale_blocked_archive_at
         )
@@ -146,10 +146,9 @@ def _run_due_stale_blocked_archive(
 ) -> float:
     """Archive stale blocked PR-QA workflows when this hourly tick comes due.
 
-    Runs ahead of the disk-cleanup tick on the same loop iteration: archiving a
-    long-blocked workflow drops it out of the RUNNING/BLOCKED set that
-    ``disk_cleanup`` treats as pinning a worktree, so its worktree becomes
-    eligible for reclamation in the very next tick rather than the next hour.
+    This clears the stale "Blocked" badge from the inbox. It no longer affects
+    disk reclamation: ``disk_cleanup`` only treats RUNNING workflows as pinning a
+    worktree, so a blocked workflow's worktree is already eligible for cleanup.
     """
     current = time.monotonic() if now is None else now
     if current < next_due_at:

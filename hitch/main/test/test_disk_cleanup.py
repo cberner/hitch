@@ -787,6 +787,40 @@ class DiskCleanupTests(TestCase):
         self.assertEqual(cleaned, 1)
         mock_cleanup.assert_called_once_with(old_path)
 
+    def test_blocked_workflow_system_session_is_finished_for_cleanup(self) -> None:
+        # A blocked system workflow is a failure state, not active work, and the
+        # user never interacts with system sessions directly: its worktree must
+        # no longer be pinned against cleanup.
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            patch(
+                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                return_value=True,
+            ) as mock_cleanup,
+        ):
+            root = Path(raw)
+            blocked_path = self._managed_path(root, "blocked")
+            self._session(
+                thread_id="blocked",
+                cwd=blocked_path,
+                hidden_system=True,
+            )
+            SystemWorkflow.objects.create(
+                kind=SystemWorkflow.KIND_PR_QA,
+                main_thread_id="blocked",
+                cwd=blocked_path,
+                status=SystemWorkflow.STATUS_BLOCKED,
+            )
+
+            cleaned = self._run_cleanup(
+                root=root,
+                sizes=[300, 150],
+                mock_cleanup=mock_cleanup,
+            )
+
+        self.assertEqual(cleaned, 1)
+        mock_cleanup.assert_called_once_with(blocked_path)
+
     def test_active_stack_fork_worktree_is_not_finished_for_cleanup(self) -> None:
         with (
             tempfile.TemporaryDirectory() as raw,
