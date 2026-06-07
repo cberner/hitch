@@ -6,7 +6,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("main", "0057_codexinstance_backend_and_more"),
+        ("main", "0062_codexinstance_backend_and_more"),
     ]
 
     operations = [

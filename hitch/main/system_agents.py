@@ -6609,57 +6609,6 @@ def _spawn_pr_qa_run(workflow: SystemWorkflow) -> SystemAgentRun:
     return run
 
 
-def _spawn_pr_qa_panel_runs(workflow: SystemWorkflow) -> list[SystemAgentRun]:
-    diff_text = _review_diff_text_for_workflow(workflow)
-    runs: list[SystemAgentRun] = []
-    try:
-        for lane in _QA_PANEL_LANES:
-            instance = codex_pool.spawn_new_session(
-                cwd=workflow.cwd,
-                prompt=_qa_panel_lane_prompt(workflow.cwd, diff_text, lane),
-                base_instructions=_state_string(workflow, "base_instructions") or None,
-                developer_instructions=(
-                    _state_string(workflow, "developer_instructions") or None
-                ),
-                model=_state_string(workflow, "model") or None,
-                reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
-                approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
-                sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
-                enable_memories=_state_bool(workflow, "enable_memories"),
-                web_search_mode=_workflow_web_search_mode(workflow),
-                thread_source=ThreadSource.subagent,
-                purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-                backend=_workflow_backend(workflow),
-                workflow_id=workflow.pk,
-                agent_kind=lane.agent_kind,
-                display_author=QA_PANEL_DISPLAY_AUTHOR,
-                output_schema=_QA_PANEL_LANE_OUTPUT_SCHEMA,
-                user_message_index=_qa_review_revision(workflow),
-            )
-            run, _created = SystemAgentRun.objects.get_or_create(
-                instance=instance,
-                defaults={
-                    "workflow": workflow,
-                    "agent_kind": lane.agent_kind,
-                    "thread_id": instance.thread_id,
-                    "status": SystemAgentRun.STATUS_RUNNING,
-                    "input": {
-                        "cwd": workflow.cwd,
-                        "diff_chars": len(diff_text),
-                        "iteration": workflow.iteration,
-                        "qa_review_revision": _qa_review_revision(workflow),
-                        "lane": lane.label,
-                        "focus": lane.focus,
-                    },
-                },
-            )
-            runs.append(run)
-    except Exception:
-        _mark_running_panel_runs_failed(workflow, "QA panel failed to start")
-        raise
-    return runs
-
-
 def _review_diff_text_for_workflow(workflow: SystemWorkflow) -> str:
     auto_merge_branch = _state_string(workflow, "auto_merge_branch")
     if not auto_merge_branch:
@@ -6673,48 +6622,6 @@ def _review_diff_text_for_workflow(workflow: SystemWorkflow) -> str:
     }
     workflow.save(update_fields=["state", "updated_at"])
     return review_patch.patch
-
-
-def _spawn_qa_panel_synthesizer_run(workflow: SystemWorkflow) -> SystemAgentRun:
-    diff_text = _review_diff_text_for_workflow(workflow)
-    prompt = _qa_panel_synthesizer_prompt(workflow, diff_text)
-    instance = codex_pool.spawn_new_session(
-        cwd=workflow.cwd,
-        prompt=prompt,
-        base_instructions=_state_string(workflow, "base_instructions") or None,
-        developer_instructions=_state_string(workflow, "developer_instructions") or None,
-        model=_state_string(workflow, "model") or None,
-        reasoning_effort=_state_string(workflow, "reasoning_effort") or None,
-        approval_mode=SYSTEM_AGENT_APPROVAL_MODE,
-        sandbox_policy=_state_string(workflow, "sandbox_policy") or None,
-        enable_memories=_state_bool(workflow, "enable_memories"),
-        web_search_mode=_workflow_web_search_mode(workflow),
-        thread_source=ThreadSource.subagent,
-        purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
-        backend=_workflow_backend(workflow),
-        workflow_id=workflow.pk,
-        agent_kind=PR_QA_PANEL_SYNTHESIZER_AGENT_KIND,
-        display_author=QA_PANEL_DISPLAY_AUTHOR,
-        output_schema=_QA_OUTPUT_SCHEMA,
-        user_message_index=_qa_review_revision(workflow),
-    )
-    run, _created = SystemAgentRun.objects.get_or_create(
-        instance=instance,
-        defaults={
-            "workflow": workflow,
-            "agent_kind": PR_QA_PANEL_SYNTHESIZER_AGENT_KIND,
-            "thread_id": instance.thread_id,
-            "status": SystemAgentRun.STATUS_RUNNING,
-            "input": {
-                "cwd": workflow.cwd,
-                "diff_chars": len(diff_text),
-                "iteration": workflow.iteration,
-                "qa_review_revision": _qa_review_revision(workflow),
-                "lane_count": len(_QA_PANEL_LANES),
-            },
-        },
-    )
-    return run
 
 
 def _prepare_autonomous_goal_candidate_cwd(

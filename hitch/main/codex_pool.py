@@ -162,7 +162,6 @@ def spawn_new_session(
             user_message_index=user_message_index,
             auto_pr_enabled=auto_pr_enabled,
             auto_qa_enabled=auto_qa_enabled,
-            qa_panel_enabled=qa_panel_enabled,
             auto_merge_to_local_branch=auto_merge_to_local_branch,
             auto_merge_branch=auto_merge_branch,
         )
@@ -267,7 +266,6 @@ def _spawn_claude_session(
     user_message_index: int | None,
     auto_pr_enabled: bool,
     auto_qa_enabled: bool,
-    qa_panel_enabled: bool,
     auto_merge_to_local_branch: bool,
     auto_merge_branch: str,
 ) -> CodexInstance:
@@ -337,7 +335,6 @@ def _spawn_claude_session(
         user_message_index=user_message_index,
         auto_pr_enabled=auto_pr_enabled,
         auto_qa_enabled=auto_qa_enabled,
-        qa_panel_enabled=qa_panel_enabled,
         auto_merge_to_local_branch=auto_merge_to_local_branch,
         auto_merge_branch=auto_merge_branch,
         backend=CodexInstance.BACKEND_CLAUDE,

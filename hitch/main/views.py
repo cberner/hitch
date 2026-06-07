@@ -5685,8 +5685,6 @@ def _start_claude_qa_workflow(
     # the current global provider, decides). Claude ships its own system prompt,
     # so Hitch's Codex/HITCH base-instruction variants must never reach a Claude
     # QA/PR agent -- even when the global provider was switched back to Codex.
-    if settings.qa_panel_enabled:
-        workflow_kwargs["qa_panel_enabled"] = True
     if qa_activation:
         workflow_kwargs["open_pr_on_lgtm"] = False
     if auto_merge_to_local_branch and auto_merge_branch:
@@ -5808,8 +5806,6 @@ def _start_claude_spec_critic_follow_up(
     # No base instructions: a Claude workflow ships its own system prompt, so
     # Hitch's Codex base-instruction variants must not reach the Claude Spec
     # Critic agents even if the global provider was switched back to Codex.
-    if (auto_pr_enabled or auto_qa_enabled) and settings.qa_panel_enabled:
-        spec_workflow_kwargs["qa_panel_enabled"] = True
     if auto_merge_to_local_branch and auto_merge_branch:
         spec_workflow_kwargs["auto_merge_to_local_branch"] = True
         spec_workflow_kwargs["auto_merge_branch"] = auto_merge_branch
@@ -5894,8 +5890,6 @@ def _send_claude_follow_up(
     )
     if auto_pr_enabled or auto_qa_enabled:
         spawn_kwargs["user_message_index"] = _claude_user_message_index(session_id)
-        if settings.qa_panel_enabled:
-            spawn_kwargs["qa_panel_enabled"] = True
     if auto_pr_enabled:
         spawn_kwargs["auto_pr_enabled"] = True
     elif auto_qa_enabled:
