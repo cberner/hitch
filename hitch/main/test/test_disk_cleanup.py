@@ -557,7 +557,7 @@ class DiskCleanupTests(TestCase):
         self.assertEqual(cleaned, 0)
         mock_cleanup.assert_not_called()
 
-    def test_archived_user_without_pr_must_be_archived_for_48_hours(self) -> None:
+    def test_archived_user_without_pr_must_be_archived_for_min_age(self) -> None:
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
