@@ -167,7 +167,9 @@
             select.value = selected;
         }
         // Let the reasoning-effort filter re-evaluate against the new model.
-        select.dispatchEvent(new Event("change"));
+        // ``bubbles: true`` so the filter's delegated document listener catches
+        // it even for a <select> created here (e.g. from the free-text fallback).
+        select.dispatchEvent(new Event("change", { bubbles: true }));
     }
 
     function buildTextInput(value) {

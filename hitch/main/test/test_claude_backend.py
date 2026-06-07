@@ -362,6 +362,31 @@ class ClaudeOptionsTests(TestCase):
         )
         self.assertIsInstance(options.system_prompt, dict)
 
+    @patch("hitch.main.claude_options.claude_bin", return_value=None)
+    def test_developer_instructions_ride_in_system_prompt(self, _bin: MagicMock) -> None:
+        # Developer guidance must go through the system prompt, not the user
+        # prompt, so it does not leak into the transcript or repeat on resume.
+        options = claude_options.build_options(
+            cwd="/repo",
+            model="claude-opus-4-8",
+            base_instructions="Base guidance.",
+            developer_instructions="Use repo conventions.",
+        )
+        append = options.system_prompt["append"]
+        self.assertIn("Base guidance.", append)
+        self.assertIn("Use repo conventions.", append)
+
+    @patch("hitch.main.claude_options.claude_bin", return_value=None)
+    def test_developer_instructions_alone_create_system_prompt(
+        self, _bin: MagicMock
+    ) -> None:
+        options = claude_options.build_options(
+            cwd="/repo",
+            model="claude-opus-4-8",
+            developer_instructions="Use repo conventions.",
+        )
+        self.assertIsInstance(options.system_prompt, dict)
+        self.assertIn("Use repo conventions.", options.system_prompt["append"])
 
     @patch("hitch.main.claude_options.claude_bin", return_value=None)
     def test_build_options_with_mcp_server_and_schema_and_hook(self, _bin: MagicMock) -> None:

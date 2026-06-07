@@ -5878,7 +5878,11 @@ def _send_claude_follow_up(
         spawn_kwargs["input_image_paths"] = input_image_paths
     if web_search_mode:
         spawn_kwargs["web_search_mode"] = web_search_mode
-    if previous_instance is None and developer_instructions:
+    if developer_instructions:
+        # Set on every turn, not just the first: developer guidance now rides in
+        # the per-turn system prompt (not the user prompt), so each follow-up
+        # worker must carry it. It is read back from the previous instance above,
+        # so it propagates forward across the session.
         spawn_kwargs["developer_instructions"] = developer_instructions
     # Carry the session's Auto-PR/Auto-QA configuration onto every follow-up
     # turn. ``on_codex_instance_finished`` fires off the completed instance's

@@ -411,6 +411,7 @@ class _TurnRunner:
             web_search_mode=self._web_search_mode,
             plan_mode=self._plan_mode,
             base_instructions=instance.base_instructions or None,
+            developer_instructions=instance.developer_instructions or None,
             output_schema=instance.output_schema,
             resume_session_id=resume,
             session_id=None if resume else instance.thread_id,
@@ -429,17 +430,15 @@ class _TurnRunner:
     def _turn_input(self) -> str | AsyncIterator[dict[str, Any]]:
         """Return the query input: a plain prompt, or a message stream w/ images.
 
-        Per-turn developer guidance rides in front of the user prompt; the SDK
-        has no separate per-turn system channel. When the row carries image
-        attachments, the prompt becomes an Anthropic-style content list (text +
-        base64 image blocks) delivered through the streaming-input form of
-        ``ClaudeSDKClient.query``.
+        Developer guidance is delivered via the system prompt (see
+        ``_build_options``), not folded into the user prompt, so it does not leak
+        into the transcript or repeat as prior user content on resume. When the
+        row carries image attachments, the prompt becomes an Anthropic-style
+        content list (text + base64 image blocks) delivered through the
+        streaming-input form of ``ClaudeSDKClient.query``.
         """
         instance = self._instance
-        prompt = instance.prompt
-        if instance.developer_instructions:
-            prompt = f"{instance.developer_instructions}\n\n{prompt}"
-        return _build_query_input(prompt, instance.input_image_paths)
+        return _build_query_input(instance.prompt, instance.input_image_paths)
 
     # -- streaming bookkeeping --------------------------------------------
 

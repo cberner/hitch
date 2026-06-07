@@ -230,6 +230,7 @@ def build_options(
     web_search_mode: str | None = None,
     plan_mode: bool = False,
     base_instructions: str | None = None,
+    developer_instructions: str | None = None,
     output_schema: dict[str, Any] | None = None,
     resume_session_id: str | None = None,
     session_id: str | None = None,
@@ -248,12 +249,23 @@ def build_options(
 
         allowed.append(PROPOSE_SESSION_TOOL_NAME)
 
+    # Base (Hitch/HITCH) and per-turn developer instructions both ride in the
+    # ``claude_code`` preset's ``append`` -- the system channel -- rather than
+    # being folded into the user prompt. Folding developer guidance into the user
+    # text leaks it into the transcript (Claude echoes the user message) and
+    # repeats it as prior user content on resume; the system prompt does neither.
+    # Each Claude worker runs one turn, so this preset is effectively per-turn.
+    append_parts = [
+        part
+        for part in (base_instructions, developer_instructions)
+        if part and part.strip()
+    ]
     system_prompt: Any = None
-    if base_instructions and base_instructions.strip():
+    if append_parts:
         system_prompt = {
             "type": "preset",
             "preset": "claude_code",
-            "append": base_instructions,
+            "append": "\n\n".join(append_parts),
         }
 
     options = ClaudeAgentOptions(
