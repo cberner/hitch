@@ -545,6 +545,16 @@ _AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT = 8
 _AUTONOMOUS_GOAL_MEMORY_FULL_SUMMARY_CHARS = 700
 _AUTONOMOUS_GOAL_MEMORY_COMPACT_SUMMARY_CHARS = 180
 _AUTONOMOUS_GOAL_MEMORY_FILE_LIMIT = 80
+_AUTONOMOUS_GOAL_MEMORY_FILE_SUMMARY_CHARS = 1_200
+_AUTONOMOUS_GOAL_MEMORY_LINE_FILE_LIMIT = 4
+_AUTONOMOUS_GOAL_MEMORY_FIT_RECENT_SUMMARY_CHARS = 420
+_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS = 5_000
+_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_MAX_ROWS = 50
+_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_RECENT_SUMMARY_CHARS = 650
+_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_OLDER_SUMMARY_CHARS = 260
+_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_PROMPT_CHARS = 260
+_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_FILE_LIMIT = 6
+_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_FILE_CHARS = 600
 _AUTONOMOUS_GOAL_TITLE_MAX_LEN = 200
 _CONFIDENCE_RANK = {
     AutonomousGoal.CONFIDENCE_MEDIUM: 1,
@@ -6711,9 +6721,11 @@ def _spawn_autonomous_goal_candidate_run(
         workflow, autonomous_goal
     )
     try:
-        prompt, memory_context = _autonomous_goal_candidate_prompt(
-            workflow, autonomous_goal
-        )
+        (
+            prompt,
+            memory_context,
+            proposal_history_context,
+        ) = _autonomous_goal_candidate_prompt(workflow, autonomous_goal)
         instance = codex_pool.spawn_new_session(
             cwd=session_cwd,
             prompt=prompt,
@@ -6765,6 +6777,8 @@ def _spawn_autonomous_goal_candidate_run(
                 "autonomous_goal_id": autonomous_goal.pk,
                 "memory_count": memory_context.count,
                 "memory_compacted": memory_context.compacted,
+                "proposal_history_count": proposal_history_context.count,
+                "proposal_history_compacted": proposal_history_context.compacted,
             },
         },
     )
@@ -7744,9 +7758,16 @@ def _qa_design_synthesis_feedback_prompt(
 
 def _autonomous_goal_candidate_prompt(
     workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
-) -> tuple[str, _AutonomousGoalMemoryPromptContext]:
+) -> tuple[
+    str,
+    _AutonomousGoalMemoryPromptContext,
+    _AutonomousGoalProposalHistoryPromptContext,
+]:
     ambition = _autonomous_goal_ambition_guidance(autonomous_goal)
     memory_context = _autonomous_goal_memory_context(autonomous_goal)
+    proposal_history_context = _autonomous_goal_candidate_proposal_history_context(
+        autonomous_goal
+    )
     session_cwd = _autonomous_goal_session_cwd(workflow)
     stacked_depth = _autonomous_goal_workflow_stacked_diff_depth(
         workflow, autonomous_goal
@@ -7798,6 +7819,8 @@ def _autonomous_goal_candidate_prompt(
         f"{autonomous_goal.goal}\n\n"
         "Autonomous goal memory from previous candidate runs:\n"
         f"{memory_context.text}\n\n"
+        "Accepted/dismissed proposal history for candidate planning:\n"
+        f"{proposal_history_context.text}\n\n"
         "Return only JSON matching this shape: "
         '{"proposal": {"title": string, "summary": string, "impact": string, '
         '"implemented_changes": string, "implementation_direction": string, '
@@ -7824,7 +7847,7 @@ def _autonomous_goal_candidate_prompt(
         "repetition. "
         f"{ambition.candidate_instruction}"
     )
-    return prompt, memory_context
+    return prompt, memory_context, proposal_history_context
 
 
 def _autonomous_goal_candidate_retry_prompt(
@@ -7905,6 +7928,139 @@ class _AutonomousGoalMemoryPromptContext:
     text: str
     count: int
     compacted: bool
+
+
+@dataclass(frozen=True)
+class _AutonomousGoalProposalHistoryPromptContext:
+    text: str
+    count: int
+    compacted: bool
+
+
+def _autonomous_goal_candidate_proposal_history_context(
+    autonomous_goal: AutonomousGoal,
+) -> _AutonomousGoalProposalHistoryPromptContext:
+    proposal_queryset = (
+        autonomous_goal.proposed_sessions.filter(
+            inbox_kind=ProposedSession.INBOX_KIND_PROPOSAL
+        )
+        .exclude(outcome_status=ProposedSession.OUTCOME_UNSET)
+        .select_related("candidate_session", "accepted_session")
+        .order_by("-updated_at", "-id")
+    )
+    total_count = proposal_queryset.count()
+    if total_count == 0:
+        return _AutonomousGoalProposalHistoryPromptContext("(none)", 0, False)
+
+    proposals = list(proposal_queryset[:_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_MAX_ROWS])
+    omitted_count = max(total_count - len(proposals), 0)
+    parts: list[str] = []
+    used_chars = 0
+    compacted = omitted_count > 0
+    for index, proposal in enumerate(proposals):
+        summary_chars = (
+            _AUTONOMOUS_GOAL_CANDIDATE_HISTORY_RECENT_SUMMARY_CHARS
+            if index < _AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT
+            else _AUTONOMOUS_GOAL_CANDIDATE_HISTORY_OLDER_SUMMARY_CHARS
+        )
+        section = _format_autonomous_goal_candidate_proposal_history(
+            proposal, summary_chars=summary_chars
+        )
+        section_chars = len(section) + (2 if parts else 0)
+        if used_chars + section_chars > _AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS:
+            compacted = True
+            if not parts:
+                truncated_section = _truncate_for_prompt(
+                    section, _AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS
+                )
+                parts.append(truncated_section)
+                used_chars = len(truncated_section)
+            break
+        parts.append(section)
+        used_chars += section_chars
+
+    omitted_count += len(proposals) - len(parts)
+    if omitted_count > 0:
+        marker = f"{omitted_count} older proposal history rows omitted."
+        marker_chars = len(marker) + (2 if parts else 0)
+        if used_chars + marker_chars <= _AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS:
+            parts.append(marker)
+        elif not parts:
+            parts.append(
+                _truncate_for_prompt(
+                    marker, _AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS
+                )
+            )
+    return _AutonomousGoalProposalHistoryPromptContext(
+        "\n\n".join(parts), total_count, compacted
+    )
+
+
+def _format_autonomous_goal_candidate_proposal_history(
+    proposal: ProposedSession, *, summary_chars: int
+) -> str:
+    files = _format_limited_strings(
+        _string_list(proposal.relevant_files),
+        limit=_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_FILE_LIMIT,
+        max_chars=min(
+            _AUTONOMOUS_GOAL_CANDIDATE_HISTORY_FILE_CHARS,
+            max(80, _AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS // 8),
+        ),
+    )
+    candidate_id = (
+        proposal.candidate_session.thread_id if proposal.candidate_session else "(none)"
+    )
+    accepted_id = (
+        proposal.accepted_session.thread_id if proposal.accepted_session else "(none)"
+    )
+    parts = [
+        f"ProposedSession ID: {proposal.pk}",
+        f"Updated: {_proposal_updated_date(proposal)}",
+        f"Outcome status: {proposal.outcome_status or '(none)'}",
+        f"Candidate session ID: {candidate_id}",
+        f"Accepted session ID: {accepted_id}",
+        f"Title: {proposal.title or '(none)'}",
+    ]
+    description = _autonomous_goal_candidate_proposal_description(proposal)
+    if description:
+        parts.append(f"Description: {_truncate_for_prompt(description, summary_chars)}")
+    continuation = proposal.prompt.strip()
+    if continuation:
+        parts.append(
+            "Continuation prompt: "
+            f"{_truncate_for_prompt(continuation, _AUTONOMOUS_GOAL_CANDIDATE_HISTORY_PROMPT_CHARS)}"
+        )
+    if files:
+        parts.append(f"Relevant files: {files}")
+    if proposal.outcome_notes.strip():
+        parts.append(
+            f"Outcome notes: {_truncate_for_prompt(proposal.outcome_notes, 180)}"
+        )
+    return "\n".join(parts)
+
+
+def _autonomous_goal_candidate_proposal_description(
+    proposal: ProposedSession,
+) -> str:
+    if proposal.summary.strip():
+        return proposal.summary.strip()
+    metadata = proposal.outcome_metadata
+    if not isinstance(metadata, dict):
+        return ""
+    parts: list[str] = []
+    for label, key in (
+        ("Implemented", "implemented_changes"),
+        ("Verification", "verification"),
+        ("Rough edges", "rough_edges"),
+    ):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(f"{label}: {value.strip()}")
+    return "\n\n".join(parts)
+
+
+def _proposal_updated_date(proposal: ProposedSession) -> str:
+    return timezone.localtime(proposal.updated_at).date().isoformat()
 
 
 def _autonomous_goal_proposed_session_prompt(
@@ -8132,18 +8288,27 @@ def _autonomous_goal_memory_context(
 
 
 def _format_autonomous_goal_memory(
-    memory: AutonomousGoalMemory, *, summary_chars: int
+    memory: AutonomousGoalMemory,
+    *,
+    summary_chars: int,
+    file_limit: int | None = None,
+    file_chars: int | None = None,
 ) -> str:
     candidate_id = (
         memory.candidate_session.thread_id if memory.candidate_session else "(none)"
     )
     files = _string_list(memory.relevant_files)
+    file_text = (
+        _format_limited_strings(files, limit=file_limit, max_chars=file_chars)
+        if file_limit is not None
+        else ", ".join(files)
+    )
     return (
         f"Memory ID: {memory.pk}\n"
         f"Created: {_memory_created_date(memory)}\n"
         f"Candidate session ID: {candidate_id}\n"
         f"Title: {memory.title or '(none)'}\n"
-        f"Relevant files: {', '.join(files) if files else '(none)'}\n"
+        f"Relevant files: {file_text if file_text else '(none)'}\n"
         f"Next steps summary: {_truncate_for_prompt(memory.summary, summary_chars)}"
     )
 
@@ -8157,7 +8322,10 @@ def _compact_autonomous_goal_memories(
     files = _format_limited_strings(
         _autonomous_goal_memory_files(memories),
         limit=_AUTONOMOUS_GOAL_MEMORY_FILE_LIMIT,
-        max_chars=max(80, _AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS // 4),
+        max_chars=min(
+            _AUTONOMOUS_GOAL_MEMORY_FILE_SUMMARY_CHARS,
+            max(80, _AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS // 8),
+        ),
     )
     sections = [
         (
@@ -8204,35 +8372,72 @@ def _fit_autonomous_goal_memory_context(
     header = (
         f"Compacted from {len(memories) + omitted_count} prior candidate summaries.\n"
         f"Files seen across prior runs: {file_summary or '(none)'}\n"
-        "Summaries:"
+        "Recent detailed summaries:"
     )
-    budget = max(_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS - len(header) - 1, 0)
-    lines = [
-        _format_autonomous_goal_memory_line(memory, summary_chars=80)
-        for memory in memories
-    ]
-    selected: list[str] = []
-    used = 0
-    for line in lines:
-        line_chars = len(line) + 1
-        if selected and used + line_chars > budget:
+    parts = [header]
+    used_chars = len(header)
+    selected_count = 0
+    recent = memories[:_AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT]
+    older = memories[_AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT:]
+
+    for memory in recent:
+        section = _format_autonomous_goal_memory(
+            memory,
+            summary_chars=_AUTONOMOUS_GOAL_MEMORY_FIT_RECENT_SUMMARY_CHARS,
+            file_limit=_AUTONOMOUS_GOAL_MEMORY_LINE_FILE_LIMIT,
+            file_chars=180,
+        )
+        section_chars = len(section) + 2
+        if used_chars + section_chars > _AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS:
+            line = _format_autonomous_goal_memory_line(
+                memory,
+                summary_chars=_AUTONOMOUS_GOAL_MEMORY_FIT_RECENT_SUMMARY_CHARS,
+            )
+            line_chars = len(line) + 2
+            if used_chars + line_chars > _AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS:
+                break
+            parts.append(line)
+            used_chars += line_chars
+            selected_count += 1
+            continue
+        parts.append(section)
+        used_chars += section_chars
+        selected_count += 1
+
+    older_started = False
+    for memory in older:
+        line = _format_autonomous_goal_memory_line(
+            memory, summary_chars=_AUTONOMOUS_GOAL_MEMORY_COMPACT_SUMMARY_CHARS
+        )
+        prefix = "\nOlder compacted summaries:\n" if not older_started else "\n"
+        line_chars = len(prefix) + len(line)
+        if used_chars + line_chars > _AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS:
             break
-        if not selected and line_chars > budget:
-            selected.append(_truncate_for_prompt(line, max(budget, 40)))
-            used = budget
-            break
-        selected.append(line)
-        used += line_chars
-    omitted = len(lines) - len(selected) + omitted_count
+        if not older_started:
+            parts.append("Older compacted summaries:")
+            used_chars += len("\n\nOlder compacted summaries:")
+            older_started = True
+        parts.append(line)
+        used_chars += len(line) + 1
+        selected_count += 1
+
+    omitted = len(memories) - selected_count + omitted_count
     if omitted > 0:
-        selected.append(f"- {omitted} older summaries omitted after compaction.")
-    return _cap_autonomous_goal_memory_context(f"{header}\n" + "\n".join(selected))
+        marker = f"- {omitted} older summaries omitted after compaction."
+        marker_chars = len(marker) + 1
+        if used_chars + marker_chars <= _AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS:
+            parts.append(marker)
+    return _cap_autonomous_goal_memory_context("\n\n".join(parts))
 
 
 def _format_autonomous_goal_memory_line(
     memory: AutonomousGoalMemory, *, summary_chars: int
 ) -> str:
-    files = _format_limited_strings(_string_list(memory.relevant_files), limit=8)
+    files = _format_limited_strings(
+        _string_list(memory.relevant_files),
+        limit=_AUTONOMOUS_GOAL_MEMORY_LINE_FILE_LIMIT,
+        max_chars=180,
+    )
     return (
         f"- {_memory_created_date(memory)}: {memory.title or '(none)'}; "
         f"files: {files or '(none)'}; "
@@ -8500,9 +8705,20 @@ def _candidate_memory_summary(
     if isinstance(summary, str) and summary.strip():
         return summary.strip()
     if proposal is not None:
-        proposal_summary = proposal.get("summary")
-        if isinstance(proposal_summary, str) and proposal_summary.strip():
-            return proposal_summary.strip()
+        proposal_parts: list[str] = []
+        for label, key in (
+            ("Summary", "summary"),
+            ("Implemented", "implemented_changes"),
+            ("Impact", "impact"),
+            ("Verification", "verification"),
+            ("Rough edges", "rough_edges"),
+            ("Suggested continuation", "suggested_continuation"),
+        ):
+            value = proposal.get(key)
+            if isinstance(value, str) and value.strip():
+                proposal_parts.append(f"{label}: {value.strip()}")
+        if proposal_parts:
+            return "\n\n".join(proposal_parts)
     return message.strip()
 
 

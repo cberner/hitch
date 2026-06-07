@@ -9252,6 +9252,53 @@ class AutonomousGoalWorkflowTests(TestCase):
             )
         )
 
+    def test_candidate_memory_summary_falls_back_to_proposal_details(self) -> None:
+        parsed = system_agents._parse_autonomous_goal_candidate_output(
+            json.dumps(
+                {
+                    "proposal": {
+                        "title": "Add parser coverage",
+                        "summary": "Cover parser edge cases.",
+                        "impact": "Fewer regressions.",
+                        "implemented_changes": "Added parser tests.",
+                        "implementation_direction": "Add focused tests.",
+                        "verification": "Not run.",
+                        "rough_edges": "Needs cleanup.",
+                        "suggested_continuation": "Polish and test parser work.",
+                        "relevant_files": ["hitch/main/rollout.py"],
+                    },
+                    "message": "",
+                    "next_steps_summary": "",
+                    "memory_relevant_files": [],
+                }
+            )
+        )
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertIn("Implemented: Added parser tests.", parsed["next_steps_summary"])
+        self.assertIn(
+            "Suggested continuation: Polish and test parser work.",
+            parsed["next_steps_summary"],
+        )
+        message_fallback = system_agents._parse_autonomous_goal_candidate_output(
+            json.dumps(
+                {
+                    "proposal": None,
+                    "message": "Use the message as the durable summary.",
+                    "next_steps_summary": "",
+                    "memory_relevant_files": [],
+                }
+            )
+        )
+
+        self.assertIsNotNone(message_fallback)
+        assert message_fallback is not None
+        self.assertEqual(
+            message_fallback["next_steps_summary"],
+            "Use the message as the durable summary.",
+        )
+
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_workflow_starts_hidden_candidate_thread(
         self, mock_spawn: MagicMock
@@ -9319,6 +9366,198 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertIn("next_steps_summary", kwargs["prompt"])
         self.assertTrue(
             SessionMetadata.objects.filter(thread_id="candidate-thread").exists()
+        )
+
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_candidate_prompt_includes_prior_proposal_descriptions(
+        self, mock_spawn: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+        )
+        candidate = SessionMetadata.objects.create(
+            thread_id="prior-candidate",
+            cwd="/repo",
+            project=project,
+        )
+        accepted = SessionMetadata.objects.create(
+            thread_id="accepted-thread",
+            cwd="/repo",
+            project=project,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Prior parser cleanup",
+            summary=(
+                "Summary: cleaned up parser setup.\n\n"
+                "Implemented: moved parser setup into a shared helper."
+            ),
+            prompt="Continue from the parser helper and add focused regression tests.",
+            confidence=AutonomousGoal.CONFIDENCE_HIGH,
+            relevant_files=["hitch/main/rollout.py"],
+            candidate_session=candidate,
+            accepted_session=accepted,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        )
+        mock_spawn.return_value = _instance(
+            thread_id="candidate-thread",
+            purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
+            agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+        )
+
+        workflow = system_agents.start_autonomous_goal_workflow(
+            autonomous_goal=autonomous_goal
+        )
+
+        prompt = mock_spawn.call_args.kwargs["prompt"]
+        self.assertIn(
+            "Accepted/dismissed proposal history for candidate planning", prompt
+        )
+        self.assertIn("Prior parser cleanup", prompt)
+        self.assertIn("Implemented: moved parser setup into a shared helper.", prompt)
+        self.assertIn(
+            "Continue from the parser helper and add focused regression tests.",
+            prompt,
+        )
+        run = SystemAgentRun.objects.get(workflow=workflow)
+        self.assertEqual(run.input["proposal_history_count"], 1)
+        self.assertFalse(run.input["proposal_history_compacted"])
+
+    @patch.object(system_agents, "_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_MAX_ROWS", 1)
+    def test_candidate_proposal_history_uses_metadata_and_outcome_notes(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Older parser proposal",
+            summary="Older accepted context.",
+            prompt="Continue older work.",
+            confidence=AutonomousGoal.CONFIDENCE_MEDIUM,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Metadata-only proposal",
+            prompt="Continue from the metadata-only result.",
+            confidence=AutonomousGoal.CONFIDENCE_HIGH,
+            outcome_status=ProposedSession.OUTCOME_DISMISSED,
+            outcome_notes="Dismissed because a newer parser approach superseded it.",
+            outcome_metadata={
+                "implemented_changes": "Moved parser setup into a helper.",
+                "verification": "Ran parser tests.",
+                "rough_edges": "Could still trim duplicate fixtures.",
+            },
+        )
+
+        history = system_agents._autonomous_goal_candidate_proposal_history_context(
+            autonomous_goal
+        )
+
+        self.assertTrue(history.compacted)
+        self.assertIn("Metadata-only proposal", history.text)
+        self.assertIn("Implemented: Moved parser setup into a helper.", history.text)
+        self.assertIn("Verification: Ran parser tests.", history.text)
+        self.assertIn(
+            "Outcome notes: Dismissed because a newer parser approach superseded it.",
+            history.text,
+        )
+        self.assertIn("1 older proposal history rows omitted.", history.text)
+        bad_metadata_proposal = ProposedSession(summary="", outcome_metadata=["bad"])
+        self.assertEqual(
+            system_agents._autonomous_goal_candidate_proposal_description(
+                bad_metadata_proposal
+            ),
+            "",
+        )
+
+    @patch.object(system_agents, "_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS", 10)
+    @patch.object(system_agents, "_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_MAX_ROWS", 0)
+    def test_candidate_proposal_history_truncates_marker_when_no_rows_fit(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Omitted proposal",
+            summary="This proposal is outside the patched row cap.",
+            prompt="Continue omitted work.",
+            confidence=AutonomousGoal.CONFIDENCE_HIGH,
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        )
+
+        history = system_agents._autonomous_goal_candidate_proposal_history_context(
+            autonomous_goal
+        )
+
+        self.assertTrue(history.compacted)
+        self.assertEqual(history.count, 1)
+        self.assertLessEqual(
+            len(history.text),
+            system_agents._AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS,
+        )
+
+    @patch.object(system_agents, "_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS", 300)
+    def test_candidate_proposal_history_keeps_row_with_long_files(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Keep docs current",
+            goal="Find small documentation improvements.",
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Older omitted proposal",
+            summary="This row should be omitted when the newest row fills the budget.",
+            prompt="Continue from older context.",
+            confidence=AutonomousGoal.CONFIDENCE_MEDIUM,
+            outcome_status=ProposedSession.OUTCOME_DISMISSED,
+        )
+        ProposedSession.objects.create(
+            project=project,
+            autonomous_goal=autonomous_goal,
+            title="Prior proposal with long files",
+            summary=(
+                "This accepted proposal summary should survive file compaction."
+            ),
+            prompt="Continue from the accepted proposal.",
+            confidence=AutonomousGoal.CONFIDENCE_HIGH,
+            relevant_files=[
+                "hitch/main/test/"
+                + ("very_long_path_segment_" * 8)
+                + f"{idx}.py"
+                for idx in range(20)
+            ],
+            outcome_status=ProposedSession.OUTCOME_ACCEPTED,
+        )
+
+        history = system_agents._autonomous_goal_candidate_proposal_history_context(
+            autonomous_goal
+        )
+
+        self.assertTrue(history.compacted)
+        self.assertIn("Prior proposal with long files", history.text)
+        self.assertIn("Outcome status: accepted", history.text)
+        self.assertIn("summary should survive", history.text)
+        self.assertNotIn("Older omitted proposal", history.text)
+        self.assertNotEqual("1 older proposal history rows omitted.", history.text)
+        self.assertLessEqual(
+            len(history.text),
+            system_agents._AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS,
         )
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -12558,6 +12797,140 @@ class AutonomousGoalWorkflowTests(TestCase):
         run = SystemAgentRun.objects.get(workflow=workflow)
         self.assertEqual(run.input["memory_count"], 4)
         self.assertTrue(run.input["memory_compacted"])
+
+    @patch.object(system_agents, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 900)
+    def test_compacted_memory_context_keeps_recent_actionable_summary(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Process one test file",
+            goal="Pick one test file and improve it.",
+        )
+        for idx in range(6):
+            AutonomousGoalMemory.objects.create(
+                autonomous_goal=autonomous_goal,
+                title=f"Processed file {idx}",
+                summary=(
+                    f"Run {idx} selected a file. Future runs should target "
+                    "constraint row generation instead of repeating file catalogs."
+                ),
+                relevant_files=[
+                    "hitch/main/test/"
+                    + ("very_long_path_segment_" * 5)
+                    + f"{file_idx}_{idx}.py"
+                    for file_idx in range(12)
+                ],
+            )
+
+        memory_context = system_agents._autonomous_goal_memory_context(autonomous_goal)
+
+        self.assertTrue(memory_context.compacted)
+        self.assertIn("constraint row generation", memory_context.text)
+        self.assertLessEqual(
+            len(memory_context.text), system_agents._AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS
+        )
+
+    def test_compacted_memory_context_includes_older_summary_section(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Process one test file",
+            goal="Pick one test file and improve it.",
+        )
+        memories = [
+            AutonomousGoalMemory.objects.create(
+                autonomous_goal=autonomous_goal,
+                title=f"Processed file {idx}",
+                summary=f"Run {idx} left a concise continuation.",
+                relevant_files=[f"hitch/main/test/test_{idx}.py"],
+            )
+            for idx in range(system_agents._AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT + 1)
+        ]
+
+        compacted = system_agents._compact_autonomous_goal_memories(memories)
+
+        self.assertIn("Older compacted summaries:", compacted)
+        self.assertIn(
+            f"Processed file {system_agents._AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT}",
+            compacted,
+        )
+
+    @patch.object(system_agents, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 190)
+    def test_fit_memory_context_uses_line_when_full_section_does_not_fit(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Process one test file",
+            goal="Pick one test file and improve it.",
+        )
+        memory = AutonomousGoalMemory.objects.create(
+            autonomous_goal=autonomous_goal,
+            title="Short",
+            summary="Target parser assertions next.",
+        )
+
+        compacted = system_agents._fit_autonomous_goal_memory_context([memory], "")
+
+        self.assertIn("Target parser assertions next.", compacted)
+        self.assertNotIn("Memory ID:", compacted)
+        self.assertLessEqual(
+            len(compacted), system_agents._AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS
+        )
+
+    @patch.object(system_agents, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 450)
+    @patch.object(system_agents, "_AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT", 1)
+    def test_fit_memory_context_includes_older_compacted_summaries(self) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Process one test file",
+            goal="Pick one test file and improve it.",
+        )
+        memories = [
+            AutonomousGoalMemory.objects.create(
+                autonomous_goal=autonomous_goal,
+                title=f"Processed file {idx}",
+                summary=f"Run {idx} left a concise continuation.",
+            )
+            for idx in range(2)
+        ]
+
+        compacted = system_agents._fit_autonomous_goal_memory_context(memories, "")
+
+        self.assertIn("Older compacted summaries:", compacted)
+        self.assertIn("Processed file 1", compacted)
+        self.assertLessEqual(
+            len(compacted), system_agents._AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS
+        )
+
+    @patch.object(system_agents, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 260)
+    @patch.object(system_agents, "_AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT", 1)
+    def test_fit_memory_context_stops_before_older_summary_that_would_overflow(
+        self,
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Process one test file",
+            goal="Pick one test file and improve it.",
+        )
+        memories = [
+            AutonomousGoalMemory.objects.create(
+                autonomous_goal=autonomous_goal,
+                title=f"File {idx}",
+                summary=f"Run {idx} next.",
+            )
+            for idx in range(2)
+        ]
+
+        compacted = system_agents._fit_autonomous_goal_memory_context(memories, "")
+
+        self.assertIn("File 0", compacted)
+        self.assertNotIn("Older compacted summaries:", compacted)
+        self.assertNotIn("File 1", compacted)
+        self.assertLessEqual(
+            len(compacted), system_agents._AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS
+        )
 
     @patch.object(system_agents, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 240)
     def test_compacted_memory_context_enforces_budget_with_long_files(self) -> None:
