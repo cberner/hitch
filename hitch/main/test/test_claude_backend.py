@@ -256,6 +256,8 @@ class ClaudeOptionsTests(TestCase):
         # ``Monitor`` runs a background script under Bash rules; gate it too so
         # ``approve_all`` cannot run commands despite the read-only sandbox.
         self.assertIn("Monitor", disallowed)
+        # ``BashOutput`` polls a background Bash run; block it alongside Bash.
+        self.assertIn("BashOutput", disallowed)
         # ``PowerShell`` runs host commands natively (Windows / opt-in env var);
         # it must be blocked like Bash so read-only stays authoritative.
         self.assertIn("PowerShell", disallowed)
@@ -605,6 +607,13 @@ class ApprovalRoutingTests(TestCase):
         # command-execution path -- not the generic tool path.
         self.assertEqual(
             claude_worker._approval_method("Monitor"),
+            claude_worker._COMMAND_APPROVAL_METHOD,
+        )
+        # ``BashOutput`` polls a background Bash run, so it shares Bash's
+        # command-execution treatment (a hidden auto_review run must be able to
+        # observe a background command to completion).
+        self.assertEqual(
+            claude_worker._approval_method("BashOutput"),
             claude_worker._COMMAND_APPROVAL_METHOD,
         )
         self.assertEqual(
@@ -1028,8 +1037,17 @@ class HiddenAutoReviewApprovalTests(TestCase):
 
         runner = self._runner(sandbox_policy="workspaceWrite")
         # ``Monitor`` runs under Bash rules and is bash-sandbox-confinable, so a
-        # hidden write-sandbox run auto-approves it like Bash.
-        for tool in ("Bash", "Monitor", "Edit", "Write", "MultiEdit", "NotebookEdit"):
+        # hidden write-sandbox run auto-approves it like Bash. ``BashOutput`` polls
+        # a background Bash run, so it too must be observable to completion.
+        for tool in (
+            "Bash",
+            "BashOutput",
+            "Monitor",
+            "Edit",
+            "Write",
+            "MultiEdit",
+            "NotebookEdit",
+        ):
             result = asyncio.run(runner._can_use_tool(tool, {}, None))
             self.assertIsInstance(result, PermissionResultAllow, tool)
 
@@ -3311,6 +3329,32 @@ class TranslateCoverageTests(TestCase):
         item = ev[0][1]["item"]
         self.assertEqual(item["type"], "dynamicToolCall")
         self.assertEqual(item["tool"], "Task")
+
+    def test_monitor_renders_as_command_execution(self) -> None:
+        # Monitor runs a shell script under Bash rules, so it must surface its
+        # command (auditable) rather than a generic dynamicToolCall.
+        translator = claude_translate.EventTranslator()
+        ev = translator.translate(
+            _assistant(
+                ToolUseBlock(id="m", name="Monitor", input={"command": "pytest -q"})
+            )
+        )
+        item = ev[0][1]["item"]
+        self.assertEqual(item["type"], "commandExecution")
+        self.assertEqual(item["command"], "pytest -q")
+
+    def test_repeated_message_id_yields_unique_item_ids(self) -> None:
+        # Multiple assistant messages can share a message_id; their text item ids
+        # must differ so the live renderer can't overwrite pre-tool text with the
+        # final response.
+        translator = claude_translate.EventTranslator()
+        first = translator.translate(_assistant(TextBlock(text="pre-tool")))
+        second = translator.translate(_assistant(TextBlock(text="final")))
+        self.assertNotEqual(
+            first[0][1]["item"]["id"], second[0][1]["item"]["id"]
+        )
+        # started/completed for a single block still share one id.
+        self.assertEqual(first[0][1]["item"]["id"], first[1][1]["item"]["id"])
 
     def test_structured_output_result_becomes_agent_message(self) -> None:
         # With an output_schema the SDK returns the validated JSON on the

@@ -91,7 +91,16 @@ _POWERSHELL_TOOL = "PowerShell"
 # visible approval would mislabel it as a generic tool. Unlike ``PowerShell`` it
 # *is* sandbox-confinable, so it is not in the ``_powershell_unconfined`` carve-out.
 _MONITOR_TOOL = "Monitor"
-_COMMAND_TOOLS = frozenset({"Bash", _POWERSHELL_TOOL, _MONITOR_TOOL})
+# Polls/returns output (and status) of a ``Bash`` run started with
+# ``run_in_background``. It is the follow-up half of a background command, so it
+# must share Bash's command-execution treatment -- otherwise a hidden
+# ``auto_review`` run (which only auto-approves command/file tools) would deny it
+# as a generic tool and could never observe a background test/server command to
+# completion.
+_BASH_OUTPUT_TOOL = "BashOutput"
+_COMMAND_TOOLS = frozenset(
+    {"Bash", _BASH_OUTPUT_TOOL, _POWERSHELL_TOOL, _MONITOR_TOOL}
+)
 # Plan mode's approval boundary: the model calls ``ExitPlanMode`` to present its
 # plan and leave plan mode. It is deliberately kept out of ``allowed_tools`` so it
 # always reaches ``can_use_tool`` -- and must never be auto-approved (even under

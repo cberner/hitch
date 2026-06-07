@@ -79,6 +79,9 @@ WRITE_TOOLS: tuple[str, ...] = (
 _WEB_SEARCH_TOOL = "WebSearch"
 _WEB_FETCH_TOOL = "WebFetch"
 _BASH_TOOL = "Bash"
+# Returns output/status of a background ``Bash`` run; gated as command execution
+# (and blocked alongside Bash under the read-only sandbox).
+_BASH_OUTPUT_TOOL = "BashOutput"
 # Runs a background script under Bash permission rules; gated with Bash.
 _MONITOR_TOOL = "Monitor"
 # Runs host commands natively (Windows, or ``CLAUDE_CODE_USE_POWERSHELL_TOOL=1``);
@@ -181,6 +184,7 @@ def resolve_tool_lists(
         # would let them run commands despite the read-only sandbox.
         disallowed.extend(WRITE_TOOLS)
         disallowed.append(_BASH_TOOL)
+        disallowed.append(_BASH_OUTPUT_TOOL)
         disallowed.append(_MONITOR_TOOL)
         disallowed.append(_POWERSHELL_TOOL)
         allowed = [tool for tool in allowed if tool != _BASH_TOOL]

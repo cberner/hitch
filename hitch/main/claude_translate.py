@@ -40,6 +40,9 @@ _STATUS_FAILED = "failed"
 # Tool name -> Codex item ``type``. Anything unlisted is surfaced as a generic
 # ``dynamicToolCall`` so unfamiliar tools still appear in the timeline.
 _WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+# Tools that run a shell command via a ``command`` input and so render as a
+# command execution (``Monitor`` runs a background script under Bash rules).
+_COMMAND_INPUT_TOOLS = frozenset({"Bash", "Monitor"})
 _FILE_PATH_KEYS = ("file_path", "path", "notebook_path")
 
 
@@ -49,6 +52,9 @@ class EventTranslator:
     def __init__(self) -> None:
         # Open tool items keyed by tool-use id, awaiting their result block.
         self._open_tools: dict[str, dict[str, Any]] = {}
+        # Monotonic per-turn counter to keep assistant item ids unique across
+        # messages that share a ``message_id`` (see ``_translate_assistant``).
+        self._assistant_message_seq = 0
         # Number of upcoming user-prompt echoes to drop because the worker already
         # emitted that turn's ``userMessage`` itself (see
         # ``suppress_next_user_prompt``).
@@ -97,11 +103,18 @@ class EventTranslator:
         events: list[Event] = []
         # ``message_id``/``uuid`` exist on the current SDK dataclass; guard with
         # getattr so a differing SDK shape can't crash the whole turn translation.
+        # Multiple ``AssistantMessage``s in one turn can share a ``message_id``
+        # (per the SDK), so fold in a per-message counter -- otherwise a later
+        # message's text/thinking ids would collide with an earlier one's and the
+        # live renderer (which updates the existing item on completion) would
+        # overwrite pre-tool assistant text with the final response until reload.
+        self._assistant_message_seq += 1
         base_id = (
             message.message_id
             or getattr(message, "uuid", None)
             or "assistant"
         )
+        base_id = f"{base_id}:{self._assistant_message_seq}"
         for index, block in enumerate(message.content):
             item_id = f"{base_id}:{index}"
             if isinstance(block, TextBlock):
@@ -130,7 +143,12 @@ class EventTranslator:
     def _tool_item(self, block: ToolUseBlock) -> dict[str, Any]:
         name = block.name
         item: dict[str, Any] = {"id": block.id, "status": "inProgress"}
-        if name == "Bash":
+        if name in _COMMAND_INPUT_TOOLS:
+            # ``Monitor`` runs a background shell script under Bash permission
+            # rules with the same ``command`` input, so surface it (like Bash) as
+            # a command execution rather than a generic tool call -- otherwise the
+            # transcript records only "Tool call" and the actual command run is
+            # not auditable in session history.
             item["type"] = "commandExecution"
             item["command"] = _string(block.input.get("command"))
         elif name in _WRITE_TOOLS:
