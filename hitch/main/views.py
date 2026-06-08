@@ -18,7 +18,7 @@ from decimal import Decimal, DecimalException
 from functools import wraps
 from pathlib import Path
 from stat import S_ISREG
-from typing import Any, NamedTuple, override
+from typing import Any, Literal, NamedTuple, override
 from urllib.parse import urlencode
 
 from django.conf import settings as django_settings
@@ -221,8 +221,23 @@ class AutonomousGoalValues(NamedTuple):
     auto_merge_branch: str
 
 
+AutonomousGoalRunState = Literal[
+    "blocked",
+    "failed",
+    "manual",
+    "maxed",
+    "queued",
+    "quota",
+    "ready",
+    "review",
+    "running",
+    "skipped",
+    "waiting",
+]
+
+
 class AutonomousGoalRunBadge(NamedTuple):
-    state: str
+    state: AutonomousGoalRunState
     label: str
     title: str
     detail: str
@@ -4055,6 +4070,10 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
         goals,
         continuable_stack_goal_ids=pending_proposal_state.continuable_stack_goal_ids,
     )
+    auto_proposals_paused_by_quota = (
+        any(goal.auto_proposal_enabled for goal in goals)
+        and system_agents._auto_proposals_paused_by_usage_quota_throttled()
+    )
     workflows = (
         SystemWorkflow.objects.filter(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
@@ -4101,6 +4120,7 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
             project_running_auto_proposal_ids=project_running_auto_proposal_ids,
             project_in_flight_automation_ids=project_in_flight_automation_ids,
             no_change_goal_ids=no_change_goal_ids,
+            auto_proposals_paused_by_quota=auto_proposals_paused_by_quota,
         )
         goal.run_status_state = run_badge.state  # type: ignore[attr-defined]
         goal.run_status_label = run_badge.label  # type: ignore[attr-defined]
@@ -4233,6 +4253,7 @@ def _autonomous_goal_run_badge(
     project_running_auto_proposal_ids: set[int],
     project_in_flight_automation_ids: set[int],
     no_change_goal_ids: set[int],
+    auto_proposals_paused_by_quota: bool,
 ) -> AutonomousGoalRunBadge:
     if workflow is not None:
         if workflow.status == SystemWorkflow.STATUS_RUNNING:
@@ -4320,6 +4341,16 @@ def _autonomous_goal_run_badge(
                 "for the tracked branch. It will try again after that branch changes."
             ),
         )
+    if goal.auto_proposal_enabled and auto_proposals_paused_by_quota:
+        return AutonomousGoalRunBadge(
+            state="quota",
+            label="Quota",
+            title="Autonomous goal is paused for quota",
+            detail=(
+                "Not running because remaining Codex quota is below the "
+                "auto-proposal safety threshold. It will try again as quota recovers."
+            ),
+        )
     if goal.auto_proposal_enabled and goal.pk in continuable_stack_goal_ids:
         return AutonomousGoalRunBadge(
             state="ready",
@@ -4328,7 +4359,9 @@ def _autonomous_goal_run_badge(
             detail="Auto-proposal is enabled. This goal will start when the scheduler runs and quota allows.",
         )
     if workflow is not None and workflow.status == SystemWorkflow.STATUS_COMPLETED:
-        return _completed_autonomous_goal_run_badge(workflow)
+        completed_badge = _completed_autonomous_goal_run_badge(workflow)
+        if completed_badge is not None:
+            return completed_badge
     if not goal.auto_proposal_enabled:
         detail = "Auto-proposal is off. Use Run to start this goal manually."
         latest_detail = _autonomous_goal_latest_run_detail(workflow)
@@ -4350,7 +4383,7 @@ def _autonomous_goal_run_badge(
 
 def _completed_autonomous_goal_run_badge(
     workflow: SystemWorkflow,
-) -> AutonomousGoalRunBadge:
+) -> AutonomousGoalRunBadge | None:
     if workflow.step == system_agents.STEP_AUTONOMOUS_GOAL_SKIPPED:
         return AutonomousGoalRunBadge(
             state="skipped",
@@ -4358,19 +4391,7 @@ def _completed_autonomous_goal_run_badge(
             title="Autonomous goal last run was skipped",
             detail=_autonomous_goal_latest_run_detail(workflow),
         )
-    if workflow.step == system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED:
-        return AutonomousGoalRunBadge(
-            state="done",
-            label="Done",
-            title="Autonomous goal last run completed",
-            detail=_autonomous_goal_latest_run_detail(workflow),
-        )
-    return AutonomousGoalRunBadge(
-        state="done",
-        label="Done",
-        title="Autonomous goal last run completed",
-        detail=_autonomous_goal_latest_run_detail(workflow),
-    )
+    return None
 
 
 def _autonomous_goal_running_token_counts(
