@@ -9,7 +9,7 @@ import re
 import secrets
 import subprocess
 import threading
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -2288,93 +2288,171 @@ def reconcile_terminal_workflow_instances(
         return 0
     reconciled = _reconcile_terminal_system_agent_instances(workflows)
     reconciled += _reconcile_terminal_workflow_turns(workflows)
-    reconciled += _reconcile_stale_pr_monitor_workflows(workflows)
-    reconciled += _reconcile_stale_spec_critic_workflows(workflows)
-    reconciled += _reconcile_orphaned_qa_spawns(workflows)
-    reconciled += _reconcile_orphaned_pr_prompt_spawns(workflows)
-    reconciled += _reconcile_zombie_workflow_turns(workflows)
+    reconciled += _drive_orphaned_workflow_spawns(workflows)
     return reconciled
 
 
-def _reconcile_stale_pr_monitor_workflows(workflows: list[SystemWorkflow]) -> int:
-    """Recover PR monitor workflows orphaned before their monitor run was stored."""
-    stale_before = timezone.now() - _WORKFLOW_SPAWN_STALE_TIMEOUT
-    reconciled = 0
-    for workflow in workflows:
-        if workflow.kind != SystemWorkflow.KIND_PR_QA:
-            continue
-        if workflow.step != STEP_PR_MONITORING:
-            continue
-        locked = _claim_stale_pr_monitor_workflow(
-            workflow, stale_before=stale_before
-        )
-        if locked is None:
-            continue
-        try:
-            _spawn_pr_followup_monitor_run(locked)
-        except Exception as exc:
-            _block_workflow(
-                locked, f"failed to restart PR follow-up monitor: {exc!r}"
-            )
-        reconciled += 1
-    return reconciled
+@dataclass(frozen=True)
+class _SpawnRecoverySpec:
+    """How to recover one ``(kind, step)`` workflow stranded by a dead spawn.
 
-
-def _claim_stale_pr_monitor_workflow(
-    workflow: SystemWorkflow, *, stale_before: datetime
-) -> SystemWorkflow | None:
-    with transaction.atomic():
-        locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
-        if (
-            locked.status != SystemWorkflow.STATUS_RUNNING
-            or locked.step != STEP_PR_MONITORING
-            or locked.updated_at > stale_before
-            or isinstance(locked.state.get(_PR_MONITOR_BACKOFF_STATE_KEY), dict)
-            or not _pr_handoff_from_workflow(locked)
-            or _pr_monitor_has_unresolved_agent_work(locked)
-        ):
-            return None
-        locked.save(update_fields=["updated_at"])
-    return locked
-
-
-def _reconcile_orphaned_pr_prompt_spawns(workflows: list[SystemWorkflow]) -> int:
-    """Recover PR-QA workflows stranded in ``pr_prompt_running`` by a dead spawn.
-
-    A QA-approved auto-PR workflow commits ``pr_prompt_running`` and *then* spawns
-    the PR-prompt turn. Unlike the QA-feedback or user-steering turns, this
-    prompt is reconstructable (``state['pr_prompt']`` or ``PR_SLASH_PROMPT`` via
-    ``_spawn_pr_prompt``), so a spawn killed before the turn existed can be
-    re-driven rather than blocked. ``_spawn_pr_prompt`` records its target index
-    (``QA_APPROVAL_INSERT_INDEX_STATE_KEY``) before launching the worker, so we
-    only re-drive when no PR-prompt turn was ever created -- never opening a
-    second PR for a turn that already ran (an off-by-one terminal turn is routed
-    by ``_reconcile_terminal_workflow_turns`` first, which moves the step).
+    A workflow commits its next step and *then* spawns the worker for it. If the
+    process dies in that gap no ``CodexInstance`` row is created, so the terminal
+    reconcilers have nothing to route and the workflow sits in ``step`` forever.
+    ``needs_recovery`` is the authoritative "no live or finish-routing worker
+    owns this step" predicate (re-checked under the claim lock so a worker that
+    appears mid-sweep is never double-driven); ``recover`` re-drives the spawn or
+    -- when the turn's prompt is unrecoverable -- blocks the workflow.
     """
-    stale_before = timezone.now() - _WORKFLOW_SPAWN_STALE_TIMEOUT
+
+    kind: str
+    step: str
+    stale_timeout: timedelta
+    needs_recovery: Callable[[SystemWorkflow], bool]
+    recover: Callable[[SystemWorkflow], None]
+
+
+def _drive_orphaned_workflow_spawns(workflows: list[SystemWorkflow]) -> int:
+    """Re-drive (or block) every workflow stranded by a dead spawn handler.
+
+    One table-driven sweep over :data:`_SPAWN_RECOVERY_SPECS` replaces the former
+    per-step reconcilers: for each stale RUNNING workflow whose step has a spec
+    and whose expected worker is missing, claim the step and run its recovery.
+    ``needs_recovery`` is re-checked after the claim (a worker may have appeared
+    since the batch was loaded) so recovery never races a live spawn; like the
+    former reconcilers, the check stays outside the claim's write lock.
+    """
+    now = timezone.now()
     reconciled = 0
     for workflow in workflows:
-        if workflow.kind != SystemWorkflow.KIND_PR_QA:
+        spec = _SPAWN_RECOVERY_SPECS.get((workflow.kind, workflow.step))
+        if spec is None:
             continue
-        if workflow.step != STEP_PR_PROMPT_RUNNING:
-            continue
+        stale_before = now - spec.stale_timeout
         if workflow.updated_at > stale_before:
             continue
-        if _pr_prompt_turn_in_flight(workflow):
+        if not spec.needs_recovery(workflow):
             continue
         locked = _claim_stale_workflow_step(
-            workflow, step=STEP_PR_PROMPT_RUNNING, stale_before=stale_before
+            workflow, step=workflow.step, stale_before=stale_before
         )
-        if locked is None or _pr_prompt_turn_in_flight(locked):
+        if locked is None or not spec.needs_recovery(locked):
             continue
-        try:
-            _spawn_pr_prompt(locked)
-        except Exception as exc:
-            _block_workflow(
-                locked, f"failed to restart PR prompt after its spawn handler died: {exc!r}"
-            )
+        spec.recover(locked)
         reconciled += 1
     return reconciled
+
+
+def _respawn_or_block(
+    workflow: SystemWorkflow,
+    spawn: Callable[[SystemWorkflow], object],
+    failure_message: str,
+) -> None:
+    """Re-drive a recoverable spawn, blocking the workflow if it raises."""
+    try:
+        spawn(workflow)
+    except Exception as exc:
+        _block_workflow(workflow, failure_message.format(exc=exc))
+
+
+def _block_zombie_workflow_turn(workflow: SystemWorkflow) -> None:
+    """Block a turn whose prompt is gone and so cannot be re-driven."""
+    label = _ZOMBIE_TURN_STEP_MESSAGES[workflow.step]
+    _block_workflow(
+        workflow,
+        f"{label} never started: its spawn handler died before the worker "
+        "launched. Restart the workflow to continue.",
+    )
+
+
+def _pr_monitor_spawn_needs_recovery(workflow: SystemWorkflow) -> bool:
+    """True when a ``pr_monitoring`` workflow lost its monitor run to a dead spawn.
+
+    A backoff claim or an unresolved monitor run means the spawn is still owned;
+    a missing PR handoff means there is nothing to monitor.
+    """
+    return (
+        not isinstance(workflow.state.get(_PR_MONITOR_BACKOFF_STATE_KEY), dict)
+        and bool(_pr_handoff_from_workflow(workflow))
+        and not _pr_monitor_has_unresolved_agent_work(workflow)
+    )
+
+
+_SPAWN_RECOVERY_SPECS: dict[tuple[str, str], _SpawnRecoverySpec] = {
+    (spec.kind, spec.step): spec
+    for spec in (
+        _SpawnRecoverySpec(
+            kind=SystemWorkflow.KIND_PR_QA,
+            step=STEP_QA_RUNNING,
+            stale_timeout=_WORKFLOW_SPAWN_STALE_TIMEOUT,
+            needs_recovery=lambda w: not _qa_review_in_flight(w),
+            recover=lambda w: _respawn_or_block(
+                w,
+                _spawn_pr_qa_run,
+                "failed to restart QA agent after its spawn handler died: {exc!r}",
+            ),
+        ),
+        _SpawnRecoverySpec(
+            kind=SystemWorkflow.KIND_PR_QA,
+            step=STEP_PR_PROMPT_RUNNING,
+            stale_timeout=_WORKFLOW_SPAWN_STALE_TIMEOUT,
+            needs_recovery=lambda w: not _pr_prompt_turn_in_flight(w),
+            recover=lambda w: _respawn_or_block(
+                w,
+                _spawn_pr_prompt,
+                "failed to restart PR prompt after its spawn handler died: {exc!r}",
+            ),
+        ),
+        _SpawnRecoverySpec(
+            kind=SystemWorkflow.KIND_PR_QA,
+            step=STEP_PR_MONITORING,
+            stale_timeout=_WORKFLOW_SPAWN_STALE_TIMEOUT,
+            needs_recovery=_pr_monitor_spawn_needs_recovery,
+            recover=lambda w: _respawn_or_block(
+                w,
+                _spawn_pr_followup_monitor_run,
+                "failed to restart PR follow-up monitor: {exc!r}",
+            ),
+        ),
+        *(
+            _SpawnRecoverySpec(
+                kind=SystemWorkflow.KIND_PR_QA,
+                step=step,
+                stale_timeout=_WORKFLOW_SPAWN_STALE_TIMEOUT,
+                needs_recovery=lambda w: not _workflow_turn_settling(w),
+                recover=_block_zombie_workflow_turn,
+            )
+            for step in _ZOMBIE_TURN_STEP_MESSAGES
+        ),
+        _SpawnRecoverySpec(
+            kind=SPEC_CRITIC_WORKFLOW_KIND,
+            step=STEP_SPEC_CRITIC_CLASSIFYING,
+            stale_timeout=_SPEC_CRITIC_CLASSIFY_STALE_TIMEOUT,
+            needs_recovery=lambda w: True,
+            recover=lambda w: _start_spec_critic_classification(w),
+        ),
+        _SpawnRecoverySpec(
+            kind=SPEC_CRITIC_WORKFLOW_KIND,
+            step=STEP_SPEC_CRITIC_ANALYZING,
+            stale_timeout=_SPEC_CRITIC_CLASSIFY_STALE_TIMEOUT,
+            # Only the "claimed ANALYZING but never spawned the agents" orphan is
+            # recoverable; once any run exists, terminal-instance reconciliation
+            # owns it (and re-spawning would duplicate agents).
+            needs_recovery=lambda w: not w.agent_runs.exists(),
+            recover=lambda w: _begin_spec_critic_analysis(w),
+        ),
+        _SpawnRecoverySpec(
+            kind=SPEC_CRITIC_WORKFLOW_KIND,
+            step=STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED,
+            stale_timeout=_SPEC_CRITIC_CLASSIFY_STALE_TIMEOUT,
+            # Only the skip path leaves this step RUNNING (the synthesis path sets
+            # it together with COMPLETED), so finalizing with the original prompt
+            # is correct.
+            needs_recovery=lambda w: _state_bool(w, "skipped_classification"),
+            recover=lambda w: _finalize_spec_critic_skip(w),
+        ),
+    )
+}
 
 
 def _pr_prompt_turn_in_flight(workflow: SystemWorkflow) -> bool:
@@ -2398,44 +2476,6 @@ def _pr_prompt_turn_in_flight(workflow: SystemWorkflow) -> bool:
     ).exists()
 
 
-def _reconcile_zombie_workflow_turns(workflows: list[SystemWorkflow]) -> int:
-    """Surface a clear failure for PR-QA workflows whose turn spawn died.
-
-    A turn step (feedback_running, pr_feedback_running, user_steering_running)
-    commits the step and *then* spawns a visible coding/feedback turn. If that
-    spawn's process is killed before the turn instance exists, the workflow
-    zombies in the step: no live worker, and nothing for the terminal-turn
-    reconciler to route. Unlike the QA review or the PR prompt, the turn cannot
-    be re-driven (its feedback or user prompt is gone), so once the row goes
-    stale with no worker settling we block it with a surfaced, owner-appropriate
-    error rather than letting it sit silently forever.
-    """
-    stale_before = timezone.now() - _WORKFLOW_SPAWN_STALE_TIMEOUT
-    reconciled = 0
-    for workflow in workflows:
-        if workflow.kind != SystemWorkflow.KIND_PR_QA:
-            continue
-        if workflow.step not in _ZOMBIE_TURN_STEP_MESSAGES:
-            continue
-        if workflow.updated_at > stale_before:
-            continue
-        if _workflow_turn_settling(workflow):
-            continue
-        locked = _claim_stale_workflow_step(
-            workflow, step=workflow.step, stale_before=stale_before
-        )
-        if locked is None or _workflow_turn_settling(locked):
-            continue
-        label = _ZOMBIE_TURN_STEP_MESSAGES[locked.step]
-        _block_workflow(
-            locked,
-            f"{label} never started: its spawn handler died before the worker "
-            "launched. Restart the workflow to continue.",
-        )
-        reconciled += 1
-    return reconciled
-
-
 def _workflow_turn_settling(workflow: SystemWorkflow) -> bool:
     """True while a worker is live or a finished turn is still being routed.
 
@@ -2457,43 +2497,6 @@ def _workflow_turn_settling(workflow: SystemWorkflow) -> bool:
         ),
         workflow_routing_started_at__gte=fresh_claim,
     ).exists()
-
-
-def _reconcile_orphaned_qa_spawns(workflows: list[SystemWorkflow]) -> int:
-    """Recover PR-QA workflows stranded in ``qa_running`` by a dead spawn.
-
-    Every transition into ``qa_running`` (initial start, post-feedback restart,
-    post-user-steering restart) flips the step first and *then* calls
-    ``_spawn_pr_qa_run``. If that call's process is killed before the QA
-    CodexInstance row exists, no exception is raised in-process and no instance
-    is created, so neither the terminal-instance nor the terminal-turn
-    reconciler has anything to route: the workflow sits in ``qa_running`` with no
-    live worker. Once the row goes stale we re-drive the spawn. ``_spawn_pr_qa_run``
-    is idempotent against a live review because we only fire when no QA review is
-    in flight; a prior round's completed QA instance does not count.
-    """
-    stale_before = timezone.now() - _WORKFLOW_SPAWN_STALE_TIMEOUT
-    reconciled = 0
-    for workflow in workflows:
-        if workflow.kind != SystemWorkflow.KIND_PR_QA:
-            continue
-        if workflow.step != STEP_QA_RUNNING:
-            continue
-        if _qa_review_in_flight(workflow):
-            continue
-        locked = _claim_stale_workflow_step(
-            workflow, step=STEP_QA_RUNNING, stale_before=stale_before
-        )
-        if locked is None or _qa_review_in_flight(locked):
-            continue
-        try:
-            _spawn_pr_qa_run(locked)
-        except Exception as exc:
-            _block_workflow(
-                locked, f"failed to restart QA agent after its spawn handler died: {exc!r}"
-            )
-        reconciled += 1
-    return reconciled
 
 
 def _qa_review_in_flight(workflow: SystemWorkflow) -> bool:
@@ -2526,61 +2529,6 @@ def _qa_review_in_flight(workflow: SystemWorkflow) -> bool:
         )
         .exists()
     )
-
-
-def _reconcile_stale_spec_critic_workflows(workflows: list[SystemWorkflow]) -> int:
-    """Recover Spec Critic workflows orphaned by a web-process restart.
-
-    Each routing step claims the next step before its durable CodexInstance work
-    exists (the classifier runs in an in-process thread; analysis/implementation
-    spawn workers right after the claim). A restart in that gap strands a RUNNING
-    workflow with nothing to advance it, which ``active_workflow_for_thread``
-    keeps treating as active. Once the row goes stale we re-drive the orphaned
-    step; each re-drive checks for the durable work it would create, so it never
-    double-spawns if a live thread still wins.
-    """
-    stale_before = timezone.now() - _SPEC_CRITIC_CLASSIFY_STALE_TIMEOUT
-    reconciled = 0
-    for workflow in workflows:
-        if workflow.kind != SPEC_CRITIC_WORKFLOW_KIND:
-            continue
-        if workflow.step == STEP_SPEC_CRITIC_CLASSIFYING:
-            locked = _claim_stale_workflow_step(
-                workflow, step=STEP_SPEC_CRITIC_CLASSIFYING, stale_before=stale_before
-            )
-            if locked is None:
-                continue
-            _start_spec_critic_classification(locked)
-            reconciled += 1
-        elif workflow.step == STEP_SPEC_CRITIC_ANALYZING:
-            # Only the "claimed ANALYZING but never spawned the agents" orphan is
-            # recoverable here; once any run exists, terminal-instance
-            # reconciliation owns it (and re-spawning would duplicate agents).
-            if workflow.agent_runs.exists():
-                continue
-            locked = _claim_stale_workflow_step(
-                workflow, step=STEP_SPEC_CRITIC_ANALYZING, stale_before=stale_before
-            )
-            if locked is None or locked.agent_runs.exists():
-                continue
-            _begin_spec_critic_analysis(locked)
-            reconciled += 1
-        elif workflow.step == STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED:
-            # Only the skip path leaves this step RUNNING (the synthesis path sets
-            # it together with COMPLETED), so finalizing with the original prompt
-            # is correct; the turn-exists guard keeps it from double-spawning.
-            if not _state_bool(workflow, "skipped_classification"):
-                continue
-            locked = _claim_stale_workflow_step(
-                workflow,
-                step=STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED,
-                stale_before=stale_before,
-            )
-            if locked is None:
-                continue
-            _finalize_spec_critic_skip(locked)
-            reconciled += 1
-    return reconciled
 
 
 def _claim_stale_workflow_step(
