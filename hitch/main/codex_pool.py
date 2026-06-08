@@ -3298,13 +3298,17 @@ def _launch_systemd_worker(
             env=env,
             stderr=stderr,
         )
-        _raise_for_systemd_run_start_failure(
+        client_exited = _check_systemd_run_start_result(
             proc,
             scope_unit,
             stderr_capture,
             stderr_offset=stderr_offset,
         )
-        return WorkerLaunch(pid=0, scope_unit=scope_unit)
+        return WorkerLaunch(
+            pid=0,
+            proc=None if client_exited else proc,
+            scope_unit=scope_unit,
+        )
     with tempfile.TemporaryFile() as stderr_file:
         proc = _popen_detached(
             _systemd_scope_argv(
@@ -3316,8 +3320,12 @@ def _launch_systemd_worker(
             env=env,
             stderr=stderr_file,
         )
-        _raise_for_systemd_run_start_failure(proc, scope_unit, stderr_file)
-    return WorkerLaunch(pid=0, scope_unit=scope_unit)
+        client_exited = _check_systemd_run_start_result(proc, scope_unit, stderr_file)
+    return WorkerLaunch(
+        pid=0,
+        proc=None if client_exited else proc,
+        scope_unit=scope_unit,
+    )
 
 
 def _stderr_log_path(stderr_capture: BinaryIO) -> str | None:
@@ -3768,25 +3776,26 @@ def _systemd_scope_argv(
     return argv
 
 
-def _raise_for_systemd_run_start_failure(
+def _check_systemd_run_start_result(
     proc: subprocess.Popen[bytes],
     scope_unit: str,
     stderr_file: Any,
     *,
     stderr_offset: int = 0,
-) -> None:
+) -> bool:
+    """Return whether the systemd-run client exited cleanly.
+
+    A still-running client can be waiting on a slow user manager or transient
+    service start job. The worker row remains ``pid=0`` during that handshake;
+    the worker writes its real pid once it starts, and ``reconcile_dead`` fails
+    the row later if that never happens.
+    """
     try:
-        returncode = proc.wait(timeout=2)
-    except subprocess.TimeoutExpired as exc:
-        with contextlib.suppress(OSError):
-            proc.kill()
-        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
-            proc.wait(timeout=0.5)
-        raise RuntimeError(
-            f"systemd-run timed out launching Codex worker unit {scope_unit}"
-        ) from exc
+        returncode = proc.wait(timeout=0.25)
+    except subprocess.TimeoutExpired:
+        return False
     if returncode == 0:
-        return
+        return True
     stderr_file.seek(stderr_offset)
     stderr = stderr_file.read()
     if isinstance(stderr, bytes):
