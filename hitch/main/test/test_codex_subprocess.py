@@ -1158,6 +1158,18 @@ class SystemdInstallRecipeTests(SimpleTestCase):
 
         self.assertIn("Environment=HITCH_CODEX_WORKER_ISOLATION=systemd", justfile)
 
+    def test_global_worker_isolation_default_stays_auto(self) -> None:
+        common_settings = (
+            Path(settings.BASE_DIR) / "hitch" / "settings" / "common.py"
+        ).read_text()
+        default_line = (
+            'CODEX_WORKER_ISOLATION = os.environ.get('
+            '"HITCH_CODEX_WORKER_ISOLATION", "auto")'
+        )
+
+        self.assertIn(default_line, common_settings)
+        self.assertNotIn("_CODEX_WORKER_ISOLATION_DEFAULT", common_settings)
+
 
 class LaunchWorkerProcessSystemdTests(TestCase):
     @override_settings(
@@ -1229,9 +1241,32 @@ class LaunchWorkerProcessSystemdTests(TestCase):
             kwargs["env"]["DJANGO_SETTINGS_MODULE"],
             "hitch.settings.dev",
         )
-        proc.wait.assert_called_once_with(timeout=2)
+        proc.wait.assert_called_once_with(timeout=0.25)
         mock_which.assert_called_once_with("systemd-run")
         mock_ensure_slice.assert_called_once_with()
+
+    @override_settings(CODEX_WORKER_ISOLATION="systemd")
+    @patch("hitch.main.codex_pool._ensure_systemd_worker_slice")
+    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
+    @patch("hitch.main.codex_pool.subprocess.Popen")
+    def test_systemd_launch_keeps_slow_client_pending(
+        self,
+        mock_popen: MagicMock,
+        _mock_which: MagicMock,
+        _mock_ensure_slice: MagicMock,
+    ) -> None:
+        proc = MagicMock()
+        proc.pid = 999
+        proc.wait.side_effect = subprocess.TimeoutExpired("systemd-run", 0.25)
+        mock_popen.return_value = proc
+
+        launch = codex_pool._launch_worker_process(instance_id=7)
+
+        self.assertEqual(launch.pid, 0)
+        self.assertIs(launch.proc, proc)
+        self.assertEqual(launch.scope_unit, "hitch-codex-worker-7.service")
+        proc.wait.assert_called_once_with(timeout=0.25)
+        proc.kill.assert_not_called()
 
     @override_settings(
         CODEX_WORKER_SLICE="hitch-codex-workers.slice",
@@ -1710,7 +1745,7 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         ):
             codex_pool._launch_worker_process(instance_id=7)
 
-        proc.wait.assert_called_once_with(timeout=2)
+        proc.wait.assert_called_once_with(timeout=0.25)
 
     @override_settings(CODEX_WORKER_ISOLATION="bogus")
     def test_rejects_unknown_worker_isolation(self) -> None:

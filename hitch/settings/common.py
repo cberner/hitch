@@ -194,13 +194,11 @@ CODEX_WORKER_LOGS_DB_MAX_BYTES = int(
 
 # Worker isolation policy: "auto" uses systemd units only when the user manager
 # is reachable, "systemd" fails closed, and "direct" preserves the legacy
-# process-group launch path for non-systemd environments. When Hitch itself is
-# already running as a systemd unit, default to fail-closed systemd workers so a
-# webserver restart cannot silently fall back to kill-prone direct children.
-_CODEX_WORKER_ISOLATION_DEFAULT = "systemd" if os.environ.get("INVOCATION_ID") else "auto"
-CODEX_WORKER_ISOLATION = os.environ.get(
-    "HITCH_CODEX_WORKER_ISOLATION", _CODEX_WORKER_ISOLATION_DEFAULT
-)
+# process-group launch path for non-systemd environments. The generated systemd
+# deployment unit sets this to "systemd" explicitly; the global default stays
+# "auto" so system services/containers without a user bus keep the direct
+# fallback.
+CODEX_WORKER_ISOLATION = os.environ.get("HITCH_CODEX_WORKER_ISOLATION", "auto")
 CODEX_WORKER_SLICE = os.environ.get(
     "HITCH_CODEX_WORKER_SLICE", "hitch-codex-workers.slice"
 )
