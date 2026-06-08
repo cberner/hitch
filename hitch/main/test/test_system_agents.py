@@ -464,6 +464,26 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(reconciled, 0)
         mock_spawn.assert_not_called()
 
+    @patch("hitch.main.system_agents._qa_review_in_flight", side_effect=[False, True])
+    @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
+    def test_reconcile_skips_qa_when_review_appears_during_claim(
+        self, mock_spawn: MagicMock, _mock_in_flight: MagicMock
+    ) -> None:
+        # The unlocked pre-check sees no live review, but a review appears by the
+        # time the step is claimed: the post-claim re-check must skip rather than
+        # spawn a duplicate QA agent.
+        workflow = self._stale_qa_running_workflow()
+
+        reconciled = system_agents.reconcile_terminal_workflow_instances(
+            main_thread_id="main-thread"
+        )
+
+        self.assertEqual(reconciled, 0)
+        mock_spawn.assert_not_called()
+        workflow.refresh_from_db()
+        self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
+        self.assertEqual(workflow.step, system_agents.STEP_QA_RUNNING)
+
     @patch("hitch.main.system_agents.build_worktree_diff_text", return_value="diff --git")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_reconcile_respawns_qa_despite_prior_round_completed_instance(
