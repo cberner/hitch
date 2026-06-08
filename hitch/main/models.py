@@ -537,6 +537,11 @@ class CodexInstance(models.Model):
         (STATUS_COMPLETED, "completed"),
         (STATUS_FAILED, "failed"),
     )
+    # Single source of truth for "this worker is live": a worker is active while
+    # STARTING or RUNNING and terminal once COMPLETED or FAILED. Every "is this
+    # instance active?" check (queryset filters and ``is_active``) reads this so
+    # the definition can never drift between callers.
+    ACTIVE_STATUSES: ClassVar[tuple[str, ...]] = (STATUS_STARTING, STATUS_RUNNING)
     PURPOSE_USER = "user"
     PURPOSE_SYSTEM_AGENT = "system_agent"
     PURPOSE_SYSTEM_FEEDBACK = "system_feedback"
@@ -614,6 +619,11 @@ class CodexInstance(models.Model):
     def __str__(self) -> str:
         return f"CodexInstance(pid={self.pid}, thread_id={self.thread_id}, status={self.status})"
 
+    @property
+    def is_active(self) -> bool:
+        """Whether this worker is still live (STARTING or RUNNING)."""
+        return self.status in CodexInstance.ACTIVE_STATUSES
+
 
 class SystemWorkflow(models.Model):
     """Durable state for Hitch-managed system-agent workflows."""
@@ -634,6 +644,13 @@ class SystemWorkflow(models.Model):
         (STATUS_FAILED, "failed"),
         (STATUS_MAX_ITERATIONS_REACHED, "max iterations reached"),
     )
+    # Single source of truth for "this workflow is still doing work (and so pins
+    # its worktree)". Only RUNNING is active: BLOCKED/FAILED/MAX_ITERATIONS_REACHED
+    # are terminal failure states and COMPLETED is success -- none of them keep a
+    # worktree alive. Disk cleanup and the workflow layer both read this so they
+    # cannot disagree about which workflows count as active (see commit 09c1dd8,
+    # where a drifted "RUNNING or BLOCKED" cleanup set pinned failed worktrees).
+    ACTIVE_STATUSES: ClassVar[tuple[str, ...]] = (STATUS_RUNNING,)
 
     kind = models.CharField(max_length=64)
     main_thread_id = models.CharField(max_length=128, db_index=True)
@@ -664,6 +681,11 @@ class SystemWorkflow(models.Model):
             f"SystemWorkflow(kind={self.kind}, main_thread_id={self.main_thread_id}, "
             f"status={self.status})"
         )
+
+    @property
+    def is_active(self) -> bool:
+        """Whether this workflow is still running (and thus pins its worktree)."""
+        return self.status in SystemWorkflow.ACTIVE_STATUSES
 
 
 class SystemAgentRun(models.Model):

@@ -524,7 +524,7 @@ def latest_active_for_thread(thread_id: str) -> CodexInstance | None:
     return (
         CodexInstance.objects.filter(
             thread_id=thread_id,
-            status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+            status__in=CodexInstance.ACTIVE_STATUSES,
         )
         .order_by("-started_at")
         .first()
@@ -588,10 +588,7 @@ def interrupt_instance(
         return None
     if instance.thread_id != expected_thread_id:
         return None
-    if instance.status not in (
-        CodexInstance.STATUS_STARTING,
-        CodexInstance.STATUS_RUNNING,
-    ):
+    if not instance.is_active:
         return None
     return _interrupt_instance(instance)
 
@@ -630,10 +627,7 @@ def steer_instance(
         return None
     if instance.thread_id != expected_thread_id:
         return None
-    if instance.status not in (
-        CodexInstance.STATUS_STARTING,
-        CodexInstance.STATUS_RUNNING,
-    ):
+    if not instance.is_active:
         return None
     kwargs: dict[str, Any] = {"prompt": prompt}
     if input_image_paths:
@@ -690,10 +684,7 @@ def _steer_instance(
         return None
     if instance.status != CodexInstance.STATUS_RUNNING:
         instance.refresh_from_db()
-        if instance.status not in (
-            CodexInstance.STATUS_STARTING,
-            CodexInstance.STATUS_RUNNING,
-        ):
+        if not instance.is_active:
             if images_tracked:
                 _remove_input_attachment_paths(instance, image_paths)
             return None
@@ -708,10 +699,7 @@ def _steer_instance(
     except OSError:
         return instance
     instance.refresh_from_db()
-    if instance.status not in (
-        CodexInstance.STATUS_STARTING,
-        CodexInstance.STATUS_RUNNING,
-    ):
+    if not instance.is_active:
         if images_tracked:
             _remove_input_attachment_paths(instance, image_paths)
         return None
@@ -825,7 +813,7 @@ def _mark_failed(instance: CodexInstance, error: str) -> CodexInstance | None:
     """
     updated = CodexInstance.objects.filter(
         pk=instance.pk,
-        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+        status__in=CodexInstance.ACTIVE_STATUSES,
     ).update(
         status=CodexInstance.STATUS_FAILED,
         ended_at=timezone.now(),
@@ -1086,7 +1074,7 @@ def reconcile_dead() -> int:
     """
     _reap_finished_workers()
     pending = CodexInstance.objects.filter(
-        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING)
+        status__in=CodexInstance.ACTIVE_STATUSES
     )
     updated = _mark_dead_instances_failed(pending)
     _reconcile_terminal_workflow_instances()
@@ -1214,10 +1202,7 @@ def reconcile_orphaned_workers() -> int:
         row = rows.get(instance_id)
         if row is not None:
             status, ended_at = row
-            if status in (
-                CodexInstance.STATUS_STARTING,
-                CodexInstance.STATUS_RUNNING,
-            ):
+            if status in CodexInstance.ACTIVE_STATUSES:
                 continue
             # Terminal: spare it only while it may still be running its
             # post-terminal hooks. Within the grace window it is finishing them;
@@ -1631,7 +1616,7 @@ def reconcile_dead_for_thread(thread_id: str) -> int:
     _reap_finished_workers()
     pending = CodexInstance.objects.filter(
         thread_id=thread_id,
-        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+        status__in=CodexInstance.ACTIVE_STATUSES,
     )
     updated = _mark_dead_instances_failed(pending)
     _reconcile_terminal_workflow_instances(main_thread_id=thread_id)
@@ -1648,7 +1633,7 @@ def reconcile_dead_for_workflow(
     _reap_finished_workers()
     pending = CodexInstance.objects.filter(
         workflow_id=workflow_id,
-        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+        status__in=CodexInstance.ACTIVE_STATUSES,
     )
     updated = _mark_dead_instances_failed(pending)
     _reconcile_terminal_workflow_instances(
@@ -1690,7 +1675,7 @@ def _mark_dead_instances_failed(pending: Iterable[CodexInstance]) -> int:
         # falsely routed to the system agents). Mirrors ``_mark_failed``.
         rows = CodexInstance.objects.filter(
             pk=instance.pk,
-            status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+            status__in=CodexInstance.ACTIVE_STATUSES,
         ).update(
             status=CodexInstance.STATUS_FAILED,
             error=error,
@@ -1911,7 +1896,7 @@ def _prune_reaped_workers() -> None:
     active_workers = set(
         CodexInstance.objects.filter(
             pk__in=[instance_id for _, instance_id in reaped_workers],
-            status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+            status__in=CodexInstance.ACTIVE_STATUSES,
         ).values_list("pid", "pk")
     )
     with _TRACKED_WORKER_PROCS_LOCK:
@@ -2087,7 +2072,7 @@ def cleanup_input_images_for_thread(thread_id: str) -> None:
     """Delete retained input images for every turn in a thread."""
     CodexInstance.objects.filter(
         thread_id=thread_id,
-        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+        status__in=CodexInstance.ACTIVE_STATUSES,
     ).exclude(input_attachment_paths=[]).update(
         input_attachment_cleanup_requested=True
     )
@@ -3036,7 +3021,7 @@ def _track_steer_input_attachments(
         return True
     _add_input_attachment_paths(instance, image_paths)
     instance.refresh_from_db(fields=["status"])
-    if instance.status in (CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING):
+    if instance.is_active:
         return True
     _remove_input_attachment_paths(instance, image_paths)
     return False

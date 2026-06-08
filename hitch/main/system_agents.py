@@ -1218,7 +1218,7 @@ def _maybe_start_auto_proposal_workflow(autonomous_goal_id: int) -> bool:
         )
     if created:
         _spawn_autonomous_goal_candidate_or_block(workflow, autonomous_goal)
-    return workflow.status == SystemWorkflow.STATUS_RUNNING
+    return workflow.is_active
 
 
 def _autonomous_goal_auto_proposal_db_allows_start(
@@ -1597,7 +1597,7 @@ def _autonomous_goal_in_flight_automation_exists(autonomous_goal: AutonomousGoal
     )
     if CodexInstance.objects.filter(
         thread_id__in=accepted_thread_ids,
-        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+        status__in=CodexInstance.ACTIVE_STATUSES,
     ).exists():
         return True
     return SystemWorkflow.objects.filter(
@@ -1778,7 +1778,7 @@ def _claim_active_autonomous_goal_workflow(
             .first()
         )
         workflow = SystemWorkflow.objects.select_for_update().get(pk=workflow_id)
-        if workflow.status != SystemWorkflow.STATUS_RUNNING:
+        if not workflow.is_active:
             return workflow, autonomous_goal, False
         if autonomous_goal is None:
             _block_workflow(
@@ -1801,7 +1801,7 @@ def _block_autonomous_goal_spawn_failure_if_active(
             .first()
         )
         workflow = SystemWorkflow.objects.select_for_update().get(pk=workflow_id)
-        if workflow.status != SystemWorkflow.STATUS_RUNNING:
+        if not workflow.is_active:
             return workflow
         if autonomous_goal is None:
             _block_workflow(
@@ -2132,7 +2132,7 @@ def _advance_spec_critic_to_analysis(workflow: SystemWorkflow) -> None:
     with transaction.atomic():
         locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
         if (
-            locked.status != SystemWorkflow.STATUS_RUNNING
+            not locked.is_active
             or locked.step != STEP_SPEC_CRITIC_CLASSIFYING
         ):
             return
@@ -2148,7 +2148,7 @@ def _skip_spec_critic_and_implement(workflow: SystemWorkflow) -> None:
     with transaction.atomic():
         locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
         if (
-            locked.status != SystemWorkflow.STATUS_RUNNING
+            not locked.is_active
             or locked.step != STEP_SPEC_CRITIC_CLASSIFYING
         ):
             return
@@ -2472,7 +2472,7 @@ def _pr_prompt_turn_in_flight(workflow: SystemWorkflow) -> bool:
         return True
     return CodexInstance.objects.filter(
         workflow_id=workflow.pk,
-        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+        status__in=CodexInstance.ACTIVE_STATUSES,
     ).exists()
 
 
@@ -2486,7 +2486,7 @@ def _workflow_turn_settling(workflow: SystemWorkflow) -> bool:
     """
     instances = CodexInstance.objects.filter(workflow_id=workflow.pk)
     if instances.filter(
-        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING)
+        status__in=CodexInstance.ACTIVE_STATUSES
     ).exists():
         return True
     fresh_claim = timezone.now() - _WORKFLOW_ROUTE_CLAIM_TIMEOUT
@@ -2514,7 +2514,7 @@ def _qa_review_in_flight(workflow: SystemWorkflow) -> bool:
         agent_kind__in=_QA_INTERRUPTIBLE_AGENT_KINDS,
     )
     if instances.filter(
-        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING)
+        status__in=CodexInstance.ACTIVE_STATUSES
     ).exists():
         return True
     return (
@@ -2542,7 +2542,7 @@ def _claim_stale_workflow_step(
     with transaction.atomic():
         locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
         if (
-            locked.status != SystemWorkflow.STATUS_RUNNING
+            not locked.is_active
             or locked.step != step
             or locked.updated_at > stale_before
         ):
@@ -2788,7 +2788,7 @@ def stop_running_autonomous_goal_stack_after_proposal_resolution(
         # The proposal id and running-run set are one lifecycle boundary: a stale
         # inbox decision must not complete a workflow that has advanced stacks.
         locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
-        if locked.status != SystemWorkflow.STATUS_RUNNING:
+        if not locked.is_active:
             return True
         if _state_int(locked, "proposal_id") != proposal_id:
             return True
@@ -3160,7 +3160,7 @@ def _handle_demo_agent_finished(
             run.status = SystemAgentRun.STATUS_FAILED
             run.error = error
             run.save(update_fields=["status", "error", "updated_at"])
-        if workflow.status == SystemWorkflow.STATUS_RUNNING:
+        if workflow.is_active:
             workflow.status = SystemWorkflow.STATUS_FAILED
             workflow.save(update_fields=["status", "updated_at"])
 
@@ -3172,7 +3172,7 @@ def _handle_system_feedback_finished(instance: CodexInstance) -> None:
     if instance.status != CodexInstance.STATUS_COMPLETED:
         if _retry_dead_system_feedback_worker(instance, workflow):
             return
-        if workflow.status != SystemWorkflow.STATUS_RUNNING:
+        if not workflow.is_active:
             # A feedback/notice turn that fails after the workflow already
             # reached a terminal state (e.g. the no-change completion notice or
             # a failure-surface turn) must not revert that state to Blocked.
@@ -3183,11 +3183,11 @@ def _handle_system_feedback_finished(instance: CodexInstance) -> None:
             _block_workflow(workflow, f"QA feedback worker failed: {instance.error}")
         return
     if (
-        workflow.status != SystemWorkflow.STATUS_RUNNING
+        not workflow.is_active
         or workflow.step != STEP_FEEDBACK_RUNNING
     ):
         if (
-            workflow.status == SystemWorkflow.STATUS_RUNNING
+            workflow.is_active
             and workflow.step == STEP_PR_FEEDBACK_RUNNING
         ):
             _clear_feedback_worker_death_retries(workflow, "pr_feedback")
@@ -3209,7 +3209,7 @@ def _retry_dead_system_feedback_worker(
 ) -> bool:
     retry_kind = _feedback_worker_retry_kind(workflow)
     if (
-        workflow.status != SystemWorkflow.STATUS_RUNNING
+        not workflow.is_active
         or not retry_kind
         or not _is_worker_exited_before_completion_error(instance.error)
     ):
@@ -3324,7 +3324,7 @@ def _handle_pr_qa_agent_finished(
         return
     if run.agent_kind in _LEGACY_QA_PANEL_AGENT_KINDS:
         if (
-            workflow.status == SystemWorkflow.STATUS_RUNNING
+            workflow.is_active
             and workflow.step == STEP_QA_RUNNING
         ):
             _fail_run_and_block_workflow(
@@ -3339,7 +3339,7 @@ def _handle_pr_qa_agent_finished(
             )
         return
     if (
-        workflow.status != SystemWorkflow.STATUS_RUNNING
+        not workflow.is_active
         or workflow.step != STEP_QA_RUNNING
     ):
         return
@@ -3506,7 +3506,7 @@ def _handle_workflow_user_turn_finished(instance: CodexInstance) -> None:
     workflow = _workflow_for_instance(instance)
     if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
         return
-    if workflow.status != SystemWorkflow.STATUS_RUNNING:
+    if not workflow.is_active:
         return
     if workflow.step == STEP_USER_STEERING_RUNNING:
         _handle_user_steering_finished(instance, workflow)
@@ -4600,7 +4600,7 @@ def _pr_handoff_from_github_url(url: str, *, source_tool: str) -> dict[str, Any]
 def _handle_spec_critic_agent_finished(
     instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
 ) -> None:
-    if workflow.status != SystemWorkflow.STATUS_RUNNING:
+    if not workflow.is_active:
         _finish_spec_critic_run(instance, run, block_workflow=False)
         return
     if instance.status != CodexInstance.STATUS_COMPLETED:
@@ -4670,7 +4670,7 @@ def _claim_spec_critic_analysis_advance(workflow: SystemWorkflow) -> tuple[str, 
     with transaction.atomic():
         locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
         if (
-            locked.status != SystemWorkflow.STATUS_RUNNING
+            not locked.is_active
             or locked.step != STEP_SPEC_CRITIC_ANALYZING
         ):
             return "", ""
@@ -4726,7 +4726,7 @@ def on_user_input_resolved(input_request: UserInputRequest) -> None:
         return
     workflow = run.workflow
     if (
-        workflow.status != SystemWorkflow.STATUS_RUNNING
+        not workflow.is_active
         or workflow.step != STEP_SPEC_CRITIC_CLARIFYING
     ):
         return
@@ -4759,7 +4759,7 @@ def _claim_spec_critic_clarification_response(
     with transaction.atomic():
         locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
         if (
-            locked.status != SystemWorkflow.STATUS_RUNNING
+            not locked.is_active
             or locked.step != STEP_SPEC_CRITIC_CLARIFYING
         ):
             return "", ""
@@ -4831,7 +4831,7 @@ def _handle_pr_followup_monitor_finished(
     instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
 ) -> None:
     if (
-        workflow.status != SystemWorkflow.STATUS_RUNNING
+        not workflow.is_active
         or workflow.step != STEP_PR_MONITORING
     ):
         return
@@ -5249,7 +5249,7 @@ def _claimed_pr_monitor_workflow(workflow: SystemWorkflow) -> SystemWorkflow | N
     except SystemWorkflow.DoesNotExist:
         return None
     if (
-        current.status != SystemWorkflow.STATUS_RUNNING
+        not current.is_active
         or current.step != STEP_PR_MONITORING
     ):
         return None
@@ -5294,17 +5294,14 @@ def _pr_monitor_has_active_agent_run(workflow: SystemWorkflow) -> bool:
     return workflow.agent_runs.filter(
         agent_kind=PR_FOLLOWUP_MONITOR_AGENT_KIND,
         status=SystemAgentRun.STATUS_RUNNING,
-        instance__status__in=(
-            CodexInstance.STATUS_STARTING,
-            CodexInstance.STATUS_RUNNING,
-        ),
+        instance__status__in=CodexInstance.ACTIVE_STATUSES,
     ).exists()
 
 
 def _workflow_waits_on_pr_monitor_backoff(workflow: SystemWorkflow) -> bool:
     return (
         workflow.kind == SystemWorkflow.KIND_PR_QA
-        and workflow.status == SystemWorkflow.STATUS_RUNNING
+        and workflow.is_active
         and workflow.step == STEP_PR_MONITORING
         and isinstance(workflow.state.get(_PR_MONITOR_BACKOFF_STATE_KEY), dict)
     )
@@ -5430,7 +5427,7 @@ def _fail_unsupported_system_agent_run(
     run: SystemAgentRun, workflow: SystemWorkflow
 ) -> None:
     error = f"system workflow kind {workflow.kind!r} is no longer supported"
-    if workflow.status == SystemWorkflow.STATUS_RUNNING:
+    if workflow.is_active:
         _fail_run_and_block_workflow(run, error, surface_to_thread=False)
         return
     run.status = SystemAgentRun.STATUS_FAILED
@@ -5509,7 +5506,7 @@ def _handle_autonomous_goal_agent_finished(
             SystemAgentRun.STATUS_FAILED,
         ):
             return
-        if workflow.status != SystemWorkflow.STATUS_RUNNING:
+        if not workflow.is_active:
             return
         if autonomous_goal is None:
             _fail_run_and_block_workflow(
@@ -5569,7 +5566,7 @@ def _handle_autonomous_goal_agent_finished_locked(
     tokens_used: int | None,
     token_delta: int,
 ) -> _AutonomousGoalPostCommitAction | None:
-    if workflow.status != SystemWorkflow.STATUS_RUNNING:
+    if not workflow.is_active:
         return None
     (
         proposal_outcome,
@@ -6232,7 +6229,7 @@ def _retry_dead_autonomous_goal_worker(
 ) -> _AutonomousGoalPostCommitAction | None:
     retry_kind = _autonomous_goal_worker_retry_kind(workflow)
     if (
-        workflow.status != SystemWorkflow.STATUS_RUNNING
+        not workflow.is_active
         or not retry_kind
         or not _is_worker_exited_before_completion_error(instance.error)
     ):
@@ -7468,7 +7465,7 @@ def _claim_user_steering_turn(workflow: SystemWorkflow) -> bool:
         locked = SystemWorkflow.objects.select_for_update().get(pk=workflow.pk)
         if (
             locked.kind != SystemWorkflow.KIND_PR_QA
-            or locked.status != SystemWorkflow.STATUS_RUNNING
+            or not locked.is_active
             or locked.step != STEP_QA_RUNNING
         ):
             return False
@@ -8928,7 +8925,7 @@ def pr_monitor_backoff_stage_refresh_due(workflow: SystemWorkflow | None) -> boo
     if (
         workflow is None
         or workflow.kind != SystemWorkflow.KIND_PR_QA
-        or workflow.status != SystemWorkflow.STATUS_RUNNING
+        or not workflow.is_active
         or workflow.step != STEP_PR_MONITORING
         or not _pr_monitor_backoff_due(workflow)
     ):

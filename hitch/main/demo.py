@@ -618,7 +618,7 @@ def _finish_demo_system_run(
         run.status = run_status
         run.error = run_error
         run.save(update_fields=["status", "error", "updated_at"])
-    if workflow.kind == DEMO_WORKFLOW_KIND and workflow.status == SystemWorkflow.STATUS_RUNNING:
+    if workflow.kind == DEMO_WORKFLOW_KIND and workflow.is_active:
         workflow.status = workflow_status
         workflow.save(update_fields=["status", "updated_at"])
 
