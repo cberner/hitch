@@ -1158,6 +1158,15 @@ class SystemdInstallRecipeTests(SimpleTestCase):
 
         self.assertIn("Environment=HITCH_CODEX_WORKER_ISOLATION=systemd", justfile)
 
+    def test_systemd_deployment_runs_runserver_without_autoreloader(self) -> None:
+        justfile = (Path(settings.BASE_DIR) / "justfile").read_text()
+
+        self.assertIn(
+            'ExecStart="${UV_BIN}" run ./manage.py runserver --noreload '
+            "--settings hitch.settings.dev",
+            justfile,
+        )
+
     def test_global_worker_isolation_default_stays_auto(self) -> None:
         common_settings = (
             Path(settings.BASE_DIR) / "hitch" / "settings" / "common.py"

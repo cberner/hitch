@@ -4,16 +4,13 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
-import sys
 import threading
 from typing import NamedTuple
 
-from django.conf import settings
 from django.db import close_old_connections
 from openai_codex import Codex
 
-from hitch.main import codex_pool, session_index, system_agents
+from hitch.main import codex_pool, server_lifecycle, session_index, system_agents
 from hitch.main.models import Project
 
 logger = logging.getLogger(__name__)
@@ -30,8 +27,6 @@ _PR_STAGE_REFRESH_LIMIT_PER_TICK = 5
 # many active sessions does not rescan all of them every minute.
 _SESSION_STATE_REFRESH_MAX_PAGES = 5
 _SCHEDULER_ENV = "HITCH_AUTO_PROPOSAL_SCHEDULER"
-_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
-_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 
 _scheduler_lock = threading.Lock()
 _scheduler_started = False
@@ -90,20 +85,7 @@ def start_auto_proposal_scheduler() -> bool:
 
 
 def _auto_proposal_scheduler_enabled() -> bool:
-    configured = os.environ.get(_SCHEDULER_ENV)
-    if configured is not None:
-        normalized = configured.strip().lower()
-        if normalized in _TRUE_VALUES:
-            return True
-        if normalized in _FALSE_VALUES:
-            return False
-
-    if getattr(settings, "TESTING", False):
-        return False
-    argv = sys.argv[1:]
-    if not argv or argv[0] != "runserver":
-        return False
-    return os.environ.get("RUN_MAIN") == "true" or "--noreload" in argv
+    return server_lifecycle.background_work_enabled(env_var=_SCHEDULER_ENV)
 
 
 def _auto_proposal_scheduler_loop() -> None:
