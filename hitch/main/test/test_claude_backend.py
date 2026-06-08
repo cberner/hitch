@@ -1570,6 +1570,57 @@ class ClaudeMcpPrDetectionTests(TestCase):
         observation = views._claude_pr_observation_for_session("claude-pr")
         self.assertIsNone(observation.snapshot)
 
+    def _events_file(self, items: list[dict[str, Any]]) -> str:
+        import json as _json
+        import tempfile
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".jsonl", delete=False, encoding="utf-8"
+        ) as fh:
+            for item in items:
+                fh.write(
+                    _json.dumps({"method": "item/completed", "payload": {"item": item}})
+                    + "\n"
+                )
+            name = fh.name
+        self.addCleanup(Path(name).unlink, missing_ok=True)
+        return name
+
+    def test_later_normal_turn_clears_stale_pr(self) -> None:
+        # Turn 1 opens a PR; a later completed ordinary turn with no PR MCP calls
+        # supersedes it, so the badge/`/fix-pr` must not keep targeting the stale PR.
+        from hitch.main import views
+
+        pr_path = self._events_file(
+            [
+                {
+                    "id": "g1",
+                    "type": "mcpToolCall",
+                    "server": "github",
+                    "tool": "create_pull_request",
+                    "status": "completed",
+                    "result": (
+                        '{"url": "https://github.com/cberner/hitch/pull/500", '
+                        '"state": "open", "number": 500}'
+                    ),
+                },
+                {"id": "a1", "type": "agentMessage", "text": "opened the PR"},
+            ]
+        )
+        self._claude_instance(pr_path)
+        work_path = self._events_file(
+            [
+                {"id": "u2", "type": "userMessage", "text": "now refactor the parser"},
+                {"id": "a2", "type": "agentMessage", "text": "done"},
+            ]
+        )
+        self._claude_instance(work_path)
+
+        observation = views._claude_pr_observation_for_session("claude-pr")
+        self.assertIsNone(observation.snapshot)
+        self.assertTrue(observation.superseded_by_lifecycle)
+        self.assertIsNone(views._claude_fix_pr_url("claude-pr"))
+
 
 class DemoSandboxOverrideTests(TestCase):
     """A Claude demo run forces full host access regardless of the user's sandbox
@@ -3432,6 +3483,21 @@ class TranslateCoverageTests(TestCase):
         item = ev[0][1]["item"]
         self.assertEqual(item["type"], "commandExecution")
         self.assertEqual(item["command"], "pytest -q")
+
+    def test_powershell_renders_as_command_execution(self) -> None:
+        # PowerShell runs host commands (gated like Bash in the worker), so its
+        # command text must be auditable rather than a generic dynamicToolCall.
+        translator = claude_translate.EventTranslator()
+        ev = translator.translate(
+            _assistant(
+                ToolUseBlock(
+                    id="p", name="PowerShell", input={"command": "Get-ChildItem"}
+                )
+            )
+        )
+        item = ev[0][1]["item"]
+        self.assertEqual(item["type"], "commandExecution")
+        self.assertEqual(item["command"], "Get-ChildItem")
 
     def test_repeated_message_id_yields_unique_item_ids(self) -> None:
         # Multiple assistant messages can share a message_id; their text item ids

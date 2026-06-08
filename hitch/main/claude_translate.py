@@ -41,8 +41,10 @@ _STATUS_FAILED = "failed"
 # ``dynamicToolCall`` so unfamiliar tools still appear in the timeline.
 _WRITE_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
 # Tools that run a shell command via a ``command`` input and so render as a
-# command execution (``Monitor`` runs a background script under Bash rules).
-_COMMAND_INPUT_TOOLS = frozenset({"Bash", "Monitor"})
+# command execution: ``Bash``; ``Monitor`` (a background script under Bash rules);
+# and ``PowerShell`` (host commands natively). The worker gates all three as
+# command execution, so the transcript must surface their command text too.
+_COMMAND_INPUT_TOOLS = frozenset({"Bash", "Monitor", "PowerShell"})
 _FILE_PATH_KEYS = ("file_path", "path", "notebook_path")
 
 

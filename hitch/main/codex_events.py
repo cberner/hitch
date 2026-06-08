@@ -242,6 +242,75 @@ def latest_pr_snapshot_from_event_paths(
     return _pr_snapshot_from_updates(sorted(updates, key=lambda item: item.order))
 
 
+def pr_observation_result_from_claude_event_paths(
+    turns: Iterable[tuple[str | Path, bool]],
+    *,
+    thread_id: str,
+) -> PrObservationResult:
+    """Claude analog of the rollout PR-observation replay.
+
+    Each Claude worker instance is one turn, so -- like ``rollout`` does for the
+    Codex transcript -- a completed *normal* turn that does real work but makes no
+    PR-related GitHub MCP call clears a stale PR epoch. Without this boundary a
+    Claude session that opens a PR and then runs an unrelated turn would report the
+    old PR forever (stale badge / ``/fix-pr`` target). ``turns`` is
+    ``(events_path, is_completed)`` per instance in chronological order;
+    ``is_completed`` comes from the instance's terminal status, since a
+    still-running turn must not clear the epoch.
+    """
+    observation_turns: list[PrObservationTurn] = []
+    for path, is_completed in turns:
+        if not path:
+            continue
+        items, has_activity = _claude_turn_pr_items(path, thread_id=thread_id)
+        is_pr_prompt = pr_snapshot_from_completed_mcp_items(items) is not None
+        observation_turns.append(
+            PrObservationTurn(
+                is_pr_prompt=is_pr_prompt,
+                is_completed=is_completed,
+                items=tuple(items),
+                has_lifecycle_activity=(
+                    not is_pr_prompt and is_completed and has_activity
+                ),
+            )
+        )
+    return pr_observation_result_from_turns(observation_turns)
+
+
+def _claude_turn_pr_items(
+    path: str | Path, *, thread_id: str
+) -> tuple[list[dict[str, Any]], bool]:
+    """Return ``(completed mcpToolCall items, has user/agent activity)`` for one
+    Claude worker events file -- the per-turn inputs for the lifecycle replay."""
+    items: list[dict[str, Any]] = []
+    has_activity = False
+    try:
+        with Path(path).open("r", encoding="utf-8") as fh:
+            for raw in fh:
+                event = _event_from_line(raw)
+                if event is None or event.get("method") != ITEM_COMPLETED_METHOD:
+                    continue
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                payload_thread_id = _payload_thread_id(payload)
+                if payload_thread_id is not None and payload_thread_id != thread_id:
+                    continue
+                item = payload.get("item")
+                if not isinstance(item, dict):
+                    continue
+                item_type = item.get("type")
+                if item_type == "mcpToolCall":
+                    items.append(item)
+                elif item_type in ("userMessage", "agentMessage"):
+                    has_activity = True
+    except FileNotFoundError:
+        return items, has_activity
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning("failed to read Claude events %s: %s", path, exc)
+    return items, has_activity
+
+
 def _parsed_events_from_paths(
     paths: Iterable[str | Path],
     *,

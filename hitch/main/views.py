@@ -5742,23 +5742,23 @@ def _claude_pr_observation_for_session(
     -- even by a normal turn outside the ``/pr`` workflow -- is detected from the
     ``mcpToolCall`` results recorded across the thread's instances' events. This
     lets the PR badge and ``/fix-pr`` find a PR the same way the Codex rollout
-    scan does.
+    scan does, including clearing a stale PR once a later completed normal turn
+    supersedes it (each Claude instance is one turn).
     """
-    paths = [
-        path
-        for path in (
+    turns = [
+        (events_path, status == CodexInstance.STATUS_COMPLETED)
+        for events_path, status in (
             CodexInstance.objects.filter(
                 thread_id=session_id, backend=CodexInstance.BACKEND_CLAUDE
             )
             .order_by("started_at", "pk")
-            .values_list("events_path", flat=True)
+            .values_list("events_path", "status")
         )
-        if path
+        if events_path
     ]
-    snapshot = codex_events.latest_pr_snapshot_from_event_paths(
-        paths, thread_id=session_id
+    return codex_events.pr_observation_result_from_claude_event_paths(
+        turns, thread_id=session_id
     )
-    return codex_events.PrObservationResult(snapshot=snapshot)
 
 
 def _claude_fix_pr_url(session_id: str) -> str | None:
