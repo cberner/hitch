@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import re
-import subprocess
 import tempfile
 import uuid
 from collections.abc import Iterator
@@ -13,6 +12,10 @@ from os import environ
 from pathlib import Path
 
 from django.conf import settings
+
+from .git_support import GitCommandError, resolved_path, run_git
+
+_resolved_path = resolved_path
 
 _GIT_TIMEOUT_SECONDS = 10
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -181,13 +184,6 @@ def _child_dirs(path: Path) -> Iterator[Path]:
         return
 
 
-def _resolved_path(path: Path) -> Path:
-    try:
-        return path.resolve()
-    except OSError:
-        return path
-
-
 def _is_managed_worktree_path(path: Path) -> bool:
     resolved_path = _resolved_path(path)
     resolved_base = _resolved_path(Path(settings.HITCH_WORKTREES_DIR).expanduser())
@@ -259,19 +255,15 @@ def _git(
     hooks_path: Path | None = None,
     extra_env: dict[str, str] | None = None,
 ) -> str | None:
-    command = ["git"]
-    if hooks_path is not None:
-        command.extend(["-c", f"core.hooksPath={hooks_path}"])
-    command.extend(["-C", str(cwd), *args])
     try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            check=False,
+        result = run_git(
+            cwd,
+            args,
             timeout=_GIT_TIMEOUT_SECONDS,
+            hooks_path=hooks_path,
             env={**environ, **(extra_env or {})},
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except GitCommandError as exc:
         if raise_on_error:
             raise error_cls(str(exc)) from exc
         return None

@@ -3,6 +3,7 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 from django.test import SimpleTestCase
 
@@ -11,6 +12,7 @@ from hitch.main.local_merges import (
     LocalBranchMergeError,
     LocalBranchMergeResult,
     _auto_merge_source_base_ref,
+    _run_git,
     _source_worktree_tree,
     build_auto_merge_review_patch,
     local_branch_names,
@@ -836,3 +838,12 @@ class LocalMergeTests(SimpleTestCase):
                 ls_tree.startswith("100644 "),
                 msg=f"expected mode 100644 in {ls_tree!r}",
             )
+
+    def test_run_git_raises_on_spawn_failure(self) -> None:
+        with (
+            patch(
+                "hitch.main.git_support.subprocess.run", side_effect=OSError("no git")
+            ),
+            self.assertRaisesRegex(LocalBranchMergeError, "no git"),
+        ):
+            _run_git(Path("/repo"), ["status"])

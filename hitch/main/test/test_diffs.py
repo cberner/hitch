@@ -570,3 +570,9 @@ class WorktreeDiffTests(SimpleTestCase):
             any("No newline at end of file" in html for html in complete_meta),
             msg=f"unexpected EOF marker in meta lines, got {complete_meta!r}",
         )
+
+    def test_git_output_returns_none_on_spawn_failure(self) -> None:
+        with patch(
+            "hitch.main.git_support.subprocess.run", side_effect=OSError("no git")
+        ):
+            self.assertIsNone(diffs_module._git_output(Path("/repo"), ["status"]))

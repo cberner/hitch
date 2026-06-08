@@ -10,6 +10,9 @@ from hashlib import sha1
 from os import environ, readlink
 from pathlib import Path
 
+from .git_support import GitCommandError, run_git
+from .git_support import resolved_path as _resolved_path
+
 _GIT_TIMEOUT_SECONDS = 30
 _AUTO_MERGE_COMMIT_MESSAGE = "Apply QA-approved Hitch session diff"
 _MAX_REVIEW_PATCH_CHARS = 500_000
@@ -694,13 +697,6 @@ def _same_path(left: Path, right: Path) -> bool:
     return _resolved_path(left) == _resolved_path(right)
 
 
-def _resolved_path(path: Path) -> Path:
-    try:
-        return path.resolve()
-    except OSError:
-        return path
-
-
 def _git(
     cwd: Path,
     args: list[str],
@@ -727,21 +723,17 @@ def _run_git(
     hooks_path: Path | None = None,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    command = ["git"]
-    if hooks_path is not None:
-        command.extend(["-c", f"core.hooksPath={hooks_path}"])
-    command.extend(["-C", str(cwd), *args])
     try:
-        result = subprocess.run(
-            command,
-            input=input_text,
-            capture_output=True,
-            check=False,
-            env=_git_env(extra_env),
-            text=True,
+        result = run_git(
+            cwd,
+            args,
             timeout=_GIT_TIMEOUT_SECONDS,
+            hooks_path=hooks_path,
+            env=_git_env(extra_env),
+            input_text=input_text,
+            text=True,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except GitCommandError as exc:
         raise LocalBranchMergeError(str(exc)) from exc
     if check and result.returncode != 0:
         stderr = result.stderr.strip()

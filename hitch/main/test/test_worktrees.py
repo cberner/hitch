@@ -379,12 +379,12 @@ class ManagedWorktreeTests(SimpleTestCase):
 
     def test_git_wrapper_reports_spawn_failure(self) -> None:
         with (
-            patch("hitch.main.worktrees.subprocess.run", side_effect=OSError("no git")),
+            patch("hitch.main.git_support.subprocess.run", side_effect=OSError("no git")),
             self.assertRaisesRegex(WorktreeCreationError, "no git"),
         ):
             worktrees._git(Path("/repo"), ["status"])
 
-        with patch("hitch.main.worktrees.subprocess.run", side_effect=OSError("no git")):
+        with patch("hitch.main.git_support.subprocess.run", side_effect=OSError("no git")):
             self.assertIsNone(
                 worktrees._git(Path("/repo"), ["status"], raise_on_error=False)
             )
