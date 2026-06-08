@@ -206,7 +206,7 @@ def _count_metric(
 
 def _active_turn_count() -> int:
     return CodexInstance.objects.filter(
-        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING)
+        status__in=CodexInstance.ACTIVE_STATUSES
     ).count()
 
 
@@ -285,7 +285,7 @@ def _worktree_metric() -> HealthMetric:
 def _stuck_turn_count() -> int:
     cutoff = timezone.now() - _STUCK_TURN_AGE
     return CodexInstance.objects.filter(
-        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+        status__in=CodexInstance.ACTIVE_STATUSES,
         started_at__lt=cutoff,
     ).count()
 

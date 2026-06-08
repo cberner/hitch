@@ -87,7 +87,7 @@ def derive_stage(
     if awaiting_user_input:
         return AWAITING_INPUT
 
-    if workflow is not None and workflow.status == SystemWorkflow.STATUS_RUNNING:
+    if workflow is not None and workflow.is_active:
         running_pr_snapshot = (
             selected_pr
             if _has_pr_identity(workflow_pr_snapshot)

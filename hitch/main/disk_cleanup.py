@@ -36,15 +36,6 @@ DEFAULT_MAX_ALLOWED_DISK_SPACE_PERCENT = 20.0
 ARCHIVED_USER_SESSION_MIN_AGE = timedelta(hours=1)
 _WORKTREE_DIR_TIMESTAMP_FORMAT = "%Y%m%d%H%M%S"
 _PR_DONE_STAGE_KEYS = frozenset({"done_merged", "done_closed"})
-_ACTIVE_CODEX_STATUSES = (
-    CodexInstance.STATUS_STARTING,
-    CodexInstance.STATUS_RUNNING,
-)
-# Only a RUNNING workflow is still doing work that needs its worktree. BLOCKED
-# is a failure state (set by ``_block_workflow`` on error), as are FAILED and
-# MAX_ITERATIONS_REACHED -- these are system workflows the user never interacts
-# with directly, so a failed one should not pin a worktree against cleanup.
-_ACTIVE_WORKFLOW_STATUSES = (SystemWorkflow.STATUS_RUNNING,)
 _PROPOSAL_SESSION_ID_FIELDS = (
     "candidate_session_id",
     "judge_session_id",
@@ -220,17 +211,17 @@ def _cleanup_context(*, now: datetime) -> _CleanupContext:
     hidden_system_thread_ids = _hidden_system_thread_ids()
     protected_proposal_session_ids = _protected_proposal_session_ids()
     active_thread_ids = frozenset(
-        CodexInstance.objects.filter(status__in=_ACTIVE_CODEX_STATUSES)
+        CodexInstance.objects.filter(status__in=CodexInstance.ACTIVE_STATUSES)
         .exclude(thread_id="")
         .values_list("thread_id", flat=True)
     )
     active_codex_paths = set(
-        CodexInstance.objects.filter(status__in=_ACTIVE_CODEX_STATUSES)
+        CodexInstance.objects.filter(status__in=CodexInstance.ACTIVE_STATUSES)
         .exclude(cwd="")
         .values_list("cwd", flat=True)
     )
     active_workflows = list(
-        SystemWorkflow.objects.filter(status__in=_ACTIVE_WORKFLOW_STATUSES).only(
+        SystemWorkflow.objects.filter(status__in=SystemWorkflow.ACTIVE_STATUSES).only(
             "main_thread_id", "cwd", "state"
         )
     )
@@ -240,7 +231,7 @@ def _cleanup_context(*, now: datetime) -> _CleanupContext:
         for workflow in active_workflows
         if workflow.main_thread_id
     ) | frozenset(
-        SystemAgentRun.objects.filter(workflow__status__in=_ACTIVE_WORKFLOW_STATUSES)
+        SystemAgentRun.objects.filter(workflow__status__in=SystemWorkflow.ACTIVE_STATUSES)
         .exclude(thread_id="")
         .values_list("thread_id", flat=True)
     )

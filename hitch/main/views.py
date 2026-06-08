@@ -393,10 +393,6 @@ _LIVE_PENDING_APPROVAL_DECISIONS_BY_MODE = {
     _APPROVE_ALL_MODE: ApprovalRequest.DECISION_ACCEPT,
     _DENY_ALL_MODE: ApprovalRequest.DECISION_DECLINE,
 }
-_LIVE_APPROVAL_INSTANCE_STATUSES = (
-    CodexInstance.STATUS_STARTING,
-    CodexInstance.STATUS_RUNNING,
-)
 
 _WEB_SEARCH_MODE_OPTIONS = AutonomousGoal.WEB_SEARCH_CHOICES
 _VALID_WEB_SEARCH_MODES = {
@@ -2679,7 +2675,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             active_instance is not None
             or (
                 stage_workflow is not None
-                and stage_workflow.status == SystemWorkflow.STATUS_RUNNING
+                and stage_workflow.is_active
             )
         )
         session["stage"] = _session_list_stage_context(
@@ -2825,7 +2821,7 @@ def _thread_ids_awaiting_input(thread_ids: Iterable[str]) -> set[str]:
     ids = [thread_id for thread_id in dict.fromkeys(thread_ids) if thread_id]
     if not ids:
         return set()
-    active_statuses = (CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING)
+    active_statuses = CodexInstance.ACTIVE_STATUSES
     direct_input_thread_ids = UserInputRequest.objects.filter(
         response__isnull=True,
         instance__thread_id__in=ids,
@@ -2872,7 +2868,7 @@ def _active_instances_by_thread_id(
     active_instances = (
         CodexInstance.objects.filter(
             thread_id__in=ids,
-            status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+            status__in=CodexInstance.ACTIVE_STATUSES,
         )
         .order_by("thread_id", "-started_at", "-pk")
     )
@@ -2988,7 +2984,7 @@ def _workflow_after_main_lifecycle(
     main_updated_at: Any = None,
 ) -> SystemWorkflow | None:
     """Keep completed PR workflows only when main work has not superseded them."""
-    if workflow is None or workflow.status == SystemWorkflow.STATUS_RUNNING:
+    if workflow is None or workflow.is_active:
         return workflow
     if pr_observation.superseded_by_lifecycle:
         if _workflow_pr_handoff_survives_lifecycle(
@@ -4098,7 +4094,7 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
         )
         goal.run_running = (  # type: ignore[attr-defined]
             latest_workflow is not None
-            and latest_workflow.status == SystemWorkflow.STATUS_RUNNING
+            and latest_workflow.is_active
         )
         goal.run_tokens_used_display = _autonomous_goal_run_tokens_used_display(  # type: ignore[attr-defined]
             latest_workflow,
@@ -4208,7 +4204,7 @@ def _autonomous_goal_in_flight_automation_project_ids(
     active_thread_ids = set(
         CodexInstance.objects.filter(
             thread_id__in=list(accepted_thread_project_ids),
-            status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+            status__in=CodexInstance.ACTIVE_STATUSES,
         ).values_list("thread_id", flat=True)
     )
     active_thread_ids.update(
@@ -4256,7 +4252,7 @@ def _autonomous_goal_run_badge(
     auto_proposals_paused_by_quota: bool,
 ) -> AutonomousGoalRunBadge:
     if workflow is not None:
-        if workflow.status == SystemWorkflow.STATUS_RUNNING:
+        if workflow.is_active:
             return AutonomousGoalRunBadge(
                 state="running",
                 label="Running",
@@ -4400,7 +4396,7 @@ def _autonomous_goal_running_token_counts(
     workflows_by_id = {
         workflow.pk: workflow
         for workflow in workflows
-        if workflow.status == SystemWorkflow.STATUS_RUNNING
+        if workflow.is_active
     }
     if not workflows_by_id:
         return {}
@@ -4460,7 +4456,7 @@ def _autonomous_goal_recorded_thread_tokens(
 def _autonomous_goal_run_tokens_used_display(
     workflow: SystemWorkflow | None, running_tokens_by_workflow_id: Mapping[int, int]
 ) -> str:
-    if workflow is None or workflow.status != SystemWorkflow.STATUS_RUNNING:
+    if workflow is None or not workflow.is_active:
         return ""
     tokens = running_tokens_by_workflow_id.get(
         workflow.pk,
@@ -7158,7 +7154,7 @@ def _apply_live_session_approval_mode(
     _apply_live_approval_mode_to_instances(
         CodexInstance.objects.filter(
             thread_id=session_id,
-            status__in=_LIVE_APPROVAL_INSTANCE_STATUSES,
+            status__in=CodexInstance.ACTIVE_STATUSES,
         ),
         effective_approval_mode,
     )
@@ -7171,7 +7167,7 @@ def _apply_live_global_approval_mode(effective_approval_mode: str) -> None:
     _apply_live_approval_mode_to_instances(
         CodexInstance.objects.filter(
             purpose=CodexInstance.PURPOSE_USER,
-            status__in=_LIVE_APPROVAL_INSTANCE_STATUSES,
+            status__in=CodexInstance.ACTIVE_STATUSES,
         ).exclude(thread_id__in=explicit_override_thread_ids),
         effective_approval_mode,
     )
@@ -7704,7 +7700,7 @@ def _workflow_accepts_qa_pause_steering(workflow: SystemWorkflow | None) -> bool
     return (
         workflow is not None
         and workflow.kind == SystemWorkflow.KIND_PR_QA
-        and workflow.status == SystemWorkflow.STATUS_RUNNING
+        and workflow.is_active
         and workflow.step == system_agents.STEP_QA_RUNNING
     )
 
@@ -7716,15 +7712,12 @@ def _workflow_accepts_active_turn_steering(
         workflow is not None
         and active is not None
         and workflow.kind == SystemWorkflow.KIND_PR_QA
-        and workflow.status == SystemWorkflow.STATUS_RUNNING
+        and workflow.is_active
         and workflow.step == system_agents.STEP_USER_STEERING_RUNNING
         and active.workflow_id == workflow.pk
         and active.purpose == CodexInstance.PURPOSE_USER
         and active.thread_id == workflow.main_thread_id
-        and active.status in {
-            CodexInstance.STATUS_STARTING,
-            CodexInstance.STATUS_RUNNING,
-        }
+        and active.is_active
     )
 
 

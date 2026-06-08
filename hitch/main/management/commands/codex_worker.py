@@ -407,7 +407,7 @@ def _commit_terminal_status(instance: CodexInstance) -> None:
     """
     updated = CodexInstance.objects.filter(
         pk=instance.pk,
-        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+        status__in=CodexInstance.ACTIVE_STATUSES,
     ).update(
         status=instance.status,
         ended_at=instance.ended_at,
