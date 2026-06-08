@@ -2143,6 +2143,96 @@ class ClaudeImageCleanupTests(TestCase):
             self.assertFalse(image.exists())
 
 
+class ClaudeSessionRecencyTests(TestCase):
+    """A finished Claude turn bumps the session's recency directly: the worker's
+    metadata writes never reach the web index, so without this the session list
+    ordering would lag real activity (mirrors the Codex worker)."""
+
+    def test_handle_bumps_session_recency(self) -> None:
+        from django.test import override_settings
+
+        from hitch.main.management.commands import claude_worker
+        from hitch.main.models import SessionMetadata
+
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            override_settings(CODEX_EVENTS_DIR=tmp),
+        ):
+            events_path = Path(tmp) / "events.jsonl"
+            instance = CodexInstance.objects.create(
+                thread_id="thread-recency",
+                cwd=tmp,
+                prompt="hi",
+                events_path=str(events_path),
+                pid=0,
+                status=CodexInstance.STATUS_RUNNING,
+                backend=CodexInstance.BACKEND_CLAUDE,
+                purpose=CodexInstance.PURPOSE_USER,
+            )
+            SessionMetadata.objects.create(thread_id="thread-recency", cwd=tmp)
+            fake = _FakeClient([_assistant(TextBlock(text="ok")), _result()])
+
+            def _factory(*, options: Any) -> _FakeClient:
+                fake.options = options
+                return fake
+
+            with (
+                patch.object(claude_worker, "ClaudeSDKClient", _factory),
+                patch.object(claude_worker, "_apply_worker_oom_score_adjust"),
+                patch("hitch.main.management.commands.claude_worker.signal.signal"),
+                patch.object(claude_worker, "_build_query_input", return_value="hi"),
+            ):
+                claude_worker.Command().handle(
+                    instance_id=instance.pk,
+                    model=None,
+                    reasoning_effort=None,
+                    sandbox_policy=None,
+                    approval_mode=None,
+                    web_search_mode=None,
+                    plan_mode=False,
+                )
+            metadata = SessionMetadata.objects.get(thread_id="thread-recency")
+            self.assertIsNotNone(metadata.codex_updated_at)
+
+
+class ClaudePrStageRefreshTests(TestCase):
+    """The async PR stage refresh recovers a Claude session's PR from its events
+    file (no Codex rollout) and persists the terminal stage at mtime 0, which the
+    detail render -- also keyed on 0 for a no-rollout session -- then prefers."""
+
+    def test_refresh_uses_claude_observation_and_caches_at_zero_mtime(self) -> None:
+        from hitch.main import codex_events, session_stage, system_agents, views
+        from hitch.main.models import SessionMetadata
+
+        SessionMetadata.objects.create(thread_id="claude-pr", cwd="/repo", codex_path="")
+        snapshot: dict[str, Any] = {"pr_number": 7}  # gh-backed calls are mocked out
+        observation = codex_events.PrObservationResult(snapshot=snapshot)
+        with (
+            patch.object(views, "_session_is_claude", return_value=True),
+            patch.object(
+                views, "_claude_pr_observation_for_session", return_value=observation
+            ) as mock_obs,
+            patch.object(views, "_latest_pr_workflow_for_thread", return_value=None),
+            patch.object(views, "_workflow_after_main_lifecycle", return_value=None),
+            patch.object(
+                system_agents, "pr_snapshot_stage_refresh_due", return_value=True
+            ),
+            patch.object(
+                system_agents,
+                "refreshed_pr_snapshot_for_stage",
+                return_value=snapshot,
+            ),
+            patch.object(
+                session_stage, "derive_stage", return_value=session_stage.DONE_MERGED
+            ),
+        ):
+            views._refresh_session_pr_stage("claude-pr")
+        mock_obs.assert_called_once_with("claude-pr")
+        metadata = SessionMetadata.objects.get(thread_id="claude-pr")
+        self.assertEqual(metadata.derived_stage, session_stage.DONE_MERGED.key)
+        self.assertEqual(metadata.derived_stage_source_mtime_ns, 0)
+
+
 class ClaudeDanglingRequestCleanupTests(TestCase):
     """A worker that fails after creating an approval/input row but before the
     wait path records a decision must close those rows out -- otherwise the

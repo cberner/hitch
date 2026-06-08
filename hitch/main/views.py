@@ -2569,11 +2569,22 @@ def _refresh_session_pr_stage(session_id: str) -> None:
     cheap no-op when the same PR was refreshed elsewhere recently.
     """
     metadata = SessionMetadata.objects.filter(thread_id=session_id).first()
+    # A Claude session has no Codex rollout to scan; its PR identity is recovered
+    # from the thread's own GitHub MCP calls in the events file instead. The
+    # workflow-handoff path below is backend-agnostic, so a Claude PR opened via
+    # ``/pr``/``/fix-pr`` already refreshes through its monitor workflow; this
+    # closes the no-workflow path (a PR the agent opened directly via gh) whose
+    # snapshot refresh would otherwise be skipped for Claude.
+    is_claude = _session_is_claude(session_id)
     rollout_state = _rollout_file_state_from_value(
         metadata.codex_path if metadata is not None else None
     )
     rollout_path = rollout_state.path if rollout_state is not None else None
-    pr_observation = _pr_observation_result_for_rollout_path(rollout_path)
+    pr_observation = (
+        _claude_pr_observation_for_session(session_id)
+        if is_claude
+        else _pr_observation_result_for_rollout_path(rollout_path)
+    )
     main_updated_at = metadata.codex_updated_at if metadata is not None else None
     stage_pr_workflow = _workflow_after_main_lifecycle(
         _latest_pr_workflow_for_thread(session_id),
@@ -2592,7 +2603,11 @@ def _refresh_session_pr_stage(session_id: str) -> None:
         system_agents.refreshed_pr_handoff_for_stage(stage_pr_workflow)
         return
     snapshot = pr_observation.snapshot
-    if metadata is None or snapshot is None or rollout_state is None:
+    # Codex keys the stage cache on the rollout mtime; Claude has no rollout, so
+    # key it on 0 -- matching the detail render, which uses ``stage_cache_mtime_ns
+    # == 0`` for a session with no ``codex_path`` and therefore prefers this
+    # cached terminal stage on reload.
+    if metadata is None or snapshot is None or (rollout_state is None and not is_claude):
         return
     if not system_agents.pr_snapshot_stage_refresh_due(
         cwd=metadata.cwd,
@@ -2605,7 +2620,8 @@ def _refresh_session_pr_stage(session_id: str) -> None:
         cwd=metadata.cwd, snapshot=snapshot
     )
     stage = session_stage.derive_stage(pr_snapshot=refreshed)
-    _update_cached_stage_best_effort(session_id, stage, rollout_state.mtime_ns)
+    source_mtime_ns = rollout_state.mtime_ns if rollout_state is not None else 0
+    _update_cached_stage_best_effort(session_id, stage, source_mtime_ns)
 
 
 def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:

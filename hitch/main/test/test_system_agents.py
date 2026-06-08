@@ -1108,6 +1108,30 @@ class SessionPrStageRefreshTests(TestCase):
 
 
 class SpecCriticWorkflowTests(TestCase):
+    def test_claude_backend_routes_classification_to_claude(self) -> None:
+        # A Claude workflow's preflight must classify on Claude, never borrow a
+        # Codex thread (a Claude-only deployment has no app-server for it).
+        from hitch.main.models import CodexInstance
+
+        with (
+            patch.object(
+                system_agents,
+                "_classify_spec_critic_prompt_with_claude",
+                return_value=True,
+            ) as mock_claude,
+            patch.object(
+                system_agents, "_classify_spec_critic_prompt_with_codex"
+            ) as mock_codex,
+        ):
+            result = system_agents.spec_critic_should_run(
+                "Refactor the auth module",
+                cwd="/repo",
+                backend=CodexInstance.BACKEND_CLAUDE,
+            )
+        self.assertTrue(result)
+        mock_claude.assert_called_once()
+        mock_codex.assert_not_called()
+
     @patch(
         "hitch.main.system_agents._classify_spec_critic_prompt_with_codex",
         return_value=None,
@@ -1311,7 +1335,9 @@ class SpecCriticWorkflowTests(TestCase):
 
         system_agents._run_spec_critic_classification(workflow.pk)
 
-        mock_should_run.assert_called_once_with("Improve onboarding", cwd="/repo")
+        mock_should_run.assert_called_once_with(
+            "Improve onboarding", cwd="/repo", backend="codex"
+        )
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_ANALYZING)

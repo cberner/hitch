@@ -1863,12 +1863,22 @@ def _sync_workflow_instance(target: SystemWorkflow, source: SystemWorkflow) -> N
     target.state = source.state
 
 
-def spec_critic_should_run(prompt: str, *, cwd: str | None = None) -> bool:
-    """Return whether an ordinary implementation prompt needs preflight critique."""
+def spec_critic_should_run(
+    prompt: str, *, cwd: str | None = None, backend: str | None = None
+) -> bool:
+    """Return whether an ordinary implementation prompt needs preflight critique.
+
+    The ML classification runs on the session's own backend -- Claude for a
+    Claude workflow, Codex otherwise -- so a Claude-only deployment never needs a
+    Codex app-server for it; either falls back to the heuristic on failure.
+    """
     text = " ".join(prompt.strip().split())
     if not text:
         return False
-    classified = _classify_spec_critic_prompt_with_codex(text, cwd=cwd)
+    if backend == CodexInstance.BACKEND_CLAUDE:
+        classified = _classify_spec_critic_prompt_with_claude(text, cwd=cwd)
+    else:
+        classified = _classify_spec_critic_prompt_with_codex(text, cwd=cwd)
     if classified is not None:
         return classified
     return _spec_critic_should_run_heuristic(text)
@@ -1927,6 +1937,64 @@ def _classify_spec_critic_prompt_with_codex(
     except Exception:
         logger.warning("failed to classify Spec Critic prompt with Codex", exc_info=True)
         return None
+
+
+def _classify_spec_critic_prompt_with_claude(
+    prompt: str, *, cwd: str | None
+) -> bool | None:
+    """Claude analog of the Codex classifier.
+
+    A Claude session has no Codex app-server to borrow, so run the same
+    classification as a one-shot read-only Claude turn (structured output) on the
+    session's own backend instead of spawning a Codex thread. Best-effort: any
+    failure (no ``claude`` binary, SDK error) returns ``None`` so the caller falls
+    back to the heuristic.
+    """
+    import asyncio
+
+    try:
+        return asyncio.run(_run_claude_spec_critic_classification(prompt, cwd=cwd))
+    except Exception:
+        logger.warning("failed to classify Spec Critic prompt with Claude", exc_info=True)
+        return None
+
+
+async def _run_claude_spec_critic_classification(
+    prompt: str, *, cwd: str | None
+) -> bool | None:
+    from claude_agent_sdk import ClaudeSDKClient, ResultMessage
+
+    from hitch.main import claude_options
+
+    options = claude_options.build_options(
+        cwd=cwd or os.getcwd(),
+        model=claude_options.DEFAULT_CLAUDE_MODEL,
+        sandbox_policy=claude_options.SANDBOX_READ_ONLY,
+        approval_mode=claude_options.APPROVAL_DENY_ALL,
+        output_schema=_SPEC_CRITIC_CLASSIFIER_OUTPUT_SCHEMA,
+        # A bare classification needs no repo settings/MCP and must not run a
+        # repo's ``.claude`` hooks; deny any tool the model might attempt.
+        load_filesystem_settings=False,
+        can_use_tool=_deny_spec_critic_classifier_tool,
+    )
+    structured: Any = None
+    async with ClaudeSDKClient(options=options) as client:
+        await client.query(_spec_critic_classifier_prompt(prompt))
+        async for message in client.receive_response():
+            if isinstance(message, ResultMessage):
+                structured = message.structured_output
+    if not isinstance(structured, dict):
+        return None
+    should_run = structured.get("should_run")
+    return should_run if isinstance(should_run, bool) else None
+
+
+async def _deny_spec_critic_classifier_tool(
+    _tool_name: str, _tool_input: dict[str, Any], _context: Any
+) -> Any:
+    from hitch.main import claude_options
+
+    return claude_options.deny_result("Spec Critic classifier runs read-only.")
 
 
 def _smallest_available_codex_model(models_data: list[Any]) -> str | None:
@@ -2128,7 +2196,9 @@ def _run_spec_critic_classification(workflow_id: int) -> None:
             return
         try:
             needs_critique = spec_critic_should_run(
-                _state_string(workflow, "original_prompt"), cwd=workflow.cwd or None
+                _state_string(workflow, "original_prompt"),
+                cwd=workflow.cwd or None,
+                backend=_workflow_backend(workflow),
             )
         except Exception:
             # spec_critic_should_run already falls back to a heuristic internally,

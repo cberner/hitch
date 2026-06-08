@@ -44,7 +44,7 @@ from claude_agent_sdk import (
 from django.core.management.base import BaseCommand, CommandParser
 from django.utils import timezone
 
-from hitch.main import claude_options, claude_translate, claude_usage
+from hitch.main import claude_options, claude_translate, claude_usage, session_index
 from hitch.main.claude_tools import PROPOSE_SESSION_TOOL_NAME, build_hitch_mcp_server
 from hitch.main.codex_pool import (
     cleanup_input_images_for,
@@ -216,6 +216,21 @@ class Command(BaseCommand):
             # them (Codex defers this because its rollout references the paths).
             cleanup_input_images_for(instance)
             raise
+        finally:
+            # Worker turns write thread metadata to an isolated Claude home the web
+            # index never reads, so bump the session's recency directly to keep the
+            # list ordered by real activity -- mirroring the Codex worker. (On the
+            # success path ``ended_at`` is set just below, so this falls back to
+            # now().) Best-effort: a failed bump must not fail a finished turn.
+            try:
+                session_index.record_turn_activity(
+                    instance.thread_id,
+                    updated_at=instance.ended_at or timezone.now(),
+                )
+            except Exception:
+                logger.exception(
+                    "failed to record turn activity for %s", instance.thread_id
+                )
 
         instance.ended_at = timezone.now()
         if runner.session_id and runner.session_id != instance.claude_session_id:
