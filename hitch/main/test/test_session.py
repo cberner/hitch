@@ -4288,15 +4288,15 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertContains(response, "still running")
         self.assertNotContains(response, "bailed fast")
 
-    @patch("hitch.main.views.codex_pool.is_alive", return_value=False)
+    @patch("hitch.main.views.codex_pool.reconcile_dead_if_due", return_value=0)
     @patch("hitch.main.views.Codex")
     def test_dead_worker_is_reconciled_before_render(
-        self, mock_codex: MagicMock, _mock_alive: MagicMock
+        self, mock_codex: MagicMock, mock_global_reconcile: MagicMock
     ) -> None:
         # A worker that died without writing a terminal status would leave
         # the page in "streaming" mode permanently. The session view
-        # sweeps such rows before reading status so the live UI doesn't
-        # appear.
+        # reconciles this exact thread before reading status so the live UI
+        # doesn't appear even when the global sweep is debounced.
         _patch_thread(self, mock_codex, _thread([]))
         instance = _make_codex_instance(
             thread_id="thread-1",
@@ -4310,3 +4310,4 @@ class SessionViewActiveWorkerTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, "data-live-root></div>")
+        mock_global_reconcile.assert_called_once()

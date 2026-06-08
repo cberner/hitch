@@ -4684,9 +4684,11 @@ def _render_session_detail(
     demo_entries_run_id: int | None = None,
     require_system_agent_thread: bool = False,
 ) -> HttpResponse:
-    # Sweep stuck workers before reading status: a worker that died without
+    # Reconcile this thread before reading status: a worker that died without
     # writing a terminal status would otherwise leave the page in "streaming"
-    # mode forever, since the EventSource wouldn't reach an end event.
+    # mode forever, since the EventSource wouldn't reach an end event. The
+    # global sweep stays debounced, but this exact session must be fresh.
+    codex_pool.reconcile_dead_for_thread(session_id)
     codex_pool.reconcile_dead_if_due()
     initial_settings = _stored_settings(request)
     active_instance = _active_instance_for(session_id)
@@ -7917,6 +7919,7 @@ def session_stream(request: HttpRequest, session_id: str) -> StreamingHttpRespon
     active_param = request.GET.get("active", "")
     workflow_param = request.GET.get("workflow", "")
     demo_param = request.GET.get("demo", "")
+    codex_pool.reconcile_dead_for_thread(session_id)
     codex_pool.reconcile_dead_if_due()
     current_latest = codex_pool.latest_id_for_thread(session_id)
     current_latest_str = str(current_latest) if current_latest is not None else ""
