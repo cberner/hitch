@@ -103,6 +103,7 @@ install-systemd:
   EnvironmentFile=${ENV_PATH}
   Environment=ADDITIONAL_ALLOWED_HOSTS=${DOMAIN}
   Environment=HITCH_ENABLE_DEBUG_TOOLBAR=0
+  Environment=HITCH_CODEX_WORKER_ISOLATION=systemd
   # Re-sync to the install-time branch and apply migrations on every (re)start
   # so a crash loop picks up fixes pushed since the last successful boot.
   ExecStartPre="${GIT_BIN}" -C "${REPO_DIR}" pull --ff-only origin ${BRANCH}

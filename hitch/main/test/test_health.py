@@ -78,7 +78,7 @@ class CollectHealthReportTests(TestCase):
         self.assertEqual(
             titles,
             [
-                "Worker scopes (leaks)",
+                "Worker units (leaks)",
                 "Host / CPU",
                 "Leaks",
                 "Blocked workflow buckets",
@@ -201,7 +201,7 @@ class CollectHealthReportTests(TestCase):
         self.assertIn("Overall:", text)
         self.assertIn("[Leaks]", text)
         self.assertIn("[Backlogs]", text)
-        self.assertIn("[Worker scopes (leaks)]", text)
+        self.assertIn("[Worker units (leaks)]", text)
 
     def test_leaked_scope_makes_report_danger(self) -> None:
         probe = WorkerScopeProbe(
@@ -209,7 +209,7 @@ class CollectHealthReportTests(TestCase):
             leaked=[
                 LeakedScope(
                     instance_id=7,
-                    scope_unit="hitch-codex-worker-7.scope",
+                    scope_unit="hitch-codex-worker-7.service",
                     db_status="failed",
                     processes=[
                         ScopeProcess(
@@ -409,7 +409,7 @@ class WorkerScopeProbeTests(TestCase):
 
     def test_orphaned_grandchild_is_leaked(self) -> None:
         instance = self._terminal_instance(status=CodexInstance.STATUS_FAILED, ended_ago=timedelta(minutes=10))
-        scope = f"hitch-codex-worker-{instance.pk}.scope"
+        scope = f"hitch-codex-worker-{instance.pk}.service"
         _write_proc_pid(
             self.proc,
             4242,
@@ -430,9 +430,9 @@ class WorkerScopeProbeTests(TestCase):
         self.assertEqual(probe.total_leaked_rss_bytes, 2_300_000 * 1024)
         self.assertEqual(probe.active_count, 0)
 
-    def test_live_worker_in_scope_is_active_not_leaked(self) -> None:
+    def test_live_worker_in_service_is_active_not_leaked(self) -> None:
         instance = self._terminal_instance(status=CodexInstance.STATUS_FAILED, ended_ago=timedelta(minutes=10))
-        scope = f"hitch-codex-worker-{instance.pk}.scope"
+        scope = f"hitch-codex-worker-{instance.pk}.service"
         _write_proc_pid(
             self.proc,
             55,
@@ -447,9 +447,26 @@ class WorkerScopeProbeTests(TestCase):
         self.assertEqual(probe.leaked, [])
         self.assertEqual(probe.active_count, 1)
 
+    def test_legacy_scope_worker_is_still_detected(self) -> None:
+        instance = self._terminal_instance(status=CodexInstance.STATUS_FAILED, ended_ago=timedelta(minutes=10))
+        scope = f"hitch-codex-worker-{instance.pk}.scope"
+        _write_proc_pid(
+            self.proc,
+            56,
+            scope_unit=scope,
+            argv=["python3", "manage.py", "codex_worker", "--instance-id", str(instance.pk)],
+            comm="python3",
+            vmrss_kb=120_000,
+        )
+
+        probe = host_probes.probe_worker_scopes(proc_root=self.proc, now=self.now)
+
+        self.assertEqual(probe.leaked, [])
+        self.assertEqual(probe.active_count, 1)
+
     def test_recent_terminal_within_grace_not_leaked(self) -> None:
         instance = self._terminal_instance(status=CodexInstance.STATUS_COMPLETED, ended_ago=timedelta(seconds=5))
-        scope = f"hitch-codex-worker-{instance.pk}.scope"
+        scope = f"hitch-codex-worker-{instance.pk}.service"
         _write_proc_pid(
             self.proc,
             77,
@@ -465,7 +482,7 @@ class WorkerScopeProbeTests(TestCase):
 
     def test_running_instance_not_flagged(self) -> None:
         instance = _make_instance(status=CodexInstance.STATUS_RUNNING)
-        scope = f"hitch-codex-worker-{instance.pk}.scope"
+        scope = f"hitch-codex-worker-{instance.pk}.service"
         _write_proc_pid(
             self.proc,
             88,

@@ -378,18 +378,18 @@ def _backlog_section() -> HealthSection:
 
 
 def _worker_scope_section() -> HealthSection:
-    """Leaked-grandchild detector and concurrent worker-scope count (problems 1 & 3)."""
-    title = "Worker scopes (leaks)"
+    """Leaked-grandchild detector and concurrent worker-unit count (problems 1 & 3)."""
+    title = "Worker units (leaks)"
     try:
         probe = host_probes.probe_worker_scopes()
     except Exception:
-        logger.exception("failed to probe worker scopes")
+        logger.exception("failed to probe worker units")
         return HealthSection(
             title,
             [
                 HealthMetric(
                     "leaked_scopes",
-                    "Leaked worker scopes",
+                    "Leaked worker units",
                     "unavailable",
                     SEVERITY_UNKNOWN,
                     "Failed to probe /proc; see server logs.",
@@ -402,15 +402,15 @@ def _worker_scope_section() -> HealthSection:
     metrics.append(
         HealthMetric(
             key="leaked_scopes",
-            label="Leaked worker scopes",
+            label="Leaked worker units",
             value=str(len(leaked)),
             severity=SEVERITY_DANGER if leaked else SEVERITY_OK,
             detail=(
                 f"{_human_bytes(probe.total_leaked_rss_bytes)} held by orphaned grandchildren of "
                 "dead workers. Kill with: "
-                "systemctl --user kill --kill-whom=all --signal=SIGKILL <scope>."
+                "systemctl --user kill --kill-whom=all --signal=SIGKILL <unit>."
                 if leaked
-                else "No terminal worker scope still holds live processes."
+                else "No terminal worker unit still holds live processes."
             ),
         )
     )
@@ -438,10 +438,10 @@ def _worker_scope_section() -> HealthSection:
     metrics.append(
         HealthMetric(
             key="active_scopes",
-            label="Active worker scopes",
+            label="Active worker units",
             value=str(active),
             severity=active_severity,
-            detail=f"{nproc} CPU core(s); concurrent worker scopes contend for CPU.",
+            detail=f"{nproc} CPU core(s); concurrent worker units contend for CPU.",
         )
     )
     return HealthSection(title, metrics)

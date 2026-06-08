@@ -192,12 +192,15 @@ CODEX_WORKER_LOGS_DB_MAX_BYTES = int(
     os.environ.get("HITCH_CODEX_WORKER_LOGS_DB_MAX_BYTES", str(100 * 1024 * 1024))
 )
 
-# Worker isolation policy: "auto" uses systemd scopes only when the user
-# manager is reachable, "systemd" fails closed, and "direct" preserves the
-# legacy process-group launch path for non-systemd environments. The defaults
-# reserve memory for the Django server on a 16G host even when system agents run
-# concurrently.
-CODEX_WORKER_ISOLATION = os.environ.get("HITCH_CODEX_WORKER_ISOLATION", "auto")
+# Worker isolation policy: "auto" uses systemd units only when the user manager
+# is reachable, "systemd" fails closed, and "direct" preserves the legacy
+# process-group launch path for non-systemd environments. When Hitch itself is
+# already running as a systemd unit, default to fail-closed systemd workers so a
+# webserver restart cannot silently fall back to kill-prone direct children.
+_CODEX_WORKER_ISOLATION_DEFAULT = "systemd" if os.environ.get("INVOCATION_ID") else "auto"
+CODEX_WORKER_ISOLATION = os.environ.get(
+    "HITCH_CODEX_WORKER_ISOLATION", _CODEX_WORKER_ISOLATION_DEFAULT
+)
 CODEX_WORKER_SLICE = os.environ.get(
     "HITCH_CODEX_WORKER_SLICE", "hitch-codex-workers.slice"
 )
