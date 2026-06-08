@@ -17655,6 +17655,16 @@ class SessionViewApprovalContextTests(TestCase):
 
 
 class AutonomousGoalViewTests(TestCase):
+    @override
+    def setUp(self) -> None:
+        super().setUp()
+        self.quota_patcher = patch(
+            "hitch.main.views.system_agents._auto_proposals_paused_by_usage_quota_throttled",
+            return_value=False,
+        )
+        self.mock_auto_proposals_paused_by_quota = self.quota_patcher.start()
+        self.addCleanup(self.quota_patcher.stop)
+
     @patch("hitch.main.views.system_agents.maybe_start_auto_proposal_workflows")
     @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
@@ -18141,6 +18151,87 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, ">Skipped</button>", html=False)
         self.assertContains(response, "No useful docs proposal was found.")
         self.assertGreaterEqual(mock_default_branch_commit_hash.call_count, 2)
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_page_shows_quota_pause_instead_of_completed_run(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        self.mock_auto_proposals_paused_by_quota.return_value = True
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        autonomous_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Improve tests",
+            goal="Find useful test coverage increments.",
+            auto_proposal_enabled=True,
+        )
+        SystemWorkflow.objects.create(
+            kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+                autonomous_goal.pk
+            ),
+            cwd="/repo",
+            status=SystemWorkflow.STATUS_COMPLETED,
+            step=system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED,
+            state={
+                "autonomous_goal_id": autonomous_goal.pk,
+                "candidate": {"message": "The last run proposed useful work."},
+            },
+        )
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'data-state="quota"')
+        self.assertContains(response, ">Quota</button>", html=False)
+        self.assertContains(response, "remaining Codex quota is below")
+        self.assertNotContains(response, ">Done</button>", html=False)
+        self.assertNotContains(response, "The last run proposed useful work.")
+
+    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.views.Codex")
+    def test_page_treats_completed_auto_proposal_as_ready_not_done(
+        self, mock_codex: MagicMock, _mock_discover: MagicMock
+    ) -> None:
+        project = Project.objects.create(name="Hitch", repo_path="/repo")
+        _seed_cookies(self.client, hitch_selected_project_id=str(project.pk))
+        _setup_codex(mock_codex)
+        auto_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Auto goal",
+            goal="Keep proposing work.",
+            auto_proposal_enabled=True,
+        )
+        manual_goal = AutonomousGoal.objects.create(
+            project=project,
+            title="Manual goal",
+            goal="Run only on demand.",
+            auto_proposal_enabled=False,
+        )
+        for goal in (auto_goal, manual_goal):
+            SystemWorkflow.objects.create(
+                kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
+                main_thread_id=system_agents._autonomous_goal_main_thread_id(goal.pk),
+                cwd="/repo",
+                status=SystemWorkflow.STATUS_COMPLETED,
+                step=system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED,
+                state={
+                    "autonomous_goal_id": goal.pk,
+                    "candidate": {"message": f"{goal.title} proposed useful work."},
+                },
+            )
+
+        response = self.client.get(reverse("autonomous_goals"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, ">Ready</button>", html=False)
+        self.assertContains(response, ">Manual</button>", html=False)
+        self.assertNotContains(response, ">Done</button>", html=False)
+        self.assertContains(
+            response, "The last autonomous goal run created a proposal and stopped."
+        )
 
     @patch(
         "hitch.main.system_agents.default_branch_commit_hash",
