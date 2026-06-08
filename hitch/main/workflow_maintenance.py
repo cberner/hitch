@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 import logging
-import os
-import sys
 import threading
 import time
 
-from django.conf import settings
 from django.db import close_old_connections
 from django.utils import timezone
 
-from hitch.main import codex_pool, disk_cleanup, system_agents
+from hitch.main import codex_pool, disk_cleanup, server_lifecycle, system_agents
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +26,6 @@ _PR_STAGE_REFRESH_LIMIT_PER_TICK = 5
 # gh, so cap how many one tick polls and let the rest converge on later ticks.
 _PR_MONITOR_BACKOFF_LIMIT_PER_TICK = 5
 _SCHEDULER_ENV = "HITCH_WORKFLOW_MAINTENANCE_SCHEDULER"
-_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
-_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
-_SERVER_COMMANDS = frozenset({"gunicorn", "uvicorn", "daphne", "uwsgi"})
 
 _scheduler_lock = threading.Lock()
 _scheduler_started = False
@@ -55,24 +49,10 @@ def start_workflow_maintenance_scheduler() -> bool:
 
 
 def _workflow_maintenance_scheduler_enabled() -> bool:
-    configured = os.environ.get(_SCHEDULER_ENV)
-    if configured is not None:
-        normalized = configured.strip().lower()
-        if normalized in _TRUE_VALUES:
-            return True
-        if normalized in _FALSE_VALUES:
-            return False
-
-    if getattr(settings, "TESTING", False):
-        return False
-    argv = sys.argv[1:]
-    if argv and argv[0] == "runserver":
-        return os.environ.get("RUN_MAIN") == "true" or "--noreload" in argv
-    return _running_from_server_command()
-
-
-def _running_from_server_command() -> bool:
-    return os.path.basename(sys.argv[0]) in _SERVER_COMMANDS
+    return server_lifecycle.background_work_enabled(
+        env_var=_SCHEDULER_ENV,
+        include_wsgi_server_commands=True,
+    )
 
 
 def _workflow_maintenance_scheduler_loop() -> None:

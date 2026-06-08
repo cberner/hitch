@@ -108,7 +108,7 @@ install-systemd:
   # so a crash loop picks up fixes pushed since the last successful boot.
   ExecStartPre="${GIT_BIN}" -C "${REPO_DIR}" pull --ff-only origin ${BRANCH}
   ExecStartPre="${UV_BIN}" run ./manage.py migrate --settings hitch.settings.dev
-  ExecStart="${UV_BIN}" run ./manage.py runserver --settings hitch.settings.dev
+  ExecStart="${UV_BIN}" run ./manage.py runserver --noreload --settings hitch.settings.dev
   Restart=always
   RestartSec=2
   RestartSteps=5

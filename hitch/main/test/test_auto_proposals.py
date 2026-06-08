@@ -27,6 +27,18 @@ class AutoProposalSchedulerTests(SimpleTestCase):
 
     @override_settings(TESTING=False)
     @patch.dict(os.environ, {}, clear=True)
+    @patch.object(sys, "argv", ["manage.py", "runserver", "--noreload"])
+    def test_scheduler_enabled_in_runserver_noreload_process(self) -> None:
+        self.assertTrue(auto_proposals._auto_proposal_scheduler_enabled())
+
+    @override_settings(TESTING=False)
+    @patch.dict(os.environ, {}, clear=True)
+    @patch.object(sys, "argv", ["manage.py", "runserver"])
+    def test_scheduler_disabled_in_runserver_autoreloader_parent(self) -> None:
+        self.assertFalse(auto_proposals._auto_proposal_scheduler_enabled())
+
+    @override_settings(TESTING=False)
+    @patch.dict(os.environ, {}, clear=True)
     @patch.object(sys, "argv", ["manage.py", "migrate"])
     def test_scheduler_disabled_for_management_commands(self) -> None:
         self.assertFalse(auto_proposals._auto_proposal_scheduler_enabled())
@@ -91,6 +103,22 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
     @patch.object(sys, "argv", ["manage.py", "runserver"])
     def test_scheduler_enabled_in_runserver_child(self) -> None:
         self.assertTrue(
+            workflow_maintenance._workflow_maintenance_scheduler_enabled()
+        )
+
+    @override_settings(TESTING=False)
+    @patch.dict(os.environ, {}, clear=True)
+    @patch.object(sys, "argv", ["manage.py", "runserver", "--noreload"])
+    def test_scheduler_enabled_in_runserver_noreload_process(self) -> None:
+        self.assertTrue(
+            workflow_maintenance._workflow_maintenance_scheduler_enabled()
+        )
+
+    @override_settings(TESTING=False)
+    @patch.dict(os.environ, {}, clear=True)
+    @patch.object(sys, "argv", ["manage.py", "runserver"])
+    def test_scheduler_disabled_in_runserver_autoreloader_parent(self) -> None:
+        self.assertFalse(
             workflow_maintenance._workflow_maintenance_scheduler_enabled()
         )
 

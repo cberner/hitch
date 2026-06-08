@@ -7,6 +7,7 @@ settings involved); ``borrow_codex``'s bypass-under-TESTING and pooling paths ar
 covered separately.
 """
 
+import os
 import threading
 from collections.abc import Callable
 from typing import Any, override
@@ -433,6 +434,16 @@ class CodexPoolKeepaliveTests(SimpleTestCase):
         with mock.patch("hitch.main.codex_pool.sys.argv", ["manage.py", "test"]):
             self.assertFalse(codex_pool._codex_pool_keepalive_enabled())
         with mock.patch("hitch.main.codex_pool.sys.argv", ["gunicorn", "hitch.wsgi"]):
+            self.assertTrue(codex_pool._codex_pool_keepalive_enabled())
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch("hitch.main.codex_pool.sys.argv", ["manage.py", "runserver"]),
+        ):
+            self.assertFalse(codex_pool._codex_pool_keepalive_enabled())
+        with (
+            mock.patch.dict(os.environ, {"RUN_MAIN": "true"}, clear=True),
+            mock.patch("hitch.main.codex_pool.sys.argv", ["manage.py", "runserver"]),
+        ):
             self.assertTrue(codex_pool._codex_pool_keepalive_enabled())
         with mock.patch(
             "hitch.main.codex_pool.sys.argv",

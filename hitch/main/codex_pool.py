@@ -41,7 +41,7 @@ from django.utils import timezone
 from openai_codex import AppServerConfig, Codex, TransportClosedError
 from openai_codex.generated.v2_all import ThreadSource, WebSearchMode
 
-from hitch.main import rate_limit
+from hitch.main import rate_limit, server_lifecycle
 from hitch.main.codex_tools import registered_dynamic_tool_specs
 from hitch.main.db import is_database_locked_error
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
@@ -2830,8 +2830,6 @@ def _shared_pool_enabled() -> bool:
 _KEEPALIVE_INTERVAL_SECONDS = 30
 _keepalive_lock = threading.Lock()
 _keepalive_started = False
-# Process names under which the shared pool (and so the keepalive) is in use.
-_SERVER_PROCESS_COMMANDS = frozenset({"gunicorn", "uvicorn", "daphne", "uwsgi"})
 
 
 def _codex_pool_keepalive_enabled() -> bool:
@@ -2843,12 +2841,9 @@ def _codex_pool_keepalive_enabled() -> bool:
     runs elsewhere). Mirrors the schedulers' "real server process" gate so it
     never starts under management commands, migrations, or tests.
     """
-    if getattr(settings, "TESTING", False):
-        return False
-    argv = sys.argv[1:]
-    if argv and argv[0] == "runserver":
-        return os.environ.get("RUN_MAIN") == "true" or "--noreload" in argv
-    return os.path.basename(sys.argv[0]) in _SERVER_PROCESS_COMMANDS
+    return server_lifecycle.background_work_enabled(
+        include_wsgi_server_commands=True
+    )
 
 
 def start_codex_pool_keepalive() -> bool:
