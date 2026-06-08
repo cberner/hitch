@@ -1,8 +1,8 @@
 """Pool of detached Codex worker subprocesses.
 
 Each worker runs a single turn for one Codex thread and then exits. Workers
-are launched outside the Django process tree, preferably inside a per-worker
-systemd user scope with its own memory cgroup. The CodexInstance row + JSONL
+are launched outside the Django process tree, preferably as a per-worker
+systemd user service with its own memory cgroup. The CodexInstance row + JSONL
 events file on disk are the durable post-spawn links back to a worker; a
 sibling control JSONL file carries mid-turn requests such as steer payloads
 into the detached process.
@@ -20,6 +20,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -69,11 +70,12 @@ _WORKER_ISOLATION_AUTO = "auto"
 _WORKER_ISOLATION_DIRECT = "direct"
 _WORKER_ISOLATION_SYSTEMD = "systemd"
 _CODEX_THREAD_PATH_ATTR = "_hitch_codex_thread_path"
+_WORKER_UNIT_RE = re.compile(r"hitch-codex-worker-(\d+)\.(?:service|scope)")
 
 
 @dataclass(frozen=True)
 class WorkerLaunch:
-    """Result of launching a detached worker or its systemd-run wrapper."""
+    """Result of launching a detached worker or its systemd unit."""
 
     pid: int
     proc: subprocess.Popen[bytes] | None = None
@@ -760,8 +762,9 @@ def _interrupt_instance(instance: CodexInstance) -> CodexInstance | None:
         # not-yet-interruptible; the user can retry after a moment.
         return None
     if instance.systemd_scope_unit and instance.status == CodexInstance.STATUS_STARTING:
-        # The stored pid is still the systemd-run wrapper until the worker
-        # records its real pid. Do not treat the wrapper as interruptible.
+        # Legacy scope launches could briefly store the systemd-run client pid
+        # until the worker recorded its real pid. Do not treat that client as
+        # interruptible.
         return None
 
     if not _pid_is_instance_worker(instance):
@@ -865,7 +868,7 @@ def _force_kill_instance(instance: CodexInstance) -> None:
     if instance.systemd_scope_unit:
         systemctl = shutil.which("systemctl")
         if systemctl is None:
-            raise OSError("systemctl is required to kill scoped Codex workers")
+            raise OSError("systemctl is required to kill systemd Codex workers")
         result = subprocess.run(
             [
                 systemctl,
@@ -885,7 +888,7 @@ def _force_kill_instance(instance: CodexInstance) -> None:
         if _systemd_scope_is_missing(systemctl, instance.systemd_scope_unit):
             raise ProcessLookupError
         detail = result.stderr.decode("utf-8", errors="replace").strip()
-        message = "systemctl failed to kill scoped Codex worker"
+        message = "systemctl failed to kill systemd Codex worker"
         if detail:
             message = f"{message}: {detail}"
         raise OSError(message)
@@ -911,13 +914,13 @@ def _systemd_scope_is_missing(systemctl: str, scope_unit: str) -> bool:
 def _scope_has_live_worker(scope_unit: str, *, proc_root: Path = Path("/proc")) -> bool:
     """Whether any live ``codex_worker`` process currently runs in ``scope_unit``.
 
-    Scope unit names (``hitch-codex-worker-<id>.scope``) are not
-    deployment-unique, so once our dead worker's scope is collected another Hitch
-    checkout under the same user can create a scope with the same name. We only
-    reap a scope whose own worker is already gone, so a *live* ``codex_worker`` in
-    it means the name was reused by a different launch -- signaling it would kill
-    that launch's worker and grandchildren. Linux-only; without ``/proc`` it
-    reports ``False`` (the reap is then best-effort, as before).
+    Worker unit names are not deployment-unique, so once our dead worker's unit
+    is collected another Hitch checkout under the same user can create a unit
+    with the same name. We only reap a unit whose own worker is already gone, so
+    a *live* ``codex_worker`` in it means the name was reused by a different
+    launch -- signaling it would kill that launch's worker and grandchildren.
+    Linux-only; without ``/proc`` it reports ``False`` (the reap is then
+    best-effort, as before).
     """
     if not proc_root.exists():
         return False
@@ -940,25 +943,40 @@ def _scope_has_live_worker(scope_unit: str, *, proc_root: Path = Path("/proc")) 
     return False
 
 
+def _worker_unit_from_pid_cgroup(
+    pid: int, instance_id: int, *, proc_root: Path = Path("/proc")
+) -> str | None:
+    """Return the worker unit containing ``pid`` when /proc exposes it."""
+    try:
+        cgroup = (proc_root / str(pid) / "cgroup").read_bytes()
+    except OSError:
+        return None
+    decoded = cgroup.decode("utf-8", errors="replace")
+    for match in _WORKER_UNIT_RE.finditer(decoded):
+        if match.group(1) == str(instance_id):
+            return match.group(0)
+    return None
+
+
 def _reap_scope_cgroup(instance: CodexInstance) -> None:
-    """Best-effort kill of a dead scoped worker's cgroup to clear leaked
+    """Best-effort kill of a dead systemd worker's cgroup to clear leaked
     grandchildren.
 
     A worker reaped here exited without reporting completion -- wedged,
     OOM-killed, or SIGKILL'd. The codex exec sandbox runs each command in its own
     pgid/session, so a grandchild it spawned (e.g. a runaway ``cargo bench``) is
-    reparented out of the worker's process group but stays in the worker's scope
-    cgroup, holding memory until the scope's last process exits. A scope only
+    reparented out of the worker's process group but stays in the worker's
+    systemd cgroup, holding memory until the unit's last process exits. A unit only
     dies when that last process exits, so without this the grandchild can hold
     gigabytes for hours after the worker is gone. ``systemctl kill
     --kill-whom=all`` reaches every process in the cgroup; an already
-    empty/collected scope is a no-op. Non-scoped (direct) launches have no cgroup
+    empty/collected unit is a no-op. Direct launches have no systemd cgroup
     to sweep and their already-dead pid must never be re-signaled, so they are
     skipped.
 
-    Scope names are not deployment-unique, so a collected scope's name can be
+    Unit names are not deployment-unique, so a collected unit's name can be
     reused by another checkout: skip the reap if a live worker now holds the
-    scope (it can't be ours -- ours is already dead) rather than killing an
+    unit (it can't be ours -- ours is already dead) rather than killing an
     unrelated launch's worker.
     """
     if not instance.systemd_scope_unit:
@@ -971,7 +989,7 @@ def _reap_scope_cgroup(instance: CodexInstance) -> None:
         return
     except OSError:
         logger.warning(
-            "failed to reap scope cgroup %s for instance %s",
+            "failed to reap systemd cgroup %s for instance %s",
             instance.systemd_scope_unit,
             instance.pk,
         )
@@ -1234,30 +1252,33 @@ def _kill_orphaned_worker(pid: int, instance_id: int) -> bool:
     except Exception:
         logger.exception("could not load instance %s for orphan reap", instance_id)
     scope_unit = instance.systemd_scope_unit if instance is not None else None
-    # The scope unit may be absent even for a scoped worker: the row can be gone
-    # (e.g. a reset/cleaned DB) or exist with an empty ``systemd_scope_unit`` (the
-    # parent died after ``systemd-run`` returned but before saving it). A scoped
-    # worker is reparented out of our session by systemd-run, so it is not a
-    # session leader; if the scanned pid is ours under the relaxed check but fails
-    # the session-leader check it was launched under systemd isolation, and the
+    # The systemd unit may be absent even for a systemd worker: the row can be
+    # gone (e.g. a reset/cleaned DB) or exist with an empty
+    # ``systemd_scope_unit`` (the parent died after ``systemd-run`` returned but
+    # before saving it). Systemd workers are not launched as our direct session
+    # leaders; if the scanned pid is ours under the relaxed check but fails the
+    # session-leader check it was launched under systemd isolation, and the
     # killpg path below would skip it -- leaving its app-server (and the Codex DB
-    # lock) alive. Reap it through its derived scope instead.
+    # lock) alive. Reap it through its derived unit instead.
     if (
         not scope_unit
         and _pid_is_our_worker(pid, instance_id, require_session_leader=False)
         and not _pid_is_our_worker(pid, instance_id)
     ):
-        scope_unit = _scope_unit_for_instance(instance_id)
+        scope_unit = (
+            _worker_unit_from_pid_cgroup(pid, instance_id)
+            or _scope_unit_for_instance(instance_id)
+        )
     if scope_unit:
-        # The scope unit name (``hitch-codex-worker-<id>.scope``) is not
+        # The unit name (``hitch-codex-worker-<id>``) is not
         # deployment-unique, so ``systemctl kill <unit>`` could hit another
-        # checkout's reused unit if our scoped worker exited since the scan.
+        # checkout's reused unit if our systemd worker exited since the scan.
         # Reverify the scanned pid is still our deployment's worker for this
-        # instance (scoped workers are not session leaders) before signaling.
+        # instance (systemd workers are not session leaders) before signaling.
         if not _pid_is_our_worker(pid, instance_id, require_session_leader=False):
             return False
-        # Carry the effective scope unit on the target even when the row had it
-        # empty (a derived scope), so _force_kill_instance signals the unit
+        # Carry the effective systemd unit on the target even when the row had it
+        # empty (a derived unit), so _force_kill_instance signals the unit
         # rather than falling back to killpg.
         target = instance or CodexInstance(pid=pid)
         target.systemd_scope_unit = scope_unit
@@ -1268,7 +1289,7 @@ def _kill_orphaned_worker(pid: int, instance_id: int) -> bool:
             return False
         except OSError:
             logger.warning(
-                "failed to kill orphaned scoped worker for instance %s", instance_id
+                "failed to kill orphaned systemd worker for instance %s", instance_id
             )
             return False
     # Re-verify identity right before signaling: the pid could have been recycled
@@ -1676,7 +1697,7 @@ def _mark_dead_instances_failed(pending: Iterable[CodexInstance]) -> int:
             continue
         _resolve_dangling_requests(instance.pk)
         instance.refresh_from_db()
-        # The worker died without reporting completion, so its scope cgroup may
+        # The worker died without reporting completion, so its systemd cgroup may
         # still hold grandchildren the codex sandbox reparented into their own
         # session (a process-group signal would miss them). Reap the cgroup so a
         # leaked ``cargo bench`` can't hold memory long after the worker is gone.
@@ -3121,16 +3142,15 @@ def _spawn_worker(
     scope_unit = getattr(launch, "scope_unit", "")
     if scope_unit:
         # The worker never touches systemd_scope_unit, so the parent owns it
-        # outright; force-kill escalation needs it.
+        # outright; force-kill escalation needs the systemd unit name.
         instance.systemd_scope_unit = scope_unit
         instance.save(update_fields=["systemd_scope_unit"])
     if launch_pid > 0:
         # The worker's first action is to overwrite pid with its own real pid.
-        # Under systemd isolation launch_pid is only the systemd-run wrapper, so
-        # a parent that is slow to reach this point must not clobber a real pid
-        # the worker has already recorded -- aiming a polite interrupt at the
-        # systemd-run wrapper would never reach the scoped worker (it does not
-        # forward SIGTERM). Fill pid only while it is still unset.
+        # Under direct isolation launch_pid is already the worker. Systemd
+        # isolation returns pid=0 and relies on the worker's own first write,
+        # so a webserver restart never leaves the row aimed at a systemd-run
+        # client process.
         claimed = CodexInstance.objects.filter(pk=instance.pk, pid=0).update(
             pid=launch_pid
         )
@@ -3272,29 +3292,37 @@ def _launch_systemd_worker(
                 systemd_run=systemd_run,
                 scope_unit=scope_unit,
                 worker_argv=worker_argv,
+                env=env,
+                stderr_log_path=_stderr_log_path(stderr_capture),
             ),
             env=env,
             stderr=stderr,
         )
-        _raise_for_immediate_systemd_run_failure(
+        _raise_for_systemd_run_start_failure(
             proc,
             scope_unit,
             stderr_capture,
             stderr_offset=stderr_offset,
         )
-        return WorkerLaunch(pid=proc.pid, proc=proc, scope_unit=scope_unit)
+        return WorkerLaunch(pid=0, scope_unit=scope_unit)
     with tempfile.TemporaryFile() as stderr_file:
         proc = _popen_detached(
             _systemd_scope_argv(
                 systemd_run=systemd_run,
                 scope_unit=scope_unit,
                 worker_argv=worker_argv,
+                env=env,
             ),
             env=env,
             stderr=stderr_file,
         )
-        _raise_for_immediate_systemd_run_failure(proc, scope_unit, stderr_file)
-    return WorkerLaunch(pid=proc.pid, proc=proc, scope_unit=scope_unit)
+        _raise_for_systemd_run_start_failure(proc, scope_unit, stderr_file)
+    return WorkerLaunch(pid=0, scope_unit=scope_unit)
+
+
+def _stderr_log_path(stderr_capture: BinaryIO) -> str | None:
+    name = getattr(stderr_capture, "name", None)
+    return name if isinstance(name, str) else None
 
 
 def _worker_slice() -> str:
@@ -3350,7 +3378,7 @@ def _memory_cgroup_properties(
     ``declarative`` makes cleared caps render as ``infinity`` rather than being
     omitted, so a stateful ``set-property`` target (the slice) fully resets to
     the configured state instead of inheriting stale runtime values. The
-    per-worker scope and the aggregate slice share this builder so their
+    per-worker unit and the aggregate slice share this builder so their
     accounting/limit/swap handling cannot drift apart.
     """
     high = str(getattr(settings, high_setting, "") or "").strip()
@@ -3665,7 +3693,41 @@ def _worker_isolation() -> str:
 
 
 def _scope_unit_for_instance(instance_id: int) -> str:
-    return f"hitch-codex-worker-{instance_id}.scope"
+    return f"hitch-codex-worker-{instance_id}.service"
+
+
+_SYSTEMD_ENV_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_SYSTEMD_ENV_DENYLIST = frozenset(
+    {
+        "INVOCATION_ID",
+        "JOURNAL_STREAM",
+        "LISTEN_FDS",
+        "LISTEN_FDNAMES",
+        "LISTEN_PID",
+        "MAINPID",
+        "MANAGERPID",
+        "NOTIFY_SOCKET",
+        "WATCHDOG_PID",
+        "WATCHDOG_USEC",
+    }
+)
+
+
+def _systemd_env_args(env: dict[str, str]) -> list[str]:
+    """Pass the launcher's valid environment names to a transient service.
+
+    Transient services run in the user manager's clean environment rather than
+    inheriting the caller like ``--scope`` does, so the worker must explicitly
+    receive settings such as ``DJANGO_SETTINGS_MODULE``, ``CODEX_HOME``, and
+    deployment-specific Hitch paths. ``--setenv=NAME`` copies the value from
+    the ``systemd-run`` client's environment without placing secrets directly
+    on the command line.
+    """
+    return [
+        f"--setenv={name}"
+        for name in sorted(env)
+        if name not in _SYSTEMD_ENV_DENYLIST and _SYSTEMD_ENV_NAME_RE.fullmatch(name)
+    ]
 
 
 def _systemd_scope_argv(
@@ -3673,18 +3735,28 @@ def _systemd_scope_argv(
     systemd_run: str,
     scope_unit: str,
     worker_argv: list[str],
+    env: dict[str, str] | None = None,
+    stderr_log_path: str | None = None,
 ) -> list[str]:
+    unit_name = scope_unit.removesuffix(".service").removesuffix(".scope")
     argv = [
         systemd_run,
         "--user",
-        "--scope",
         "--quiet",
         "--collect",
-        f"--unit={scope_unit.removesuffix('.scope')}",
+        "--service-type=exec",
+        f"--unit={unit_name}",
     ]
     worker_slice = _worker_slice()
     if worker_slice:
         argv.append(f"--slice={worker_slice}")
+    if env is not None:
+        argv.extend(_systemd_env_args(env))
+    argv.append("--property=StandardOutput=null")
+    if stderr_log_path:
+        argv.append(f"--property=StandardError=append:{stderr_log_path}")
+    else:
+        argv.append("--property=StandardError=null")
     for property_value in _memory_cgroup_properties(
         "CODEX_WORKER_MEMORY_HIGH",
         "CODEX_WORKER_MEMORY_MAX",
@@ -3696,7 +3768,7 @@ def _systemd_scope_argv(
     return argv
 
 
-def _raise_for_immediate_systemd_run_failure(
+def _raise_for_systemd_run_start_failure(
     proc: subprocess.Popen[bytes],
     scope_unit: str,
     stderr_file: Any,
@@ -3704,9 +3776,15 @@ def _raise_for_immediate_systemd_run_failure(
     stderr_offset: int = 0,
 ) -> None:
     try:
-        returncode = proc.wait(timeout=0.25)
-    except subprocess.TimeoutExpired:
-        return
+        returncode = proc.wait(timeout=2)
+    except subprocess.TimeoutExpired as exc:
+        with contextlib.suppress(OSError):
+            proc.kill()
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            proc.wait(timeout=0.5)
+        raise RuntimeError(
+            f"systemd-run timed out launching Codex worker unit {scope_unit}"
+        ) from exc
     if returncode == 0:
         return
     stderr_file.seek(stderr_offset)
@@ -3715,7 +3793,7 @@ def _raise_for_immediate_systemd_run_failure(
         detail = stderr.decode("utf-8", errors="replace").strip()
     else:
         detail = str(stderr).strip()
-    message = f"systemd-run failed to launch Codex worker scope {scope_unit}"
+    message = f"systemd-run failed to launch Codex worker unit {scope_unit}"
     if detail:
         message = f"{message}: {detail}"
     else:

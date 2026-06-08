@@ -1,13 +1,13 @@
 """Host- and process-level probes for the Hitch health dashboard.
 
-These read ``/proc`` (and the systemd worker-scope cgroups surfaced there) to
+These read ``/proc`` (and the systemd worker-unit cgroups surfaced there) to
 surface the operational leaks that DB rows alone cannot show:
 
 * leaked worker grandchildren — a worker's Python died but a sandbox grandchild
-  (e.g. a runaway ``cargo bench``) survives in the now-orphaned scope cgroup,
+  (e.g. a runaway ``cargo bench``) survives in the now-orphaned worker cgroup,
   holding gigabytes for hours (the highest-priority incident class);
 * CPU saturation — load average and the count of concurrently active worker
-  scopes against the core count;
+  units against the core count;
 * runserver socket/fd accumulation — open fds and CLOSE_WAIT sockets that leak
   when a streaming client aborts.
 
@@ -29,12 +29,12 @@ from django.utils import timezone
 
 from hitch.main.models import CodexInstance
 
-# Scope units are named ``hitch-codex-worker-<instance id>.scope`` (see
-# codex_pool._scope_unit_for_instance) and that name appears verbatim in the
-# cgroup path of every process in the scope.
-_SCOPE_RE = re.compile(r"hitch-codex-worker-(\d+)\.scope")
+# Worker units are named ``hitch-codex-worker-<instance id>.service``. Legacy
+# scope units used ``.scope``; support both suffixes so the health page still
+# sees workers launched before the service-mode change.
+_SCOPE_RE = re.compile(r"hitch-codex-worker-(\d+)\.(?:service|scope)")
 _SOCKET_INODE_RE = re.compile(r"socket:\[(\d+)\]")
-# Process names expected inside a healthy worker scope. Anything else is a
+# Process names expected inside a healthy worker unit. Anything else is a
 # sandbox grandchild (the build/test/bench runners that leak).
 _KNOWN_SCOPE_COMMS = frozenset({"python", "python3", "node", "codex"})
 # A turn that reached a terminal row only moments ago may still have its
@@ -118,7 +118,7 @@ def _rss_bytes_from_status(status: str | None) -> int:
 
 
 def _scan_worker_scope_procs(proc_root: Path) -> list[_ProcInfo]:
-    """Single /proc pass yielding one record per process inside a worker scope."""
+    """Single /proc pass yielding one record per process inside a worker unit."""
     if not proc_root.exists():
         return []
     infos: list[_ProcInfo] = []
@@ -151,11 +151,11 @@ def _scan_worker_scope_procs(proc_root: Path) -> list[_ProcInfo]:
 def probe_worker_scopes(
     *, proc_root: Path = Path("/proc"), now: datetime | None = None
 ) -> WorkerScopeProbe:
-    """Active worker-scope count and the leaked (orphaned-grandchild) scopes.
+    """Active worker-unit count and leaked orphaned-grandchild units.
 
-    A scope is *leaked* when its instance row is already terminal (and past the
+    A unit is *leaked* when its instance row is already terminal (and past the
     shutdown grace window) yet processes remain in its cgroup, and none of them
-    is a live ``codex_worker`` (a live worker means the non-unique scope name was
+    is a live ``codex_worker`` (a live worker means the non-unique unit name was
     reused by a fresh launch, not a leak).
     """
     infos = _scan_worker_scope_procs(proc_root)

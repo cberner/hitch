@@ -234,13 +234,13 @@ class SpawnNewSessionTests(TestCase):
 
     @patch("hitch.main.codex_pool._launch_worker_process")
     @patch("hitch.main.codex_pool.Codex")
-    def test_systemd_launch_leaves_pid_for_worker_and_records_scope(
+    def test_systemd_launch_leaves_pid_for_worker_and_records_unit(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
         _stub_codex_thread_start(mock_codex, "thread-scoped")
         mock_launch.return_value = codex_pool.WorkerLaunch(
             pid=0,
-            scope_unit="hitch-codex-worker-7.scope",
+            scope_unit="hitch-codex-worker-7.service",
         )
 
         with (
@@ -252,7 +252,7 @@ class SpawnNewSessionTests(TestCase):
         self.assertEqual(instance.pid, 0)
         self.assertEqual(
             instance.systemd_scope_unit,
-            "hitch-codex-worker-7.scope",
+            "hitch-codex-worker-7.service",
         )
 
     @patch("hitch.main.codex_pool._launch_worker_process")
@@ -260,12 +260,10 @@ class SpawnNewSessionTests(TestCase):
     def test_systemd_post_launch_pid_write_does_not_clobber_worker_pid(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
-        # Under systemd isolation the launch pid is only the systemd-run
-        # wrapper; the worker overwrites pid with its own real pid as its first
-        # action. If the parent's post-launch write lands after the worker's,
-        # it must not clobber the real pid back to the wrapper -- otherwise a
-        # polite interrupt would signal systemd-run, which never forwards it to
-        # the scoped worker.
+        # Under systemd isolation the launcher can leave pid unset; the worker
+        # overwrites pid with its own real pid as its first action. If a future
+        # launch path reports a non-worker pid and the parent's post-launch
+        # write lands after the worker's, it must not clobber the real pid.
         _stub_codex_thread_start(mock_codex, "thread-scoped")
         real_worker_pid = 4242
         wrapper_pid = 999
@@ -278,7 +276,7 @@ class SpawnNewSessionTests(TestCase):
                 pid=real_worker_pid, status=CodexInstance.STATUS_RUNNING
             )
             return codex_pool.WorkerLaunch(
-                pid=wrapper_pid, scope_unit="hitch-codex-worker-7.scope"
+                pid=wrapper_pid, scope_unit="hitch-codex-worker-7.service"
             )
 
         mock_launch.side_effect = _launch
@@ -293,7 +291,7 @@ class SpawnNewSessionTests(TestCase):
         self.assertEqual(instance.pid, real_worker_pid)
         self.assertEqual(
             instance.systemd_scope_unit,
-            "hitch-codex-worker-7.scope",
+            "hitch-codex-worker-7.service",
         )
 
     @patch("hitch.main.codex_pool._launch_worker_process")
@@ -1153,6 +1151,15 @@ class LaunchWorkerProcessTests(TestCase):
             # default takes over inside the worker.
             self.assertNotIn("--reasoning-effort", argv)
 
+
+class SystemdInstallRecipeTests(SimpleTestCase):
+    def test_systemd_deployment_forces_systemd_worker_isolation(self) -> None:
+        justfile = (Path(settings.BASE_DIR) / "justfile").read_text()
+
+        self.assertIn("Environment=HITCH_CODEX_WORKER_ISOLATION=systemd", justfile)
+
+
+class LaunchWorkerProcessSystemdTests(TestCase):
     @override_settings(
         CODEX_WORKER_ISOLATION="systemd",
         CODEX_WORKER_MEMORY_HIGH="4G",
@@ -1163,7 +1170,7 @@ class LaunchWorkerProcessTests(TestCase):
     @patch("hitch.main.codex_pool._ensure_systemd_worker_slice")
     @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
     @patch("hitch.main.codex_pool.subprocess.Popen")
-    def test_systemd_launches_worker_in_memory_capped_scope(
+    def test_systemd_launches_worker_in_memory_capped_service(
         self,
         mock_popen: MagicMock,
         mock_which: MagicMock,
@@ -1171,23 +1178,40 @@ class LaunchWorkerProcessTests(TestCase):
     ) -> None:
         proc = MagicMock()
         proc.pid = 999
-        proc.wait.side_effect = subprocess.TimeoutExpired("systemd-run", 0.25)
+        proc.wait.return_value = 0
         mock_popen.return_value = proc
 
-        launch = codex_pool._launch_worker_process(instance_id=7)
+        with (
+            tempfile.TemporaryDirectory() as raw,
+            override_settings(CODEX_WORKER_LOG_DIR=Path(raw)),
+        ):
+            launch = codex_pool._launch_worker_process(instance_id=7)
 
         args, kwargs = mock_popen.call_args
         argv = args[0]
-        self.assertEqual(launch.pid, 999)
-        self.assertEqual(launch.scope_unit, "hitch-codex-worker-7.scope")
+        self.assertEqual(launch.pid, 0)
+        self.assertIsNone(launch.proc)
+        self.assertEqual(launch.scope_unit, "hitch-codex-worker-7.service")
         self.assertEqual(
             argv[:5],
-            ["/usr/bin/systemd-run", "--user", "--scope", "--quiet", "--collect"],
+            [
+                "/usr/bin/systemd-run",
+                "--user",
+                "--quiet",
+                "--collect",
+                "--service-type=exec",
+            ],
         )
+        self.assertNotIn("--pipe", argv)
         self.assertIn("--unit=hitch-codex-worker-7", argv)
         self.assertIn("--slice=hitch-codex-workers.slice", argv)
+        self.assertIn("--setenv=DJANGO_SETTINGS_MODULE", argv)
+        self.assertIn("--property=StandardOutput=null", argv)
+        self.assertIn(
+            f"--property=StandardError=append:{Path(raw) / '7.log'}", argv
+        )
         # MemoryHigh/MemoryMax are silently ignored on hosts that do not
-        # default to memory accounting, so the scope must opt in explicitly —
+        # default to memory accounting, so the service must opt in explicitly —
         # otherwise the per-worker cap would not actually bound the worker.
         self.assertIn("--property=MemoryAccounting=yes", argv)
         self.assertIn("--property=MemoryHigh=4G", argv)
@@ -1205,7 +1229,7 @@ class LaunchWorkerProcessTests(TestCase):
             kwargs["env"]["DJANGO_SETTINGS_MODULE"],
             "hitch.settings.dev",
         )
-        proc.wait.assert_called_once_with(timeout=0.25)
+        proc.wait.assert_called_once_with(timeout=2)
         mock_which.assert_called_once_with("systemd-run")
         mock_ensure_slice.assert_called_once_with()
 
@@ -1276,8 +1300,8 @@ class LaunchWorkerProcessTests(TestCase):
         CODEX_WORKER_MEMORY_SWAP_MAX="0",
         CODEX_WORKER_SLICE="hitch-codex-workers.slice",
     )
-    def test_per_worker_scope_enables_memory_accounting(self) -> None:
-        # Regression: a scope launched with MemoryHigh/MemoryMax but no
+    def test_per_worker_service_enables_memory_accounting(self) -> None:
+        # Regression: a worker unit launched with MemoryHigh/MemoryMax but no
         # MemoryAccounting=yes has its limits silently dropped on any host that
         # does not default to memory accounting (DefaultMemoryAccounting=no or
         # legacy cgroup v1). The aggregate slice opts in, so without this the
@@ -1286,7 +1310,7 @@ class LaunchWorkerProcessTests(TestCase):
         # sibling QA-panel lanes.
         argv = codex_pool._systemd_scope_argv(
             systemd_run="/usr/bin/systemd-run",
-            scope_unit="hitch-codex-worker-7.scope",
+            scope_unit="hitch-codex-worker-7.service",
             worker_argv=["python", "manage.py", "codex_worker"],
         )
 
@@ -1294,13 +1318,34 @@ class LaunchWorkerProcessTests(TestCase):
         self.assertIn("--property=MemoryHigh=2G", argv)
         self.assertIn("--property=MemoryMax=4G", argv)
 
+    def test_systemd_service_env_args_copy_valid_names_without_values(self) -> None:
+        argv = codex_pool._systemd_scope_argv(
+            systemd_run="/usr/bin/systemd-run",
+            scope_unit="hitch-codex-worker-7.service",
+            worker_argv=["python", "manage.py", "codex_worker"],
+            env={
+                "DJANGO_SETTINGS_MODULE": "hitch.settings.dev",
+                "CODEX_HOME": "/home/user/.codex",
+                "INVOCATION_ID": "parent-unit",
+                "bad-name": "ignored",
+            },
+        )
+
+        self.assertIn("--setenv=CODEX_HOME", argv)
+        self.assertIn("--setenv=DJANGO_SETTINGS_MODULE", argv)
+        self.assertNotIn("--setenv=INVOCATION_ID", argv)
+        self.assertNotIn("--setenv=bad-name", argv)
+        self.assertFalse(
+            [arg for arg in argv if arg.startswith("--setenv=CODEX_HOME=")]
+        )
+
     @override_settings(
         CODEX_WORKER_MEMORY_HIGH="2G",
         CODEX_WORKER_MEMORY_MAX="4G",
         CODEX_WORKER_MEMORY_SWAP_MAX="0",
         CODEX_WORKER_SLICE="hitch-codex-workers.slice",
     )
-    def test_per_worker_scope_caps_swap(self) -> None:
+    def test_per_worker_service_caps_swap(self) -> None:
         # Regression: cgroup v2 counts only RAM toward MemoryMax, so without a
         # swap cap a runaway worker is reclaimed to swap rather than OOM-killed.
         # The hard cap then never fires and the turn thrashes the host
@@ -1308,7 +1353,7 @@ class LaunchWorkerProcessTests(TestCase):
         # cap to be a true ceiling.
         argv = codex_pool._systemd_scope_argv(
             systemd_run="/usr/bin/systemd-run",
-            scope_unit="hitch-codex-worker-7.scope",
+            scope_unit="hitch-codex-worker-7.service",
             worker_argv=["python", "manage.py", "codex_worker"],
         )
 
@@ -1320,12 +1365,12 @@ class LaunchWorkerProcessTests(TestCase):
         CODEX_WORKER_MEMORY_SWAP_MAX="1G",
         CODEX_WORKER_SLICE="hitch-codex-workers.slice",
     )
-    def test_per_worker_scope_honors_swap_override(self) -> None:
+    def test_per_worker_service_honors_swap_override(self) -> None:
         # A non-zero cap grants a bounded swap cushion rather than forbidding
         # swap outright; the configured value must be passed through verbatim.
         argv = codex_pool._systemd_scope_argv(
             systemd_run="/usr/bin/systemd-run",
-            scope_unit="hitch-codex-worker-7.scope",
+            scope_unit="hitch-codex-worker-7.service",
             worker_argv=["python", "manage.py", "codex_worker"],
         )
 
@@ -1337,14 +1382,14 @@ class LaunchWorkerProcessTests(TestCase):
         CODEX_WORKER_MEMORY_SWAP_MAX="0",
         CODEX_WORKER_SLICE="hitch-codex-workers.slice",
     )
-    def test_per_worker_scope_skips_accounting_without_limits(self) -> None:
+    def test_per_worker_service_skips_accounting_without_limits(self) -> None:
         # Accounting is only worth enabling when a limit rides along with it;
         # an unconfigured cap must not emit a bare MemoryAccounting property,
         # and a stray swap cap must not disable swap on an otherwise-unbounded
         # unit (it only completes a real MemoryMax ceiling).
         argv = codex_pool._systemd_scope_argv(
             systemd_run="/usr/bin/systemd-run",
-            scope_unit="hitch-codex-worker-7.scope",
+            scope_unit="hitch-codex-worker-7.service",
             worker_argv=["python", "manage.py", "codex_worker"],
         )
 
@@ -1357,7 +1402,7 @@ class LaunchWorkerProcessTests(TestCase):
         CODEX_WORKER_MEMORY_SWAP_MAX="0",
         CODEX_WORKER_SLICE="hitch-codex-workers.slice",
     )
-    def test_per_worker_scope_keeps_swap_for_soft_only_throttle(self) -> None:
+    def test_per_worker_service_keeps_swap_for_soft_only_throttle(self) -> None:
         # MemoryHigh is a soft throttle that usage may exceed (graceful
         # degradation, no OOM); with no hard MemoryMax there is no ceiling for a
         # swap cap to make "true", so swap must NOT be disabled out from under a
@@ -1365,7 +1410,7 @@ class LaunchWorkerProcessTests(TestCase):
         # soft throttle itself still apply.
         argv = codex_pool._systemd_scope_argv(
             systemd_run="/usr/bin/systemd-run",
-            scope_unit="hitch-codex-worker-7.scope",
+            scope_unit="hitch-codex-worker-7.service",
             worker_argv=["python", "manage.py", "codex_worker"],
         )
 
@@ -1382,14 +1427,14 @@ class LaunchWorkerProcessTests(TestCase):
         CODEX_WORKER_MEMORY_SWAP_MAX="0",
         CODEX_WORKER_SLICE="hitch-codex-workers.slice",
     )
-    def test_per_worker_scope_keeps_swap_when_hard_cap_is_infinity(self) -> None:
+    def test_per_worker_service_keeps_swap_when_hard_cap_is_infinity(self) -> None:
         # systemd treats MemoryMax=infinity as no limit, so it is not a real
         # ceiling for the swap cap to make "true"; capping swap here would
         # reintroduce the soft-only/unbounded regression. The explicit
         # MemoryMax=infinity is still passed through.
         argv = codex_pool._systemd_scope_argv(
             systemd_run="/usr/bin/systemd-run",
-            scope_unit="hitch-codex-worker-7.scope",
+            scope_unit="hitch-codex-worker-7.service",
             worker_argv=["python", "manage.py", "codex_worker"],
         )
 
@@ -1598,14 +1643,14 @@ class LaunchWorkerProcessTests(TestCase):
     ) -> None:
         proc = MagicMock()
         proc.pid = 999
-        proc.wait.side_effect = subprocess.TimeoutExpired("systemd-run", 0.25)
+        proc.wait.return_value = 0
         mock_popen.return_value = proc
 
         launch = codex_pool._launch_worker_process(instance_id=7)
 
         argv = mock_popen.call_args.args[0]
-        self.assertEqual(launch.pid, 999)
-        self.assertEqual(launch.scope_unit, "hitch-codex-worker-7.scope")
+        self.assertEqual(launch.pid, 0)
+        self.assertEqual(launch.scope_unit, "hitch-codex-worker-7.service")
         self.assertEqual(argv[0], "/usr/bin/systemd-run")
         mock_user_manager.assert_called_once_with()
         mock_ensure_slice.assert_called_once_with()
@@ -1642,7 +1687,7 @@ class LaunchWorkerProcessTests(TestCase):
     @patch("hitch.main.codex_pool._ensure_systemd_worker_slice")
     @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
     @patch("hitch.main.codex_pool.subprocess.Popen")
-    def test_systemd_launch_fails_promptly_when_wrapper_exits_nonzero(
+    def test_systemd_launch_fails_promptly_when_systemd_run_exits_nonzero(
         self,
         mock_popen: MagicMock,
         _mock_which: MagicMock,
@@ -1665,7 +1710,7 @@ class LaunchWorkerProcessTests(TestCase):
         ):
             codex_pool._launch_worker_process(instance_id=7)
 
-        proc.wait.assert_called_once_with(timeout=0.25)
+        proc.wait.assert_called_once_with(timeout=2)
 
     @override_settings(CODEX_WORKER_ISOLATION="bogus")
     def test_rejects_unknown_worker_isolation(self) -> None:
@@ -3008,7 +3053,7 @@ class ReapScopeCgroupTests(TestCase):
     def test_kills_cgroup_of_scoped_worker(
         self, mock_force_kill: MagicMock, _mock_live: MagicMock
     ) -> None:
-        instance = self._make(systemd_scope_unit="hitch-codex-worker-7.scope")
+        instance = self._make(systemd_scope_unit="hitch-codex-worker-7.service")
 
         codex_pool._reap_scope_cgroup(instance)
 
@@ -3030,7 +3075,7 @@ class ReapScopeCgroupTests(TestCase):
         # Scope names are not deployment-unique. Our worker is already dead, so a
         # live worker now in the scope means another checkout reused the name --
         # signaling it would kill that launch, so skip.
-        instance = self._make(systemd_scope_unit="hitch-codex-worker-7.scope")
+        instance = self._make(systemd_scope_unit="hitch-codex-worker-7.service")
 
         codex_pool._reap_scope_cgroup(instance)
 
@@ -3044,7 +3089,7 @@ class ReapScopeCgroupTests(TestCase):
         # An already empty/collected scope reports ProcessLookupError; that is the
         # success case (nothing left to reap), not an error to propagate.
         mock_force_kill.side_effect = ProcessLookupError
-        instance = self._make(systemd_scope_unit="hitch-codex-worker-7.scope")
+        instance = self._make(systemd_scope_unit="hitch-codex-worker-7.service")
 
         codex_pool._reap_scope_cgroup(instance)  # must not raise
 
@@ -3054,20 +3099,20 @@ class ReapScopeCgroupTests(TestCase):
         self, mock_force_kill: MagicMock, _mock_live: MagicMock
     ) -> None:
         mock_force_kill.side_effect = OSError("boom")
-        instance = self._make(systemd_scope_unit="hitch-codex-worker-7.scope")
+        instance = self._make(systemd_scope_unit="hitch-codex-worker-7.service")
 
         codex_pool._reap_scope_cgroup(instance)  # best-effort: must not raise
 
     @patch("hitch.main.codex_pool._scope_has_live_worker", return_value=False)
     @patch("hitch.main.codex_pool._force_kill_instance")
     @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
-    def test_reconcile_reaps_dead_scoped_worker_cgroup(
+    def test_reconcile_reaps_dead_systemd_worker_cgroup(
         self,
         _mock_alive: MagicMock,
         mock_force_kill: MagicMock,
         _mock_live: MagicMock,
     ) -> None:
-        # A wedged/OOM-killed scoped worker reaped by the reconcile sweep has its
+        # A wedged/OOM-killed systemd worker reaped by the reconcile sweep has its
         # cgroup swept so a reparented grandchild can't keep holding memory.
         scoped = CodexInstance.objects.create(
             pid=10,
@@ -3075,7 +3120,7 @@ class ReapScopeCgroupTests(TestCase):
             cwd="/r",
             events_path="/dev/null",
             status=CodexInstance.STATUS_RUNNING,
-            systemd_scope_unit="hitch-codex-worker-10.scope",
+            systemd_scope_unit="hitch-codex-worker-10.service",
         )
         direct = CodexInstance.objects.create(
             pid=11,
@@ -3091,7 +3136,7 @@ class ReapScopeCgroupTests(TestCase):
 
         scoped.refresh_from_db()
         self.assertEqual(scoped.status, CodexInstance.STATUS_FAILED)
-        # Only the scoped worker's cgroup is swept; the direct worker is skipped.
+        # Only the systemd worker's cgroup is swept; the direct worker is skipped.
         mock_force_kill.assert_called_once()
         self.assertEqual(mock_force_kill.call_args.args[0].pk, scoped.pk)
 
@@ -3122,10 +3167,25 @@ class ScopeHasLiveWorkerTests(SimpleTestCase):
         ]
         return proc_root
 
-    def test_true_when_worker_runs_in_scope(self) -> None:
+    def test_true_when_worker_runs_in_systemd_service(self) -> None:
         proc_root = self._proc(
             {
                 "100": {
+                    "cmdline": b"python\x00manage.py\x00codex_worker\x00",
+                    "cgroup": b"0::/u.slice/hitch-codex-worker-7.service\n",
+                },
+            }
+        )
+        self.assertTrue(
+            codex_pool._scope_has_live_worker(
+                "hitch-codex-worker-7.service", proc_root=proc_root
+            )
+        )
+
+    def test_true_for_legacy_scope_worker(self) -> None:
+        proc_root = self._proc(
+            {
+                "101": {
                     "cmdline": b"python\x00manage.py\x00codex_worker\x00",
                     "cgroup": b"0::/u.slice/hitch-codex-worker-7.scope\n",
                 },
@@ -3138,19 +3198,19 @@ class ScopeHasLiveWorkerTests(SimpleTestCase):
         )
 
     def test_false_when_only_a_grandchild_runs_in_scope(self) -> None:
-        # A leaked ``cargo bench`` is not a codex_worker, so the scope is still
+        # A leaked ``cargo bench`` is not a codex_worker, so the unit is still
         # ours to reap.
         proc_root = self._proc(
             {
                 "200": {
                     "cmdline": b"cargo\x00bench\x00",
-                    "cgroup": b"0::/u.slice/hitch-codex-worker-7.scope\n",
+                    "cgroup": b"0::/u.slice/hitch-codex-worker-7.service\n",
                 },
             }
         )
         self.assertFalse(
             codex_pool._scope_has_live_worker(
-                "hitch-codex-worker-7.scope", proc_root=proc_root
+                "hitch-codex-worker-7.service", proc_root=proc_root
             )
         )
 
@@ -3159,13 +3219,13 @@ class ScopeHasLiveWorkerTests(SimpleTestCase):
             {
                 "300": {
                     "cmdline": b"python\x00manage.py\x00codex_worker\x00",
-                    "cgroup": b"0::/u.slice/hitch-codex-worker-99.scope\n",
+                    "cgroup": b"0::/u.slice/hitch-codex-worker-99.service\n",
                 },
             }
         )
         self.assertFalse(
             codex_pool._scope_has_live_worker(
-                "hitch-codex-worker-7.scope", proc_root=proc_root
+                "hitch-codex-worker-7.service", proc_root=proc_root
             )
         )
 
@@ -3174,7 +3234,7 @@ class ScopeHasLiveWorkerTests(SimpleTestCase):
         proc_root.exists.return_value = False
         self.assertFalse(
             codex_pool._scope_has_live_worker(
-                "hitch-codex-worker-7.scope", proc_root=proc_root
+                "hitch-codex-worker-7.service", proc_root=proc_root
             )
         )
 
@@ -3192,9 +3252,51 @@ class ScopeHasLiveWorkerTests(SimpleTestCase):
         )
         self.assertFalse(
             codex_pool._scope_has_live_worker(
-                "hitch-codex-worker-7.scope", proc_root=proc_root
+                "hitch-codex-worker-7.service", proc_root=proc_root
             )
         )
+
+    def test_worker_unit_from_pid_cgroup_returns_service(self) -> None:
+        with tempfile.TemporaryDirectory() as proc_root:
+            pid_dir = Path(proc_root) / "700"
+            pid_dir.mkdir()
+            (pid_dir / "cgroup").write_bytes(
+                b"0::/user.slice/hitch-codex-worker-7.service\n"
+            )
+
+            unit = codex_pool._worker_unit_from_pid_cgroup(
+                700, 7, proc_root=Path(proc_root)
+            )
+
+        self.assertEqual(unit, "hitch-codex-worker-7.service")
+
+    def test_worker_unit_from_pid_cgroup_returns_legacy_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as proc_root:
+            pid_dir = Path(proc_root) / "701"
+            pid_dir.mkdir()
+            (pid_dir / "cgroup").write_bytes(
+                b"0::/user.slice/hitch-codex-worker-7.scope\n"
+            )
+
+            unit = codex_pool._worker_unit_from_pid_cgroup(
+                701, 7, proc_root=Path(proc_root)
+            )
+
+        self.assertEqual(unit, "hitch-codex-worker-7.scope")
+
+    def test_worker_unit_from_pid_cgroup_ignores_wrong_instance(self) -> None:
+        with tempfile.TemporaryDirectory() as proc_root:
+            pid_dir = Path(proc_root) / "702"
+            pid_dir.mkdir()
+            (pid_dir / "cgroup").write_bytes(
+                b"0::/user.slice/hitch-codex-worker-99.scope\n"
+            )
+
+            unit = codex_pool._worker_unit_from_pid_cgroup(
+                702, 7, proc_root=Path(proc_root)
+            )
+
+        self.assertIsNone(unit)
 
 
 class ReconcileOrphanedWorkersTests(TestCase):
@@ -3243,18 +3345,20 @@ class ReconcileOrphanedWorkersTests(TestCase):
 
     @patch("hitch.main.codex_pool._force_kill_instance")
     @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._worker_unit_from_pid_cgroup", return_value=None)
     @patch("hitch.main.codex_pool._pid_is_our_worker")
     @patch("hitch.main.codex_pool._iter_running_worker_pids")
-    def test_kills_scoped_worker_with_no_instance_row(
+    def test_kills_systemd_worker_with_no_instance_row(
         self,
         mock_iter: MagicMock,
         mock_identity: MagicMock,
+        _mock_cgroup_unit: MagicMock,
         mock_killpg: MagicMock,
         mock_force_kill: MagicMock,
     ) -> None:
-        # Row gone (reset DB) but a scoped worker is still alive: it is not a
+        # Row gone (reset DB) but a systemd worker is still alive: it is not a
         # session leader, so the killpg path would skip it. Reap it through its
-        # derived scope instead so its app-server / DB lock is released.
+        # derived unit instead so its app-server / DB lock is released.
         mock_identity.side_effect = (
             lambda pid, iid, require_session_leader=True: not require_session_leader
         )
@@ -3272,18 +3376,50 @@ class ReconcileOrphanedWorkersTests(TestCase):
 
     @patch("hitch.main.codex_pool._force_kill_instance")
     @patch("hitch.main.codex_pool.os.killpg")
+    @patch(
+        "hitch.main.codex_pool._worker_unit_from_pid_cgroup",
+        return_value="hitch-codex-worker-999999.scope",
+    )
     @patch("hitch.main.codex_pool._pid_is_our_worker")
     @patch("hitch.main.codex_pool._iter_running_worker_pids")
-    def test_kills_scoped_worker_when_row_lacks_scope_unit(
+    def test_kills_legacy_scope_worker_with_no_instance_row(
         self,
         mock_iter: MagicMock,
         mock_identity: MagicMock,
+        _mock_cgroup_unit: MagicMock,
         mock_killpg: MagicMock,
         mock_force_kill: MagicMock,
     ) -> None:
-        # The row exists but never saved its scope unit (parent died after
-        # systemd-run returned): the worker is still scoped (not a session
-        # leader), so derive the scope rather than falling through to killpg.
+        mock_identity.side_effect = (
+            lambda pid, iid, require_session_leader=True: not require_session_leader
+        )
+        mock_iter.return_value = [(5002, 999999)]
+
+        killed = codex_pool.reconcile_orphaned_workers()
+
+        self.assertEqual(killed, 1)
+        mock_killpg.assert_not_called()
+        mock_force_kill.assert_called_once()
+        target = mock_force_kill.call_args.args[0]
+        self.assertEqual(target.systemd_scope_unit, "hitch-codex-worker-999999.scope")
+
+    @patch("hitch.main.codex_pool._force_kill_instance")
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._worker_unit_from_pid_cgroup", return_value=None)
+    @patch("hitch.main.codex_pool._pid_is_our_worker")
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_kills_systemd_worker_when_row_lacks_unit(
+        self,
+        mock_iter: MagicMock,
+        mock_identity: MagicMock,
+        _mock_cgroup_unit: MagicMock,
+        mock_killpg: MagicMock,
+        mock_force_kill: MagicMock,
+    ) -> None:
+        # The row exists but never saved its systemd unit (parent died after
+        # systemd-run returned): the worker is still systemd-managed (not a
+        # session leader), so derive the unit rather than falling through to
+        # killpg.
         done = self._make(pid=5006, status=CodexInstance.STATUS_COMPLETED)
         mock_identity.side_effect = (
             lambda pid, iid, require_session_leader=True: not require_session_leader
@@ -3298,6 +3434,36 @@ class ReconcileOrphanedWorkersTests(TestCase):
         target = mock_force_kill.call_args.args[0]
         self.assertEqual(
             target.systemd_scope_unit, codex_pool._scope_unit_for_instance(done.pk)
+        )
+
+    @patch("hitch.main.codex_pool._force_kill_instance")
+    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.codex_pool._pid_is_our_worker")
+    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    def test_kills_legacy_scope_worker_when_row_lacks_unit(
+        self,
+        mock_iter: MagicMock,
+        mock_identity: MagicMock,
+        mock_killpg: MagicMock,
+        mock_force_kill: MagicMock,
+    ) -> None:
+        done = self._make(pid=5006, status=CodexInstance.STATUS_COMPLETED)
+        mock_identity.side_effect = (
+            lambda pid, iid, require_session_leader=True: not require_session_leader
+        )
+        mock_iter.return_value = [(5006, done.pk)]
+        with patch(
+            "hitch.main.codex_pool._worker_unit_from_pid_cgroup",
+            return_value=f"hitch-codex-worker-{done.pk}.scope",
+        ):
+            killed = codex_pool.reconcile_orphaned_workers()
+
+        self.assertEqual(killed, 1)
+        mock_killpg.assert_not_called()
+        mock_force_kill.assert_called_once()
+        target = mock_force_kill.call_args.args[0]
+        self.assertEqual(
+            target.systemd_scope_unit, f"hitch-codex-worker-{done.pk}.scope"
         )
 
     @patch("hitch.main.codex_pool.os.killpg")
@@ -4146,7 +4312,7 @@ class InterruptActiveTests(TestCase):
     @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.codex_pool.os.killpg")
     @patch("hitch.main.codex_pool.os.kill")
-    def test_second_stop_escalates_scoped_worker_to_systemctl_kill(
+    def test_second_stop_escalates_systemd_worker_to_systemctl_kill(
         self,
         mock_kill: MagicMock,
         mock_killpg: MagicMock,
@@ -4157,7 +4323,7 @@ class InterruptActiveTests(TestCase):
         instance = self._make(
             pid=4321,
             status=CodexInstance.STATUS_RUNNING,
-            systemd_scope_unit="hitch-codex-worker-7.scope",
+            systemd_scope_unit="hitch-codex-worker-7.service",
         )
         CodexInstance.objects.filter(pk=instance.pk).update(
             interrupt_requested_at=timezone.now()
@@ -4182,7 +4348,7 @@ class InterruptActiveTests(TestCase):
                 "kill",
                 "--kill-whom=all",
                 "--signal=SIGKILL",
-                "hitch-codex-worker-7.scope",
+                "hitch-codex-worker-7.service",
             ],
             check=False,
             stdin=subprocess.DEVNULL,
@@ -4198,7 +4364,7 @@ class InterruptActiveTests(TestCase):
     @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
     @patch("hitch.main.codex_pool.os.killpg")
     @patch("hitch.main.codex_pool.os.kill")
-    def test_second_stop_treats_vanished_scope_as_stopped(
+    def test_second_stop_treats_vanished_systemd_unit_as_stopped(
         self,
         mock_kill: MagicMock,
         mock_killpg: MagicMock,
@@ -4209,7 +4375,7 @@ class InterruptActiveTests(TestCase):
         instance = self._make(
             pid=4321,
             status=CodexInstance.STATUS_RUNNING,
-            systemd_scope_unit="hitch-codex-worker-7.scope",
+            systemd_scope_unit="hitch-codex-worker-7.service",
         )
         CodexInstance.objects.filter(pk=instance.pk).update(
             interrupt_requested_at=timezone.now()
