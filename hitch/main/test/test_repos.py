@@ -346,3 +346,9 @@ class DiscoverReposTests(TestCase):
 
             self.assertEqual(default_branch_commit_hash(repo), head_sha)
             self.assertEqual(default_branch_checkout_commit_hash(repo), head_sha)
+
+    def test_git_output_returns_none_on_spawn_failure(self) -> None:
+        with patch(
+            "hitch.main.git_support.subprocess.run", side_effect=OSError("no git")
+        ):
+            self.assertIsNone(repos._git_output(Path("/repo"), ["status"]))

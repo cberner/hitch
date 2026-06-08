@@ -3,7 +3,6 @@
 import difflib
 import html
 import re
-import subprocess
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -13,6 +12,8 @@ from pygments import highlight
 from pygments.formatters import HtmlFormatter
 from pygments.lexer import Lexer
 from pygments.lexers import TextLexer, find_lexer_class_for_filename
+
+from .git_support import GitCommandError, run_git
 
 DiffLineKind = Literal["add", "remove", "context", "hunk", "meta"]
 
@@ -185,13 +186,8 @@ def _repo_root(cwd: Path) -> Path | None:
 def _git_output(cwd: Path, args: list[str], *, allow_statuses: set[int] | None = None) -> str | None:
     statuses = allow_statuses or {0}
     try:
-        result = subprocess.run(
-            ["git", "-C", str(cwd), *args],
-            capture_output=True,
-            check=False,
-            timeout=_GIT_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        result = run_git(cwd, args, timeout=_GIT_TIMEOUT_SECONDS)
+    except GitCommandError:
         return None
     if result.returncode not in statuses:
         return None

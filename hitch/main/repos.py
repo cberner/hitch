@@ -1,7 +1,9 @@
 """Discover and identify local git repositories."""
 
-import subprocess
 from pathlib import Path
+
+from .git_support import GitCommandError, run_git
+from .git_support import resolved_path as _resolved_path
 
 _GIT_TIMEOUT_SECONDS = 10
 _DEFAULT_BRANCH_NAMES = ("main", "master", "trunk", "develop")
@@ -113,13 +115,8 @@ def same_repo_or_worktree(cwd: str | Path, repo_path: str | Path, repo_common_di
 
 def _git_output(cwd: Path, args: list[str]) -> str | None:
     try:
-        result = subprocess.run(
-            ["git", "-C", str(cwd), *args],
-            capture_output=True,
-            check=False,
-            timeout=_GIT_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        result = run_git(cwd, args, timeout=_GIT_TIMEOUT_SECONDS)
+    except GitCommandError:
         return None
     if result.returncode != 0:
         return None
@@ -210,10 +207,3 @@ def _repo_root(cwd: Path) -> Path | None:
         return None
     root = output.strip()
     return Path(root) if root else None
-
-
-def _resolved_path(path: Path) -> Path:
-    try:
-        return path.resolve()
-    except OSError:
-        return path
