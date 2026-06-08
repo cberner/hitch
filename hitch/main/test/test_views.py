@@ -17210,6 +17210,30 @@ class SessionStreamViewTests(TestCase):
         body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
         self.assertIn(b'"status": "stale"', body)
 
+    @patch("hitch.main.views.codex_pool.reconcile_dead_if_due", return_value=0)
+    def test_reconciles_dead_active_worker_before_stream_routing(
+        self, mock_global_reconcile: MagicMock
+    ) -> None:
+        instance = self._make(
+            thread_id="thread-dead-before-stream",
+            pid=99999999,
+            status=CodexInstance.STATUS_RUNNING,
+        )
+
+        response = self.client.get(
+            self._stream_url(
+                "thread-dead-before-stream",
+                baseline=str(instance.pk),
+                active=str(instance.pk),
+            )
+        )
+        body = b"".join(response.streaming_content)  # type: ignore[attr-defined]
+
+        self.assertIn(b'"status": "stale"', body)
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        mock_global_reconcile.assert_called_once()
+
     @patch("hitch.main.streaming._POLL_INTERVAL", 0.01)
     def test_forwards_worker_events_through_view(self) -> None:
         # End-to-end through the URL routing: a RUNNING instance with

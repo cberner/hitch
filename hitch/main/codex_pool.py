@@ -1621,6 +1621,26 @@ def reconcile_dead_if_due() -> int:
     return 0
 
 
+def reconcile_dead_for_thread(thread_id: str) -> int:
+    """Mark dead active workers for one user-visible thread.
+
+    Session detail and SSE routing need this exact thread's active-worker state
+    to be fresh even when the global sweep is debounced. Keep the scope narrow so
+    opening a stale session repairs it without doing a full active-worker scan.
+    """
+    _reap_finished_workers()
+    pending = CodexInstance.objects.filter(
+        thread_id=thread_id,
+        status__in=(CodexInstance.STATUS_STARTING, CodexInstance.STATUS_RUNNING),
+    )
+    updated = _mark_dead_instances_failed(pending)
+    _reconcile_terminal_workflow_instances(main_thread_id=thread_id)
+    if updated:
+        _reconcile_orphaned_workers_if_due()
+    _prune_reaped_workers()
+    return updated
+
+
 def reconcile_dead_for_workflow(
     workflow_id: int, *, main_thread_id: str | None = None
 ) -> int:
