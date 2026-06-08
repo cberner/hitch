@@ -5012,6 +5012,35 @@ def _pr_monitor_result_from_gh_observation(
     }
 
 
+_PR_MONITOR_MAX_ITERATIONS_FEEDBACK = (
+    "PR follow-up monitor reached the maximum feedback loop count "
+    "without reaching a clean PR state."
+)
+
+
+def _fail_pr_monitor_max_iterations(workflow: SystemWorkflow, feedback: str) -> None:
+    """Mark a PR-monitor workflow as out of iterations and surface ``feedback``."""
+    workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
+    workflow.status = SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED
+    workflow.step = STEP_MAX_ITERATIONS_REACHED
+    workflow.save(update_fields=["status", "step", "state", "updated_at"])
+    _surface_workflow_failure(workflow, feedback)
+
+
+def _start_pr_followup_feedback(workflow: SystemWorkflow, feedback: str) -> None:
+    """Advance to a fresh PR follow-up feedback turn, blocking the workflow if the
+    turn cannot be spawned."""
+    workflow.state = {**workflow.state, _PR_PENDING_CHECKS_STATE_KEY: 0}
+    workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
+    workflow.iteration += 1
+    workflow.step = STEP_PR_FEEDBACK_RUNNING
+    workflow.save(update_fields=["iteration", "step", "state", "updated_at"])
+    try:
+        _spawn_pr_followup_feedback_turn(workflow, feedback)
+    except Exception as exc:
+        _block_workflow(workflow, f"failed to start PR follow-up turn: {exc!r}")
+
+
 def _advance_pr_workflow_from_monitor_result(
     workflow: SystemWorkflow, parsed: dict[str, Any]
 ) -> None:
@@ -5044,29 +5073,11 @@ def _advance_pr_workflow_from_monitor_result(
         feedback = _pr_monitor_actionable_feedback(parsed)
         if feedback:
             if workflow.iteration >= workflow.max_iterations:
-                workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
-                workflow.status = SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED
-                workflow.step = STEP_MAX_ITERATIONS_REACHED
-                workflow.save(update_fields=["status", "step", "state", "updated_at"])
-                _surface_workflow_failure(
-                    workflow,
-                    (
-                        "PR follow-up monitor reached the maximum feedback loop count "
-                        "without reaching a clean PR state."
-                    ),
+                _fail_pr_monitor_max_iterations(
+                    workflow, _PR_MONITOR_MAX_ITERATIONS_FEEDBACK
                 )
                 return
-            workflow.state = {**workflow.state, _PR_PENDING_CHECKS_STATE_KEY: 0}
-            workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
-            workflow.iteration += 1
-            workflow.step = STEP_PR_FEEDBACK_RUNNING
-            workflow.save(update_fields=["iteration", "step", "state", "updated_at"])
-            try:
-                _spawn_pr_followup_feedback_turn(workflow, feedback)
-            except Exception as exc:
-                _block_workflow(
-                    workflow, f"failed to start PR follow-up turn: {exc!r}"
-                )
+            _start_pr_followup_feedback(workflow, feedback)
             return
         workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
         workflow.status = SystemWorkflow.STATUS_COMPLETED
@@ -5076,41 +5087,18 @@ def _advance_pr_workflow_from_monitor_result(
 
     actionable_blockers = _pr_gates_have_actionable_blockers(gates)
     if actionable_blockers and workflow.iteration >= workflow.max_iterations:
-        workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
-        workflow.status = SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED
-        workflow.step = STEP_MAX_ITERATIONS_REACHED
-        workflow.save(update_fields=["status", "step", "state", "updated_at"])
-        _surface_workflow_failure(
-            workflow,
-            (
-                "PR follow-up monitor reached the maximum feedback loop count "
-                "without reaching a clean PR state."
-            ),
-        )
+        _fail_pr_monitor_max_iterations(workflow, _PR_MONITOR_MAX_ITERATIONS_FEEDBACK)
         return
 
     if actionable_blockers:
-        feedback = _pr_actionable_feedback(gates, parsed)
-        workflow.state = {**workflow.state, _PR_PENDING_CHECKS_STATE_KEY: 0}
-        workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
-        workflow.iteration += 1
-        workflow.step = STEP_PR_FEEDBACK_RUNNING
-        workflow.save(update_fields=["iteration", "step", "state", "updated_at"])
-        try:
-            _spawn_pr_followup_feedback_turn(workflow, feedback)
-        except Exception as exc:
-            _block_workflow(workflow, f"failed to start PR follow-up turn: {exc!r}")
+        _start_pr_followup_feedback(workflow, _pr_actionable_feedback(gates, parsed))
         return
 
     feedback = _pr_gate_pending_feedback(gates) or _pr_monitor_feedback(parsed)
     pending_checks = _state_int(workflow, _PR_PENDING_CHECKS_STATE_KEY) + 1
     workflow.state = {**workflow.state, _PR_PENDING_CHECKS_STATE_KEY: pending_checks}
     if pending_checks >= workflow.max_iterations:
-        workflow.state.pop(_PR_MONITOR_BACKOFF_STATE_KEY, None)
-        workflow.status = SystemWorkflow.STATUS_MAX_ITERATIONS_REACHED
-        workflow.step = STEP_MAX_ITERATIONS_REACHED
-        workflow.save(update_fields=["status", "step", "state", "updated_at"])
-        _surface_workflow_failure(workflow, feedback)
+        _fail_pr_monitor_max_iterations(workflow, feedback)
         return
     _schedule_pr_monitor_backoff(
         workflow,
