@@ -584,7 +584,7 @@ class SessionViewTests(TestCase):
                 self.assertContains(response, 'role="menuitem">Archive</button>')
                 self.assertNotContains(response, ">Edit</button>")
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/tmp/demo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/tmp/demo")])
     @patch("hitch.main.views.Codex")
     def test_action_menu_includes_debug_chat_link(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -624,7 +624,7 @@ class SessionViewTests(TestCase):
         )
 
     @patch(
-        "hitch.main.views.discover_repos",
+        "hitch.main.repos.discover_repos",
         return_value=[Path("/tmp/other"), Path("/tmp/hitch")],
     )
     @patch("hitch.main.views.Codex")
@@ -647,7 +647,7 @@ class SessionViewTests(TestCase):
         self.assertEqual(query["project"], [str(hitch_project.pk)])
         self.assertNotEqual(query["project"], [str(session_project.pk)])
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/tmp/other")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/tmp/other")])
     @patch("hitch.main.views.Codex")
     def test_action_menu_ignores_undiscovered_hitch_project_for_debug_chat_link(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -670,7 +670,7 @@ class SessionViewTests(TestCase):
         self.assertEqual(query["project"], [str(session_project.pk)])
         self.assertNotEqual(query["project"], [str(hitch_project.pk)])
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/tmp/demo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/tmp/demo")])
     @patch("hitch.main.views.Codex")
     def test_action_menu_includes_cwd_for_bare_repo_debug_chat_link(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -3922,7 +3922,7 @@ class SessionViewActiveWorkerTests(TestCase):
             body.index("QA agent approved the diff and merged it into main."),
         )
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_system_session_detail_is_read_only_and_shows_system_prompt(
         self, mock_codex: MagicMock, _mock_discover: MagicMock

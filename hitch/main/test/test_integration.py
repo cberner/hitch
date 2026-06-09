@@ -129,7 +129,7 @@ class CodexIntegrationTests(TestCase):
             with (
                 tempfile.TemporaryDirectory(prefix="hitch-events-") as events_dir,
                 override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
-                patch("hitch.main.views.discover_repos", return_value=[Path(repo)]),
+                patch("hitch.main.repos.discover_repos", return_value=[Path(repo)]),
                 patch(
                     "hitch.main.codex_pool._launch_worker_process",
                     return_value=SimpleNamespace(pid=4321),

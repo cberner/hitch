@@ -386,7 +386,7 @@ class NukeCodexViewTests(TestCase):
 
 
 class AuthenticatedSettingsTests(TestCase):
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_index_places_profile_link_in_primary_nav(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -489,7 +489,7 @@ class AuthenticatedSettingsTests(TestCase):
         self.assertEqual(settings.last_selected_repo, "/home/user/proj")
         self.assertEqual(_cookie_value(response, _SHOW_ARCHIVED_COOKIE), "true")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_new_session_page_prefers_account_settings_over_conflicting_cookies(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -565,7 +565,7 @@ class AuthenticatedSettingsTests(TestCase):
             _cookie_value(new_session_response, _ENABLE_MEMORIES_COOKIE), "true"
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_send_message_uses_account_settings_without_cookies(
