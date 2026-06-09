@@ -20,6 +20,7 @@ from openai_codex.errors import AppServerError
 
 from hitch.main import codex_events, demo, system_agents
 from hitch.main.diffs import DiffFile, DiffLine, DiffView
+from hitch.main.entry_render import _tool_call_detail, _tool_call_status
 from hitch.main.models import (
     CodexInstance,
     Project,
@@ -31,8 +32,6 @@ from hitch.main.models import (
 from hitch.main.views import (
     _pr_snapshot_for_thread,
     _pr_url_for_thread,
-    _tool_call_detail,
-    _tool_call_status,
 )
 
 # Used for active-worker rendering tests so the session view's
