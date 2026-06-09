@@ -55,6 +55,7 @@ from hitch.main import (
     input_images,
     session_index,
     session_pr_plan,
+    session_resume,
     session_settings,
     session_stage,
     session_stage_refresh,
@@ -712,7 +713,7 @@ class SessionDetailFastPathTests(TestCase):
             )
 
             with patch.dict(os.environ, {"CODEX_HOME": codex_home}):
-                recovered = views._session_detail_metadata("abc-def")
+                recovered = session_resume._session_detail_metadata("abc-def")
 
         self.assertEqual(recovered, metadata)
         metadata.refresh_from_db()
@@ -1575,7 +1576,7 @@ class SessionDetailFastPathTests(TestCase):
             codex_updated_at=now,
         )
 
-        real_session_detail_data = views._session_detail_data_for_metadata_resume
+        real_session_detail_data = session_resume._session_detail_data_for_metadata_resume
 
         def _append_during_read(path: Path) -> rollout_module.SessionDetailData | None:
             rollout_data = real_session_detail_data(path)
@@ -1593,7 +1594,7 @@ class SessionDetailFastPathTests(TestCase):
             return rollout_data
 
         with patch(
-            "hitch.main.views._session_detail_data_for_metadata_resume",
+            "hitch.main.session_resume._session_detail_data_for_metadata_resume",
             side_effect=_append_during_read,
         ):
             response = self.client.get(
@@ -12934,6 +12935,11 @@ class SendMessageViewTests(TestCase):
         path: str | None = None,
         turns: list[Any] | None = None,
     ) -> None:
+        session_resume_codex_patcher = patch(
+            "hitch.main.session_resume.Codex", new=mock_codex
+        )
+        session_resume_codex_patcher.start()
+        self.addCleanup(session_resume_codex_patcher.stop)
         client = mock_codex.return_value.__enter__.return_value
         thread = SimpleNamespace(cwd=cwd, turns=turns or [])
         if path is not None:
