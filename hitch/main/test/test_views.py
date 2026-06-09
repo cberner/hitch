@@ -13617,6 +13617,310 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
+    def test_archived_follow_up_unarchives_before_spawning(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        rollout_path = (
+            Path(temp_dir.name)
+            / "archived_sessions"
+            / "rollout-2026-06-07T05-43-07-abc.jsonl"
+        )
+        rollout_path.parent.mkdir(parents=True)
+        rollout_path.write_text(
+            "\n".join(
+                [
+                    _rollout_line(
+                        "event_msg", {"type": "user_message", "message": "Hi"}
+                    ),
+                    _rollout_line(
+                        "response_item",
+                        {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [
+                                {"type": "output_text", "text": "Done."}
+                            ],
+                            "phase": "final_answer",
+                        },
+                    ),
+                ]
+            )
+            + "\n"
+        )
+        metadata = SessionMetadata.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            codex_path=str(rollout_path),
+            codex_archived=True,
+            codex_archived_at=timezone.now(),
+        )
+        ArchivedSessionTokenUsage.objects.create(thread_id="abc", total_tokens=100)
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="other", total_tokens=200
+        )
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        client = mock_codex.return_value.__enter__.return_value
+        client.thread_unarchive.assert_called_once_with("abc")
+        client._client.thread_resume.assert_called_once_with("abc")
+        self._assert_follow_up_spawn(mock_spawn)
+        metadata.refresh_from_db()
+        self.assertFalse(metadata.codex_archived)
+        self.assertIsNone(metadata.codex_archived_at)
+        self.assertEqual(metadata.codex_path, "")
+        self.assertFalse(
+            ArchivedSessionTokenUsage.objects.filter(thread_id="abc").exists()
+        )
+        self.assertTrue(
+            ArchivedSessionTokenUsage.objects.filter(thread_id="other").exists()
+        )
+
+    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_archived_follow_up_rejects_disallowed_cached_cwd_before_unarchive(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+        _mock_managed_worktrees: MagicMock,
+    ) -> None:
+        archived_path = (
+            "/tmp/archived_sessions/rollout-2026-06-07T05-43-07-abc.jsonl"
+        )
+        metadata = SessionMetadata.objects.create(
+            thread_id="abc",
+            cwd="/elsewhere",
+            codex_path=archived_path,
+            codex_archived=True,
+            codex_archived_at=timezone.now(),
+        )
+        ArchivedSessionTokenUsage.objects.create(thread_id="abc", total_tokens=100)
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertContains(
+            response,
+            "thread cwd is not an allowed repository",
+            status_code=400,
+        )
+        mock_codex.assert_not_called()
+        mock_spawn.assert_not_called()
+        metadata.refresh_from_db()
+        self.assertTrue(metadata.codex_archived)
+        self.assertIsNotNone(metadata.codex_archived_at)
+        self.assertEqual(metadata.codex_path, archived_path)
+        self.assertTrue(
+            ArchivedSessionTokenUsage.objects.filter(thread_id="abc").exists()
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_archived_live_resume_retry_unarchives_before_spawning(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        client = mock_codex.return_value.__enter__.return_value
+        resumed = client._client.thread_resume.return_value
+        client._client.thread_resume.side_effect = [
+            InvalidRequestError(
+                -32600,
+                "session abc is archived. Run `codex unarchive abc` to unarchive it first.",
+            ),
+            resumed,
+        ]
+        ArchivedSessionTokenUsage.objects.create(thread_id="abc", total_tokens=100)
+        ArchivedSessionTokenUsage.objects.create(
+            thread_id="other", total_tokens=200
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        client.thread_unarchive.assert_called_once_with("abc")
+        self.assertEqual(
+            client._client.thread_resume.call_args_list,
+            [call("abc"), call("abc")],
+        )
+        self._assert_follow_up_spawn(mock_spawn)
+        self.assertFalse(
+            ArchivedSessionTokenUsage.objects.filter(thread_id="abc").exists()
+        )
+        self.assertTrue(
+            ArchivedSessionTokenUsage.objects.filter(thread_id="other").exists()
+        )
+
+    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_archived_live_resume_retry_rejects_cached_cwd_before_unarchive(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+        _mock_managed_worktrees: MagicMock,
+    ) -> None:
+        SessionMetadata.objects.create(thread_id="abc", cwd="/elsewhere")
+        ArchivedSessionTokenUsage.objects.create(thread_id="abc", total_tokens=100)
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        client = mock_codex.return_value.__enter__.return_value
+        client._client.thread_resume.side_effect = InvalidRequestError(
+            -32600,
+            "session abc is archived. Run `codex unarchive abc` to unarchive it first.",
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertContains(
+            response,
+            "thread cwd is not an allowed repository",
+            status_code=400,
+        )
+        client._client.thread_resume.assert_called_once_with("abc")
+        client.thread_unarchive.assert_not_called()
+        mock_spawn.assert_not_called()
+        self.assertTrue(
+            ArchivedSessionTokenUsage.objects.filter(thread_id="abc").exists()
+        )
+
+    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_archived_live_resume_retry_rearchives_disallowed_resumed_cwd(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+        _mock_managed_worktrees: MagicMock,
+    ) -> None:
+        archived_path = (
+            "/tmp/archived_sessions/rollout-2026-06-07T05-43-07-abc.jsonl"
+        )
+        metadata = SessionMetadata.objects.create(
+            thread_id="abc",
+            cwd="",
+            codex_path=archived_path,
+        )
+        self._patch_codex(mock_codex, cwd="/elsewhere")
+        mock_discover.return_value = [Path("/repo")]
+        client = mock_codex.return_value.__enter__.return_value
+        resumed = client._client.thread_resume.return_value
+        client._client.thread_resume.side_effect = [
+            InvalidRequestError(
+                -32600,
+                "session abc is archived. Run `codex unarchive abc` to unarchive it first.",
+            ),
+            resumed,
+        ]
+        ArchivedSessionTokenUsage.objects.create(thread_id="abc", total_tokens=100)
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertContains(
+            response,
+            "thread cwd is not an allowed repository",
+            status_code=400,
+        )
+        self.assertEqual(
+            client._client.thread_resume.call_args_list,
+            [call("abc"), call("abc")],
+        )
+        client.thread_unarchive.assert_called_once_with("abc")
+        client.thread_archive.assert_called_once_with("abc")
+        mock_spawn.assert_not_called()
+        metadata.refresh_from_db()
+        self.assertTrue(metadata.codex_archived)
+        self.assertIsNotNone(metadata.codex_archived_at)
+        self.assertEqual(metadata.codex_path, "")
+        self.assertFalse(
+            ArchivedSessionTokenUsage.objects.filter(thread_id="abc").exists()
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
+    def test_archived_follow_up_rearchives_when_spawn_rejects(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        archived_path = (
+            "/tmp/archived_sessions/rollout-2026-06-07T05-43-07-abc.jsonl"
+        )
+        metadata = SessionMetadata.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            codex_path=archived_path,
+            codex_archived=True,
+            codex_archived_at=timezone.now(),
+        )
+        ArchivedSessionTokenUsage.objects.create(thread_id="abc", total_tokens=100)
+        self._patch_codex(mock_codex)
+        mock_discover.return_value = [Path("/repo")]
+        mock_spawn.side_effect = codex_pool.InputAttachmentLimitExceededError(
+            "too many image attachments are queued for this turn"
+        )
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "follow-up"},
+        )
+
+        self.assertContains(
+            response,
+            "too many image attachments are queued for this turn",
+            status_code=400,
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client.thread_unarchive.assert_called_once_with("abc")
+        client.thread_archive.assert_called_once_with("abc")
+        mock_spawn.assert_called_once()
+        metadata.refresh_from_db()
+        self.assertTrue(metadata.codex_archived)
+        self.assertIsNotNone(metadata.codex_archived_at)
+        self.assertEqual(metadata.codex_path, "")
+        self.assertFalse(
+            ArchivedSessionTokenUsage.objects.filter(thread_id="abc").exists()
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
     def test_disk_resume_plan_turn_recovers_thread_model(
         self,
         mock_codex: MagicMock,
