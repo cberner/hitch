@@ -13921,6 +13921,48 @@ class SendMessageViewTests(TestCase):
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
+    def test_archived_follow_up_rearchives_when_default_model_missing(
+        self,
+        mock_codex: MagicMock,
+        mock_spawn: MagicMock,
+        mock_discover: MagicMock,
+    ) -> None:
+        metadata = SessionMetadata.objects.create(
+            thread_id="abc",
+            cwd="/repo",
+            codex_path="/tmp/archived_sessions/rollout-2026-06-07T05-43-07-abc.jsonl",
+            codex_archived=True,
+            codex_archived_at=timezone.now(),
+        )
+        ArchivedSessionTokenUsage.objects.create(thread_id="abc", total_tokens=100)
+        self._patch_codex(mock_codex, model=None, models=[])
+        mock_discover.return_value = [Path("/repo")]
+
+        response = self.client.post(
+            reverse("send_message", kwargs={"session_id": "abc"}),
+            data={"prompt": "Implement it.", "collaboration_mode": "default"},
+        )
+
+        self.assertContains(
+            response,
+            "default collaboration mode requires a model",
+            status_code=400,
+        )
+        client = mock_codex.return_value.__enter__.return_value
+        client.thread_unarchive.assert_called_once_with("abc")
+        client.thread_archive.assert_called_once_with("abc")
+        mock_spawn.assert_not_called()
+        metadata.refresh_from_db()
+        self.assertTrue(metadata.codex_archived)
+        self.assertIsNotNone(metadata.codex_archived_at)
+        self.assertEqual(metadata.codex_path, "")
+        self.assertFalse(
+            ArchivedSessionTokenUsage.objects.filter(thread_id="abc").exists()
+        )
+
+    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.views.codex_pool.spawn_turn")
+    @patch("hitch.main.views.Codex")
     def test_disk_resume_plan_turn_recovers_thread_model(
         self,
         mock_codex: MagicMock,

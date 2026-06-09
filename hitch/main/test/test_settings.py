@@ -146,6 +146,14 @@ def _clear_models_cache() -> None:
         caches._MODELS_REFRESH_IN_FLIGHT = set()
 
 
+def _clear_rate_limits_cache() -> None:
+    with caches._RATE_LIMITS_REFRESH_LOCK:
+        caches._RATE_LIMITS_CACHE_VALUE = None
+        caches._RATE_LIMITS_CACHE_HAS_VALUE = False
+        caches._RATE_LIMITS_CACHE_FETCHED_AT = None
+        caches._RATE_LIMITS_REFRESH_IN_FLIGHT = False
+
+
 def _seed_models_cache(
     models: list[SimpleNamespace], *, enable_memories: bool = False
 ) -> None:
@@ -996,12 +1004,14 @@ class SettingsPageRenderTests(TestCase):
             ],
         )
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.caches.Codex")
     def test_usage_page_hides_rate_limits_when_unsupported(
         self, mock_codex: MagicMock
     ) -> None:
         """Local-dev (ollama) and older Codex builds reject the rate-limits
         method; the usage page must still render with an empty state."""
+        _clear_rate_limits_cache()
+        self.addCleanup(_clear_rate_limits_cache)
         _configure_codex(
             mock_codex,
             models=[],
@@ -1022,13 +1032,15 @@ class SettingsPageRenderTests(TestCase):
         self.assertContains(response, "Usage unavailable.")
         self.assertNotContains(response, "% remaining")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.caches.Codex")
     def test_usage_page_hides_rate_limits_on_unexpected_exception(
         self, mock_codex: MagicMock
     ) -> None:
         """Non-Codex exceptions (pydantic ValidationError on a malformed
         wire payload, transport hiccups not wrapped as AppServerError) must
         also be swallowed so usage can show an empty state."""
+        _clear_rate_limits_cache()
+        self.addCleanup(_clear_rate_limits_cache)
         _configure_codex(
             mock_codex,
             models=[],
@@ -1047,12 +1059,14 @@ class SettingsPageRenderTests(TestCase):
         self.assertContains(response, "Usage unavailable.")
         self.assertNotContains(response, "% remaining")
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.caches.Codex")
     def test_usage_page_hides_rate_limits_when_both_windows_empty(
         self, mock_codex: MagicMock
     ) -> None:
         """An account that has no metered usage at all returns a snapshot
         with both windows unset; show the empty state under a valid heading."""
+        _clear_rate_limits_cache()
+        self.addCleanup(_clear_rate_limits_cache)
         _configure_codex(
             mock_codex,
             models=[],
