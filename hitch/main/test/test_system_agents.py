@@ -27,6 +27,7 @@ from hitch.main import (
     demo,
     gh_observations,
     pr_handoff,
+    qa_prompts,
     rate_limit,
     spec_critic_prompts,
     streaming,
@@ -3289,7 +3290,7 @@ class SpecCriticWorkflowTests(TestCase):
 
                 mock_spawn.assert_called_once()
                 prompt = mock_spawn.call_args.kwargs["prompt"]
-                gate = workflow.state.get(system_agents._QA_DESIGN_SYNTHESIS_STATE_KEY)
+                gate = workflow.state.get(qa_prompts._QA_DESIGN_SYNTHESIS_STATE_KEY)
                 if case.expect_gate:
                     self.assertIsNotNone(gate)
                     self.assertEqual(gate["triggered_at_iteration"], case.iteration + 1)
@@ -8349,7 +8350,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(run.error, "QA workflow paused for user steering")
         self.assertEqual(workflow.step, system_agents.STEP_USER_STEERING_RUNNING)
         self.assertEqual(
-            workflow.state[system_agents._QA_REVIEW_REVISION_STATE_KEY], 1
+            workflow.state[qa_prompts._QA_REVIEW_REVISION_STATE_KEY], 1
         )
         self.assertEqual(workflow.state["next_user_message_index"], 4)
         mock_spawn.assert_called_once()
@@ -8419,7 +8420,7 @@ class SpecCriticWorkflowTests(TestCase):
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_USER_STEERING_RUNNING,
-            state={system_agents._QA_REVIEW_REVISION_STATE_KEY: 1},
+            state={qa_prompts._QA_REVIEW_REVISION_STATE_KEY: 1},
         )
         instance = _instance(
             thread_id="main-thread",
@@ -8440,7 +8441,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(run.thread_id, "qa-thread")
         self.assertEqual(
             run.input["qa_review_revision"],
-            workflow.state[system_agents._QA_REVIEW_REVISION_STATE_KEY],
+            workflow.state[qa_prompts._QA_REVIEW_REVISION_STATE_KEY],
         )
 
     def test_recovered_qa_run_preserves_instance_review_revision(self) -> None:
@@ -8452,7 +8453,7 @@ class SpecCriticWorkflowTests(TestCase):
             step=system_agents.STEP_QA_RUNNING,
             state={
                 "open_pr_on_lgtm": False,
-                system_agents._QA_REVIEW_REVISION_STATE_KEY: 1,
+                qa_prompts._QA_REVIEW_REVISION_STATE_KEY: 1,
             },
         )
         instance = _instance(
@@ -8480,7 +8481,7 @@ class SpecCriticWorkflowTests(TestCase):
             cwd="/repo",
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_QA_RUNNING,
-            state={system_agents._QA_REVIEW_REVISION_STATE_KEY: 1},
+            state={qa_prompts._QA_REVIEW_REVISION_STATE_KEY: 1},
         )
         instance = _instance(
             thread_id="qa-thread",
