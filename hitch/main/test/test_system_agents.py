@@ -9358,7 +9358,7 @@ class AutonomousGoalWorkflowTests(TestCase):
 
         self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING)
         self.assertEqual(
-            workflow.state[system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY],
+            workflow.state[autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY],
             25000,
         )
         kwargs = mock_spawn.call_args.kwargs
@@ -11057,10 +11057,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         workflow.refresh_from_db()
         workflow.state = {
             **workflow.state,
-            system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY: (
+            autonomous_goal_prompts._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY: (
                 system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT
             ),
-            system_agents._AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY: {
+            autonomous_goal_prompts._AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY: {
                 "reason": "judge_confidence_below_threshold"
             },
         }
@@ -11081,11 +11081,11 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
         self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED)
         self.assertNotIn(
-            system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY,
+            autonomous_goal_prompts._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY,
             workflow.state,
         )
         self.assertNotIn(
-            system_agents._AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY,
+            autonomous_goal_prompts._AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY,
             workflow.state,
         )
         mock_cleanup.assert_called_once_with("/repo-worktree-1")
@@ -13303,7 +13303,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             state={
                 "autonomous_goal_id": autonomous_goal.pk,
                 "candidate_session_id": candidate_metadata.pk,
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
             },
         )
         instance = _instance(
@@ -13366,7 +13366,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(mock_spawn.call_args.kwargs["cwd"], "/repo")
         self.assertEqual(
             workflow.state[
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
             ],
             400,
         )
@@ -13466,8 +13466,8 @@ class AutonomousGoalWorkflowTests(TestCase):
                 system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {
                     system_agents._AUTONOMOUS_GOAL_CANDIDATE_RETRY_KIND: 1
                 },
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 400,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 400,
                 system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY: {
                     "candidate-thread-1": 400,
                 },
@@ -13511,21 +13511,21 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         self.assertEqual(
             workflow.state[
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
             ],
             400,
         )
         self.assertEqual(
-            workflow.state[system_agents._AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY],
+            workflow.state[autonomous_goal_prompts._AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY],
             1,
         )
         self.assertEqual(
             workflow.state[
-                system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY
             ],
             1,
         )
-        failure = workflow.state[system_agents._AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY]
+        failure = workflow.state[autonomous_goal_prompts._AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY]
         self.assertEqual(failure["reason"], "candidate_failed")
         self.assertIn("worker process exited", failure["error"])
         retry_run = SystemAgentRun.objects.get(instance=retry_instance)
@@ -13899,8 +13899,8 @@ class AutonomousGoalWorkflowTests(TestCase):
                     ),
                     "relevant_files": ["hitch/main/rollout.py"],
                 },
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 500,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 500,
                 system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {
                     system_agents._AUTONOMOUS_GOAL_JUDGE_RETRY_KIND: 1
                 },
@@ -14918,8 +14918,8 @@ class AutonomousGoalWorkflowTests(TestCase):
             main_thread_id="autonomous-goal:1",
             cwd="/repo",
             state={
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
-                system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY: 1,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY: 1,
             },
         )
         candidate = _instance(
@@ -14948,7 +14948,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             300,
         )
         self.assertNotIn(
-            system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY,
+            autonomous_goal_prompts._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY,
             workflow.state,
         )
         self.assertEqual(
@@ -14972,7 +14972,7 @@ class AutonomousGoalWorkflowTests(TestCase):
 
         self.assertEqual(
             workflow.state[
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
             ],
             650,
         )
@@ -14994,7 +14994,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             status=SystemWorkflow.STATUS_RUNNING,
             step=system_agents.STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING,
             state={
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
             },
         )
         instance = _instance(
@@ -15015,7 +15015,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
 
         self.assertNotIn(
-            system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY,
+            autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY,
             workflow.state,
         )
         self.assertTrue(
@@ -15023,7 +15023,7 @@ class AutonomousGoalWorkflowTests(TestCase):
                 workflow, tokens_used=None, token_delta=0
             )
         )
-        workflow.state[system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY] = (
+        workflow.state[autonomous_goal_prompts._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY] = (
             system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT
         )
         self.assertFalse(
@@ -15056,7 +15056,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             )
         )
         self.assertEqual(
-            system_agents._format_autonomous_goal_last_failure_context(workflow),
+            autonomous_goal_prompts._format_autonomous_goal_last_failure_context(workflow),
             "(none)",
         )
 
@@ -15086,7 +15086,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             state={
                 "autonomous_goal_id": autonomous_goal.pk,
                 "candidate_session_id": candidate_metadata.pk,
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
             },
         )
         instance = _instance(
@@ -15147,7 +15147,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(
             workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING
         )
-        failure = workflow.state[system_agents._AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY]
+        failure = workflow.state[autonomous_goal_prompts._AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY]
         self.assertEqual(failure["reason"], "candidate_failed")
         self.assertEqual(failure["tokens_used"], 350)
         self.assertEqual(failure["error"], "autonomous goal candidate output was not valid JSON")
@@ -15183,7 +15183,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             state={
                 "autonomous_goal_id": autonomous_goal.pk,
                 "candidate_session_id": candidate_metadata.pk,
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 300,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 300,
             },
         )
         instance = _instance(
@@ -15233,7 +15233,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
         self.assertEqual(
             workflow.state[
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
             ],
             350,
         )
@@ -15275,8 +15275,8 @@ class AutonomousGoalWorkflowTests(TestCase):
             state={
                 "autonomous_goal_id": autonomous_goal.pk,
                 "candidate_session_id": candidate_metadata.pk,
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 350,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 350,
                 system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY: {
                     "candidate-thread": 350,
                 },
@@ -15340,7 +15340,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         self.assertEqual(
             workflow.state[
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
             ],
             350,
         )
@@ -15351,12 +15351,12 @@ class AutonomousGoalWorkflowTests(TestCase):
             {"candidate-thread": 350},
         )
         self.assertEqual(
-            workflow.state[system_agents._AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY],
+            workflow.state[autonomous_goal_prompts._AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY],
             1,
         )
         self.assertEqual(
             workflow.state[
-                system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY
             ],
             1,
         )
@@ -15393,12 +15393,12 @@ class AutonomousGoalWorkflowTests(TestCase):
             state={
                 "autonomous_goal_id": autonomous_goal.pk,
                 "candidate_session_id": candidate_metadata.pk,
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 350,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 350,
                 system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY: {
                     "candidate-thread": 350,
                 },
-                system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY: (
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY: (
                     system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT
                 ),
             },
@@ -15450,7 +15450,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
         self.assertEqual(
             workflow.state[
-                system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY
             ],
             system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT,
         )
@@ -15487,7 +15487,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             state={
                 "autonomous_goal_id": autonomous_goal.pk,
                 "candidate_session_id": candidate_metadata.pk,
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
             },
         )
         instance = _instance(
@@ -15533,7 +15533,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING
         )
         self.assertNotIn("candidate", workflow.state)
-        failure = workflow.state[system_agents._AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY]
+        failure = workflow.state[autonomous_goal_prompts._AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY]
         self.assertEqual(failure["reason"], "candidate_no_proposal")
         self.assertEqual(failure["tokens_used"], 250)
         self.assertEqual(failure["message"], "No safe target found this time.")
@@ -15578,7 +15578,7 @@ class AutonomousGoalWorkflowTests(TestCase):
                 "judge_session_id": judge_metadata.pk,
                 "session_cwd": "/repo-worktree",
                 "web_search_mode": AutonomousGoal.WEB_SEARCH_LIVE,
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
                 "candidate": {
                     "title": "Maybe add tests",
                     "summary": "Add a broad test sweep.",
@@ -15629,17 +15629,17 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         self.assertEqual(
             workflow.state[
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
             ],
             400,
         )
         self.assertEqual(
-            workflow.state[system_agents._AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY],
+            workflow.state[autonomous_goal_prompts._AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY],
             1,
         )
         self.assertNotIn("candidate", workflow.state)
         self.assertNotIn("judge_session_id", workflow.state)
-        failure = workflow.state[system_agents._AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY]
+        failure = workflow.state[autonomous_goal_prompts._AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY]
         self.assertEqual(failure["reason"], "judge_confidence_below_threshold")
         self.assertEqual(failure["tokens_used"], 400)
         self.assertIn("too narrow", failure["judgment"]["rationale"])
@@ -15681,7 +15681,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
             state={
                 "autonomous_goal_id": autonomous_goal.pk,
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
             },
         )
 
@@ -15728,9 +15728,9 @@ class AutonomousGoalWorkflowTests(TestCase):
             main_thread_id="autonomous-goal:1",
             cwd="/repo",
             state={
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 450,
-                system_agents._AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY: 2,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 450,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY: 2,
             },
         )
         existing = ProposedSession.objects.create(

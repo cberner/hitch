@@ -46,6 +46,7 @@ from openai_codex.generated.v2_all import (
 )
 
 from hitch.main import (
+    autonomous_goal_prompts,
     caches,
     codex_events,
     codex_pool,
@@ -3137,7 +3138,7 @@ def _autonomous_goal_running_token_count(
     workflow: SystemWorkflow, instance: CodexInstance
 ) -> int:
     persisted_tokens = _workflow_state_int(
-        workflow, system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
+        workflow, autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
     )
     current_tokens = codex_events.latest_goal_tokens_for_instance(instance)
     if current_tokens is None:
@@ -3170,7 +3171,7 @@ def _autonomous_goal_run_tokens_used_display(
     tokens = running_tokens_by_workflow_id.get(
         workflow.pk,
         _workflow_state_int(
-            workflow, system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
+            workflow, autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY
         ),
     )
     return f"{token_usage._format_token_count(tokens)} tokens"
