@@ -13,7 +13,7 @@ from django.utils import timezone
 from openai_codex.errors import MethodNotFoundError
 from openai_codex.generated.v2_all import ReasoningEffort
 
-from hitch.main import coding_agents, context_processors, settings_cookies, views
+from hitch.main import caches, coding_agents, context_processors, settings_cookies, views
 from hitch.main.models import GlobalSettings, Project, UserSettings
 from hitch.settings import common as common_settings
 
@@ -134,19 +134,19 @@ def _model(
 
 
 def _clear_models_cache() -> None:
-    with views._MODELS_REFRESH_LOCK:
-        views._MODELS_CACHE_VALUE = {}
-        views._MODELS_CACHE_FETCHED_AT = {}
-        views._MODELS_REFRESH_IN_FLIGHT = set()
+    with caches._MODELS_REFRESH_LOCK:
+        caches._MODELS_CACHE_VALUE = {}
+        caches._MODELS_CACHE_FETCHED_AT = {}
+        caches._MODELS_REFRESH_IN_FLIGHT = set()
 
 
 def _seed_models_cache(
     models: list[SimpleNamespace], *, enable_memories: bool = False
 ) -> None:
-    with views._MODELS_REFRESH_LOCK:
-        views._MODELS_CACHE_VALUE[enable_memories] = list(models)
-        views._MODELS_CACHE_FETCHED_AT[enable_memories] = timezone.now()
-        views._MODELS_REFRESH_IN_FLIGHT.discard(enable_memories)
+    with caches._MODELS_REFRESH_LOCK:
+        caches._MODELS_CACHE_VALUE[enable_memories] = list(models)
+        caches._MODELS_CACHE_FETCHED_AT[enable_memories] = timezone.now()
+        caches._MODELS_REFRESH_IN_FLIGHT.discard(enable_memories)
 
 
 def _configure_codex(
@@ -294,72 +294,72 @@ class ServerRevisionContextTests(SimpleTestCase):
 class UsageModelCacheTests(SimpleTestCase):
     @override
     def tearDown(self) -> None:
-        with views._MODELS_REFRESH_LOCK:
-            views._MODELS_CACHE_VALUE = {}
-            views._MODELS_CACHE_FETCHED_AT = {}
-            views._MODELS_REFRESH_IN_FLIGHT = set()
+        with caches._MODELS_REFRESH_LOCK:
+            caches._MODELS_CACHE_VALUE = {}
+            caches._MODELS_CACHE_FETCHED_AT = {}
+            caches._MODELS_REFRESH_IN_FLIGHT = set()
         super().tearDown()
 
     def test_failed_initial_model_refresh_remains_retryable(self) -> None:
-        with views._MODELS_REFRESH_LOCK:
-            views._MODELS_CACHE_VALUE = {}
-            views._MODELS_CACHE_FETCHED_AT = {}
-            views._MODELS_REFRESH_IN_FLIGHT = {False}
+        with caches._MODELS_REFRESH_LOCK:
+            caches._MODELS_CACHE_VALUE = {}
+            caches._MODELS_CACHE_FETCHED_AT = {}
+            caches._MODELS_REFRESH_IN_FLIGHT = {False}
 
         with (
-            patch("hitch.main.views.codex_pool.app_server_config", return_value=object()),
-            patch("hitch.main.views.Codex", side_effect=RuntimeError("codex down")),
-            patch("hitch.main.views.logger.exception") as log_exception,
+            patch("hitch.main.caches.codex_pool.app_server_config", return_value=object()),
+            patch("hitch.main.caches.Codex", side_effect=RuntimeError("codex down")),
+            patch("hitch.main.caches.logger.exception") as log_exception,
         ):
-            views._refresh_models_cache_best_effort(enable_memories=False)
+            caches._refresh_models_cache_best_effort(enable_memories=False)
 
         log_exception.assert_called_once()
-        with views._MODELS_REFRESH_LOCK:
-            self.assertEqual(views._MODELS_CACHE_VALUE, {})
-            self.assertEqual(views._MODELS_CACHE_FETCHED_AT, {})
-            self.assertNotIn(False, views._MODELS_REFRESH_IN_FLIGHT)
-        self.assertTrue(views._models_refresh_needed(enable_memories=False))
+        with caches._MODELS_REFRESH_LOCK:
+            self.assertEqual(caches._MODELS_CACHE_VALUE, {})
+            self.assertEqual(caches._MODELS_CACHE_FETCHED_AT, {})
+            self.assertNotIn(False, caches._MODELS_REFRESH_IN_FLIGHT)
+        self.assertTrue(caches._models_refresh_needed(enable_memories=False))
 
-    @patch("hitch.main.views.codex_pool.app_server_config", return_value=object())
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.caches.codex_pool.app_server_config", return_value=object())
+    @patch("hitch.main.caches.Codex")
     def test_successful_empty_model_refresh_marks_cache_fresh(
         self, mock_codex: MagicMock, _mock_config: MagicMock
     ) -> None:
         ctx = mock_codex.return_value.__enter__.return_value
         ctx.models.return_value.data = []
 
-        views._refresh_models_cache_best_effort(enable_memories=False)
+        caches._refresh_models_cache_best_effort(enable_memories=False)
 
-        self.assertEqual(views._cached_models_data(enable_memories=False), [])
-        with views._MODELS_REFRESH_LOCK:
-            self.assertIn(False, views._MODELS_CACHE_FETCHED_AT)
-            self.assertNotIn(False, views._MODELS_REFRESH_IN_FLIGHT)
-        self.assertFalse(views._models_refresh_needed(enable_memories=False))
+        self.assertEqual(caches._cached_models_data(enable_memories=False), [])
+        with caches._MODELS_REFRESH_LOCK:
+            self.assertIn(False, caches._MODELS_CACHE_FETCHED_AT)
+            self.assertNotIn(False, caches._MODELS_REFRESH_IN_FLIGHT)
+        self.assertFalse(caches._models_refresh_needed(enable_memories=False))
 
     def test_model_cache_freshness_is_keyed_by_memories_mode(self) -> None:
         models = [_model("gpt-5", is_default=True)]
-        with views._MODELS_REFRESH_LOCK:
-            views._MODELS_CACHE_VALUE = {False: models}
-            views._MODELS_CACHE_FETCHED_AT = {False: timezone.now()}
-            views._MODELS_REFRESH_IN_FLIGHT = set()
+        with caches._MODELS_REFRESH_LOCK:
+            caches._MODELS_CACHE_VALUE = {False: models}
+            caches._MODELS_CACHE_FETCHED_AT = {False: timezone.now()}
+            caches._MODELS_REFRESH_IN_FLIGHT = set()
 
         self.assertEqual(
-            views._cached_models_data(enable_memories=False),
+            caches._cached_models_data(enable_memories=False),
             models,
         )
-        self.assertEqual(views._cached_models_data(enable_memories=True), [])
-        self.assertFalse(views._models_refresh_needed(enable_memories=False))
-        self.assertTrue(views._models_refresh_needed(enable_memories=True))
+        self.assertEqual(caches._cached_models_data(enable_memories=True), [])
+        self.assertFalse(caches._models_refresh_needed(enable_memories=False))
+        self.assertTrue(caches._models_refresh_needed(enable_memories=True))
 
 
 class UsageRateLimitCacheTests(SimpleTestCase):
     @override
     def tearDown(self) -> None:
-        with views._RATE_LIMITS_REFRESH_LOCK:
-            views._RATE_LIMITS_CACHE_VALUE = None
-            views._RATE_LIMITS_CACHE_HAS_VALUE = False
-            views._RATE_LIMITS_CACHE_FETCHED_AT = None
-            views._RATE_LIMITS_REFRESH_IN_FLIGHT = False
+        with caches._RATE_LIMITS_REFRESH_LOCK:
+            caches._RATE_LIMITS_CACHE_VALUE = None
+            caches._RATE_LIMITS_CACHE_HAS_VALUE = False
+            caches._RATE_LIMITS_CACHE_FETCHED_AT = None
+            caches._RATE_LIMITS_REFRESH_IN_FLIGHT = False
         super().tearDown()
 
     def test_empty_rate_limit_refresh_preserves_existing_snapshot(self) -> None:
@@ -376,24 +376,24 @@ class UsageRateLimitCacheTests(SimpleTestCase):
             "limit_name": None,
             "plan_type": "plus",
         }
-        with views._RATE_LIMITS_REFRESH_LOCK:
-            views._RATE_LIMITS_CACHE_VALUE = snapshot
-            views._RATE_LIMITS_CACHE_HAS_VALUE = True
-            views._RATE_LIMITS_CACHE_FETCHED_AT = None
-            views._RATE_LIMITS_REFRESH_IN_FLIGHT = True
+        with caches._RATE_LIMITS_REFRESH_LOCK:
+            caches._RATE_LIMITS_CACHE_VALUE = snapshot
+            caches._RATE_LIMITS_CACHE_HAS_VALUE = True
+            caches._RATE_LIMITS_CACHE_FETCHED_AT = None
+            caches._RATE_LIMITS_REFRESH_IN_FLIGHT = True
 
         with (
-            patch("hitch.main.views.codex_pool.app_server_config", return_value=object()),
-            patch("hitch.main.views.Codex"),
-            patch("hitch.main.views._fetch_rate_limits", return_value=None),
+            patch("hitch.main.caches.codex_pool.app_server_config", return_value=object()),
+            patch("hitch.main.caches.Codex"),
+            patch("hitch.main.caches._fetch_rate_limits", return_value=None),
         ):
-            views._refresh_rate_limits_cache_best_effort(enable_memories=False)
+            caches._refresh_rate_limits_cache_best_effort(enable_memories=False)
 
-        self.assertEqual(views._cached_rate_limits(), snapshot)
-        with views._RATE_LIMITS_REFRESH_LOCK:
-            self.assertTrue(views._RATE_LIMITS_CACHE_HAS_VALUE)
-            self.assertIsNotNone(views._RATE_LIMITS_CACHE_FETCHED_AT)
-            self.assertFalse(views._RATE_LIMITS_REFRESH_IN_FLIGHT)
+        self.assertEqual(caches._cached_rate_limits(), snapshot)
+        with caches._RATE_LIMITS_REFRESH_LOCK:
+            self.assertTrue(caches._RATE_LIMITS_CACHE_HAS_VALUE)
+            self.assertIsNotNone(caches._RATE_LIMITS_CACHE_FETCHED_AT)
+            self.assertFalse(caches._RATE_LIMITS_REFRESH_IN_FLIGHT)
 
 
 class SettingsPageRenderTests(TestCase):
@@ -933,9 +933,9 @@ class SettingsPageRenderTests(TestCase):
         )
 
         with (
-            patch("hitch.main.views._cached_rate_limits", return_value=rate_limits),
-            patch("hitch.main.views._start_models_refresh_thread"),
-            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            patch("hitch.main.caches._cached_rate_limits", return_value=rate_limits),
+            patch("hitch.main.caches._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_rate_limits_refresh_thread"),
         ):
             response = self.client.get(reverse("usage"))
 
@@ -965,9 +965,9 @@ class SettingsPageRenderTests(TestCase):
         models = [_model("gpt-5", is_default=True, default_effort="medium")]
 
         with (
-            patch("hitch.main.views._cached_models_data", return_value=models),
-            patch("hitch.main.views._start_models_refresh_thread"),
-            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            patch("hitch.main.caches._cached_models_data", return_value=models),
+            patch("hitch.main.caches._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             patch("hitch.main.views._start_usage_session_index_refresh_thread"),
         ):
             response = self.client.get(reverse("usage"))
@@ -1005,8 +1005,8 @@ class SettingsPageRenderTests(TestCase):
         )
 
         with (
-            patch("hitch.main.views._start_models_refresh_thread"),
-            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            patch("hitch.main.caches._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_rate_limits_refresh_thread"),
         ):
             response = self.client.get(reverse("usage"))
 
@@ -1030,8 +1030,8 @@ class SettingsPageRenderTests(TestCase):
         )
 
         with (
-            patch("hitch.main.views._start_models_refresh_thread"),
-            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            patch("hitch.main.caches._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_rate_limits_refresh_thread"),
         ):
             response = self.client.get(reverse("usage"))
 
@@ -1054,8 +1054,8 @@ class SettingsPageRenderTests(TestCase):
         )
 
         with (
-            patch("hitch.main.views._start_models_refresh_thread"),
-            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            patch("hitch.main.caches._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_rate_limits_refresh_thread"),
         ):
             response = self.client.get(reverse("usage"))
 

@@ -547,8 +547,8 @@ class SessionViewTests(TestCase):
         )
 
         with (
-            patch("hitch.main.views._cached_models_data", return_value=models),
-            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.caches._cached_models_data", return_value=models),
+            patch("hitch.main.caches._start_models_refresh_thread"),
         ):
             response = cast(HttpResponse, self.client.get(reverse("update_settings")))
 
