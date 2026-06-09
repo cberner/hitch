@@ -58,13 +58,13 @@ from hitch.main import (
     demo,
     disk_cleanup,
     health,
+    pr_stage,
     rollout,
     session_index,
     session_stage,
     streaming,
     system_agents,
 )
-from hitch.main.db import run_ignoring_database_locks
 from hitch.main.diffs import build_worktree_diff
 from hitch.main.entry_render import (
     collapse_flat_entries,
@@ -2326,7 +2326,7 @@ def _refresh_session_pr_stage(session_id: str) -> None:
     pr_observation = _pr_observation_result_for_rollout_path(rollout_path)
     main_updated_at = metadata.codex_updated_at if metadata is not None else None
     stage_pr_workflow = _workflow_after_main_lifecycle(
-        _latest_pr_workflow_for_thread(session_id),
+        pr_stage._latest_pr_workflow_for_thread(session_id),
         pr_observation,
         main_updated_at=main_updated_at,
     )
@@ -2350,19 +2350,19 @@ def _refresh_session_pr_stage(session_id: str) -> None:
         attempted_at=metadata.derived_stage_pr_refresh_attempted_at,
     ):
         return
-    _mark_cached_pr_stage_refresh_attempt(session_id)
+    pr_stage._mark_cached_pr_stage_refresh_attempt(session_id)
     refreshed = system_agents.refreshed_pr_snapshot_for_stage(
         cwd=metadata.cwd, snapshot=snapshot
     )
     stage = session_stage.derive_stage(pr_snapshot=refreshed)
-    _update_cached_stage_best_effort(session_id, stage, rollout_state.mtime_ns)
+    pr_stage._update_cached_stage_best_effort(session_id, stage, rollout_state.mtime_ns)
 
 
 def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
     thread_ids = [
         session["id"] for session in sessions if isinstance(session.get("id"), str)
     ]
-    workflows_by_thread_id = _latest_stage_workflows_by_thread_id(thread_ids)
+    workflows_by_thread_id = pr_stage._latest_stage_workflows_by_thread_id(thread_ids)
     active_instances_by_thread_id = _active_instances_by_thread_id(thread_ids)
     waiting_thread_ids = _thread_ids_awaiting_input(thread_ids)
     pr_stage_refreshes_remaining = _SESSION_LIST_PR_STAGE_REFRESH_LIMIT
@@ -2504,7 +2504,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             and not awaiting_user_input
             and not refresh_due
         ):
-            _update_cached_stage_best_effort(
+            pr_stage._update_cached_stage_best_effort(
                 session_id,
                 stage,
                 rollout_state.mtime_ns if rollout_state is not None else 0,
@@ -2594,28 +2594,6 @@ def _pr_number_from_snapshot(snapshot: Mapping[str, Any] | None) -> int | None:
     return identity[1] if identity is not None else None
 
 
-def _latest_stage_workflows_by_thread_id(
-    thread_ids: Iterable[str],
-) -> dict[str, SystemWorkflow]:
-    ids = [thread_id for thread_id in dict.fromkeys(thread_ids) if thread_id]
-    if not ids:
-        return {}
-    workflows = (
-        SystemWorkflow.objects.filter(
-            main_thread_id__in=ids,
-        )
-        .filter(
-            Q(kind=SystemWorkflow.KIND_PR_QA)
-            | Q(status=SystemWorkflow.STATUS_RUNNING)
-        )
-        .order_by("main_thread_id", "-updated_at", "-pk")
-    )
-    by_thread_id: dict[str, SystemWorkflow] = {}
-    for workflow in workflows:
-        by_thread_id.setdefault(workflow.main_thread_id, workflow)
-    return by_thread_id
-
-
 def _thread_ids_awaiting_input(thread_ids: Iterable[str]) -> set[str]:
     ids = [thread_id for thread_id in dict.fromkeys(thread_ids) if thread_id]
     if not ids:
@@ -2690,47 +2668,6 @@ def _cached_stage_for_session_row(
         cached
         if session.get("stage_cache_mtime_ns") == rollout_state.mtime_ns
         else None
-    )
-
-
-def _update_cached_stage(
-    session_id: str, stage: session_stage.SessionStage, source_mtime_ns: int
-) -> None:
-    SessionMetadata.objects.filter(thread_id=session_id).exclude(
-        derived_stage=stage.key,
-        derived_stage_source_mtime_ns=source_mtime_ns,
-    ).update(
-        derived_stage=stage.key,
-        derived_stage_source_mtime_ns=source_mtime_ns,
-    )
-
-
-def _update_cached_stage_best_effort(
-    session_id: str, stage: session_stage.SessionStage, source_mtime_ns: int
-) -> None:
-    run_ignoring_database_locks(
-        lambda: _update_cached_stage(session_id, stage, source_mtime_ns),
-        description="session stage cache update",
-    )
-
-
-def _mark_cached_pr_stage_refresh_attempt(session_id: str) -> None:
-    run_ignoring_database_locks(
-        lambda: SessionMetadata.objects.filter(thread_id=session_id).update(
-            derived_stage_pr_refresh_attempted_at=timezone.now()
-        ),
-        description="PR stage refresh backoff",
-    )
-
-
-def _latest_pr_workflow_for_thread(session_id: str) -> SystemWorkflow | None:
-    return (
-        SystemWorkflow.objects.filter(
-            kind=SystemWorkflow.KIND_PR_QA,
-            main_thread_id=session_id,
-        )
-        .order_by("-updated_at", "-pk")
-        .first()
     )
 
 
@@ -4608,7 +4545,7 @@ def _render_session_detail(
         if rollout_data is not None
         else _pr_observation_result_for_thread(thread)
     )
-    latest_pr_workflow = _latest_pr_workflow_for_thread(session_id)
+    latest_pr_workflow = pr_stage._latest_pr_workflow_for_thread(session_id)
     stage_workflow = active_system_workflow or latest_pr_workflow
     stage_pr_workflow = (
         active_system_workflow
@@ -4712,7 +4649,7 @@ def _render_session_detail(
             # Best-effort like the session-list path: this runs while rendering
             # the session detail page, so a contended write lock must skip the
             # cache refresh rather than 500 the page (the next render retries).
-            _update_cached_stage_best_effort(session_id, stage, stage_cache_mtime_ns)
+            pr_stage._update_cached_stage_best_effort(session_id, stage, stage_cache_mtime_ns)
         stage_context = dict(stage.as_context())
         if stage_refreshing:
             stage_context["refreshing"] = True
@@ -9701,7 +9638,7 @@ def _current_pr_url_for_thread(
 def _fix_pr_url_for_thread(session_id: str, thread: Any) -> str | None:
     pr_observation = _pr_observation_result_for_thread(thread)
     stage_pr_workflow = _workflow_after_main_lifecycle(
-        _latest_pr_workflow_for_thread(session_id),
+        pr_stage._latest_pr_workflow_for_thread(session_id),
         pr_observation,
         main_updated_at=getattr(thread, "updated_at", None),
     )
