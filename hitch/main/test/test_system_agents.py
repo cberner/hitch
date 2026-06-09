@@ -27,6 +27,7 @@ from hitch.main import (
     demo,
     gh_observations,
     pr_handoff,
+    pr_monitor_format,
     qa_prompts,
     rate_limit,
     spec_critic_prompts,
@@ -4903,7 +4904,7 @@ class SpecCriticWorkflowTests(TestCase):
         )
 
         prompt = system_agents._pr_followup_monitor_prompt(workflow, {}, observation)
-        formatted = system_agents._pr_handoff_for_monitor_schema(observation["pr"])
+        formatted = pr_monitor_format._pr_handoff_for_monitor_schema(observation["pr"])
 
         self.assertIsNone(formatted["ci_status"])
         self.assertEqual(
@@ -8670,7 +8671,7 @@ class SpecCriticWorkflowTests(TestCase):
             }
         )
         statuses = {gate["key"]: gate["status"] for gate in gates}
-        feedback = system_agents._pr_gate_feedback(gates)
+        feedback = pr_monitor_format._pr_gate_feedback(gates)
 
         self.assertEqual(statuses["merge_conflicts"], "blocked")
         self.assertEqual(statuses["review"], "blocked")
@@ -8773,7 +8774,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(statuses["merge_conflicts"], "passed")
         self.assertEqual(statuses["review"], "pending")
         self.assertEqual(statuses["ci"], "pending")
-        self.assertEqual(system_agents._pr_gate_feedback(gates), "")
+        self.assertEqual(pr_monitor_format._pr_gate_feedback(gates), "")
 
     def test_pr_gate_evaluator_requires_observed_clear_review_threads(self) -> None:
         gates = gh_observations._evaluate_pr_gates(
@@ -8842,7 +8843,7 @@ class SpecCriticWorkflowTests(TestCase):
             }
         )
         statuses = {gate["key"]: gate["status"] for gate in gates}
-        feedback = system_agents._pr_gate_feedback(gates)
+        feedback = pr_monitor_format._pr_gate_feedback(gates)
 
         self.assertEqual(statuses["review"], "blocked")
         self.assertIn("draft", feedback)
