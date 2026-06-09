@@ -10,15 +10,14 @@ import re
 import threading
 import uuid
 from collections import OrderedDict
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, DecimalException
-from functools import wraps
 from pathlib import Path
 from stat import S_ISREG
-from typing import Any, Literal, NamedTuple, override
+from typing import Any, Literal, NamedTuple
 from urllib.parse import urlencode
 
 from django.conf import settings as django_settings
@@ -26,9 +25,7 @@ from django.contrib.auth import login as auth_login
 from django.contrib.auth import logout as auth_logout
 from django.contrib.auth.forms import AuthenticationForm, UserCreationForm
 from django.core import signing
-from django.core.exceptions import SuspiciousOperation
 from django.core.files.uploadedfile import UploadedFile
-from django.core.files.uploadhandler import FileUploadHandler
 from django.db import IntegrityError, close_old_connections, transaction
 from django.db.models import Exists, OuterRef, Q, QuerySet
 from django.http import (
@@ -43,7 +40,7 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
-from django.views.decorators.csrf import csrf_exempt, csrf_protect
+from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 from openai_codex import AppServerError, Codex
 from openai_codex.errors import InvalidRequestError
@@ -78,6 +75,13 @@ from hitch.main.entry_render import (
     user_message_text,
 )
 from hitch.main.formatting import render_markdown
+from hitch.main.input_images import (
+    _INPUT_IMAGE_ACCEPT,
+    _INPUT_IMAGE_FIELD,
+    _INPUT_IMAGE_MAX_BYTES,
+    _INPUT_IMAGE_MAX_COUNT,
+    _limit_input_image_uploads,
+)
 from hitch.main.local_merges import local_branch_names
 from hitch.main.models import (
     ApprovalRequest,
@@ -491,104 +495,8 @@ _ARCHIVED_SESSIONS_ANCESTOR_DEPTH = 5
 _ROLLOUT_FILENAME_RE = re.compile(
     r"^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(?P<thread_id>.+)\.jsonl$"
 )
-_INPUT_IMAGE_FIELD = "input_images"
-_INPUT_IMAGE_MAX_COUNT = 4
-_INPUT_IMAGE_MAX_BYTES = 20 * 1024 * 1024
-_INPUT_IMAGE_MAX_REQUEST_BYTES = (
-    _INPUT_IMAGE_MAX_COUNT * _INPUT_IMAGE_MAX_BYTES + 1024 * 1024
-)
-_INPUT_IMAGE_ACCEPT = "image/png,image/jpeg,image/gif,image/webp"
 _MINUTES_PER_HOUR = 60
 _MINUTES_PER_DAY = 24 * _MINUTES_PER_HOUR
-
-
-class _InputImageLimitUploadHandler(FileUploadHandler):
-    def __init__(self, request: HttpRequest | None = None) -> None:
-        super().__init__(request)
-        self._input_image_count = 0
-        self._current_input_image_bytes = 0
-        self._tracking_input_image = False
-
-    @override
-    def new_file(
-        self,
-        field_name: str,
-        file_name: str,
-        content_type: str,
-        content_length: int | None,
-        charset: str | None = None,
-        content_type_extra: dict[str, bytes] | None = None,
-    ) -> None:
-        super().new_file(
-            field_name,
-            file_name,
-            content_type,
-            content_length,
-            charset,
-            content_type_extra,
-        )
-        self._tracking_input_image = field_name == _INPUT_IMAGE_FIELD
-        self._current_input_image_bytes = 0
-        if not self._tracking_input_image:
-            return
-        self._input_image_count += 1
-        if self._input_image_count > _INPUT_IMAGE_MAX_COUNT:
-            raise SuspiciousOperation(
-                f"at most {_INPUT_IMAGE_MAX_COUNT} image attachments are allowed"
-            )
-        if content_length is not None and content_length > _INPUT_IMAGE_MAX_BYTES:
-            raise SuspiciousOperation("image attachment is too large")
-
-    @override
-    def receive_data_chunk(self, raw_data: bytes, _start: int) -> bytes:
-        if self._tracking_input_image:
-            self._current_input_image_bytes += len(raw_data)
-            if self._current_input_image_bytes > _INPUT_IMAGE_MAX_BYTES:
-                raise SuspiciousOperation("image attachment is too large")
-        return raw_data
-
-    @override
-    def file_complete(self, _file_size: int) -> UploadedFile | None:
-        return None
-
-
-def _limit_input_image_uploads(
-    view_func: Callable[..., HttpResponse],
-) -> Callable[..., HttpResponse]:
-    protected_view = csrf_protect(view_func)
-
-    @csrf_exempt
-    @wraps(view_func)
-    def wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
-        if error := _input_image_request_size_error(request):
-            return HttpResponseBadRequest(error)
-        content_type = (
-            request.content_type or request.META.get("CONTENT_TYPE", "")
-        ).lower()
-        if request.method == "POST" and content_type.startswith("multipart/"):
-            request.upload_handlers.insert(0, _InputImageLimitUploadHandler(request))
-        try:
-            return protected_view(request, *args, **kwargs)
-        except SuspiciousOperation as exc:
-            message = str(exc)
-            if message.startswith(("image attachment", "at most ")):
-                return HttpResponseBadRequest(message)
-            raise
-
-    return wrapper
-
-
-def _input_image_request_size_error(request: HttpRequest) -> str | None:
-    raw_content_length = request.META.get("CONTENT_LENGTH")
-    if not raw_content_length:
-        return None
-    try:
-        content_length = int(raw_content_length)
-    except ValueError:
-        return None
-    if content_length > _INPUT_IMAGE_MAX_REQUEST_BYTES:
-        return "image attachments are too large"
-    return None
 
 
 # Server-side cap on user-supplied thread names. Matches the `maxlength` we
