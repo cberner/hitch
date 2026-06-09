@@ -20,7 +20,14 @@ from openai_codex.generated.v2_all import (
     TurnStatus,
 )
 
-from hitch.main import codex_events, demo, rate_limit, streaming, system_agents
+from hitch.main import (
+    codex_events,
+    demo,
+    pr_handoff,
+    rate_limit,
+    streaming,
+    system_agents,
+)
 from hitch.main.local_merges import (
     AutoMergeReviewPatch,
     LocalBranchMergeError,
@@ -2177,7 +2184,7 @@ class SpecCriticWorkflowTests(TestCase):
         _assert_response_schema_objects_are_strict(self, schema)
         self.assertEqual(schema["properties"]["status"]["enum"], ["blocked", "terminal"])
         pr_schema = schema["properties"]["pr"]
-        self.assertEqual(pr_schema["required"], list(system_agents._PR_HANDOFF_FIELDS))
+        self.assertEqual(pr_schema["required"], list(pr_handoff._PR_HANDOFF_FIELDS))
         self.assertEqual(pr_schema["properties"]["url"]["type"], ["string", "null"])
         self.assertEqual(
             pr_schema["properties"]["pr_number"]["type"], ["integer", "null"]
@@ -2194,7 +2201,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(structured_schema["additionalProperties"], False)
         self.assertEqual(
             structured_schema["required"],
-            list(system_agents._PR_SAFE_LIST_ITEM_FIELDS),
+            list(pr_handoff._PR_SAFE_LIST_ITEM_FIELDS),
         )
         self.assertEqual(
             pr_schema["properties"]["ci_status"]["enum"],
@@ -4896,7 +4903,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIsNone(formatted["ci_status"])
         self.assertEqual(
             set(formatted["failing_jobs"][0]),
-            set(system_agents._PR_SAFE_LIST_ITEM_FIELDS),
+            set(pr_handoff._PR_SAFE_LIST_ITEM_FIELDS),
         )
         self.assertEqual(formatted["failing_jobs"][0]["name"], "lint")
         self.assertIsNone(formatted["failing_jobs"][0]["path"])
@@ -4952,7 +4959,7 @@ class SpecCriticWorkflowTests(TestCase):
 
         self.assertEqual(pr["review_signal"], "")
         self.assertEqual(pr["reaction_count"], 1)
-        merged = system_agents._merge_pr_handoff_dicts(
+        merged = pr_handoff._merge_pr_handoff_dicts(
             {
                 "url": "https://github.com/cberner/hitch/pull/181",
                 "pr_number": 181,
@@ -8867,7 +8874,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertFalse(system_agents._pr_gates_all_passed(gates))
 
     def test_pr_handoff_head_change_clears_gate_observations(self) -> None:
-        merged = system_agents._merge_pr_handoff_dicts(
+        merged = pr_handoff._merge_pr_handoff_dicts(
             {
                 "url": "https://github.com/cberner/hitch/pull/169",
                 "pr_number": 169,
@@ -8887,7 +8894,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertNotIn("ci_status", merged)
 
     def test_pr_handoff_head_change_detects_conflicting_sha_aliases(self) -> None:
-        merged = system_agents._merge_pr_handoff_dicts(
+        merged = pr_handoff._merge_pr_handoff_dicts(
             {
                 "pr_number": 169,
                 "head_sha": "old",
@@ -9039,7 +9046,7 @@ class SpecCriticWorkflowTests(TestCase):
         # old verdict, the Review gate stays blocked, and the PR follow-up
         # loops feedback rounds trying to address feedback the PR no longer
         # carries until ``max_iterations`` fails the run.
-        merged = system_agents._merge_pr_handoff_dicts(
+        merged = pr_handoff._merge_pr_handoff_dicts(
             {
                 "url": "https://github.com/cberner/hitch/pull/176",
                 "pr_number": 176,
@@ -9065,7 +9072,7 @@ class SpecCriticWorkflowTests(TestCase):
         # reaction-derived ``thumbs_up`` already persisted from an earlier
         # +1 reaction observation: the reviews tool only speaks for the
         # review-derived signals (changes_requested / approved / commented).
-        merged = system_agents._merge_pr_handoff_dicts(
+        merged = pr_handoff._merge_pr_handoff_dicts(
             {
                 "url": "https://github.com/cberner/hitch/pull/177",
                 "pr_number": 177,
@@ -9091,7 +9098,7 @@ class SpecCriticWorkflowTests(TestCase):
         # because their writers never emit ``""``, but the explicit reviews
         # clear emitted by ``codex_events._copy_review_fields`` must survive
         # so it can drive the cross-worker pop in ``_merge_pr_handoff_dicts``.
-        compact = system_agents._compact_pr_handoff(
+        compact = pr_handoff._compact_pr_handoff(
             {
                 "url": "https://github.com/cberner/hitch/pull/178",
                 "pr_number": 178,
