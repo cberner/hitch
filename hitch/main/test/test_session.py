@@ -29,7 +29,7 @@ from hitch.main.models import (
     SystemAgentRun,
     SystemWorkflow,
 )
-from hitch.main.views import (
+from hitch.main.session_pr_plan import (
     _pr_snapshot_for_thread,
     _pr_url_for_thread,
 )
