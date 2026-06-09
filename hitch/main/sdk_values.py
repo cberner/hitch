@@ -12,30 +12,30 @@ from __future__ import annotations
 from typing import Any
 
 
-def _string_value(value: Any) -> str:
+def string_value(value: Any) -> str:
     raw = getattr(value, "value", value)
     return raw.strip() if isinstance(raw, str) else ""
 
 
-def _value_for(value: Any, key: str) -> Any:
+def value_for(value: Any, key: str) -> Any:
     if isinstance(value, dict):
         return value.get(key)
     return getattr(value, key, None)
 
 
-def _plain_sdk_value(value: Any) -> Any:
+def plain_sdk_value(value: Any) -> Any:
     if isinstance(value, dict):
-        return {key: _plain_sdk_value(child) for key, child in value.items()}
+        return {key: plain_sdk_value(child) for key, child in value.items()}
     if isinstance(value, list):
-        return [_plain_sdk_value(child) for child in value]
+        return [plain_sdk_value(child) for child in value]
     if isinstance(value, tuple):
-        return [_plain_sdk_value(child) for child in value]
+        return [plain_sdk_value(child) for child in value]
     if value is None or isinstance(value, str | int | float | bool):
         return value
-    return _sdk_model_dump_value(value)
+    return sdk_model_dump_value(value)
 
 
-def _sdk_model_dump_value(value: Any) -> Any:
+def sdk_model_dump_value(value: Any) -> Any:
     model_dump = getattr(value, "model_dump", None)
     if not callable(model_dump):
         return value
@@ -43,10 +43,10 @@ def _sdk_model_dump_value(value: Any) -> Any:
         dumped = model_dump(by_alias=True)
     except TypeError:
         dumped = model_dump()
-    return _plain_sdk_value(dumped) if dumped is not value else value
+    return plain_sdk_value(dumped) if dumped is not value else value
 
 
-def _sequence_value(value: Any) -> list[Any]:
+def sequence_value(value: Any) -> list[Any]:
     if isinstance(value, list):
         return value
     if isinstance(value, tuple):
@@ -54,7 +54,7 @@ def _sequence_value(value: Any) -> list[Any]:
     return []
 
 
-def _int_value(value: Any) -> int:
+def int_value(value: Any) -> int:
     if isinstance(value, bool):
         return 0
     if isinstance(value, int):

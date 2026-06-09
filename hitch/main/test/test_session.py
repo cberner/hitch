@@ -20,7 +20,7 @@ from openai_codex.errors import AppServerError
 
 from hitch.main import codex_events, demo, system_agents
 from hitch.main.diffs import DiffFile, DiffLine, DiffView
-from hitch.main.entry_render import _tool_call_detail, _tool_call_status
+from hitch.main.entry_render import tool_call_detail, tool_call_status
 from hitch.main.models import (
     CodexInstance,
     Project,
@@ -2774,7 +2774,7 @@ class FinalAgentMarkdownTests(TestCase):
 
 
 class ToolCallDetailTests(TestCase):
-    """Exercise every branch of ``_tool_call_detail`` and ``_tool_call_status``
+    """Exercise every branch of ``tool_call_detail`` and ``tool_call_status``
     so the per-type description and status badge stay stable.
     """
 
@@ -2839,7 +2839,7 @@ class ToolCallDetailTests(TestCase):
         ]
         for tool_type, label, item, expected in cases:
             with self.subTest(tool_type=tool_type, case=label):
-                self.assertEqual(_tool_call_detail(item, tool_type), expected)
+                self.assertEqual(tool_call_detail(item, tool_type), expected)
 
     def test_collab_agent_detail(self) -> None:
         # Two cases share an assertion shape but differ in what they expose.
@@ -2849,20 +2849,20 @@ class ToolCallDetailTests(TestCase):
         without_receiver = SimpleNamespace(
             tool=SimpleNamespace(value="spawn"), receiver_thread_ids=[]
         )
-        result = _tool_call_detail(with_receiver, "collabAgentToolCall")
+        result = tool_call_detail(with_receiver, "collabAgentToolCall")
         self.assertIn("child-thread", result)
         self.assertIn("spawn", result)
         self.assertEqual(
-            _tool_call_detail(without_receiver, "collabAgentToolCall"), "spawn"
+            tool_call_detail(without_receiver, "collabAgentToolCall"), "spawn"
         )
 
     def test_status_badge(self) -> None:
         # ``completed`` and missing status both render no badge; ``failed``
         # surfaces verbatim so the UI can highlight it.
-        self.assertIsNone(_tool_call_status(SimpleNamespace(status=SimpleNamespace(value="completed"))))
-        self.assertIsNone(_tool_call_status(SimpleNamespace()))
+        self.assertIsNone(tool_call_status(SimpleNamespace(status=SimpleNamespace(value="completed"))))
+        self.assertIsNone(tool_call_status(SimpleNamespace()))
         self.assertEqual(
-            _tool_call_status(SimpleNamespace(status=SimpleNamespace(value="failed"))),
+            tool_call_status(SimpleNamespace(status=SimpleNamespace(value="failed"))),
             "failed",
         )
 
