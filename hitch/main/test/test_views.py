@@ -45,6 +45,7 @@ from openai_codex.generated.v2_all import (
 )
 
 from hitch.main import (
+    agent_io,
     caches,
     codex_events,
     codex_pool,
@@ -3425,12 +3426,12 @@ class IndexViewTests(TestCase):
             status=CodexInstance.STATUS_COMPLETED,
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
-            agent_kind=system_agents.SPEC_RISK_AGENT_KIND,
+            agent_kind=agent_io.SPEC_RISK_AGENT_KIND,
             display_author=system_agents.SPEC_CRITIC_DISPLAY_AUTHOR,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.SPEC_RISK_AGENT_KIND,
+            agent_kind=agent_io.SPEC_RISK_AGENT_KIND,
             thread_id="spec-hidden",
             instance=instance,
             status=SystemAgentRun.STATUS_COMPLETED,
