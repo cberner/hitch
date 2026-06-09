@@ -1,0 +1,289 @@
+"""Background-refresh cache layer for model lists and account rate limits.
+
+This module holds the per-process caches (with their locks and in-flight
+state) plus the helpers that schedule and perform best-effort background
+refreshes against Codex. It must NOT import ``views`` -- the view layer
+imports this module and calls these helpers module-qualified
+(``caches._foo(...)``) so there is exactly one binding per symbol, which
+keeps test ``mock.patch`` of these names intercepting both the view call
+sites and the internal sibling calls between the helpers below.
+"""
+
+import logging
+import threading
+from datetime import datetime, timedelta
+from typing import Any
+
+from django.db import close_old_connections, transaction
+from django.utils import timezone
+from openai_codex import AppServerError, Codex
+from openai_codex.generated.v2_all import (
+    GetAccountRateLimitsResponse,
+    RateLimitSnapshot,
+)
+
+from hitch.main import codex_pool, rate_limit
+
+logger = logging.getLogger(__name__)
+
+_MINUTES_PER_HOUR = 60
+_MINUTES_PER_DAY = 24 * _MINUTES_PER_HOUR
+
+_RATE_LIMITS_REFRESH_LOCK = threading.Lock()
+_RATE_LIMITS_REFRESH_IN_FLIGHT = False
+_RATE_LIMITS_CACHE_VALUE: dict[str, Any] | None = None
+_RATE_LIMITS_CACHE_HAS_VALUE = False
+_RATE_LIMITS_CACHE_FETCHED_AT: datetime | None = None
+# The account rate-limit endpoint is a real OpenAI ping; honour the central
+# debounce floor rather than re-hitting it every render.
+_RATE_LIMITS_CACHE_TTL = rate_limit.DEFAULT_MIN_INTERVAL
+_RATE_LIMITS_RATE_LIMIT_KEY = "codex:account-rate-limits"
+_MODELS_REFRESH_LOCK = threading.Lock()
+_MODELS_REFRESH_IN_FLIGHT: set[bool] = set()
+_MODELS_CACHE_VALUE: dict[bool, list[Any]] = {}
+_MODELS_CACHE_FETCHED_AT: dict[bool, datetime] = {}
+_MODELS_CACHE_TTL = timedelta(minutes=5)
+
+
+def _cached_models_data(*, enable_memories: bool) -> list[Any]:
+    with _MODELS_REFRESH_LOCK:
+        return list(_MODELS_CACHE_VALUE.get(enable_memories, []))
+
+
+def _store_models_cache(*, enable_memories: bool, models_data: list[Any]) -> None:
+    with _MODELS_REFRESH_LOCK:
+        _MODELS_CACHE_VALUE[enable_memories] = list(models_data)
+        _MODELS_CACHE_FETCHED_AT[enable_memories] = timezone.now()
+
+
+def _models_cache_has_value(*, enable_memories: bool) -> bool:
+    with _MODELS_REFRESH_LOCK:
+        return enable_memories in _MODELS_CACHE_FETCHED_AT
+
+
+def _cached_models_for_session_detail(*, enable_memories: bool) -> list[Any]:
+    models_data = _cached_models_data(enable_memories=enable_memories)
+    _schedule_models_refresh(enable_memories=enable_memories)
+    return models_data
+
+
+def _schedule_models_refresh(*, enable_memories: bool) -> None:
+    if not _models_refresh_needed(enable_memories=enable_memories):
+        return
+    transaction.on_commit(
+        lambda: _start_models_refresh_thread(enable_memories=enable_memories)
+    )
+
+
+def _models_refresh_needed(*, enable_memories: bool) -> bool:
+    with _MODELS_REFRESH_LOCK:
+        fetched_at = _MODELS_CACHE_FETCHED_AT.get(enable_memories)
+        if fetched_at is None:
+            return True
+        return timezone.now() - _MODELS_CACHE_TTL >= fetched_at
+
+
+def _start_models_refresh_thread(*, enable_memories: bool) -> None:
+    with _MODELS_REFRESH_LOCK:
+        if enable_memories in _MODELS_REFRESH_IN_FLIGHT:
+            return
+        fetched_at = _MODELS_CACHE_FETCHED_AT.get(enable_memories)
+        if fetched_at is not None and timezone.now() - _MODELS_CACHE_TTL < fetched_at:
+            return
+        _MODELS_REFRESH_IN_FLIGHT.add(enable_memories)
+    try:
+        threading.Thread(
+            target=_refresh_models_cache_best_effort,
+            kwargs={"enable_memories": enable_memories},
+            name="models-refresh",
+            daemon=True,
+        ).start()
+    except Exception:
+        with _MODELS_REFRESH_LOCK:
+            _MODELS_REFRESH_IN_FLIGHT.discard(enable_memories)
+        logger.exception("failed to start models refresh thread")
+
+
+def _refresh_models_cache_best_effort(*, enable_memories: bool) -> None:
+    refreshed = False
+    models_data: list[Any] = []
+    try:
+        close_old_connections()
+        with codex_pool.borrow_codex(
+            Codex, enable_memories=enable_memories
+        ) as codex:
+            models_data = list(codex.models().data)
+        refreshed = True
+    except Exception:
+        logger.exception("failed to refresh models cache")
+    finally:
+        close_old_connections()
+        if refreshed:
+            _store_models_cache(enable_memories=enable_memories, models_data=models_data)
+        with _MODELS_REFRESH_LOCK:
+            _MODELS_REFRESH_IN_FLIGHT.discard(enable_memories)
+
+
+def _cached_rate_limits() -> dict[str, Any] | None:
+    with _RATE_LIMITS_REFRESH_LOCK:
+        return _RATE_LIMITS_CACHE_VALUE if _RATE_LIMITS_CACHE_HAS_VALUE else None
+
+
+def _rate_limits_for_usage_context(*, enable_memories: bool) -> dict[str, Any] | None:
+    _refresh_rate_limits_cache_if_cold(enable_memories=enable_memories)
+    rate_limits = _cached_rate_limits()
+    _schedule_rate_limits_refresh(enable_memories=enable_memories)
+    return rate_limits
+
+
+def _refresh_rate_limits_cache_if_cold(*, enable_memories: bool) -> None:
+    global _RATE_LIMITS_REFRESH_IN_FLIGHT
+    with _RATE_LIMITS_REFRESH_LOCK:
+        if _RATE_LIMITS_CACHE_HAS_VALUE or _RATE_LIMITS_REFRESH_IN_FLIGHT:
+            return
+        _RATE_LIMITS_REFRESH_IN_FLIGHT = True
+    _refresh_rate_limits_cache_best_effort(enable_memories=enable_memories)
+
+
+def _schedule_rate_limits_refresh(*, enable_memories: bool) -> None:
+    if not _rate_limits_refresh_needed():
+        return
+    transaction.on_commit(
+        lambda: _start_rate_limits_refresh_thread(enable_memories=enable_memories)
+    )
+
+
+def _rate_limits_refresh_needed() -> bool:
+    with _RATE_LIMITS_REFRESH_LOCK:
+        if _RATE_LIMITS_CACHE_FETCHED_AT is None:
+            return True
+        return timezone.now() - _RATE_LIMITS_CACHE_TTL >= _RATE_LIMITS_CACHE_FETCHED_AT
+
+
+def _start_rate_limits_refresh_thread(*, enable_memories: bool) -> None:
+    global _RATE_LIMITS_REFRESH_IN_FLIGHT
+    with _RATE_LIMITS_REFRESH_LOCK:
+        if _RATE_LIMITS_REFRESH_IN_FLIGHT:
+            return
+        if (
+            _RATE_LIMITS_CACHE_FETCHED_AT is not None
+            and timezone.now() - _RATE_LIMITS_CACHE_TTL < _RATE_LIMITS_CACHE_FETCHED_AT
+        ):
+            return
+        _RATE_LIMITS_REFRESH_IN_FLIGHT = True
+    try:
+        threading.Thread(
+            target=_refresh_rate_limits_cache_best_effort,
+            kwargs={"enable_memories": enable_memories},
+            name="rate-limits-refresh",
+            daemon=True,
+        ).start()
+    except Exception:
+        with _RATE_LIMITS_REFRESH_LOCK:
+            _RATE_LIMITS_REFRESH_IN_FLIGHT = False
+        logger.exception("failed to start rate limits refresh thread")
+
+
+def _refresh_rate_limits_cache_best_effort(*, enable_memories: bool) -> None:
+    global _RATE_LIMITS_CACHE_FETCHED_AT
+    global _RATE_LIMITS_CACHE_HAS_VALUE
+    global _RATE_LIMITS_CACHE_VALUE
+    global _RATE_LIMITS_REFRESH_IN_FLIGHT
+    rate_limits: dict[str, Any] | None = None
+    fetched = False
+    try:
+        # Hit OpenAI for the account rate limits only when the central, app-wide
+        # debounce floor allows; otherwise serve the last cached value. This is
+        # the cross-process guard the per-process TTL cannot provide.
+        if rate_limit.claim(_RATE_LIMITS_RATE_LIMIT_KEY):
+            close_old_connections()
+            with codex_pool.borrow_codex(
+                Codex, enable_memories=enable_memories
+            ) as codex:
+                rate_limits = _fetch_rate_limits(codex)
+            fetched = True
+    except Exception:
+        logger.exception("failed to refresh rate limits cache")
+    finally:
+        close_old_connections()
+        with _RATE_LIMITS_REFRESH_LOCK:
+            if fetched and (rate_limits is not None or not _RATE_LIMITS_CACHE_HAS_VALUE):
+                _RATE_LIMITS_CACHE_VALUE = rate_limits
+                _RATE_LIMITS_CACHE_HAS_VALUE = True
+            # Advance the local TTL when we fetched, or when we already have a
+            # value to keep serving -- then this process backs off and trusts the
+            # global owner. A still-cold process whose claim was denied must NOT
+            # back off, or it would hide the rate-limit section for the full TTL
+            # without ever populating its own cache; leave it due so it retries
+            # and wins a claim shortly.
+            if fetched or _RATE_LIMITS_CACHE_HAS_VALUE:
+                _RATE_LIMITS_CACHE_FETCHED_AT = timezone.now()
+            _RATE_LIMITS_REFRESH_IN_FLIGHT = False
+
+
+def _fetch_rate_limits(codex: Codex) -> dict[str, Any] | None:
+    """Fetch the account/rateLimits/read snapshot, or None if unavailable.
+
+    The endpoint is meaningful only when Codex is talking to a real OpenAI
+    account; local-dev (no auth, custom provider via ollama) and older
+    Codex builds will fail with MethodNotFound or an auth error. The
+    usage page must still render in those modes, so any failure here
+    swallows into None and the page shows its empty state.
+    """
+    try:
+        response = codex._client.request(
+            "account/rateLimits/read",
+            None,
+            response_model=GetAccountRateLimitsResponse,
+        )
+    except AppServerError:
+        return None
+    except Exception:
+        logger.exception("failed to fetch account rate limits; showing usage empty state")
+        return None
+    return _format_rate_limit_snapshot(response.rate_limits)
+
+
+def _format_rate_limit_snapshot(snapshot: RateLimitSnapshot) -> dict[str, Any] | None:
+    """Project a RateLimitSnapshot into a template-friendly dict.
+
+    Returns None when neither the primary nor secondary window is set; the
+    template hides the section entirely in that case rather than render an
+    empty header. ``used_percent`` from Codex describes consumption, so we
+    expose ``remaining_percent`` (the more intuitive framing for a user
+    looking at their remaining budget) alongside it.
+    """
+    windows: list[dict[str, Any]] = []
+    for label, window in (("Primary", snapshot.primary), ("Secondary", snapshot.secondary)):
+        if window is None:
+            continue
+        used = max(0, min(100, window.used_percent))
+        windows.append(
+            {
+                "label": label,
+                "used_percent": used,
+                "remaining_percent": 100 - used,
+                "resets_at": window.resets_at,
+                "window_duration_label": _format_window_duration(window.window_duration_mins),
+            }
+        )
+    if not windows:
+        return None
+    plan_type = snapshot.plan_type.value if snapshot.plan_type is not None else None
+    return {
+        "windows": windows,
+        "limit_name": snapshot.limit_name,
+        "plan_type": plan_type,
+    }
+
+
+def _format_window_duration(window_duration_mins: int | None) -> str | None:
+    if window_duration_mins is None or window_duration_mins <= 0:
+        return None
+    if window_duration_mins % _MINUTES_PER_DAY == 0:
+        days = window_duration_mins // _MINUTES_PER_DAY
+        return f"{days}-day"
+    if window_duration_mins % _MINUTES_PER_HOUR == 0:
+        hours = window_duration_mins // _MINUTES_PER_HOUR
+        return f"{hours}-hour"
+    return f"{window_duration_mins}-min"

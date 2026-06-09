@@ -527,8 +527,8 @@ class AuthenticatedSettingsTests(TestCase):
         mock_discover.return_value = [Path("/home/user/account"), Path("/home/user/cookie")]
 
         with (
-            patch("hitch.main.views._cached_models_data", return_value=models),
-            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.caches._cached_models_data", return_value=models),
+            patch("hitch.main.caches._start_models_refresh_thread"),
         ):
             new_session_response = self.client.get(reverse("new_session"))
             settings_response = self.client.get(reverse("update_settings"))

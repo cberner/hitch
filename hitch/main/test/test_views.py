@@ -45,6 +45,7 @@ from openai_codex.generated.v2_all import (
 )
 
 from hitch.main import (
+    caches,
     codex_events,
     codex_pool,
     coding_agents,
@@ -396,7 +397,7 @@ def _session(
 
 
 class SessionDetailFastPathTests(TestCase):
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_renders_indexed_rollout_without_resume(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
@@ -496,7 +497,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.views.discover_managed_worktrees")
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_session_detail_next_message_config_uses_managed_worktree_sandbox(
         self,
@@ -539,7 +540,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(config["sandbox"], "Workspace write")
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_session_detail_uses_session_approval_mode_override(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
@@ -588,7 +589,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertContains(response, "Follow global (Deny all escalations)")
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_uses_archived_rollout_for_stale_path(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
@@ -651,7 +652,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertContains(response, "Archived rollout answer")
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_recovers_missing_rollout_path(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
@@ -711,7 +712,7 @@ class SessionDetailFastPathTests(TestCase):
         metadata.refresh_from_db()
         self.assertEqual(metadata.codex_path, "")
 
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_keeps_archived_flag_for_recovered_active_path(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
@@ -749,7 +750,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertTrue(metadata.codex_archived)
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_reuses_loaded_rollout_data(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
@@ -811,7 +812,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(load_rollout_lines.call_count, 1)
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_hides_fix_pr_after_pr_epoch_clears(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
@@ -885,7 +886,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertNotContains(response, "Fix PR")
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_falls_back_when_rollout_fast_path_raises(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
@@ -933,7 +934,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertContains(response, "SDK answer")
         codex._client.thread_resume.assert_called_once_with("schema-drift")
 
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_lazy_loads_intermediate_body(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
@@ -1006,7 +1007,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(load_rollout_lines.call_count, 1)
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_session_intermediate_derives_demo_visibility_from_signed_context(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
@@ -1098,7 +1099,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertContains(signed_fragment, "printf demo-only-command")
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_derives_done_stage_from_pr_state(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
@@ -1181,7 +1182,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(metadata.derived_stage, "done_merged")
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_uses_pr_workflow_failure_observation_for_pr_link(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
@@ -1281,7 +1282,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.system_agents._gh_pr_view")
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_refreshes_ready_pr_to_done_merged(
         self,
@@ -1371,7 +1372,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_gh_pr_view.assert_called_once()
 
     @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_refreshes_due_pr_monitor_backoff_to_done_merged(
         self,
@@ -1434,7 +1435,7 @@ class SessionDetailFastPathTests(TestCase):
         mock_observe.assert_called_once()
 
     @patch("hitch.main.system_agents._gh_pr_view")
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_refreshes_cached_pr_stage_to_done_merged(
         self,
@@ -1527,7 +1528,7 @@ class SessionDetailFastPathTests(TestCase):
         )
         mock_gh_pr_view.assert_called_once()
 
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_stamps_stage_cache_with_pre_read_mtime(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
@@ -1604,7 +1605,7 @@ class SessionDetailFastPathTests(TestCase):
         )
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_active_session_detail_does_not_cache_forced_stage(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
@@ -1690,7 +1691,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(metadata.derived_stage_source_mtime_ns, 0)
 
     @patch("hitch.main.views._schedule_pr_stage_refresh")
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_active_session_detail_does_not_flag_pr_workflow_refreshing(
         self,
@@ -1771,7 +1772,7 @@ class SessionDetailFastPathTests(TestCase):
         )
         mock_schedule.assert_not_called()
 
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_ignores_stale_completed_pr_workflow(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
@@ -1859,7 +1860,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(metadata.derived_stage, "implementation")
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_prefers_newer_main_pr_over_stale_workflow(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
@@ -1942,7 +1943,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(metadata.derived_stage, "pr")
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_prefers_newer_main_pr_state_over_workflow(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
@@ -2025,7 +2026,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(metadata.derived_stage, "pr")
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_ignores_workflow_only_stale_pr_handoff(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
@@ -2087,7 +2088,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(metadata.derived_stage, "implementation")
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views._start_models_refresh_thread")
+    @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_keeps_server_created_pr_handoff(
         self, mock_codex: MagicMock, _start_models_refresh: MagicMock
@@ -5421,7 +5422,7 @@ class IndexViewTests(TestCase):
         session_index.upsert_thread(cached, projects=[])
 
         with (
-            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_models_refresh_thread"),
             patch(
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
@@ -5457,7 +5458,7 @@ class IndexViewTests(TestCase):
         session_index.upsert_thread(cached, projects=[])
 
         with (
-            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_models_refresh_thread"),
             patch(
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
@@ -5499,7 +5500,7 @@ class IndexViewTests(TestCase):
         )
 
         with (
-            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_models_refresh_thread"),
             patch(
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
@@ -5541,7 +5542,7 @@ class IndexViewTests(TestCase):
         mock_discover.return_value = []
 
         with (
-            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_models_refresh_thread"),
             patch(
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
@@ -5603,12 +5604,12 @@ class IndexViewTests(TestCase):
         mock_discover.return_value = []
 
         with (
-            patch("hitch.main.views._rate_limits_for_usage_context", return_value=None),
+            patch("hitch.main.caches._rate_limits_for_usage_context", return_value=None),
             patch(
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
             patch("hitch.main.views._start_usage_token_refresh_thread"),
-            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_models_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
         ):
             usage_response = self.client.get(reverse("usage"))
@@ -5651,7 +5652,7 @@ class IndexViewTests(TestCase):
         mock_discover.return_value = []
 
         with (
-            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.views._start_usage_session_index_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
         ):
@@ -7590,8 +7591,8 @@ class IndexViewTests(TestCase):
 
         with (
             patch("hitch.main.views._start_usage_token_refresh_thread"),
-            patch("hitch.main.views._start_models_refresh_thread"),
-            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            patch("hitch.main.caches._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_rate_limits_refresh_thread"),
         ):
             response = self.client.get(reverse("usage"))
 
@@ -7625,8 +7626,8 @@ class IndexViewTests(TestCase):
             patch("hitch.main.views.rollout.latest_token_usage") as latest_usage,
             patch("hitch.main.views.rollout.token_usage_history") as usage_history,
             patch("hitch.main.views._start_usage_token_refresh_thread") as start_refresh,
-            patch("hitch.main.views._start_models_refresh_thread"),
-            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            patch("hitch.main.caches._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
         ):
             response = self.client.get(reverse("usage"))
@@ -7660,7 +7661,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(cache.total_tokens, 999_999)
         self.assertEqual(cache.rollout_mtime_ns, 2_000_000_000)
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.caches.Codex")
     def test_usage_page_fetches_rate_limits_before_first_render(
         self, mock_codex: MagicMock
     ) -> None:
@@ -7682,13 +7683,13 @@ class IndexViewTests(TestCase):
         )
 
         with (
-            patch("hitch.main.views._RATE_LIMITS_CACHE_VALUE", None),
-            patch("hitch.main.views._RATE_LIMITS_CACHE_HAS_VALUE", False),
-            patch("hitch.main.views._RATE_LIMITS_CACHE_FETCHED_AT", None),
-            patch("hitch.main.views._RATE_LIMITS_REFRESH_IN_FLIGHT", False),
-            patch("hitch.main.views._start_models_refresh_thread"),
+            patch("hitch.main.caches._RATE_LIMITS_CACHE_VALUE", None),
+            patch("hitch.main.caches._RATE_LIMITS_CACHE_HAS_VALUE", False),
+            patch("hitch.main.caches._RATE_LIMITS_CACHE_FETCHED_AT", None),
+            patch("hitch.main.caches._RATE_LIMITS_REFRESH_IN_FLIGHT", False),
+            patch("hitch.main.caches._start_models_refresh_thread"),
             patch(
-                "hitch.main.views._start_rate_limits_refresh_thread"
+                "hitch.main.caches._start_rate_limits_refresh_thread"
             ) as start_rate_limits,
             self.captureOnCommitCallbacks(execute=True),
         ):
@@ -7780,8 +7781,8 @@ class IndexViewTests(TestCase):
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
             patch("hitch.main.views._start_usage_token_refresh_thread"),
-            patch("hitch.main.views._start_models_refresh_thread"),
-            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            patch("hitch.main.caches._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
         ):
             response = self.client.get(reverse("usage"))
@@ -7809,8 +7810,8 @@ class IndexViewTests(TestCase):
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
             patch("hitch.main.views._start_usage_token_refresh_thread"),
-            patch("hitch.main.views._start_models_refresh_thread"),
-            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            patch("hitch.main.caches._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
         ):
             response = self.client.get(reverse("usage"))
@@ -7834,8 +7835,8 @@ class IndexViewTests(TestCase):
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
             patch("hitch.main.views._start_usage_token_refresh_thread") as start_tokens,
-            patch("hitch.main.views._start_models_refresh_thread"),
-            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            patch("hitch.main.caches._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_rate_limits_refresh_thread"),
         ):
             response = self.client.get(reverse("usage"))
 
@@ -7886,8 +7887,8 @@ class IndexViewTests(TestCase):
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
             patch("hitch.main.views._start_usage_token_refresh_thread"),
-            patch("hitch.main.views._start_models_refresh_thread"),
-            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            patch("hitch.main.caches._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
         ):
             response = self.client.get(reverse("usage"))
@@ -7943,8 +7944,8 @@ class IndexViewTests(TestCase):
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
             patch("hitch.main.views._start_usage_token_refresh_thread") as start_tokens,
-            patch("hitch.main.views._start_models_refresh_thread"),
-            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            patch("hitch.main.caches._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
         ):
             response = self.client.get(reverse("usage"))
@@ -8874,8 +8875,8 @@ class IndexViewTests(TestCase):
 
         with (
             patch("hitch.main.views._start_usage_token_refresh_thread") as start_refresh,
-            patch("hitch.main.views._start_models_refresh_thread"),
-            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            patch("hitch.main.caches._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             patch(
                 "hitch.main.views._rollout_path_from_value",
                 side_effect=AssertionError("usage render touched rollout path"),
@@ -8929,8 +8930,8 @@ class IndexViewTests(TestCase):
             patch(
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
-            patch("hitch.main.views._start_models_refresh_thread"),
-            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            patch("hitch.main.caches._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
         ):
             response = self.client.get(reverse("usage"))
@@ -8966,8 +8967,8 @@ class IndexViewTests(TestCase):
 
         with (
             patch("hitch.main.views._start_usage_token_refresh_thread") as start_refresh,
-            patch("hitch.main.views._start_models_refresh_thread"),
-            patch("hitch.main.views._start_rate_limits_refresh_thread"),
+            patch("hitch.main.caches._start_models_refresh_thread"),
+            patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
         ):
             response = self.client.get(reverse("usage"))
@@ -9681,10 +9682,10 @@ class NewSessionViewTests(TestCase):
 
     @staticmethod
     def _clear_models_cache() -> None:
-        with views._MODELS_REFRESH_LOCK:
-            views._MODELS_CACHE_VALUE = {}
-            views._MODELS_CACHE_FETCHED_AT = {}
-            views._MODELS_REFRESH_IN_FLIGHT = set()
+        with caches._MODELS_REFRESH_LOCK:
+            caches._MODELS_CACHE_VALUE = {}
+            caches._MODELS_CACHE_FETCHED_AT = {}
+            caches._MODELS_REFRESH_IN_FLIGHT = set()
 
     def _assert_new_session_spawn(
         self,
@@ -9751,7 +9752,7 @@ class NewSessionViewTests(TestCase):
     ) -> None:
         mock_discover.return_value = [Path(self.REPO)]
         mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
-        views._store_models_cache(
+        caches._store_models_cache(
             enable_memories=False,
             models_data=[_make_model("gpt-5.4", is_default=True)],
         )
@@ -9783,7 +9784,7 @@ class NewSessionViewTests(TestCase):
     ) -> None:
         mock_discover.return_value = [Path(self.REPO)]
         mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
-        views._store_models_cache(enable_memories=False, models_data=[])
+        caches._store_models_cache(enable_memories=False, models_data=[])
         _setup_codex(mock_codex, models=[_make_model("gpt-5.4", is_default=True)])
         _seed_cookies(self.client, **{_MODEL_COOKIE: "removed-model"})
 
@@ -9813,14 +9814,14 @@ class NewSessionViewTests(TestCase):
     ) -> None:
         mock_discover.return_value = [Path(self.REPO)]
         mock_spawn.return_value = SimpleNamespace(thread_id="thread-xyz")
-        views._store_models_cache(
+        caches._store_models_cache(
             enable_memories=False,
             models_data=[_make_model("removed-model", is_default=True)],
         )
-        with views._MODELS_REFRESH_LOCK:
-            views._MODELS_CACHE_FETCHED_AT[False] = (
+        with caches._MODELS_REFRESH_LOCK:
+            caches._MODELS_CACHE_FETCHED_AT[False] = (
                 timezone.now()
-                - views._MODELS_CACHE_TTL
+                - caches._MODELS_CACHE_TTL
                 - timedelta(seconds=1)
             )
         _setup_codex(mock_codex, models=[_make_model("gpt-5.4", is_default=True)])
@@ -13627,10 +13628,10 @@ class SendMessageViewTests(TestCase):
         # one-off live resume -- preferring it over the catalog default -- rather
         # than 400 "requires a model" or sending the wrong model.
         def _clear_models_cache() -> None:
-            with views._MODELS_REFRESH_LOCK:
-                views._MODELS_CACHE_VALUE = {}
-                views._MODELS_CACHE_FETCHED_AT = {}
-                views._MODELS_REFRESH_IN_FLIGHT = set()
+            with caches._MODELS_REFRESH_LOCK:
+                caches._MODELS_CACHE_VALUE = {}
+                caches._MODELS_CACHE_FETCHED_AT = {}
+                caches._MODELS_REFRESH_IN_FLIGHT = set()
 
         _clear_models_cache()
         self.addCleanup(_clear_models_cache)
