@@ -23,6 +23,7 @@ from openai_codex.generated.v2_all import (
 from hitch.main import (
     agent_io,
     autonomous_goal_prompts,
+    autonomous_goal_proposal_stack,
     codex_events,
     demo,
     gh_observations,
@@ -10476,7 +10477,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             "judge_confidence_below_threshold",
         )
         stop_reason_key = (
-            system_agents._AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY
+            autonomous_goal_proposal_stack._AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY
         )
         self.assertEqual(
             proposal.outcome_metadata[stop_reason_key],
@@ -11215,7 +11216,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     def test_pending_proposal_state_empty_input_has_no_blockers(self) -> None:
-        state = system_agents._autonomous_goal_pending_proposal_state([])
+        state = autonomous_goal_proposal_stack._autonomous_goal_pending_proposal_state([])
 
         self.assertEqual(state.blocking_goal_ids, set())
         self.assertEqual(state.continuable_stack_goal_ids, set())
@@ -11247,12 +11248,12 @@ class AutonomousGoalWorkflowTests(TestCase):
             },
         )
         self.assertFalse(
-            system_agents._autonomous_goal_proposal_allows_stack_continuation(
+            autonomous_goal_proposal_stack._autonomous_goal_proposal_allows_stack_continuation(
                 dismissed_proposal, autonomous_goal
             )
         )
         self.assertIsNone(
-            system_agents._claim_autonomous_goal_stack_continuation_proposal(
+            autonomous_goal_proposal_stack._claim_autonomous_goal_stack_continuation_proposal(
                 dismissed_proposal
             )
         )
@@ -11269,7 +11270,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             },
         )
         self.assertFalse(
-            system_agents._autonomous_goal_proposal_allows_stack_continuation(
+            autonomous_goal_proposal_stack._autonomous_goal_proposal_allows_stack_continuation(
                 notice_proposal, autonomous_goal
             )
         )
@@ -11290,7 +11291,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             },
         )
         self.assertFalse(
-            system_agents._autonomous_goal_proposal_allows_stack_continuation(
+            autonomous_goal_proposal_stack._autonomous_goal_proposal_allows_stack_continuation(
                 repo_cwd_proposal, autonomous_goal
             )
         )
@@ -11314,7 +11315,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             },
         )
         self.assertIsNone(
-            system_agents._autonomous_goal_proposal_stack_continuation_metadata(
+            autonomous_goal_proposal_stack._autonomous_goal_proposal_stack_continuation_metadata(
                 too_shallow_proposal, propose_only_goal
             )
         )
@@ -11330,19 +11331,19 @@ class AutonomousGoalWorkflowTests(TestCase):
             },
         )
         self.assertIsNone(
-            system_agents._autonomous_goal_proposal_stack_continuation_metadata(
+            autonomous_goal_proposal_stack._autonomous_goal_proposal_stack_continuation_metadata(
                 completed_stack_proposal, autonomous_goal
             )
         )
         self.assertEqual(
-            system_agents._autonomous_goal_proposal_stack_iteration(
+            autonomous_goal_proposal_stack._autonomous_goal_proposal_stack_iteration(
                 completed_stack_proposal
             ),
             3,
         )
         plain_proposal = ProposedSession(outcome_metadata={})
         self.assertEqual(
-            system_agents._autonomous_goal_proposal_stack_iteration(plain_proposal),
+            autonomous_goal_proposal_stack._autonomous_goal_proposal_stack_iteration(plain_proposal),
             1,
         )
 
@@ -11576,7 +11577,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
 
         with CaptureQueriesContext(connection) as queries:
-            state = system_agents._autonomous_goal_pending_proposal_state(
+            state = autonomous_goal_proposal_stack._autonomous_goal_pending_proposal_state(
                 [
                     continuable_goal,
                     non_continuable_goal,
@@ -11679,7 +11680,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         proposal.refresh_from_db()
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
         stop_reason_key = (
-            system_agents._AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY
+            autonomous_goal_proposal_stack._AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY
         )
         self.assertEqual(
             proposal.outcome_metadata[stop_reason_key],
@@ -12259,7 +12260,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             accepted_session=implementation,
             outcome_metadata={
-                "accepted_by": system_agents.LEGACY_AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY
+                "accepted_by": autonomous_goal_proposal_stack.LEGACY_AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY
             },
         )
         _instance(

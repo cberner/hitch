@@ -47,6 +47,7 @@ from openai_codex.generated.v2_all import (
 
 from hitch.main import (
     autonomous_goal_prompts,
+    autonomous_goal_proposal_stack,
     caches,
     codex_events,
     codex_pool,
@@ -2783,7 +2784,7 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
     goal_ids = [goal.pk for goal in goals]
     if not goal_ids:
         return
-    pending_proposal_state = system_agents._autonomous_goal_pending_proposal_state(
+    pending_proposal_state = autonomous_goal_proposal_stack._autonomous_goal_pending_proposal_state(
         goals
     )
     pending_proposal_goal_ids = pending_proposal_state.blocking_goal_ids
@@ -2907,7 +2908,7 @@ def _autonomous_goal_in_flight_automation_project_ids(
             accepted_session__isnull=True,
             **{claim_lookup: False},
         )
-        .filter(system_agents._autonomous_goal_in_flight_proposal_criteria())
+        .filter(autonomous_goal_proposal_stack._autonomous_goal_in_flight_proposal_criteria())
         .values_list("project_id", "outcome_metadata")
     )
     for project_id, metadata in claimed_metadatas:
@@ -2923,7 +2924,7 @@ def _autonomous_goal_in_flight_automation_project_ids(
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             accepted_session__isnull=False,
         )
-        .filter(system_agents._autonomous_goal_in_flight_proposal_criteria())
+        .filter(autonomous_goal_proposal_stack._autonomous_goal_in_flight_proposal_criteria())
         .exclude(accepted_session__thread_id="")
         .values_list("project_id", "accepted_session__thread_id")
     )

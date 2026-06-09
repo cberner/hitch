@@ -47,6 +47,7 @@ from openai_codex.generated.v2_all import (
 from hitch.main import (
     agent_io,
     autonomous_goal_prompts,
+    autonomous_goal_proposal_stack,
     caches,
     codex_events,
     codex_pool,
@@ -18886,7 +18887,7 @@ class AutonomousGoalViewTests(TestCase):
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
             accepted_session=implementation,
             outcome_metadata={
-                "accepted_by": system_agents.AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY,
+                "accepted_by": autonomous_goal_proposal_stack.AUTONOMOUS_GOAL_AUTONOMY_ACCEPTED_BY,
             },
         )
         CodexInstance.objects.create(
