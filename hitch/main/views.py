@@ -16,7 +16,6 @@ from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, DecimalException
 from pathlib import Path
-from stat import S_ISREG
 from typing import Any, Literal, NamedTuple
 from urllib.parse import urlencode
 
@@ -96,6 +95,14 @@ from hitch.main.models import (
     UserSettings,
 )
 from hitch.main.repos import discover_repos, git_common_dir, same_repo_or_worktree
+from hitch.main.rollout_state import (
+    _ARCHIVED_SESSIONS_DIR,
+    _rollout_file_state_from_value,
+    _rollout_mtime_ns,
+    _rollout_path_for,
+    _rollout_path_from_value,
+    _RolloutFileState,
+)
 from hitch.main.sdk_values import (
     plain_sdk_value,
     sdk_model_dump_value,
@@ -209,11 +216,6 @@ class UsageSessionIndexState(NamedTuple):
     refresh_active: bool
     refresh_archived: bool
     totals_available: bool
-
-
-class _RolloutFileState(NamedTuple):
-    path: Path
-    mtime_ns: int
 
 
 class _UsageTokenCacheState(NamedTuple):
@@ -384,7 +386,6 @@ _DISPLAY_TITLE_MAX_LEN = 80
 _SESSION_PAGE_SIZE = 50
 _THREAD_LIST_FETCH_LIMIT = 100
 _THREAD_LIST_USE_STATE_DB_ONLY = True
-_ARCHIVED_SESSIONS_DIR = "archived_sessions"
 # Codex's archived rollouts live at most four levels below the
 # ``archived_sessions/`` directory (``archived_sessions/YYYY/MM/DD/rollout-*.jsonl``);
 # five gives a small cushion for future structural changes without re-opening
@@ -5615,68 +5616,6 @@ def _parse_token_usage_and_daily(
         return None, {}
     usage = {key: raw_usage.get(key, 0) for key in _TOKEN_USAGE_KEYS}
     return usage, _daily_token_usage_from_history(history)
-
-
-def _rollout_path_for(thread: Any) -> Path | None:
-    return _rollout_path_from_value(getattr(thread, "path", None))
-
-
-def _rollout_path_from_value(path: object) -> Path | None:
-    rollout_state = _rollout_file_state_from_value(path)
-    return rollout_state.path if rollout_state is not None else None
-
-
-def _rollout_file_state_from_value(path: object) -> _RolloutFileState | None:
-    if not isinstance(path, str) or not path:
-        return None
-    rollout_path = Path(path)
-    rollout_state = _rollout_file_state_for_path(rollout_path)
-    if rollout_state is not None:
-        return rollout_state
-    return _archived_rollout_file_state_for_missing_session_path(rollout_path)
-
-
-def _rollout_file_state_for_path(rollout_path: Path) -> _RolloutFileState | None:
-    try:
-        stat_result = rollout_path.stat()
-    except OSError:
-        return None
-    if not S_ISREG(stat_result.st_mode):
-        return None
-    return _RolloutFileState(path=rollout_path, mtime_ns=stat_result.st_mtime_ns)
-
-
-def _archived_rollout_file_state_for_missing_session_path(
-    rollout_path: Path,
-) -> _RolloutFileState | None:
-    if rollout_path.suffix != ".jsonl" or not rollout_path.name.startswith("rollout-"):
-        return None
-    sessions_dir = next(
-        (parent for parent in rollout_path.parents if parent.name == "sessions"),
-        None,
-    )
-    if sessions_dir is None:
-        return None
-    archived_dir = sessions_dir.parent / _ARCHIVED_SESSIONS_DIR
-    candidates = [archived_dir / rollout_path.name]
-    try:
-        archived_relative_path = archived_dir / rollout_path.relative_to(sessions_dir)
-    except ValueError:
-        archived_relative_path = None
-    if archived_relative_path is not None and archived_relative_path not in candidates:
-        candidates.append(archived_relative_path)
-    for candidate in candidates:
-        rollout_state = _rollout_file_state_for_path(candidate)
-        if rollout_state is not None:
-            return rollout_state
-    return None
-
-
-def _rollout_mtime_ns(rollout_path: Path | None) -> int:
-    if rollout_path is None:
-        return 0
-    rollout_state = _rollout_file_state_for_path(rollout_path)
-    return rollout_state.mtime_ns if rollout_state is not None else 0
 
 
 def _cached_token_usage_is_current_for_state(
