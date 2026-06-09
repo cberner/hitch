@@ -63,6 +63,21 @@ def int_value(value: Any) -> int:
     return 0
 
 
+def string_from_any(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def positive_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    if isinstance(value, str) and value.isdecimal():
+        parsed = int(value)
+        return parsed if parsed > 0 else None
+    return None
+
+
 def datetime_value(value: Any) -> datetime | None:
     return value if isinstance(value, datetime) else None
 
