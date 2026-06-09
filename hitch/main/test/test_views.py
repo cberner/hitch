@@ -56,6 +56,7 @@ from hitch.main import (
     session_index,
     session_pr_plan,
     session_stage,
+    session_stage_refresh,
     settings_cookies,
     streaming,
     system_agents,
@@ -1694,7 +1695,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(metadata.derived_stage, "")
         self.assertEqual(metadata.derived_stage_source_mtime_ns, 0)
 
-    @patch("hitch.main.views._schedule_pr_stage_refresh")
+    @patch("hitch.main.session_stage_refresh._schedule_pr_stage_refresh")
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_active_session_detail_does_not_flag_pr_workflow_refreshing(
@@ -2867,7 +2868,7 @@ class IndexViewTests(TestCase):
         )
         mock_observe.assert_called_once()
 
-    @patch("hitch.main.views._schedule_pr_stage_refresh")
+    @patch("hitch.main.session_stage_refresh._schedule_pr_stage_refresh")
     @patch("hitch.main.system_agents.pr_snapshot_stage_refresh_due", return_value=True)
     @patch("hitch.main.views.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -21256,31 +21257,34 @@ class PrStageRefreshSchedulingTests(TestCase):
     def tearDown(self) -> None:
         # The threaded path adds to a module-level in-flight set; keep tests
         # isolated by clearing it.
-        with views._PR_STAGE_REFRESH_INFLIGHT_LOCK:
-            views._PR_STAGE_REFRESH_INFLIGHT.clear()
+        with session_stage_refresh._PR_STAGE_REFRESH_INFLIGHT_LOCK:
+            session_stage_refresh._PR_STAGE_REFRESH_INFLIGHT.clear()
 
-    @patch("hitch.main.views._refresh_session_pr_stage")
+    @patch("hitch.main.session_stage_refresh._refresh_session_pr_stage")
     def test_schedule_runs_inline_under_testing(
         self, mock_refresh: MagicMock
     ) -> None:
-        views._schedule_pr_stage_refresh("sess-1")
+        session_stage_refresh._schedule_pr_stage_refresh("sess-1")
         mock_refresh.assert_called_once_with("sess-1")
 
-    @patch("hitch.main.views._refresh_session_pr_stage")
-    @patch("hitch.main.views.threading.Thread")
+    @patch("hitch.main.session_stage_refresh._refresh_session_pr_stage")
+    @patch("hitch.main.session_stage_refresh.threading.Thread")
     def test_schedule_spawns_one_thread_per_session_off_request(
         self, mock_thread: MagicMock, _mock_refresh: MagicMock
     ) -> None:
         with self.settings(TESTING=False):
-            views._schedule_pr_stage_refresh("sess-x")
+            session_stage_refresh._schedule_pr_stage_refresh("sess-x")
             # A concurrent render for the same session does not spawn a duplicate.
-            views._schedule_pr_stage_refresh("sess-x")
+            session_stage_refresh._schedule_pr_stage_refresh("sess-x")
         mock_thread.assert_called_once()
         mock_thread.return_value.start.assert_called_once()
 
-    @patch("hitch.main.views._schedule_pr_stage_refresh")
-    @patch("hitch.main.views.system_agents.pr_snapshot_stage_refresh_due", return_value=True)
-    @patch("hitch.main.views._pr_snapshot_for_rollout_path")
+    @patch("hitch.main.session_stage_refresh._schedule_pr_stage_refresh")
+    @patch(
+        "hitch.main.session_stage_refresh.system_agents.pr_snapshot_stage_refresh_due",
+        return_value=True,
+    )
+    @patch("hitch.main.session_stage_refresh._pr_snapshot_for_rollout_path")
     def test_cached_pr_row_drops_refreshing_when_budget_exhausted(
         self,
         mock_snapshot: MagicMock,
@@ -21294,12 +21298,14 @@ class PrStageRefreshSchedulingTests(TestCase):
         rollout_state = _RolloutFileState(path=Path("/tmp/rollout.jsonl"), mtime_ns=1)
         session = {"cwd": "/repo", "stage_pr_refresh_attempted_at": None}
 
-        _stage, _snap, remaining, refreshing = views._stage_from_cached_session_row(
-            "sess-budget",
-            session,
-            rollout_state=rollout_state,
-            cached_stage=session_stage.PR,
-            pr_stage_refreshes_remaining=1,
+        _stage, _snap, remaining, refreshing = (
+            session_stage_refresh._stage_from_cached_session_row(
+                "sess-budget",
+                session,
+                rollout_state=rollout_state,
+                cached_stage=session_stage.PR,
+                pr_stage_refreshes_remaining=1,
+            )
         )
         self.assertTrue(refreshing)
         self.assertEqual(remaining, 0)
@@ -21307,12 +21313,14 @@ class PrStageRefreshSchedulingTests(TestCase):
 
         mock_schedule.reset_mock()
 
-        _stage, _snap, remaining, refreshing = views._stage_from_cached_session_row(
-            "sess-exhausted",
-            session,
-            rollout_state=rollout_state,
-            cached_stage=session_stage.PR,
-            pr_stage_refreshes_remaining=0,
+        _stage, _snap, remaining, refreshing = (
+            session_stage_refresh._stage_from_cached_session_row(
+                "sess-exhausted",
+                session,
+                rollout_state=rollout_state,
+                cached_stage=session_stage.PR,
+                pr_stage_refreshes_remaining=0,
+            )
         )
         self.assertFalse(refreshing)
         self.assertEqual(remaining, 0)
