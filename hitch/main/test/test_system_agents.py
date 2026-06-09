@@ -22,6 +22,7 @@ from openai_codex.generated.v2_all import (
 
 from hitch.main import (
     agent_io,
+    autonomous_goal_prompts,
     codex_events,
     demo,
     gh_observations,
@@ -9456,7 +9457,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(run.input["proposal_history_count"], 1)
         self.assertFalse(run.input["proposal_history_compacted"])
 
-    @patch.object(system_agents, "_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_MAX_ROWS", 1)
+    @patch.object(autonomous_goal_prompts, "_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_MAX_ROWS", 1)
     def test_candidate_proposal_history_uses_metadata_and_outcome_notes(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         autonomous_goal = AutonomousGoal.objects.create(
@@ -9488,7 +9489,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             },
         )
 
-        history = system_agents._autonomous_goal_candidate_proposal_history_context(
+        history = autonomous_goal_prompts._autonomous_goal_candidate_proposal_history_context(
             autonomous_goal
         )
 
@@ -9503,14 +9504,14 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertIn("1 older proposal history rows omitted.", history.text)
         bad_metadata_proposal = ProposedSession(summary="", outcome_metadata=["bad"])
         self.assertEqual(
-            system_agents._autonomous_goal_candidate_proposal_description(
+            autonomous_goal_prompts._autonomous_goal_candidate_proposal_description(
                 bad_metadata_proposal
             ),
             "",
         )
 
-    @patch.object(system_agents, "_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS", 10)
-    @patch.object(system_agents, "_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_MAX_ROWS", 0)
+    @patch.object(autonomous_goal_prompts, "_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS", 10)
+    @patch.object(autonomous_goal_prompts, "_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_MAX_ROWS", 0)
     def test_candidate_proposal_history_truncates_marker_when_no_rows_fit(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         autonomous_goal = AutonomousGoal.objects.create(
@@ -9528,7 +9529,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
         )
 
-        history = system_agents._autonomous_goal_candidate_proposal_history_context(
+        history = autonomous_goal_prompts._autonomous_goal_candidate_proposal_history_context(
             autonomous_goal
         )
 
@@ -9536,10 +9537,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(history.count, 1)
         self.assertLessEqual(
             len(history.text),
-            system_agents._AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS,
+            autonomous_goal_prompts._AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS,
         )
 
-    @patch.object(system_agents, "_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS", 300)
+    @patch.object(autonomous_goal_prompts, "_AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS", 300)
     def test_candidate_proposal_history_keeps_row_with_long_files(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         autonomous_goal = AutonomousGoal.objects.create(
@@ -9574,7 +9575,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             outcome_status=ProposedSession.OUTCOME_ACCEPTED,
         )
 
-        history = system_agents._autonomous_goal_candidate_proposal_history_context(
+        history = autonomous_goal_prompts._autonomous_goal_candidate_proposal_history_context(
             autonomous_goal
         )
 
@@ -9586,7 +9587,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertNotEqual("1 older proposal history rows omitted.", history.text)
         self.assertLessEqual(
             len(history.text),
-            system_agents._AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS,
+            autonomous_goal_prompts._AUTONOMOUS_GOAL_CANDIDATE_HISTORY_CONTEXT_CHARS,
         )
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
