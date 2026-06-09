@@ -1,5 +1,3 @@
-import base64
-import binascii
 import contextlib
 import glob
 import json
@@ -114,6 +112,13 @@ from hitch.main.sdk_values import (
     string_value,
     updated_at_seconds,
     value_for,
+)
+from hitch.main.session_cursor import (
+    _index_cursor,
+    _index_cursor_for_sort_key,
+    _index_cursor_sort_key,
+    _IndexCursor,
+    _is_index_cursor,
 )
 from hitch.main.settings_cookies import (
     _APPROVAL_COOKIE,
@@ -261,17 +266,6 @@ class SessionListPage(NamedTuple):
     archived_next_offset: int
     archived_next_done: bool
     materialized_order: bool = False
-
-
-@dataclass(frozen=True)
-class _IndexCursor:
-    updated_at: float
-    thread_id: str
-    exact_updated_at: bool = False
-
-    @property
-    def sort_key(self) -> tuple[float, str]:
-        return (self.updated_at, self.thread_id)
 
 
 @dataclass
@@ -2043,64 +2037,6 @@ def _index_cursor_for_legacy_second(
     return _index_cursor_for_sort_key(
         (float(int(index_cursor.updated_at)), metadata.thread_id)
     )
-
-
-def _index_cursor_for_sort_key(
-    sort_key: tuple[float, str], *, exact_updated_at: bool = False
-) -> str:
-    payload = {
-        "updated_at": sort_key[0],
-        "id": sort_key[1],
-    }
-    if exact_updated_at:
-        payload["updated_at_precision"] = "exact"
-    encoded = base64.urlsafe_b64encode(
-        json.dumps(payload, separators=(",", ":")).encode()
-    ).decode()
-    return f"idx:{encoded}"
-
-
-def _index_cursor_sort_key(cursor: str) -> tuple[float, str] | None:
-    parsed = _index_cursor(cursor)
-    return parsed.sort_key if parsed is not None else None
-
-
-def _index_cursor(cursor: str) -> _IndexCursor | None:
-    if not _is_index_cursor(cursor):
-        return None
-    try:
-        payload = json.loads(base64.urlsafe_b64decode(cursor[4:].encode()).decode())
-    except (ValueError, binascii.Error, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    updated_at = payload.get("updated_at")
-    thread_id = payload.get("id")
-    if not isinstance(updated_at, int | float) or not isinstance(thread_id, str):
-        return None
-    updated_at_float = _index_cursor_updated_at(updated_at)
-    if updated_at_float is None:
-        return None
-    return _IndexCursor(
-        updated_at=updated_at_float,
-        thread_id=thread_id,
-        exact_updated_at=payload.get("updated_at_precision") == "exact",
-    )
-
-
-def _index_cursor_updated_at(updated_at: int | float) -> float | None:
-    updated_at_float = float(updated_at)
-    if not math.isfinite(updated_at_float):
-        return None
-    try:
-        datetime.fromtimestamp(updated_at_float, UTC)
-    except (OverflowError, OSError, ValueError):
-        return None
-    return updated_at_float
-
-
-def _is_index_cursor(cursor: str) -> bool:
-    return cursor.startswith("idx:")
 
 
 def _thread_list_page(codex: Codex, *, archived: bool, cursor: str) -> ThreadListPage:
