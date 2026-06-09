@@ -753,7 +753,7 @@ def _copy_ci_fields(
                 # success here proves nothing about whether a previously-
                 # observed ``fetch_workflow_run_jobs`` failure has recovered.
                 # Update ``ci_status`` only; never clear the per-job lists
-                # from this branch. ``system_agents._ci_gate`` already
+                # from this branch. ``gh_observations._ci_gate`` already
                 # short-circuits on non-empty ``failing_jobs`` ahead of
                 # reading ``ci_status``, so leaving a real workflow-run
                 # failure in the list keeps the actionable BLOCKED verdict

@@ -1548,7 +1548,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
         # non-empty, so the clean second observation produced an update
         # without the key. ``_merge_pr_snapshot_update`` therefore kept the
         # first observation's stale failing list alongside ``ci_status:
-        # "success"``, and ``system_agents._ci_gate`` -- which short-circuits
+        # "success"``, and ``gh_observations._ci_gate`` -- which short-circuits
         # to BLOCKED whenever ``failing_jobs`` has any items, regardless of
         # ``ci_status`` -- then surfaced the PR as "Failing CI jobs were
         # observed" to the PR follow-up agent. The follow-up workflow looped
@@ -1677,7 +1677,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
         # cross-tool re-observation produced an update without those keys.
         # ``_merge_pr_snapshot_update`` therefore kept the first observation's
         # stale failing list alongside ``ci_status: "success"``, and
-        # ``system_agents._ci_gate`` -- which short-circuits to BLOCKED
+        # ``gh_observations._ci_gate`` -- which short-circuits to BLOCKED
         # whenever ``failing_jobs`` has any items, regardless of ``ci_status``
         # -- then surfaced the PR as "Failing CI jobs were observed" to the
         # PR follow-up agent. The follow-up workflow looped feedback rounds
@@ -2244,7 +2244,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
         # clean second observation emitted an update without the key.
         # ``_merge_pr_snapshot_update`` therefore kept the stale
         # ``"changes_requested"`` from the first observation alongside
-        # ``review_count=0``, and ``system_agents._review_gate`` -- which
+        # ``review_count=0``, and ``gh_observations._review_gate`` -- which
         # short-circuits to BLOCKED whenever ``review_signal`` is
         # ``"changes_requested"`` regardless of ``review_count`` -- then
         # surfaced the PR as "A reviewer requested changes." to the PR
