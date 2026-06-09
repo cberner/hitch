@@ -36,25 +36,37 @@ from hitch.main.agent_io import (
     SPEC_RISK_AGENT_KIND,
     SPEC_SYNTHESIZER_AGENT_KIND,
     SPEC_TEST_AGENT_KIND,
-    _autonomous_goal_history_sections,
-    _autonomous_goal_memory_context,
-    _AutonomousGoalMemoryPromptContext,
-    _merge_string_lists,
     _parse_autonomous_goal_candidate_output,
     _parse_autonomous_goal_judge_output,
     _parse_pr_monitor_output,
     _parse_qa_output,
     _parse_spec_critic_output,
-    _split_autonomous_goal_history,
     _string_list,
-    _write_autonomous_goal_history_files,
 )
 from hitch.main.autonomous_goal_prompts import (
-    _autonomous_goal_ambition_guidance,
-    _autonomous_goal_candidate_proposal_history_context,
+    _AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY,
+    _AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY,
+    _AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY,
+    _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY,
+    _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY,
+    _AUTONOMOUS_GOAL_SESSION_CWD_STATE_KEY,
+    _AUTONOMOUS_GOAL_STACKED_DEPTH_STATE_KEY,
+    _AUTONOMOUS_GOAL_STACKED_ITERATION_STATE_KEY,
+    _autonomous_goal_candidate_allows_code_changes,
+    _autonomous_goal_candidate_prompt,
+    _autonomous_goal_candidate_retry_prompt,
+    _autonomous_goal_failed_attempts,
+    _autonomous_goal_judge_prompt,
+    _autonomous_goal_no_progress_budget_retries,
+    _autonomous_goal_proposal_budget_metadata,
+    _autonomous_goal_proposal_budget_tokens_used,
     _autonomous_goal_proposal_summary,
     _autonomous_goal_proposed_session_prompt,
-    _AutonomousGoalProposalHistoryPromptContext,
+    _autonomous_goal_session_cwd,
+    _autonomous_goal_stack_iteration,
+    _autonomous_goal_workflow_proposal_budget,
+    _autonomous_goal_workflow_stacked_diff_depth,
+    _store_autonomous_goal_memory,
 )
 from hitch.main.diffs import build_worktree_diff_text
 from hitch.main.gh_observations import (
@@ -82,7 +94,6 @@ from hitch.main.local_merges import (
 )
 from hitch.main.models import (
     AutonomousGoal,
-    AutonomousGoalMemory,
     CodexInstance,
     Project,
     ProposedSession,
@@ -246,9 +257,6 @@ _quota_cache_lock = threading.Lock()
 _quota_cache_paused = False
 _quota_cache_checked_at: datetime | None = None
 _AUTONOMOUS_GOAL_USE_WORKTREES_STATE_KEY = "use_worktrees"
-_AUTONOMOUS_GOAL_SESSION_CWD_STATE_KEY = "session_cwd"
-_AUTONOMOUS_GOAL_STACKED_DEPTH_STATE_KEY = "stacked_diff_depth"
-_AUTONOMOUS_GOAL_STACKED_ITERATION_STATE_KEY = "stacked_diff_iteration"
 _AUTONOMOUS_GOAL_STACKED_FORK_CWD_STATE_KEY = "stacked_diff_fork_from_cwd"
 _AUTONOMOUS_GOAL_STACKED_CONTINUATION_STOP_REASON_METADATA_KEY = (
     "stacked_diff_continuation_stopped_reason"
@@ -272,15 +280,8 @@ _AUTONOMOUS_GOAL_PROPOSAL_RESOLUTION_ERRORS = {
 _AUTONOMOUS_GOAL_PROPOSAL_RESOLUTION_ERROR_VALUES = frozenset(
     _AUTONOMOUS_GOAL_PROPOSAL_RESOLUTION_ERRORS.values()
 )
-_AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY = "proposal_budget"
-_AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY = "proposal_budget_tokens_used"
 _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY = (
     "proposal_budget_token_totals"
-)
-_AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY = "proposal_budget_failed_attempts"
-_AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY = "proposal_budget_last_failure"
-_AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY = (
-    "proposal_budget_no_progress_retries"
 )
 _AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT = 1
 _WORKFLOW_FAILURE_OWNER_STATE_KEY = "failure_owner"
@@ -5432,37 +5433,6 @@ def _autonomous_goal_failed_judgment_context(
     return context
 
 
-def _autonomous_goal_workflow_proposal_budget(workflow: SystemWorkflow) -> int:
-    return _state_int(workflow, _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY)
-
-
-def _autonomous_goal_proposal_budget_tokens_used(workflow: SystemWorkflow) -> int:
-    return _state_int(workflow, _AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY)
-
-
-def _autonomous_goal_failed_attempts(workflow: SystemWorkflow) -> int:
-    return _state_int(workflow, _AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY)
-
-
-def _autonomous_goal_no_progress_budget_retries(workflow: SystemWorkflow) -> int:
-    return _state_int(workflow, _AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY)
-
-
-def _autonomous_goal_proposal_budget_metadata(
-    workflow: SystemWorkflow,
-) -> dict[str, object]:
-    budget = _autonomous_goal_workflow_proposal_budget(workflow)
-    if budget <= 0:
-        return {}
-    return {
-        "proposal_budget": budget,
-        "proposal_budget_tokens_used": _autonomous_goal_proposal_budget_tokens_used(
-            workflow
-        ),
-        "proposal_budget_failed_attempts": _autonomous_goal_failed_attempts(workflow),
-    }
-
-
 def _state_without_current_candidate_result(
     state: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -5676,22 +5646,6 @@ def _autonomous_goal_should_continue_stack(
     ) < _autonomous_goal_workflow_stacked_diff_depth(workflow, autonomous_goal)
 
 
-def _autonomous_goal_workflow_stacked_diff_depth(
-    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
-) -> int:
-    depth = _state_int(workflow, _AUTONOMOUS_GOAL_STACKED_DEPTH_STATE_KEY)
-    if not depth:
-        depth = autonomous_goal.effective_stacked_diff_depth
-    return min(
-        max(depth, AutonomousGoal.STACKED_DIFF_DEPTH_MIN),
-        AutonomousGoal.STACKED_DIFF_DEPTH_MAX,
-    )
-
-
-def _autonomous_goal_stack_iteration(workflow: SystemWorkflow) -> int:
-    return max(_state_int(workflow, _AUTONOMOUS_GOAL_STACKED_ITERATION_STATE_KEY), 1)
-
-
 def _autonomous_goal_next_stack_candidate_state(
     workflow: SystemWorkflow, proposal: ProposedSession
 ) -> dict[str, Any]:
@@ -5871,14 +5825,6 @@ def _autonomous_goal_recorded_base_sha(workflow: SystemWorkflow) -> str:
     if start_sha and start_sha != _AUTO_PROPOSAL_UNKNOWN_DEFAULT_BRANCH_SHA:
         return start_sha
     return ""
-
-
-def _autonomous_goal_session_cwd(workflow: SystemWorkflow) -> str:
-    return _state_string(workflow, _AUTONOMOUS_GOAL_SESSION_CWD_STATE_KEY) or workflow.cwd
-
-
-def _autonomous_goal_candidate_allows_code_changes(workflow: SystemWorkflow) -> bool:
-    return _autonomous_goal_session_cwd(workflow) != workflow.cwd
 
 
 def _cleanup_new_autonomous_goal_worktree(worktree: ManagedWorktree | None) -> None:
@@ -6648,260 +6594,6 @@ def _mark_system_agent_runs_failed(runs: list[SystemAgentRun], error: str) -> No
         run.status = SystemAgentRun.STATUS_FAILED
         run.error = error
         run.save(update_fields=["status", "error", "updated_at"])
-
-
-def _autonomous_goal_candidate_prompt(
-    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
-) -> tuple[
-    str,
-    _AutonomousGoalMemoryPromptContext,
-    _AutonomousGoalProposalHistoryPromptContext,
-]:
-    ambition = _autonomous_goal_ambition_guidance(autonomous_goal)
-    memory_context = _autonomous_goal_memory_context(autonomous_goal)
-    proposal_history_context = _autonomous_goal_candidate_proposal_history_context(
-        autonomous_goal
-    )
-    session_cwd = _autonomous_goal_session_cwd(workflow)
-    stacked_depth = _autonomous_goal_workflow_stacked_diff_depth(
-        workflow, autonomous_goal
-    )
-    stacked_iteration = _autonomous_goal_stack_iteration(workflow)
-    if not _autonomous_goal_candidate_allows_code_changes(workflow):
-        code_change_guidance = "Do not make code changes. "
-    elif stacked_depth > 1:
-        code_change_guidance = (
-            "Make code changes that turn the proposal into real, reviewable "
-            "progress; leave any changes in this session checkout so Hitch can "
-            "continue from them. This autonomous goal is configured for stacked "
-            f"diff depth {stacked_depth}; this is candidate round "
-            f"{stacked_iteration} of {stacked_depth}. "
-            "Before returning a proposal, polish the work you changed in this "
-            "round: resolve obvious rough edges, keep the diff coherent, and "
-            "run relevant checks when practical. Do not push a branch or open a "
-            "PR. If this round is accepted and more depth remains, Hitch will "
-            "start another hidden candidate round from this proposal branch. "
-        )
-    else:
-        code_change_guidance = (
-            "Make code changes that turn the proposal into real, reviewable "
-            "progress; leave any changes in this session checkout so the user can "
-            "accept and continue from them. Do not run QA loops or polish this "
-            "as a finished PR; the continuation session will do that after user "
-            "approval. "
-        )
-    stack_context = (
-        f"Stacked diff round: {stacked_iteration} of {stacked_depth}\n"
-        if stacked_depth > 1
-        else ""
-    )
-    prompt = (
-        "You are Hitch's autonomous goal agent.\n\n"
-        "Thoroughly analyze the codebase and find one way to make "
-        f"{ambition.candidate_progress} toward the autonomous goal. "
-        f"{code_change_guidance}"
-        "Focus on a concrete session that a user could accept and continue from. "
-        "Use autonomous-goal memory to avoid repeating recently proposed, skipped, "
-        "or processed files unless repeating one is clearly the best next step. "
-        "Do not stop just because an optional host command is missing; use an "
-        "available fallback, such as Python standard-library tooling for SQLite, "
-        "or report the limitation in the JSON output.\n\n"
-        f"Repository cwd: {session_cwd}\n"
-        f"{stack_context}"
-        f"Autonomous goal title: {autonomous_goal.title}\n\n"
-        "Autonomous goal objective:\n"
-        f"{autonomous_goal.goal}\n\n"
-        "Autonomous goal memory from previous candidate runs:\n"
-        f"{memory_context.text}\n\n"
-        "Accepted/dismissed proposal history for candidate planning:\n"
-        f"{proposal_history_context.text}\n\n"
-        "Return only JSON matching this shape: "
-        '{"proposal": {"title": string, "summary": string, "impact": string, '
-        '"implemented_changes": string, "implementation_direction": string, '
-        '"verification": string, "rough_edges": string, '
-        '"suggested_continuation": string, "relevant_files": [string]} | null, '
-        '"message": string, "next_steps_summary": string, '
-        '"memory_relevant_files": [string]}. If you find a concrete proposal, '
-        'put it in "proposal" and leave "message" empty. If you find nothing '
-        'worth proposing, set "proposal" to null and put a concise user-facing '
-        'explanation in "message". The title should be concise. The summary '
-        "should explain the proposed session. Impact should describe the likely "
-        "user-visible or engineering benefit. Implemented changes should "
-        "summarize the concrete code changes already made in this hidden "
-        "rollout. Implementation direction should be specific enough for the "
-        "user to continue the work in this session. Verification should list "
-        "checks you attempted, or say not run. Rough edges should call out "
-        "known incompleteness. Suggested continuation should be the editable "
-        "message to send if the user accepts the proposal. "
-        "The next_steps_summary is durable memory for future autonomous-goal runs: "
-        "mention what you inspected or selected, specific files or areas involved, "
-        "what you proposed or skipped, and what a future run should try next. "
-        "memory_relevant_files should list repo-relative files this run selected, "
-        "inspected, or intentionally skipped so future runs can avoid accidental "
-        "repetition. "
-        f"{ambition.candidate_instruction}"
-    )
-    return prompt, memory_context, proposal_history_context
-
-
-def _autonomous_goal_candidate_retry_prompt(
-    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal
-) -> str:
-    ambition = _autonomous_goal_ambition_guidance(autonomous_goal)
-    candidate_session = _session_metadata_from_state(workflow, "candidate_session_id")
-    session_cwd = (
-        candidate_session.cwd
-        if candidate_session is not None and candidate_session.cwd
-        else _autonomous_goal_session_cwd(workflow)
-    )
-    stacked_depth = _autonomous_goal_workflow_stacked_diff_depth(
-        workflow, autonomous_goal
-    )
-    stack_context = (
-        f"Stacked diff round: {_autonomous_goal_stack_iteration(workflow)} "
-        f"of {stacked_depth}\n"
-        if stacked_depth > 1
-        else ""
-    )
-    code_change_guidance = (
-        "Do not make code changes. "
-        if not _autonomous_goal_candidate_allows_code_changes(workflow)
-        else (
-            "Continue from the current checkout. Keep useful changes from the "
-            "prior attempt, revise or remove changes that caused the failure, "
-            "and leave the result in this hidden candidate checkout. Do not "
-            "push a branch or open a PR. "
-        )
-    )
-    return (
-        "You are Hitch's autonomous goal agent.\n\n"
-        "Continue this autonomous-goal candidate attempt from the current hidden "
-        "candidate thread and checkout. The last attempt did not produce an "
-        "accepted proposal. Use the failure context below to avoid repeating "
-        f"the same failure and find one way to make {ambition.candidate_progress} "
-        "toward the autonomous goal. "
-        f"{code_change_guidance}"
-        "Focus on a concrete session that a user could accept and continue from.\n\n"
-        f"Repository cwd: {session_cwd}\n"
-        f"{stack_context}"
-        f"Autonomous goal title: {autonomous_goal.title}\n"
-        f"Proposal budget: {_autonomous_goal_workflow_proposal_budget(workflow)} tokens\n"
-        "Proposal budget tokens used so far: "
-        f"{_autonomous_goal_proposal_budget_tokens_used(workflow)}\n"
-        f"Failed proposal attempts so far: {_autonomous_goal_failed_attempts(workflow)}\n\n"
-        "Autonomous goal objective:\n"
-        f"{autonomous_goal.goal}\n\n"
-        "Last failed attempt context:\n"
-        f"{_format_autonomous_goal_last_failure_context(workflow)}\n\n"
-        "Return only JSON matching this shape: "
-        '{"proposal": {"title": string, "summary": string, "impact": string, '
-        '"implemented_changes": string, "implementation_direction": string, '
-        '"verification": string, "rough_edges": string, '
-        '"suggested_continuation": string, "relevant_files": [string]} | null, '
-        '"message": string, "next_steps_summary": string, '
-        '"memory_relevant_files": [string]}. If you find a concrete proposal, '
-        'put it in "proposal" and leave "message" empty. If you still find '
-        'nothing worth proposing, set "proposal" to null and put a concise '
-        'user-facing explanation in "message". The next_steps_summary is '
-        "durable memory for future autonomous-goal runs: mention what failed, "
-        "what you changed or inspected on this retry, and what a future run "
-        "should try next. "
-        f"{ambition.candidate_instruction}"
-    )
-
-
-def _format_autonomous_goal_last_failure_context(workflow: SystemWorkflow) -> str:
-    failure = _state_dict(workflow, _AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY)
-    if not failure:
-        return "(none)"
-    return truncate_for_prompt(json.dumps(failure, indent=2, sort_keys=True), 5000)
-
-
-def _autonomous_goal_judge_prompt(
-    workflow: SystemWorkflow, autonomous_goal: AutonomousGoal, candidate: dict[str, Any]
-) -> tuple[str, list[str]]:
-    history_sections = _autonomous_goal_history_sections(autonomous_goal)
-    inline_history, overflow_history = _split_autonomous_goal_history(history_sections)
-    history_files = _write_autonomous_goal_history_files(workflow, overflow_history)
-    history_file_text = (
-        "\n".join(f"- {path}" for path in history_files) if history_files else "(none)"
-    )
-    ambition = _autonomous_goal_ambition_guidance(autonomous_goal)
-    candidate_text = json.dumps(candidate, indent=2, sort_keys=True)
-    candidate_session = _session_metadata_from_state(workflow, "candidate_session_id")
-    candidate_thread_id = (
-        candidate_session.thread_id if candidate_session is not None else "(unknown)"
-    )
-    session_cwd = _autonomous_goal_session_cwd(workflow)
-    stacked_depth = _autonomous_goal_workflow_stacked_diff_depth(
-        workflow, autonomous_goal
-    )
-    stack_context = (
-        "Stacked diff round: "
-        f"{_autonomous_goal_stack_iteration(workflow)} of {stacked_depth}\n"
-        if stacked_depth > 1
-        else ""
-    )
-    return (
-        "You are Hitch's autonomous goal confidence judge.\n\n"
-        "Judge whether the candidate session is likely to make meaningful "
-        f"{ambition.judge_progress} toward the autonomous goal. "
-        "Use the autonomous goal's "
-        "accepted and rejected proposal history to calibrate your judgment. "
-        "Do not reward broad or vague ideas; confidence should reflect whether "
-        f"the proposal is concrete and well-scoped. {ambition.judge_instruction}\n\n"
-        f"Repository cwd: {session_cwd}\n"
-        f"{stack_context}"
-        f"Autonomous goal title: {autonomous_goal.title}\n"
-        f"Confidence threshold: {autonomous_goal.confidence_threshold}\n\n"
-        "Autonomous goal objective:\n"
-        f"{autonomous_goal.goal}\n\n"
-        "Candidate session JSON:\n"
-        f"Candidate session ID: {candidate_thread_id}\n"
-        f"{candidate_text}\n\n"
-        "Accepted/rejected proposal history included inline:\n"
-        f"{inline_history or '(none)'}\n\n"
-        "Additional history files:\n"
-        f"{history_file_text}\n\n"
-        "Return only JSON matching this shape: "
-        '{"confidence": "medium" | "high" | "very_high", '
-        '"summary": string, "rationale": string}. Summary is shown to the user '
-        "in the inbox and should explain the expected impact."
-    ), history_files
-
-def _store_autonomous_goal_memory(
-    autonomous_goal: AutonomousGoal,
-    workflow: SystemWorkflow,
-    candidate_output: dict[str, Any],
-) -> AutonomousGoalMemory:
-    proposal = candidate_output.get("proposal")
-    title = ""
-    proposal_files: list[str] = []
-    if isinstance(proposal, dict):
-        title = str(proposal.get("title") or "").strip()
-        proposal_files = _string_list(proposal.get("relevant_files"))
-    if not title:
-        title = f"No proposal from {autonomous_goal.title}"
-    summary = str(candidate_output.get("next_steps_summary") or "").strip()
-    if not summary:
-        summary = str(candidate_output.get("message") or "").strip()
-    memory_files = _merge_string_lists(
-        _string_list(candidate_output.get("memory_relevant_files")),
-        proposal_files,
-    )
-    memory, _created = AutonomousGoalMemory.objects.update_or_create(
-        source_workflow=workflow,
-        defaults={
-            "autonomous_goal": autonomous_goal,
-            "candidate_session": _session_metadata_from_state(
-                workflow, "candidate_session_id"
-            ),
-            "title": title[:_AUTONOMOUS_GOAL_TITLE_MAX_LEN],
-            "summary": summary,
-            "relevant_files": memory_files,
-        },
-    )
-    return memory
 
 
 def _final_agent_text(events_path: str) -> str:

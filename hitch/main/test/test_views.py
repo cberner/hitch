@@ -46,6 +46,7 @@ from openai_codex.generated.v2_all import (
 
 from hitch.main import (
     agent_io,
+    autonomous_goal_prompts,
     caches,
     codex_events,
     codex_pool,
@@ -18268,7 +18269,7 @@ class AutonomousGoalViewTests(TestCase):
             step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
             state={
                 "autonomous_goal_id": running_goal.pk,
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 400_000,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 400_000,
                 system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY: {
                     "running-agent-thread": 100_000,
                 },
@@ -18320,7 +18321,7 @@ class AutonomousGoalViewTests(TestCase):
             step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
             state={
                 "autonomous_goal_id": running_no_tokens_goal.pk,
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 700_000,
+                autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 700_000,
             },
         )
         no_tokens_instance = CodexInstance.objects.create(
