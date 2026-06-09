@@ -23,6 +23,7 @@ from openai_codex.generated.v2_all import (
 from hitch.main import (
     codex_events,
     demo,
+    gh_observations,
     pr_handoff,
     rate_limit,
     streaming,
@@ -4917,7 +4918,7 @@ class SpecCriticWorkflowTests(TestCase):
     ) -> None:
         pr: dict[str, Any] = {}
 
-        system_agents._copy_gh_review_fields(
+        gh_observations._copy_gh_review_fields(
             pr,
             {
                 "reviewDecision": "REVIEW_REQUIRED",
@@ -4932,7 +4933,7 @@ class SpecCriticWorkflowTests(TestCase):
     ) -> None:
         pr: dict[str, Any] = {"review_signal": "commented"}
 
-        system_agents._copy_gh_reaction_fields(
+        gh_observations._copy_gh_reaction_fields(
             pr,
             {
                 "reviewDecision": "REVIEW_REQUIRED",
@@ -4950,7 +4951,7 @@ class SpecCriticWorkflowTests(TestCase):
     ) -> None:
         pr: dict[str, Any] = {"review_signal": "thumbs_up"}
 
-        system_agents._copy_gh_reaction_fields(
+        gh_observations._copy_gh_reaction_fields(
             pr,
             {
                 "reactionGroups": [{"content": "HEART", "users": {"totalCount": 1}}],
@@ -5273,7 +5274,7 @@ class SpecCriticWorkflowTests(TestCase):
     def test_pr_monitor_truncated_status_check_page_remains_pending(self) -> None:
         pr: dict[str, object] = {}
 
-        system_agents._copy_gh_status_check_fields(
+        gh_observations._copy_gh_status_check_fields(
             pr,
             [{"name": "ci", "status": "COMPLETED", "conclusion": "SUCCESS"}],
             complete=False,
@@ -5286,7 +5287,7 @@ class SpecCriticWorkflowTests(TestCase):
     def test_pr_monitor_treats_stale_check_runs_as_failing(self) -> None:
         pr: dict[str, Any] = {}
 
-        system_agents._copy_gh_status_check_fields(
+        gh_observations._copy_gh_status_check_fields(
             pr,
             [{"name": "build", "status": "COMPLETED", "conclusion": "STALE"}],
         )
