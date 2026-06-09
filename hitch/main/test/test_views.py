@@ -53,6 +53,7 @@ from hitch.main import (
     input_images,
     session_index,
     session_stage,
+    settings_cookies,
     streaming,
     system_agents,
     views,
@@ -9634,7 +9635,7 @@ class ProjectViewTests(TestCase):
                     "project": str(project.pk),
                     "name": "Renamed",
                     "extra_system_prompt": "x"
-                    * (views._EXTRA_SYSTEM_PROMPT_MAX_LEN + 1),
+                    * (settings_cookies._EXTRA_SYSTEM_PROMPT_MAX_LEN + 1),
                     "auto_pr_mode": Project.AUTO_PR_ON,
                 },
                 "extra system prompt is too long",

@@ -13,7 +13,7 @@ from django.utils import timezone
 from openai_codex.errors import MethodNotFoundError
 from openai_codex.generated.v2_all import ReasoningEffort
 
-from hitch.main import coding_agents, context_processors, views
+from hitch.main import coding_agents, context_processors, settings_cookies, views
 from hitch.main.models import GlobalSettings, Project, UserSettings
 from hitch.settings import common as common_settings
 
@@ -1472,7 +1472,7 @@ class UpdateSettingsViewTests(TestCase):
         # Hiragana costs 3 UTF-8 bytes/char: 2400 chars is under the 2500
         # character cap but base64-encodes to a ~9.6KB cookie.
         prompt = "あ" * 2400
-        self.assertLessEqual(len(prompt), views._EXTRA_SYSTEM_PROMPT_MAX_LEN)
+        self.assertLessEqual(len(prompt), settings_cookies._EXTRA_SYSTEM_PROMPT_MAX_LEN)
 
         response = self.client.post(
             reverse("update_settings"),
@@ -1489,7 +1489,7 @@ class UpdateSettingsViewTests(TestCase):
         writes — ASCII at the character cap and a sizable multibyte prompt
         both round-trip without crossing the byte budget."""
         for label, prompt in (
-            ("ascii at cap", "a" * views._EXTRA_SYSTEM_PROMPT_MAX_LEN),
+            ("ascii at cap", "a" * settings_cookies._EXTRA_SYSTEM_PROMPT_MAX_LEN),
             ("multibyte", "あ" * 800),
         ):
             with self.subTest(label=label):
@@ -1506,7 +1506,7 @@ class UpdateSettingsViewTests(TestCase):
                 morsel = response.cookies[_EXTRA_SYSTEM_PROMPT_COOKIE]
                 name_value = morsel.output(header="").split(";")[0].strip()
                 self.assertLessEqual(
-                    len(name_value.encode()), views._COOKIE_MAX_VALUE_BYTES
+                    len(name_value.encode()), settings_cookies._COOKIE_MAX_VALUE_BYTES
                 )
                 # The value still round-trips intact under the byte budget.
                 self.assertEqual(_extra_system_prompt_value(response), prompt)
@@ -1895,8 +1895,8 @@ class AuthenticatedWebSearchSettingsTests(TestCase):
         # Under the 2500-character cap, but its base64 cookie would blow past
         # the browser limit (the value an anonymous POST would be rejected for).
         prompt = "あ" * 2400
-        self.assertLessEqual(len(prompt), views._EXTRA_SYSTEM_PROMPT_MAX_LEN)
-        self.assertFalse(views._extra_system_prompt_cookie_fits(prompt))
+        self.assertLessEqual(len(prompt), settings_cookies._EXTRA_SYSTEM_PROMPT_MAX_LEN)
+        self.assertFalse(settings_cookies._extra_system_prompt_cookie_fits(prompt))
 
         response = self.client.post(
             reverse("update_settings"),
