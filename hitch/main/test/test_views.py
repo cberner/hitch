@@ -55,6 +55,7 @@ from hitch.main import (
     input_images,
     session_index,
     session_pr_plan,
+    session_settings,
     session_stage,
     session_stage_refresh,
     settings_cookies,
@@ -501,7 +502,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertNotContains(response, "Jan. 5, 2025")
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views.discover_managed_worktrees")
+    @patch("hitch.main.worktrees.discover_managed_worktrees")
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_session_detail_next_message_config_uses_managed_worktree_sandbox(
@@ -2493,7 +2494,7 @@ class IndexViewTests(TestCase):
         self.assertIn("cursor=idx%3A", url)
         return url
 
-    @patch("hitch.main.views.discover_repos", return_value=[])
+    @patch("hitch.main.repos.discover_repos", return_value=[])
     @patch("hitch.main.views.Codex")
     def test_index_binds_primary_nav_before_collapsing_fallback(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -2512,7 +2513,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, ".primary-nav.primary-nav-js .primary-nav-panel")
         self.assertNotContains(response, ":is(.js .primary-nav")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_does_not_call_thread_list(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -2546,7 +2547,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_shows_derived_stage_badge(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -2624,7 +2625,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_shows_pr_number_in_cached_pr_badge(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -2699,7 +2700,7 @@ class IndexViewTests(TestCase):
         client.thread_list.assert_not_called()
 
     @patch("hitch.main.system_agents._gh_pr_view")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_refreshes_cached_pr_stage_to_done_merged(
         self,
@@ -2798,7 +2799,7 @@ class IndexViewTests(TestCase):
         mock_gh_pr_view.assert_called_once()
 
     @patch("hitch.main.system_agents._pr_monitor_observation_from_gh")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_refreshes_due_pr_monitor_backoff_to_done_merged(
         self,
@@ -2870,7 +2871,7 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.session_stage_refresh._schedule_pr_stage_refresh")
     @patch("hitch.main.system_agents.pr_snapshot_stage_refresh_due", return_value=True)
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_session_list_skips_caching_stale_pr_stage_for_budget_deferred_row(
         self,
@@ -2962,7 +2963,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
 
     @patch("hitch.main.system_agents._gh_pr_view")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_refreshes_uncached_pr_snapshot_to_done_merged(
         self,
@@ -3084,7 +3085,7 @@ class IndexViewTests(TestCase):
         )
         mock_gh_pr_view.assert_called_once()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_omits_stale_pr_number_for_new_workflow(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -3169,7 +3170,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_ignores_locked_stage_cache_update(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -3218,7 +3219,7 @@ class IndexViewTests(TestCase):
         client.thread_list.assert_not_called()
 
     @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_active_instance_overrides_terminal_stage(
         self,
@@ -3310,7 +3311,7 @@ class IndexViewTests(TestCase):
         client.thread_list.assert_not_called()
 
     @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_flags_pending_active_approval(
         self,
@@ -3376,7 +3377,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_flags_pending_spec_critic_input(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -3457,7 +3458,7 @@ class IndexViewTests(TestCase):
         client.thread_list.assert_not_called()
 
     @patch("hitch.main.views.codex_pool.worker_is_alive", return_value=True)
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_active_instance_stage_not_cached_after_worker_stops(
         self,
@@ -3569,7 +3570,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_ignores_stage_cache_without_rollout(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -3611,7 +3612,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_survives_malformed_stage_rollout(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -3659,7 +3660,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_ignores_stale_completed_pr_workflow(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -3754,7 +3755,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_uses_terminal_cache_after_stale_pr_workflow(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -3839,7 +3840,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_running_pr_workflow_without_handoff_ignores_old_pr(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -3922,7 +3923,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_running_pr_workflow_uses_terminal_handoff_pr(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -4009,7 +4010,7 @@ class IndexViewTests(TestCase):
         client.thread_list.assert_not_called()
 
     @patch("hitch.main.system_agents._gh_pr_view")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_refreshes_ready_pr_to_done_merged(
         self,
@@ -4105,7 +4106,7 @@ class IndexViewTests(TestCase):
         mock_gh_pr_view.assert_called_once()
 
     @patch("hitch.main.system_agents._gh_pr_view")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_caps_ready_pr_refreshes(
         self,
@@ -4226,7 +4227,7 @@ class IndexViewTests(TestCase):
 
     @patch("hitch.main.system_agents.logger")
     @patch("hitch.main.system_agents._gh_pr_view")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_backs_off_failed_ready_pr_refresh(
         self,
@@ -4303,7 +4304,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_prefers_newer_main_pr_over_stale_workflow(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -4397,7 +4398,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_prefers_newer_main_pr_state_over_workflow(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -4487,7 +4488,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_ignores_workflow_only_stale_pr_handoff(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -4556,7 +4557,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_keeps_server_created_pr_handoff(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -4635,7 +4636,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_hidden_system_flag_drives_main_and_system_lists(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -4682,7 +4683,7 @@ class IndexViewTests(TestCase):
         self.assertContains(system_response, "Hitch system")
         self.assertContains(system_response, "untracked")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_system_sessions_demo_upsert_keeps_main_session_visible(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -4757,7 +4758,7 @@ class IndexViewTests(TestCase):
         assert metadata.codex_last_synced_at is not None
         self.assertGreater(metadata.codex_last_synced_at, old_updated_at)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_order_uses_local_qa_activity_when_hidden_row_is_stale(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -4836,7 +4837,7 @@ class IndexViewTests(TestCase):
         self.assertNotContains(response, "Hidden QA")
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_order_promotes_qa_activity_from_beyond_page_size(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -4914,7 +4915,7 @@ class IndexViewTests(TestCase):
         self.assertNotContains(response, "Hidden QA")
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_index_cursor_keeps_later_pages_stable_when_rows_move(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -4957,7 +4958,7 @@ class IndexViewTests(TestCase):
         self.assertNotContains(response, "New front session")
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_system_sessions_pages_before_helper_lookups_and_keeps_cursor_stable(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5031,7 +5032,7 @@ class IndexViewTests(TestCase):
             )
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_system_sessions_cursor_keeps_same_second_rows_stable(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5072,7 +5073,7 @@ class IndexViewTests(TestCase):
         self.assertNotContains(response, "System 49")
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_system_sessions_accepts_cold_index_second_precision_cursor(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5106,7 +5107,7 @@ class IndexViewTests(TestCase):
         self.assertNotContains(response, "System 50")
         self.assertEqual(client.thread_list.call_count, 1)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_system_sessions_keeps_cold_index_second_precision_across_pages(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5149,7 +5150,7 @@ class IndexViewTests(TestCase):
         self.assertNotContains(response, "System 020")
         self.assertEqual(client.thread_list.call_count, 1)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_system_sessions_ignores_invalid_index_cursor_timestamps(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5198,7 +5199,7 @@ class IndexViewTests(TestCase):
                 self.assertContains(response, "System")
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_system_sessions_excludes_accepted_visible_system_thread(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5389,7 +5390,7 @@ class IndexViewTests(TestCase):
         self.assertFalse(active_state.is_complete)
         self.assertFalse(archived_state.is_complete)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_complete_empty_session_index_serves_cached_empty_state(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5409,7 +5410,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "No sessions found.")
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_stale_complete_session_index_serves_cache_and_schedules_refresh(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5445,7 +5446,7 @@ class IndexViewTests(TestCase):
             include_archived=False,
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_complete_session_index_with_pending_cursor_serves_cache(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5481,7 +5482,7 @@ class IndexViewTests(TestCase):
             include_archived=False,
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_stale_complete_session_index_does_not_start_codex(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5522,7 +5523,7 @@ class IndexViewTests(TestCase):
             include_archived=False,
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_stale_complete_session_index_keeps_index_cursor_page(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5573,7 +5574,7 @@ class IndexViewTests(TestCase):
             include_archived=False,
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_stale_complete_pending_refresh_keeps_usage_totals_available(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5632,7 +5633,7 @@ class IndexViewTests(TestCase):
             include_archived=False,
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_stale_complete_session_index_keeps_load_more_on_cache(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5683,7 +5684,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_system_sessions_backfill_missing_cached_metadata(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5746,7 +5747,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(metadata.project, project)
         self.assertIsNotNone(metadata.codex_updated_at)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_archived_toggle_refreshes_missing_archived_cache(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5788,7 +5789,7 @@ class IndexViewTests(TestCase):
             use_state_db_only=True,
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_incomplete_session_index_uses_codex_cursor_pagination(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5829,7 +5830,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, 'href="/?cursor=page-2"')
         mock_codex.assert_called_once()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_codex_cursor_request_uses_codex_even_when_index_complete(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5858,7 +5859,7 @@ class IndexViewTests(TestCase):
             use_state_db_only=True,
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_empty_session_index_self_primes_from_index_view(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5898,7 +5899,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Session 0")
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_renders_empty_state_and_new_session_button(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5913,7 +5914,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, f'href="{reverse("new_session")}"')
         self.assertContains(response, "Create project")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_hides_project_banner_when_project_exists(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5927,7 +5928,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, "Create a project to group sessions")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_hides_system_agent_threads(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -5964,7 +5965,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Visible")
         self.assertNotContains(response, "Hidden QA")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_hides_system_agent_instance_threads_without_run_record(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -6024,7 +6025,7 @@ class IndexViewTests(TestCase):
         self.assertContains(detail_response, "System prompt")
         self.assertContains(detail_response, "autonomous goal")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_hides_orphan_hitch_system_prompt_threads(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -6080,7 +6081,7 @@ class IndexViewTests(TestCase):
         self.assertContains(detail_response, '<body class="read-only"')
         self.assertContains(detail_response, "You are Hitch&#x27;s autonomous goal agent.")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_hides_legacy_autonomous_goal_prompt_threads_without_source(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -6162,7 +6163,7 @@ class IndexViewTests(TestCase):
             system_response, "You are Hitch&#x27;s standing order confidence judge."
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_user_prompt_with_hitch_system_text_remains_visible(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -6190,7 +6191,7 @@ class IndexViewTests(TestCase):
 
         self.assertEqual(system_detail_response.status_code, 404)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_user_prompt_with_legacy_autonomous_goal_title_remains_visible(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -6276,7 +6277,7 @@ class IndexViewTests(TestCase):
             )
 
     @patch("hitch.main.system_agents.accepted_visible_system_thread_ids")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_session_list_reuses_accepted_visible_thread_ids_across_pages(
         self,
@@ -6308,7 +6309,7 @@ class IndexViewTests(TestCase):
         self.assertNotContains(response, "Hidden subagent")
         mock_accepted_visible.assert_called_once_with()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_accepted_candidate_thread_can_remain_visible(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -6333,7 +6334,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Accepted candidate")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_session_list_self_primes_initial_page_and_links_next_offset(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -6361,7 +6362,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(client.thread_list.call_count, 2)
         self.assertTrue(SessionIndexSyncState.objects.get(source="active").is_complete)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_historical_qa_run_does_not_disable_cursor_pagination(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -6410,7 +6411,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(client.thread_list.call_count, 2)
         self.assertTrue(SessionIndexSyncState.objects.get(source="active").is_complete)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_active_session_pagination_stops_before_refetching_seen_cursor(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -6436,7 +6437,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Session B")
         self.assertEqual(client.thread_list.call_count, 2)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_load_more_resumes_partially_consumed_codex_page(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -6501,7 +6502,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Page 2 visible 49")
         self.assertNotContains(response, "Page 2 visible 19")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_paginates_sessions_before_hiding_system_agent_threads(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -6551,7 +6552,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Visible next page")
         self.assertNotContains(response, "Hidden QA")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_qa_activity_can_promote_main_session_from_later_codex_page(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -6607,7 +6608,7 @@ class IndexViewTests(TestCase):
         self.assertNotContains(response, "Main session")
         self.assertContains(response, "Ordinary 49")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_qa_activity_can_promote_main_session_from_later_in_fetch_page(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -6651,7 +6652,7 @@ class IndexViewTests(TestCase):
         self._assert_index_cursor_url(response)
         self.assertNotContains(response, "materialized_order=1")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_mid_pagination_qa_activity_keeps_cursor_order(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -6706,7 +6707,7 @@ class IndexViewTests(TestCase):
         self.assertNotContains(response, "First 0")
         self.assertNotContains(response, "materialized_order=1")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_qa_activity_materializes_incomplete_final_page(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -6754,7 +6755,7 @@ class IndexViewTests(TestCase):
         self.assertNotContains(response, "Hidden QA")
         self.assertNotContains(response, "Load more")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_qa_activity_promotes_main_session_when_archived_sessions_are_shown(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -6810,7 +6811,7 @@ class IndexViewTests(TestCase):
         self._assert_index_cursor_url(response)
         self.assertNotContains(response, "materialized_order=1")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_archived_merge_promotes_main_session_from_later_in_fetch_page(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -6993,7 +6994,7 @@ class IndexViewTests(TestCase):
             )
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_index_links_to_new_session_page_instead_of_dialog(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -7007,7 +7008,7 @@ class IndexViewTests(TestCase):
         self.assertNotContains(response, "data-new-session-dialog")
         self.assertNotContains(response, "keyboard-adjusted")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_lists_sessions_sorted_descending(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -7058,7 +7059,7 @@ class IndexViewTests(TestCase):
         self.assertLess(body.index("Newer session"), body.index("Middle session"))
         self.assertLess(body.index("Middle session"), body.index("Older session"))
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_index_keeps_pending_archive_rows_hidden(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -7071,7 +7072,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, ".session.pending-archive {")
         self.assertContains(response, "visibility: hidden;")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_session_updated_at_includes_hidden_qa_agent_activity(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -7185,7 +7186,7 @@ class IndexViewTests(TestCase):
 
         self.assertEqual(updated_at_by_main_thread, {"active": 2000})
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_selected_project_filters_sessions(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -7271,7 +7272,7 @@ class IndexViewTests(TestCase):
         mock_hidden_thread_ids.assert_not_called()
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_visible_projects_filter_sessions(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -7501,7 +7502,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(global_pending.decision, ApprovalRequest.DECISION_DECLINE)
         self.assertIsNotNone(global_pending.decided_at)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_no_project_metadata_prevents_cwd_project_inference(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -7519,7 +7520,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertNotContains(response, "Cleared")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_session_list_omits_token_usage(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -8241,7 +8242,7 @@ class IndexViewTests(TestCase):
         assert refreshed is not None
         self.assertEqual(refreshed["usage"]["input_tokens"], 500)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_hides_archived_sessions_by_default(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -8267,7 +8268,7 @@ class IndexViewTests(TestCase):
             use_state_db_only=True,
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_active_session_not_hidden_when_codex_home_traverses_archived_sessions_dir(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -8327,7 +8328,7 @@ class IndexViewTests(TestCase):
         assert metadata is not None
         self.assertTrue(metadata.codex_archived)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_archived_and_active_sessions_are_globally_paginated(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -8386,7 +8387,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Active 0")
         self.assertNotContains(response, "Archived page 1 0")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_archived_session_pagination_exhausts_cursor_cycles(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -8414,7 +8415,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "No sessions found.")
         self.assertEqual(client.thread_list.call_count, 8)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_archived_session_pagination_hydrates_page_metadata_once(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -8438,7 +8439,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "Active 2")
         self.assertLessEqual(metadata_by_thread.call_count, 2)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_shows_archived_sessions_when_setting_enabled(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -9231,7 +9232,7 @@ class IndexViewTests(TestCase):
         for thread_id in stale_thread_ids:
             self.assertIn(thread_id, batch_ids)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_new_session_page_populates_project_and_bare_repo_selectors(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -9267,7 +9268,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, "function requireNewSessionPromptOrImages()")
         self.assertContains(response, "!commandPrompt && !newSessionHasImages()")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_repo_dropdown_selects_saved_repo(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -9284,7 +9285,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, 'value="/home/user/proj-b" selected')
         self.assertNotContains(response, 'value="/home/user/proj-a" selected')
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_project_dropdown_selects_saved_repo_project(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -9303,7 +9304,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, f'value="{project_b.pk}" selected')
         self.assertContains(response, "data-new-session-repo-field hidden")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_project_dropdown_keeps_saved_unprojected_repo_on_bare_option(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -9319,12 +9320,12 @@ class IndexViewTests(TestCase):
         response = self.client.get(reverse("new_session"))
 
         self.assertContains(
-            response, f'value="{views._BARE_REPO_PROJECT_VALUE}" selected'
+            response, f'value="{session_settings._BARE_REPO_PROJECT_VALUE}" selected'
         )
         self.assertNotContains(response, "data-new-session-repo-field hidden")
         self.assertContains(response, 'value="/home/user/bare" selected')
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_project_dropdown_ignores_stale_saved_repo(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -9342,7 +9343,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, f'value="{project.pk}" selected')
         self.assertContains(response, "data-new-session-repo-field hidden")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_new_session_page_supports_super_enter_submit(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -9359,7 +9360,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, 'event.getModifierState("OS")')
         self.assertContains(response, "requestSubmit(newSessionForm, newSessionSubmit)")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_new_session_page_exposes_plan_slash_command(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -9382,7 +9383,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, 'toLowerCase() !== "/qa"')
         self.assertContains(response, "Enter a prompt or attach an image.")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_new_session_page_exposes_coding_agent_override(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -9399,7 +9400,7 @@ class IndexViewTests(TestCase):
         self.assertContains(response, 'value="codex"')
         self.assertContains(response, 'value="hitch"')
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_new_session_page_exposes_worktree_override(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -9417,7 +9418,7 @@ class IndexViewTests(TestCase):
             'name="use_worktrees" value="true" data-new-session-use-worktree checked',
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_title_rendering(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -9456,7 +9457,7 @@ class ProjectViewTests(TestCase):
 
         self.assertEqual(project.auto_pr_mode, Project.AUTO_PR_FOLLOW_GLOBAL)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_project_form_lists_discovered_repos(self, mock_discover: MagicMock) -> None:
         mock_discover.return_value = [Path("/repo")]
 
@@ -9467,7 +9468,7 @@ class ProjectViewTests(TestCase):
         self.assertContains(response, 'name="repo_path"')
         self.assertContains(response, "/repo")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_project_form_hides_repos_that_already_have_projects(
         self, mock_discover: MagicMock
     ) -> None:
@@ -9481,7 +9482,7 @@ class ProjectViewTests(TestCase):
         self.assertContains(response, '<option value="/other">/other</option>', html=True)
 
     @patch("hitch.main.views.git_common_dir")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_project_form_hides_repos_with_existing_git_common_dir(
         self, mock_discover: MagicMock, mock_common_dir: MagicMock
     ) -> None:
@@ -9500,7 +9501,7 @@ class ProjectViewTests(TestCase):
         self.assertContains(response, "No git repositories without projects")
 
     @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_creates_project_selects_it_and_associates_existing_sessions(
         self, mock_discover: MagicMock, mock_codex: MagicMock
     ) -> None:
@@ -9537,7 +9538,7 @@ class ProjectViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.git_common_dir")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_rejects_project_with_existing_git_common_dir(
         self,
         mock_discover: MagicMock,
@@ -9566,7 +9567,7 @@ class ProjectViewTests(TestCase):
         self.assertEqual(Project.objects.count(), 1)
 
     @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_project_creation_preserves_manually_cleared_sessions(
         self, mock_discover: MagicMock, mock_codex: MagicMock
     ) -> None:
@@ -9660,7 +9661,7 @@ class ProjectViewTests(TestCase):
                 self.assertContains(response, message, status_code=400)
 
     @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_rejects_invalid_project_posts(
         self, mock_discover: MagicMock, mock_codex: MagicMock
     ) -> None:
@@ -9714,7 +9715,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_spawns_worker_and_redirects(
         self,
         mock_discover: MagicMock,
@@ -9748,7 +9749,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_post_uses_warm_model_cache(
         self,
         mock_discover: MagicMock,
@@ -9780,7 +9781,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_post_refreshes_empty_model_cache(
         self,
         mock_discover: MagicMock,
@@ -9810,7 +9811,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_post_refreshes_expired_model_cache(
         self,
         mock_discover: MagicMock,
@@ -9851,7 +9852,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
     @patch("hitch.main.views.codex_pool.create_session_thread", return_value="thread-spec")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_spec_critic_new_session_creates_visible_thread_before_implementation(
         self,
@@ -9911,7 +9912,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_spawns_worker_with_uploaded_image(
         self,
         mock_discover: MagicMock,
@@ -9950,7 +9951,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_spawns_worker_with_image_only_prompt(
         self,
         mock_discover: MagicMock,
@@ -9985,7 +9986,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_spawns_worker_with_multiple_uploaded_image_formats(
         self,
         mock_discover: MagicMock,
@@ -10031,7 +10032,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_cleans_uploaded_images_when_spawn_handoff_fails(
         self,
         mock_discover: MagicMock,
@@ -10130,7 +10131,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_upload_limited_new_session_still_enforces_csrf(
         self,
         mock_discover: MagicMock,
@@ -10176,7 +10177,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_rejects_invalid_image_uploads_before_spawn(
         self,
         mock_discover: MagicMock,
@@ -10321,7 +10322,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.codex_pool.create_session_thread")
     @patch("hitch.main.views.Codex")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_rejects_workflow_image_uploads_before_side_effects(
         self,
         mock_discover: MagicMock,
@@ -10361,7 +10362,7 @@ class NewSessionViewTests(TestCase):
     )
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_accepts_and_associates_proposed_work(
         self,
         mock_discover: MagicMock,
@@ -10429,7 +10430,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views._save_posted_input_images")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_accept_losing_start_claim_redirects_without_spawn(
         self,
         mock_discover: MagicMock,
@@ -10486,7 +10487,7 @@ class NewSessionViewTests(TestCase):
     )
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_spawn_failure_resets_proposal_start_claim(
         self,
         mock_discover: MagicMock,
@@ -10594,7 +10595,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_accept_preserves_proposal_auto_merge_settings(
         self,
         mock_discover: MagicMock,
@@ -10666,7 +10667,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_project_proposal_start_skips_preflight_and_repo_discovery(
         self,
         mock_discover: MagicMock,
@@ -10709,8 +10710,8 @@ class NewSessionViewTests(TestCase):
         "hitch.main.views.system_agents."
         "stop_running_autonomous_goal_stack_after_proposal_resolution"
     )
-    @patch("hitch.main.views.discover_managed_worktrees")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.codex_pool.spawn_turn")
@@ -10816,8 +10817,8 @@ class NewSessionViewTests(TestCase):
         mock_new_session.assert_not_called()
         mock_spec_critic_should_run.assert_not_called()
 
-    @patch("hitch.main.views.discover_managed_worktrees")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     def test_candidate_worktree_uses_local_instance_for_next_user_message_index(
@@ -10874,8 +10875,8 @@ class NewSessionViewTests(TestCase):
         self.assertEqual(mock_turn.call_args.kwargs["user_message_index"], 1)
         codex._client.thread_resume.assert_not_called()
 
-    @patch("hitch.main.views.discover_managed_worktrees")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.run_borrowed_op_with_retry")
     @patch("hitch.main.views.codex_pool.spawn_turn")
@@ -10967,8 +10968,8 @@ class NewSessionViewTests(TestCase):
         )
 
     @patch("hitch.main.views._auto_merge_to_local_branch_for_proposal")
-    @patch("hitch.main.views.discover_managed_worktrees")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     def test_candidate_accept_losing_race_aborts_to_inbox(
@@ -11033,8 +11034,8 @@ class NewSessionViewTests(TestCase):
         self.assertTrue(candidate.is_hidden_system_session)
         mock_turn.assert_not_called()
 
-    @patch("hitch.main.views.discover_managed_worktrees")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     def test_candidate_accept_claims_before_spawning_turn(
@@ -11104,8 +11105,8 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
-    @patch("hitch.main.views.discover_managed_worktrees")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     def test_new_session_candidate_worktree_slash_commands_start_qa_workflow(
@@ -11198,8 +11199,8 @@ class NewSessionViewTests(TestCase):
         "stop_running_autonomous_goal_stack_after_proposal_resolution"
     )
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
-    @patch("hitch.main.views.discover_managed_worktrees")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     def test_candidate_worktree_qa_start_failure_resets_accept_claim(
@@ -11256,8 +11257,8 @@ class NewSessionViewTests(TestCase):
         mock_stop_stack.assert_not_called()
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
-    @patch("hitch.main.views.discover_managed_worktrees")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     def test_candidate_worktree_slash_command_preserves_goal_auto_review(
@@ -11348,8 +11349,8 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.system_agents.spec_critic_should_run")
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
-    @patch("hitch.main.views.discover_managed_worktrees")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     def test_new_session_candidate_worktree_skips_spec_critic_preflight(
@@ -11420,7 +11421,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos", return_value=[Path(REPO)])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path(REPO)])
     def test_new_session_rejects_invalid_proposed_session_matrix(
         self,
         mock_discover: MagicMock,
@@ -11479,7 +11480,7 @@ class NewSessionViewTests(TestCase):
             (
                 "bare repo mismatch",
                 {
-                    "project": views._BARE_REPO_PROJECT_VALUE,
+                    "project": session_settings._BARE_REPO_PROJECT_VALUE,
                     "cwd": self.REPO,
                     "proposed_session": str(proposal.pk),
                 },
@@ -11508,7 +11509,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_remembers_selected_repo_in_cookie(
         self,
         mock_discover: MagicMock,
@@ -11530,7 +11531,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_remembers_selected_repo_in_account_settings(
         self,
         mock_discover: MagicMock,
@@ -11557,7 +11558,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_auto_pr_precedence_matrix(
         self,
         mock_discover: MagicMock,
@@ -11644,7 +11645,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_auto_qa_precedence_matrix(
         self,
         mock_discover: MagicMock,
@@ -11722,7 +11723,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_project_routing_matrix(
         self,
         mock_discover: MagicMock,
@@ -11761,7 +11762,7 @@ class NewSessionViewTests(TestCase):
                 else:
                     data["cwd"] = repo
                     if selector == "bare":
-                        data["project"] = views._BARE_REPO_PROJECT_VALUE
+                        data["project"] = session_settings._BARE_REPO_PROJECT_VALUE
                     _seed_cookies(
                         client, hitch_selected_project_id=str(selected_project.pk)
                     )
@@ -11790,7 +11791,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_forwards_cookie_settings_to_spawn_matrix(
         self,
         mock_discover: MagicMock,
@@ -11868,7 +11869,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_merges_global_and_project_developer_prompts(
         self,
         mock_discover: MagicMock,
@@ -11907,7 +11908,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_ignores_project_prompt_for_bare_repo_override(
         self,
         mock_discover: MagicMock,
@@ -11929,7 +11930,7 @@ class NewSessionViewTests(TestCase):
             data={
                 "prompt": "do thing",
                 "cwd": self.REPO,
-                "project": views._BARE_REPO_PROJECT_VALUE,
+                "project": session_settings._BARE_REPO_PROJECT_VALUE,
             },
         )
 
@@ -11938,7 +11939,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_web_search_override(
         self,
         mock_discover: MagicMock,
@@ -11964,7 +11965,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_coding_agent_override_matrix(
         self,
         mock_discover: MagicMock,
@@ -12005,7 +12006,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_rejects_invalid_coding_agent_override(
         self,
         mock_discover: MagicMock,
@@ -12029,7 +12030,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_rejects_invalid_web_search_override(
         self,
         mock_discover: MagicMock,
@@ -12054,7 +12055,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_rejects_invalid_worktree_override(
         self,
         mock_discover: MagicMock,
@@ -12079,7 +12080,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_plan_mode_matrix(
         self,
         mock_discover: MagicMock,
@@ -12136,7 +12137,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_plan_slash_command_allows_image_only_prompt(
         self,
         mock_discover: MagicMock,
@@ -12178,7 +12179,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.create_session_thread")
     @patch("hitch.main.views.create_worktree_for_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_qa_workflow_slash_commands(
         self,
         mock_discover: MagicMock,
@@ -12322,7 +12323,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.create_session_thread")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_oneoff_qa_slash_does_not_persist_global_auto_review(
         self,
         mock_discover: MagicMock,
@@ -12356,7 +12357,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.create_session_thread")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_coding_agent_proposal_qa_slash_does_not_persist_global_auto_review(
         self,
         mock_discover: MagicMock,
@@ -12402,7 +12403,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.create_session_thread")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_proposal_qa_thread_create_failure_resets_start_claim(
         self,
         mock_discover: MagicMock,
@@ -12441,7 +12442,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.create_session_thread")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_proposal_qa_workflow_start_failure_resets_start_claim(
         self,
         mock_discover: MagicMock,
@@ -12480,7 +12481,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.create_session_thread")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_pr_new_session_project_assignment_matrix(
         self,
         mock_discover: MagicMock,
@@ -12505,7 +12506,7 @@ class NewSessionViewTests(TestCase):
                 "bare repo",
                 {
                     "prompt": "/pr",
-                    "project": views._BARE_REPO_PROJECT_VALUE,
+                    "project": session_settings._BARE_REPO_PROJECT_VALUE,
                     "cwd": self.REPO,
                 },
                 {Path(self.REPO)},
@@ -12544,7 +12545,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_plan_mode_returns_bad_request_when_model_cannot_be_resolved(
         self,
         mock_discover: MagicMock,
@@ -12569,7 +12570,7 @@ class NewSessionViewTests(TestCase):
 
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_reconciles_stale_model_before_spawning(
         self,
         mock_discover: MagicMock,
@@ -12604,7 +12605,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.create_worktree_for_session")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_uses_managed_worktree_when_setting_enabled(
         self,
         mock_discover: MagicMock,
@@ -12643,7 +12644,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.create_worktree_for_session")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_managed_worktree_respects_explicit_sandbox_setting(
         self,
         mock_discover: MagicMock,
@@ -12679,7 +12680,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.create_worktree_for_session")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_new_session_worktree_override_precedence_matrix(
         self,
         mock_discover: MagicMock,
@@ -12754,7 +12755,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.create_worktree_for_session")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_cleans_up_managed_worktree_when_spawn_fails(
         self,
         mock_discover: MagicMock,
@@ -12786,7 +12787,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.create_worktree_for_session")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_cleans_up_managed_worktree_when_upload_validation_fails(
         self,
         mock_discover: MagicMock,
@@ -12828,7 +12829,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.create_worktree_for_session")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_preserves_spawn_error_when_managed_worktree_cleanup_fails(
         self,
         mock_discover: MagicMock,
@@ -12864,7 +12865,7 @@ class NewSessionViewTests(TestCase):
     @patch("hitch.main.views.create_worktree_for_session")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_reports_worktree_creation_failure(
         self,
         mock_discover: MagicMock,
@@ -12887,7 +12888,7 @@ class NewSessionViewTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch("hitch.main.views.codex_pool.spawn_new_session")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     def test_rejects_invalid_input(
         self, mock_discover: MagicMock, mock_spawn: MagicMock
     ) -> None:
@@ -12905,7 +12906,7 @@ class NewSessionViewTests(TestCase):
                 self.assertEqual(response.status_code, 400)
                 mock_spawn.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_renders_get(self, mock_codex: MagicMock, mock_discover: MagicMock) -> None:
         _setup_codex(mock_codex)
@@ -13287,7 +13288,7 @@ class SendMessageViewTests(TestCase):
         mock_spawn.assert_not_called()
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.steer_instance")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
@@ -13390,7 +13391,7 @@ class SendMessageViewTests(TestCase):
                 )
                 self._assert_follow_up_spawn(mock_spawn, prompt=prompt, **expected)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.steer_instance", return_value=None)
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
@@ -13497,7 +13498,7 @@ class SendMessageViewTests(TestCase):
         mock_spawn.assert_not_called()
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_spawns_turn_and_redirects(
@@ -13528,7 +13529,7 @@ class SendMessageViewTests(TestCase):
             approval_mode="auto_review",
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_first_follow_up_uses_project_developer_prompt(
@@ -13567,7 +13568,7 @@ class SendMessageViewTests(TestCase):
             ),
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_idle_follow_up_resumes_from_disk_without_app_server(
@@ -13619,7 +13620,7 @@ class SendMessageViewTests(TestCase):
         # The disk path never constructs a live app-server.
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_archived_follow_up_unarchives_before_spawning(
@@ -13692,8 +13693,8 @@ class SendMessageViewTests(TestCase):
             ArchivedSessionTokenUsage.objects.filter(thread_id="other").exists()
         )
 
-    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_archived_follow_up_rejects_disallowed_cached_cwd_before_unarchive(
@@ -13736,7 +13737,7 @@ class SendMessageViewTests(TestCase):
             ArchivedSessionTokenUsage.objects.filter(thread_id="abc").exists()
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_archived_live_resume_retry_unarchives_before_spawning(
@@ -13780,8 +13781,8 @@ class SendMessageViewTests(TestCase):
             ArchivedSessionTokenUsage.objects.filter(thread_id="other").exists()
         )
 
-    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_archived_live_resume_retry_rejects_cached_cwd_before_unarchive(
@@ -13818,8 +13819,8 @@ class SendMessageViewTests(TestCase):
             ArchivedSessionTokenUsage.objects.filter(thread_id="abc").exists()
         )
 
-    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_archived_live_resume_retry_rearchives_disallowed_resumed_cwd(
@@ -13875,7 +13876,7 @@ class SendMessageViewTests(TestCase):
             ArchivedSessionTokenUsage.objects.filter(thread_id="abc").exists()
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_archived_follow_up_rearchives_when_spawn_rejects(
@@ -13923,7 +13924,7 @@ class SendMessageViewTests(TestCase):
             ArchivedSessionTokenUsage.objects.filter(thread_id="abc").exists()
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_archived_follow_up_rearchives_when_default_model_missing(
@@ -13965,7 +13966,7 @@ class SendMessageViewTests(TestCase):
             ArchivedSessionTokenUsage.objects.filter(thread_id="abc").exists()
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_disk_resume_plan_turn_recovers_thread_model(
@@ -14030,7 +14031,7 @@ class SendMessageViewTests(TestCase):
 
     @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_spec_critic_resume_intercepts_ambiguous_implementation_prompt(
@@ -14074,7 +14075,7 @@ class SendMessageViewTests(TestCase):
 
     @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_spec_critic_resume_preserves_auto_merge_settings(
@@ -14112,7 +14113,7 @@ class SendMessageViewTests(TestCase):
 
     @patch("hitch.main.views.system_agents.spec_critic_should_run")
     @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_spec_critic_resume_defers_classification_to_background(
@@ -14146,7 +14147,7 @@ class SendMessageViewTests(TestCase):
         mock_spawn.assert_not_called()
         mock_start_spec_critic.assert_called_once()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_spawns_turn_with_uploaded_image(
@@ -14180,7 +14181,7 @@ class SendMessageViewTests(TestCase):
         mock_spawn.assert_called_once()
         self.assertEqual(mock_spawn.call_args.kwargs["prompt"], "use this screenshot")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_spawns_turn_with_image_only_prompt(
@@ -14214,7 +14215,7 @@ class SendMessageViewTests(TestCase):
         mock_spawn.assert_called_once()
         self.assertEqual(mock_spawn.call_args.kwargs["prompt"], "")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_spawns_turn_with_multiple_uploaded_image_formats(
@@ -14258,7 +14259,7 @@ class SendMessageViewTests(TestCase):
                 [body for _name, body, _suffix, _content_type in uploads],
             )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_send_message_cleans_uploaded_images_when_spawn_handoff_fails(
@@ -14292,8 +14293,8 @@ class SendMessageViewTests(TestCase):
                 [],
             )
 
-    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_send_message_cleans_uploaded_images_when_resume_validation_fails(
@@ -14436,7 +14437,7 @@ class SendMessageViewTests(TestCase):
                 mock_spawn.assert_not_called()
                 mock_codex.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_unwraps_pydantic_rootmodel_cwd(
@@ -14464,8 +14465,8 @@ class SendMessageViewTests(TestCase):
             approval_mode="auto_review",
         )
 
-    @patch("hitch.main.views.discover_managed_worktrees")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_allows_follow_up_turns_in_managed_worktrees(
@@ -14494,7 +14495,7 @@ class SendMessageViewTests(TestCase):
             approval_mode="auto_review",
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_forwards_follow_up_cookie_options_to_spawn_turn(
@@ -14570,7 +14571,7 @@ class SendMessageViewTests(TestCase):
                     **expected_options,
                 )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_follow_up_uses_session_approval_mode_override(
@@ -14602,7 +14603,7 @@ class SendMessageViewTests(TestCase):
             approval_mode="deny_all",
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_follow_up_clears_previous_web_search_when_setting_is_default(
@@ -14638,7 +14639,7 @@ class SendMessageViewTests(TestCase):
             web_search_mode="",
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_hitch_coding_agent_forwards_base_instructions_to_follow_up(
@@ -14660,7 +14661,7 @@ class SendMessageViewTests(TestCase):
         base_instructions = mock_spawn.call_args.kwargs["base_instructions"]
         self.assertIn("You are running inside HITCH", base_instructions)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_codex_coding_agent_clears_previous_hitch_base_instructions(
@@ -14694,7 +14695,7 @@ class SendMessageViewTests(TestCase):
         )
         self.assertNotIn("You are running inside HITCH", base_instructions)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_codex_coding_agent_clears_unknown_previous_base_instructions(
@@ -14718,7 +14719,7 @@ class SendMessageViewTests(TestCase):
             coding_agents.default_codex_base_instructions(),
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_auto_pr_session_marks_follow_up_turn(
@@ -14757,7 +14758,7 @@ class SendMessageViewTests(TestCase):
             stored_reasoning_effort="high",
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_auto_qa_session_marks_follow_up_turn(
@@ -14796,7 +14797,7 @@ class SendMessageViewTests(TestCase):
             stored_reasoning_effort="high",
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_auto_merge_session_marks_follow_up_turn(
@@ -14825,7 +14826,7 @@ class SendMessageViewTests(TestCase):
         self.assertTrue(mock_spawn.call_args.kwargs["auto_merge_to_local_branch"])
         self.assertEqual(mock_spawn.call_args.kwargs["auto_merge_branch"], "main")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_plan_routing_to_spawn_matrix(
@@ -15072,7 +15073,7 @@ class SendMessageViewTests(TestCase):
                 self.assertEqual(response.status_code, 302)
                 self._assert_follow_up_spawn(mock_spawn, **expected)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_follow_up_after_plan_mode_discussion_stays_in_plan_mode(
@@ -15110,7 +15111,7 @@ class SendMessageViewTests(TestCase):
             plan_mode=True,
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_plan_mode_state_uses_stored_fallback_when_rollout_unreadable(
@@ -15148,7 +15149,7 @@ class SendMessageViewTests(TestCase):
             plan_mode=True,
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_plan_slash_follow_up_allows_image_only_prompt(
@@ -15186,7 +15187,7 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_pr_qa_activation_routes_to_workflow_matrix(
         self,
@@ -15266,7 +15267,7 @@ class SendMessageViewTests(TestCase):
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.views.system_agents.start_pr_monitor_workflow")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_fix_pr_slash_starts_monitor_for_opened_pr(
         self,
@@ -15356,7 +15357,7 @@ class SendMessageViewTests(TestCase):
         )
 
     @patch("hitch.main.views.system_agents.start_pr_monitor_workflow")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_fix_pr_slash_requires_opened_pr(
         self,
@@ -15380,7 +15381,7 @@ class SendMessageViewTests(TestCase):
         mock_start_monitor.assert_not_called()
 
     @patch("hitch.main.views.system_agents.start_pr_monitor_workflow")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_fix_pr_slash_rejects_lifecycle_superseded_pr_url(
         self,
@@ -15452,7 +15453,7 @@ class SendMessageViewTests(TestCase):
         mock_start_monitor.assert_not_called()
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_slash_commands_forward_session_auto_merge_branch_to_workflow(
         self,
@@ -15494,7 +15495,7 @@ class SendMessageViewTests(TestCase):
                 )
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_qa_slash_command_forwards_hitch_base_instructions_to_workflow(
         self,
@@ -15516,7 +15517,7 @@ class SendMessageViewTests(TestCase):
         self.assertIn("You are running inside HITCH", base_instructions)
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_pr_slash_command_inherits_session_web_search_when_setting_is_default(
         self,
@@ -15545,7 +15546,7 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(mock_start_workflow.call_args.kwargs["web_search_mode"], "live")
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_qa_slash_command_forwards_web_search_setting(
         self,
@@ -15568,7 +15569,7 @@ class SendMessageViewTests(TestCase):
         self.assertFalse(kwargs["open_pr_on_lgtm"])
 
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_qa_slash_command_clears_hitch_base_instructions_for_codex(
         self,
@@ -15692,7 +15693,7 @@ class SendMessageViewTests(TestCase):
         mock_codex.assert_not_called()
         mock_start_workflow.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_plan_mode_model_resolution_matrix(
@@ -15741,7 +15742,7 @@ class SendMessageViewTests(TestCase):
                         plan_mode=True,
                     )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_rejects_invalid_input(
@@ -16302,8 +16303,8 @@ class StartSessionDemoViewTests(TestCase):
     @patch("hitch.main.views.demo.cleanup_unregistered_demo_containers")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
-    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.run_borrowed_op_with_retry")
     def test_requests_demo_agent_turn(
         self,
@@ -16381,8 +16382,8 @@ class StartSessionDemoViewTests(TestCase):
     @patch("hitch.main.views.demo.cleanup_unregistered_demo_containers")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
-    @patch("hitch.main.views.discover_managed_worktrees")
-    @patch("hitch.main.views.discover_repos", return_value=[])
+    @patch("hitch.main.worktrees.discover_managed_worktrees")
+    @patch("hitch.main.repos.discover_repos", return_value=[])
     @patch("hitch.main.views.codex_pool.run_borrowed_op_with_retry")
     def test_requests_demo_agent_turn_uses_managed_worktree_sandbox(
         self,
@@ -16426,8 +16427,8 @@ class StartSessionDemoViewTests(TestCase):
     @patch("hitch.main.views.demo.cleanup_demo_for_session")
     @patch("hitch.main.views.codex_pool.spawn_turn", side_effect=RuntimeError("spawn failed"))
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
-    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cleans_up_demo_when_worker_dispatch_fails(
         self,
@@ -16451,8 +16452,8 @@ class StartSessionDemoViewTests(TestCase):
     @patch("hitch.main.views.demo.cleanup_demo_for_session")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
-    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cleans_up_demo_when_workflow_state_save_fails(
         self,
@@ -16497,8 +16498,8 @@ class StartSessionDemoViewTests(TestCase):
     )
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
-    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cleans_up_demo_when_prompt_construction_fails(
         self,
@@ -16530,8 +16531,8 @@ class StartSessionDemoViewTests(TestCase):
     @patch("hitch.main.views.demo.cleanup_unregistered_demo_containers")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
-    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_requests_demo_agent_turn_tolerates_existing_system_run(
         self,
@@ -16588,8 +16589,8 @@ class StartSessionDemoViewTests(TestCase):
     @patch("hitch.main.views.demo.cleanup_unregistered_demo_containers")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
-    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_duplicate_running_demo_workflow_rejects_without_mutating_owner(
         self,
@@ -16634,8 +16635,8 @@ class StartSessionDemoViewTests(TestCase):
     @patch("hitch.main.views.SystemWorkflow.objects.create")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
-    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_demo_workflow_integrity_error_rejects_before_mutating_demo_state(
         self,
@@ -16715,8 +16716,8 @@ class StartSessionDemoViewTests(TestCase):
 
     @patch("hitch.main.views.demo.request_demo_start")
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
-    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_rejects_missing_cwd_before_starting_container(
         self,
@@ -16740,8 +16741,8 @@ class StartSessionDemoViewTests(TestCase):
 
     @patch("hitch.main.views.demo.request_demo_start", side_effect=demo.DemoError("no podman"))
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
-    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_reports_demo_start_failure(
         self,
@@ -16782,8 +16783,8 @@ class StartSessionDemoViewTests(TestCase):
     @patch("hitch.main.views.demo.request_demo_start", side_effect=RuntimeError("boom"))
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
-    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_fails_workflow_when_demo_start_raises_unexpected_error(
         self,
@@ -16812,8 +16813,8 @@ class StartSessionDemoViewTests(TestCase):
 
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
-    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_rejects_pending_demo_before_spawning_agent(
         self,
@@ -16844,8 +16845,8 @@ class StartSessionDemoViewTests(TestCase):
 
     @patch("hitch.main.views.demo.request_demo_start")
     @patch("hitch.main.views.system_agents.active_workflow_for_thread", return_value=None)
-    @patch("hitch.main.views.discover_managed_worktrees", return_value=[])
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.worktrees.discover_managed_worktrees", return_value=[])
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_rejects_unallowed_cwd_before_starting_container(
         self,
@@ -18021,7 +18022,7 @@ class AutonomousGoalViewTests(TestCase):
         self.addCleanup(self.quota_patcher.stop)
 
     @patch("hitch.main.views.system_agents.maybe_start_auto_proposal_workflows")
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_get_pages_do_not_start_auto_proposals(
         self,
@@ -18046,7 +18047,7 @@ class AutonomousGoalViewTests(TestCase):
 
         mock_scheduler.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_page_lists_goals_and_inbox_count_for_selected_project(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -18159,7 +18160,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertNotContains(response, "Other goal")
         self.assertNotContains(response, "Deleted goal")
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_page_shows_tappable_run_status_indicators(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -18414,7 +18415,7 @@ class AutonomousGoalViewTests(TestCase):
         "hitch.main.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_page_shows_not_running_run_status_reasons(
         self,
@@ -18507,7 +18508,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, "No useful docs proposal was found.")
         self.assertGreaterEqual(mock_default_branch_commit_hash.call_count, 2)
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_page_shows_quota_pause_instead_of_completed_run(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -18545,7 +18546,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertNotContains(response, ">Done</button>", html=False)
         self.assertNotContains(response, "The last run proposed useful work.")
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_page_treats_completed_auto_proposal_as_ready_not_done(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -18592,7 +18593,7 @@ class AutonomousGoalViewTests(TestCase):
         "hitch.main.system_agents.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_page_treats_pending_stack_proposal_as_ready_to_continue(
         self,
@@ -18651,7 +18652,7 @@ class AutonomousGoalViewTests(TestCase):
             "Not running because a proposal from this goal is waiting in the inbox.",
         )
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_page_treats_legacy_stopped_stack_proposal_as_ready(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -18707,7 +18708,7 @@ class AutonomousGoalViewTests(TestCase):
             "Not running because a proposal from this goal is waiting in the inbox.",
         )
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_page_shows_manual_goal_with_pending_stack_proposal_as_review(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -18753,7 +18754,7 @@ class AutonomousGoalViewTests(TestCase):
             "Auto-proposal is off. Use Run to start this goal manually.",
         )
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_page_blocks_pending_proposal_without_stack_metadata(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -18791,7 +18792,7 @@ class AutonomousGoalViewTests(TestCase):
             "Not running because a proposal from this goal is waiting in the inbox.",
         )
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_page_blocks_stack_continuation_when_extra_pending_proposal_exists(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -18838,7 +18839,7 @@ class AutonomousGoalViewTests(TestCase):
             "Not running because a proposal from this goal is waiting in the inbox.",
         )
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_page_shows_queued_when_accepted_automation_is_in_flight(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -18892,7 +18893,7 @@ class AutonomousGoalViewTests(TestCase):
         )
         self.assertNotContains(response, ">Ready</button>", html=False)
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_edit_form_sync_preserves_auto_qa_choice_when_required(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -18922,7 +18923,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertIn("delete editGoalAutoQa.dataset.autoQaUserChecked;", body)
         self.assertIn("autoQa.disabled = required || !supported;", body)
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_draft_pr_goal_shows_auto_qa_required_on_reopen(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -18949,7 +18950,7 @@ class AutonomousGoalViewTests(TestCase):
             'value="draft_pr" data-auto-qa-supported="false" data-auto-qa-required="true"',
         )
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_inbox_page_lists_proposals_for_selected_project(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -19067,7 +19068,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, 'name="proposed_session"')
         self.assertNotContains(response, "Other proposal")
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_inbox_page_shows_autonomous_goal_stack_number(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -19113,7 +19114,7 @@ class AutonomousGoalViewTests(TestCase):
 
         self.assertEqual(views._proposed_session_stack_label(proposed_session), "")
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_inbox_page_omits_stack_label_without_stack_metadata(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -19146,7 +19147,7 @@ class AutonomousGoalViewTests(TestCase):
         )
         self.assertNotContains(response, "Stack 1 of 5")
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_inbox_recovers_stale_proposal_start_claim(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -19187,7 +19188,7 @@ class AutonomousGoalViewTests(TestCase):
         )
         self.assertNotIn("resolved_by", proposal.outcome_metadata)
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_inbox_keeps_active_proposal_start_claim_hidden(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -19221,7 +19222,7 @@ class AutonomousGoalViewTests(TestCase):
             proposal.outcome_metadata,
         )
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_inbox_visible_projects_filter_messages(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -19339,7 +19340,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
         mock_cleanup.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_new_session_page_prefills_proposed_session(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -19369,7 +19370,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, f'value="{project.pk}" selected')
         self.assertContains(response, f'href="{reverse("inbox")}"')
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_new_session_page_recovers_stale_proposal_start_claim(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -19411,7 +19412,7 @@ class AutonomousGoalViewTests(TestCase):
         )
         self.assertNotIn("resolved_by", proposal.outcome_metadata)
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_new_session_page_prefills_prompt_and_project_from_query(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -19431,7 +19432,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, html.escape(prompt))
         self.assertContains(response, f'value="{project.pk}" selected')
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/other")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/other")])
     @patch("hitch.main.views.Codex")
     def test_new_session_page_rejects_unavailable_project_from_query(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -19445,7 +19446,7 @@ class AutonomousGoalViewTests(TestCase):
 
         self.assertEqual(response.status_code, 404)
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_new_session_page_prefills_bare_repo_cwd_from_query(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -19463,7 +19464,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, '<option value="/repo" selected>')
         self.assertNotContains(response, f'value="{project.pk}" selected')
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/other")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/other")])
     @patch("hitch.main.views.Codex")
     def test_new_session_page_rejects_unavailable_bare_repo_cwd(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -19474,7 +19475,7 @@ class AutonomousGoalViewTests(TestCase):
 
         self.assertEqual(response.status_code, 404)
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/other")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/other")])
     @patch("hitch.main.views.Codex")
     def test_new_session_page_rejects_proposed_session_for_unavailable_repo(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -19493,7 +19494,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertEqual(response.status_code, 404)
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_page_lists_no_proposal_notice_with_dismiss(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -19525,7 +19526,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertNotContains(response, 'data-proposed-session-id="')
         self.assertNotContains(response, 'data-reject-url="')
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_page_lists_agent_created_proposal(
         self, mock_codex: MagicMock, _mock_discover: MagicMock
@@ -19551,7 +19552,7 @@ class AutonomousGoalViewTests(TestCase):
         self.assertContains(response, "Implement tests for the proposed session CLI.")
         self.assertContains(response, f'data-proposed-session-project="{project.pk}"')
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_page_shows_create_form_inline_when_no_goals(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -19587,7 +19588,7 @@ class AutonomousGoalViewTests(TestCase):
             '<dialog class="new-session" data-create-autonomous-goal-dialog',
         )
 
-    @patch("hitch.main.views.discover_repos", return_value=[Path("/repo")])
+    @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
     def test_page_moves_create_form_to_header_dialog_when_goals_exist(
         self, mock_codex: MagicMock, mock_discover: MagicMock

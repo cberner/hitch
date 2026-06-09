@@ -411,7 +411,7 @@ class UsageRateLimitCacheTests(SimpleTestCase):
 
 
 class SettingsPageRenderTests(TestCase):
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.context_processors.server_git_hash", return_value="abc123")
     def test_page_lists_models_and_efforts(
@@ -518,7 +518,7 @@ class SettingsPageRenderTests(TestCase):
         self.assertContains(response, 'name="auto_pr_mode"')
         self.assertContains(response, "Follow global")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_page_renders_saved_disk_usage_percent(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -539,7 +539,7 @@ class SettingsPageRenderTests(TestCase):
         self.assertContains(response, 'name="disk_usage_max_percent"')
         self.assertContains(response, 'value="35.5"')
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_page_rounds_disk_usage_percent_to_input_step(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -565,7 +565,7 @@ class SettingsPageRenderTests(TestCase):
         assert match is not None, f"effort option {value!r} missing from settings page"
         return match.group(0)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_effort_dropdown_only_offers_efforts_the_model_supports(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -619,7 +619,7 @@ class SettingsPageRenderTests(TestCase):
         self.assertContains(response, 'data-supported-efforts="low medium"')
         self.assertContains(response, 'data-supported-efforts="high low medium xhigh"')
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_effort_dropdown_offers_all_efforts_when_model_unconstrained(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -672,7 +672,7 @@ class SettingsPageRenderTests(TestCase):
         self.assertNotContains(response, "html:not(.js) .primary-nav-toggle")
         self.assertNotContains(response, 'class="back-link"')
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_saved_extra_system_prompt_renders_on_settings_page(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -695,7 +695,7 @@ class SettingsPageRenderTests(TestCase):
 
         self.assertContains(response, "Prefer small diffs.")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_saved_archived_session_visibility_renders_index_toggle_checked(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -718,7 +718,7 @@ class SettingsPageRenderTests(TestCase):
             body.index("No sessions found."),
         )
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_saved_worktree_setting_renders_checked(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -734,7 +734,7 @@ class SettingsPageRenderTests(TestCase):
 
         self.assertContains(response, 'name="use_worktrees" value="true" checked')
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_saved_auto_pr_setting_renders_checked(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -750,7 +750,7 @@ class SettingsPageRenderTests(TestCase):
 
         self.assertContains(response, 'name="auto_pr" value="true" checked')
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_saved_auto_qa_setting_renders_checked(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -766,7 +766,7 @@ class SettingsPageRenderTests(TestCase):
 
         self.assertContains(response, 'name="auto_qa" value="true" checked')
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_saved_auto_qa_setting_checks_new_session_page(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -787,7 +787,7 @@ class SettingsPageRenderTests(TestCase):
         self.assertIn('name="auto_qa"', auto_qa_input)
         self.assertIn("checked", auto_qa_input)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_auto_pr_takes_precedence_in_new_session_page(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -814,7 +814,7 @@ class SettingsPageRenderTests(TestCase):
         self.assertIn("checked", auto_pr_input)
         self.assertNotIn("checked", auto_qa_input)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_saved_spec_critic_setting_renders_checked(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -831,7 +831,7 @@ class SettingsPageRenderTests(TestCase):
 
         self.assertContains(response, 'name="spec_critic" value="true" checked')
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_saved_web_search_setting_renders_selected(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -847,7 +847,7 @@ class SettingsPageRenderTests(TestCase):
 
         self.assertContains(response, 'value="live" selected')
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_project_auto_pr_setting_renders_in_edit_dialog(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -870,7 +870,7 @@ class SettingsPageRenderTests(TestCase):
         self.assertContains(response, 'value="off" selected')
         self.assertContains(response, 'data-project-edit-open')
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_empty_effort_option_renders_selected_when_cookie_cleared(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -889,7 +889,7 @@ class SettingsPageRenderTests(TestCase):
 
         self.assertContains(response, 'value="" selected')
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_dialog_captures_scroll_without_scrolling_session_list(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -1085,7 +1085,7 @@ class SettingsPageRenderTests(TestCase):
         self.assertContains(response, "Usage unavailable.")
         self.assertNotContains(response, "% remaining")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_renders_when_codex_offers_no_models(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -1102,7 +1102,7 @@ class SettingsPageRenderTests(TestCase):
 
 
 class ReconcileSettingsTests(TestCase):
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_seeds_defaults_when_no_cookies(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -1125,7 +1125,7 @@ class ReconcileSettingsTests(TestCase):
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
         self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "high")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_resets_stale_model_to_current_default(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -1151,7 +1151,7 @@ class ReconcileSettingsTests(TestCase):
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5")
         self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "medium")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_preserves_settings_when_still_valid(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -1177,7 +1177,7 @@ class ReconcileSettingsTests(TestCase):
         self.assertContains(response, 'value="gpt-5"')
         self.assertContains(response, 'value="low" selected')
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_resets_effort_when_model_no_longer_supports_it(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -1219,7 +1219,7 @@ class ReconcileSettingsTests(TestCase):
         self.assertNotIn(_MODEL_COOKIE, response.cookies)
         self.assertEqual(_cookie_value(response, _EFFORT_COOKIE), "medium")
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_does_not_reset_when_codex_returns_no_models(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -1238,7 +1238,7 @@ class ReconcileSettingsTests(TestCase):
         self.assertNotIn(_MODEL_COOKIE, response.cookies)
         self.assertNotIn(_EFFORT_COOKIE, response.cookies)
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_tampered_cookie_is_treated_as_missing(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -1261,7 +1261,7 @@ class ReconcileSettingsTests(TestCase):
 
 
 class UpdateSettingsViewTests(TestCase):
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_get_uses_cached_models_without_codex(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -1859,7 +1859,7 @@ class UpdateSettingsViewTests(TestCase):
 
 
 class AuthenticatedWebSearchSettingsTests(TestCase):
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_account_web_search_setting_renders_selected(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -2098,7 +2098,7 @@ class ApprovalModeSettingsTests(TestCase):
 
 
 class ApprovalModePageTests(TestCase):
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_saved_approval_renders_as_selected(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -2117,7 +2117,7 @@ class ApprovalModePageTests(TestCase):
 
                 self.assertContains(response, f'value="{mode}" selected')
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_unknown_approval_cookie_falls_back_to_safe_default(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -2136,7 +2136,7 @@ class ApprovalModePageTests(TestCase):
 
 
 class SandboxPolicyPageTests(TestCase):
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_saved_sandbox_renders_as_selected(
         self, mock_codex: MagicMock, mock_discover: MagicMock
@@ -2152,7 +2152,7 @@ class SandboxPolicyPageTests(TestCase):
 
         self.assertContains(response, 'value="dangerFullAccess" selected')
 
-    @patch("hitch.main.views.discover_repos")
+    @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_unknown_sandbox_cookie_falls_back_to_empty(
         self, mock_codex: MagicMock, mock_discover: MagicMock
