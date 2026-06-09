@@ -77,6 +77,7 @@ from hitch.main.models import (
     UserInputRequest,
     UserSettings,
 )
+from hitch.main.rollout_state import _RolloutFileState
 from hitch.main.worktrees import (
     ManagedWorktree,
     WorktreeCleanupError,
@@ -8038,7 +8039,7 @@ class IndexViewTests(TestCase):
         # matching path+mtime but a stale logic version must not be treated as a
         # match, so a counting-logic bump forces a recompute even when the
         # rollout file is byte-for-byte unchanged.
-        rollout_state = views._RolloutFileState(
+        rollout_state = _RolloutFileState(
             path=Path("/codex/archived/rollout.jsonl"), mtime_ns=1_234
         )
         current = ArchivedSessionTokenUsage(
@@ -21245,7 +21246,7 @@ class PrStageRefreshSchedulingTests(TestCase):
         # when a refresh was actually scheduled; otherwise rows beyond the
         # per-render budget keep _stage_refresh_script reloading forever.
         mock_snapshot.return_value = {"url": "https://github.com/cberner/hitch/pull/94"}
-        rollout_state = views._RolloutFileState(path=Path("/tmp/rollout.jsonl"), mtime_ns=1)
+        rollout_state = _RolloutFileState(path=Path("/tmp/rollout.jsonl"), mtime_ns=1)
         session = {"cwd": "/repo", "stage_pr_refresh_attempted_at": None}
 
         _stage, _snap, remaining, refreshing = views._stage_from_cached_session_row(
