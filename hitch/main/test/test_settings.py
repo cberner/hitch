@@ -13,7 +13,13 @@ from django.utils import timezone
 from openai_codex.errors import MethodNotFoundError
 from openai_codex.generated.v2_all import ReasoningEffort
 
-from hitch.main import caches, coding_agents, context_processors, settings_cookies, views
+from hitch.main import (
+    caches,
+    coding_agents,
+    context_processors,
+    pr_stage,
+    settings_cookies,
+)
 from hitch.main.models import GlobalSettings, Project, UserSettings
 from hitch.settings import common as common_settings
 
@@ -66,23 +72,23 @@ class StageCacheLockToleranceTests(SimpleTestCase):
         from django.db import OperationalError
 
         with patch(
-            "hitch.main.views._update_cached_stage",
+            "hitch.main.pr_stage._update_cached_stage",
             side_effect=OperationalError("database is locked"),
         ):
             # Must not raise: a locked cache write is skipped, not surfaced.
-            views._update_cached_stage_best_effort("thread-1", MagicMock(), 123)
+            pr_stage._update_cached_stage_best_effort("thread-1", MagicMock(), 123)
 
     def test_best_effort_stage_cache_reraises_other_errors(self) -> None:
         from django.db import OperationalError
 
         with (
             patch(
-                "hitch.main.views._update_cached_stage",
+                "hitch.main.pr_stage._update_cached_stage",
                 side_effect=OperationalError("no such table: main_sessionmetadata"),
             ),
             self.assertRaises(OperationalError),
         ):
-            views._update_cached_stage_best_effort("thread-1", MagicMock(), 123)
+            pr_stage._update_cached_stage_best_effort("thread-1", MagicMock(), 123)
 
 
 class CodingAgentsTests(SimpleTestCase):

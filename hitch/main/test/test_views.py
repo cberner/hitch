@@ -3199,7 +3199,7 @@ class IndexViewTests(TestCase):
         )
 
         with patch(
-            "hitch.main.views._update_cached_stage",
+            "hitch.main.pr_stage._update_cached_stage",
             side_effect=OperationalError("database is locked"),
         ) as update_stage:
             response = self.client.get(reverse("index"))
