@@ -57,6 +57,7 @@ from hitch.main import (
     settings_cookies,
     streaming,
     system_agents,
+    token_usage,
     views,
 )
 from hitch.main import (
@@ -282,7 +283,7 @@ def _cache_token_usage(
     total_tokens: int,
     path: str | Path = "",
     daily_usage: dict[str, dict[str, int]] | None = None,
-    usage_logic_version: int = views._TOKEN_USAGE_LOGIC_VERSION,
+    usage_logic_version: int = token_usage._TOKEN_USAGE_LOGIC_VERSION,
 ) -> ArchivedSessionTokenUsage:
     rollout_path = str(path) if path else ""
     rollout_mtime_ns = Path(path).stat().st_mtime_ns if path else 0
@@ -5609,7 +5610,7 @@ class IndexViewTests(TestCase):
             patch(
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
-            patch("hitch.main.views._start_usage_token_refresh_thread"),
+            patch("hitch.main.token_usage._start_usage_token_refresh_thread"),
             patch("hitch.main.caches._start_models_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
         ):
@@ -7591,7 +7592,7 @@ class IndexViewTests(TestCase):
         client = _setup_codex(mock_codex)
 
         with (
-            patch("hitch.main.views._start_usage_token_refresh_thread"),
+            patch("hitch.main.token_usage._start_usage_token_refresh_thread"),
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
         ):
@@ -7626,7 +7627,7 @@ class IndexViewTests(TestCase):
         with (
             patch("hitch.main.views.rollout.latest_token_usage") as latest_usage,
             patch("hitch.main.views.rollout.token_usage_history") as usage_history,
-            patch("hitch.main.views._start_usage_token_refresh_thread") as start_refresh,
+            patch("hitch.main.token_usage._start_usage_token_refresh_thread") as start_refresh,
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
@@ -7652,8 +7653,8 @@ class IndexViewTests(TestCase):
         self.assertNotContains(response, "909,999")
         self.assertNotContains(response, "999,999")
 
-        views._refresh_usage_token_cache_best_effort(
-            [views._UsageTokenRefreshItem("archived", str(rollout_path))]
+        token_usage._refresh_usage_token_cache_best_effort(
+            [token_usage._UsageTokenRefreshItem("archived", str(rollout_path))]
         )
 
         self.assertNotContains(response, "909,999")
@@ -7736,7 +7737,7 @@ class IndexViewTests(TestCase):
             daily_usage={"2025-01-05": {"input": 350, "output": 600, "cached": 50}},
         )
 
-        lifetime_usage = views._lifetime_token_usage_for_metadata([metadata])
+        lifetime_usage = token_usage._lifetime_token_usage_for_metadata([metadata])
 
         self.assertTrue(lifetime_usage["refresh_pending"])
         self.assertEqual(lifetime_usage["refresh_pending_count"], 1)
@@ -7781,7 +7782,7 @@ class IndexViewTests(TestCase):
             patch(
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
-            patch("hitch.main.views._start_usage_token_refresh_thread"),
+            patch("hitch.main.token_usage._start_usage_token_refresh_thread"),
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
@@ -7810,7 +7811,7 @@ class IndexViewTests(TestCase):
             patch(
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
-            patch("hitch.main.views._start_usage_token_refresh_thread"),
+            patch("hitch.main.token_usage._start_usage_token_refresh_thread"),
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
@@ -7835,7 +7836,7 @@ class IndexViewTests(TestCase):
             patch(
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
-            patch("hitch.main.views._start_usage_token_refresh_thread") as start_tokens,
+            patch("hitch.main.token_usage._start_usage_token_refresh_thread") as start_tokens,
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
         ):
@@ -7887,7 +7888,7 @@ class IndexViewTests(TestCase):
             patch(
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
-            patch("hitch.main.views._start_usage_token_refresh_thread"),
+            patch("hitch.main.token_usage._start_usage_token_refresh_thread"),
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
@@ -7944,7 +7945,7 @@ class IndexViewTests(TestCase):
             patch(
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
-            patch("hitch.main.views._start_usage_token_refresh_thread") as start_tokens,
+            patch("hitch.main.token_usage._start_usage_token_refresh_thread") as start_tokens,
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
@@ -7979,7 +7980,7 @@ class IndexViewTests(TestCase):
         )
         thread = _session("active", name="Active session", path=str(rollout_path))
 
-        self.assertIsNone(views._token_usage_snapshot_for(thread))
+        self.assertIsNone(token_usage._token_usage_snapshot_for(thread))
 
     def test_token_usage_snapshot_recomputes_stale_logic_version_cache(self) -> None:
         # A cache row written by an older counting-logic version must be
@@ -8020,7 +8021,7 @@ class IndexViewTests(TestCase):
         )
         thread = _session("archived", path=str(rollout_path))
 
-        snapshot = views._token_usage_snapshot_for(thread)
+        snapshot = token_usage._token_usage_snapshot_for(thread)
         assert snapshot is not None
         usage = snapshot["usage"]
         # Recomputed from the rollout, not served from the stale row.
@@ -8030,7 +8031,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(usage["total_tokens"], 120_000)
         cache = ArchivedSessionTokenUsage.objects.get(thread_id="archived")
         self.assertEqual(cache.total_tokens, 120_000)
-        self.assertEqual(cache.usage_logic_version, views._TOKEN_USAGE_LOGIC_VERSION)
+        self.assertEqual(cache.usage_logic_version, token_usage._TOKEN_USAGE_LOGIC_VERSION)
 
     def test_cached_token_usage_matches_rollout_state_requires_current_version(
         self,
@@ -8046,19 +8047,19 @@ class IndexViewTests(TestCase):
             thread_id="t",
             rollout_path=str(rollout_state.path),
             rollout_mtime_ns=rollout_state.mtime_ns,
-            usage_logic_version=views._TOKEN_USAGE_LOGIC_VERSION,
+            usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
         )
         self.assertTrue(
-            views._cached_token_usage_matches_rollout_state(current, rollout_state)
+            token_usage._cached_token_usage_matches_rollout_state(current, rollout_state)
         )
         legacy = ArchivedSessionTokenUsage(
             thread_id="t",
             rollout_path=str(rollout_state.path),
             rollout_mtime_ns=rollout_state.mtime_ns,
-            usage_logic_version=views._TOKEN_USAGE_LOGIC_VERSION - 1,
+            usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION - 1,
         )
         self.assertFalse(
-            views._cached_token_usage_matches_rollout_state(legacy, rollout_state)
+            token_usage._cached_token_usage_matches_rollout_state(legacy, rollout_state)
         )
 
     def test_stale_logic_version_cache_is_not_current_without_rollout_path(
@@ -8071,18 +8072,18 @@ class IndexViewTests(TestCase):
         current = ArchivedSessionTokenUsage(
             thread_id="t",
             rollout_path="",
-            usage_logic_version=views._TOKEN_USAGE_LOGIC_VERSION,
+            usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
         )
         self.assertTrue(
-            views._cached_token_usage_is_current_for_state(current, None)
+            token_usage._cached_token_usage_is_current_for_state(current, None)
         )
         legacy = ArchivedSessionTokenUsage(
             thread_id="t",
             rollout_path="",
-            usage_logic_version=views._TOKEN_USAGE_LOGIC_VERSION - 1,
+            usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION - 1,
         )
         self.assertFalse(
-            views._cached_token_usage_is_current_for_state(legacy, None)
+            token_usage._cached_token_usage_is_current_for_state(legacy, None)
         )
 
     def test_usage_token_cache_state_rejects_stale_version_pathless_rows(self) -> None:
@@ -8090,21 +8091,21 @@ class IndexViewTests(TestCase):
         # rows on its no-path branches, so a legacy version-0 row does not keep
         # contributing pre-fix counts to the summed totals while a refresh is
         # pending.
-        metadata = views._UsageTokenRefreshCandidate(
+        metadata = token_usage._UsageTokenRefreshCandidate(
             thread_id="t", codex_path="", usage_last_checked_at=None
         )
         current = ArchivedSessionTokenUsage(
             thread_id="t",
             rollout_path="",
-            usage_logic_version=views._TOKEN_USAGE_LOGIC_VERSION,
+            usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION,
         )
-        self.assertTrue(views._usage_token_cache_state(metadata, current).cache_usable)
+        self.assertTrue(token_usage._usage_token_cache_state(metadata, current).cache_usable)
         legacy = ArchivedSessionTokenUsage(
             thread_id="t",
             rollout_path="",
-            usage_logic_version=views._TOKEN_USAGE_LOGIC_VERSION - 1,
+            usage_logic_version=token_usage._TOKEN_USAGE_LOGIC_VERSION - 1,
         )
-        self.assertFalse(views._usage_token_cache_state(metadata, legacy).cache_usable)
+        self.assertFalse(token_usage._usage_token_cache_state(metadata, legacy).cache_usable)
 
     def test_token_usage_snapshot_survives_compaction_reset(self) -> None:
         # A session that exhausts its context window records a token_count
@@ -8149,7 +8150,7 @@ class IndexViewTests(TestCase):
         )
         thread = _session("archived", path=str(rollout_path))
 
-        snapshot = views._token_usage_snapshot_for(thread)
+        snapshot = token_usage._token_usage_snapshot_for(thread)
         assert snapshot is not None
         usage = snapshot["usage"]
         self.assertEqual(usage["input_tokens"], 150_000)
@@ -8161,7 +8162,7 @@ class IndexViewTests(TestCase):
         daily = snapshot["daily_usage"]
         self.assertEqual(
             sum(bucket["input"] for bucket in daily.values()),
-            views._non_cached_input_tokens(usage),
+            token_usage._non_cached_input_tokens(usage),
         )
         self.assertEqual(
             sum(bucket["cached"] for bucket in daily.values()),
@@ -8222,7 +8223,7 @@ class IndexViewTests(TestCase):
         with patch.object(
             rollout, "_load_rollout_lines", side_effect=load_then_append
         ):
-            snapshot = views._token_usage_snapshot_for(thread)
+            snapshot = token_usage._token_usage_snapshot_for(thread)
 
         assert snapshot is not None
         # The snapshot reflects the content actually parsed (pre-append).
@@ -8233,7 +8234,7 @@ class IndexViewTests(TestCase):
 
         # The next read sees the mismatch and re-parses the appended file rather
         # than serving the stale cached numbers.
-        refreshed = views._token_usage_snapshot_for(thread)
+        refreshed = token_usage._token_usage_snapshot_for(thread)
         assert refreshed is not None
         self.assertEqual(refreshed["usage"]["input_tokens"], 500)
 
@@ -8698,20 +8699,20 @@ class IndexViewTests(TestCase):
         client.thread_list.assert_not_called()
 
     def test_lifetime_human_token_formatter(self) -> None:
-        self.assertEqual(views._format_human_token_count(-1), "0")
-        self.assertEqual(views._format_human_token_count(999), "999")
-        self.assertEqual(views._format_human_token_count(1_500_000), "1.5M")
-        self.assertEqual(views._format_human_token_count(10_500_000), "11M")
-        self.assertEqual(views._format_human_token_count(1_000_000_000), "1B")
+        self.assertEqual(token_usage._format_human_token_count(-1), "0")
+        self.assertEqual(token_usage._format_human_token_count(999), "999")
+        self.assertEqual(token_usage._format_human_token_count(1_500_000), "1.5M")
+        self.assertEqual(token_usage._format_human_token_count(10_500_000), "11M")
+        self.assertEqual(token_usage._format_human_token_count(1_000_000_000), "1B")
 
     def test_lifetime_token_chart_formats_segments(self) -> None:
-        self.assertEqual(views._format_lifetime_token_chart({}), [])
-        self.assertEqual(views._format_lifetime_token_chart_axis({}), [])
-        self.assertEqual(views._chart_segment_percent(0, 100), 0)
-        self.assertEqual(views._chart_segment_percent(5, 0), 0)
-        self.assertEqual(views._chart_segment_percent(1, 1_000), 0)
+        self.assertEqual(token_usage._format_lifetime_token_chart({}), [])
+        self.assertEqual(token_usage._format_lifetime_token_chart_axis({}), [])
+        self.assertEqual(token_usage._chart_segment_percent(0, 100), 0)
+        self.assertEqual(token_usage._chart_segment_percent(5, 0), 0)
+        self.assertEqual(token_usage._chart_segment_percent(1, 1_000), 0)
         self.assertEqual(
-            views._format_lifetime_token_chart(
+            token_usage._format_lifetime_token_chart(
                 {
                     "2025-01-06": {"input": 50, "output": 50, "cached": 0},
                     "2025-01-05": {"input": 100, "output": 50, "cached": 50},
@@ -8741,7 +8742,7 @@ class IndexViewTests(TestCase):
             ],
         )
         self.assertEqual(
-            views._format_lifetime_token_chart_axis(
+            token_usage._format_lifetime_token_chart_axis(
                 {
                     "2025-01-06": {"input": 50, "output": 50, "cached": 0},
                     "2025-01-05": {"input": 100, "output": 50, "cached": 50},
@@ -8789,8 +8790,8 @@ class IndexViewTests(TestCase):
         self.assertEqual(cache.daily_usage, {})
         client.thread_list.assert_not_called()
 
-        views._refresh_usage_token_cache_best_effort(
-            [views._UsageTokenRefreshItem("archived", str(rollout_path))]
+        token_usage._refresh_usage_token_cache_best_effort(
+            [token_usage._UsageTokenRefreshItem("archived", str(rollout_path))]
         )
 
         cache.refresh_from_db()
@@ -8875,7 +8876,7 @@ class IndexViewTests(TestCase):
         _setup_codex(mock_codex)
 
         with (
-            patch("hitch.main.views._start_usage_token_refresh_thread") as start_refresh,
+            patch("hitch.main.token_usage._start_usage_token_refresh_thread") as start_refresh,
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             patch(
@@ -8948,7 +8949,7 @@ class IndexViewTests(TestCase):
             include_archived=True,
         )
 
-    @patch("hitch.main.views.Codex")
+    @patch("hitch.main.token_usage.Codex")
     def test_usage_page_schedules_missing_metadata_path_refresh(
         self, mock_codex: MagicMock
     ) -> None:
@@ -8967,7 +8968,7 @@ class IndexViewTests(TestCase):
         client = _setup_codex(mock_codex)
 
         with (
-            patch("hitch.main.views._start_usage_token_refresh_thread") as start_refresh,
+            patch("hitch.main.token_usage._start_usage_token_refresh_thread") as start_refresh,
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
@@ -8989,7 +8990,7 @@ class IndexViewTests(TestCase):
         client._client.thread_resume.return_value = SimpleNamespace(
             thread=_session("local-session", path=str(rollout_path), cwd="/repo")
         )
-        views._refresh_usage_token_cache_best_effort(refresh_items)
+        token_usage._refresh_usage_token_cache_best_effort(refresh_items)
 
         metadata.refresh_from_db()
         self.assertEqual(metadata.codex_path, str(rollout_path))
@@ -9011,8 +9012,8 @@ class IndexViewTests(TestCase):
             daily_usage={"2025-01-05": {"input": 350, "output": 600, "cached": 50}},
         )
 
-        views._refresh_usage_token_cache_best_effort(
-            [views._UsageTokenRefreshItem("stale", str(rollout_path))]
+        token_usage._refresh_usage_token_cache_best_effort(
+            [token_usage._UsageTokenRefreshItem("stale", str(rollout_path))]
         )
 
         cache = ArchivedSessionTokenUsage.objects.get(thread_id="stale")
@@ -9038,8 +9039,8 @@ class IndexViewTests(TestCase):
         client = _setup_codex(mock_codex)
         client._client.thread_resume.side_effect = AppServerError("resume failed")
 
-        views._refresh_usage_token_cache_best_effort(
-            [views._UsageTokenRefreshItem("missing", "/nonexistent/rollout.jsonl")]
+        token_usage._refresh_usage_token_cache_best_effort(
+            [token_usage._UsageTokenRefreshItem("missing", "/nonexistent/rollout.jsonl")]
         )
 
         cache.refresh_from_db()
@@ -9055,10 +9056,10 @@ class IndexViewTests(TestCase):
             )
 
         with (
-            patch("hitch.main.views._USAGE_TOKEN_REFRESH_CHECKED_UPDATE_BATCH_SIZE", 2),
+            patch("hitch.main.token_usage._USAGE_TOKEN_REFRESH_CHECKED_UPDATE_BATCH_SIZE", 2),
             CaptureQueriesContext(connection) as queries,
         ):
-            views._mark_usage_token_refresh_checked_many(
+            token_usage._mark_usage_token_refresh_checked_many(
                 [
                     "checked-0",
                     "",
@@ -9085,34 +9086,34 @@ class IndexViewTests(TestCase):
         )
 
     def test_usage_refresh_thread_start_failure_clears_in_flight(self) -> None:
-        views._USAGE_TOKEN_REFRESH_IN_FLIGHT = False
-        self.addCleanup(setattr, views, "_USAGE_TOKEN_REFRESH_IN_FLIGHT", False)
+        token_usage._USAGE_TOKEN_REFRESH_IN_FLIGHT = False
+        self.addCleanup(setattr, token_usage, "_USAGE_TOKEN_REFRESH_IN_FLIGHT", False)
         thread = MagicMock()
         thread.start.side_effect = RuntimeError("thread limit")
 
         with (
-            self.assertLogs("hitch.main.views", level="ERROR"),
-            patch("hitch.main.views.threading.Thread", return_value=thread),
+            self.assertLogs("hitch.main.token_usage", level="ERROR"),
+            patch("hitch.main.token_usage.threading.Thread", return_value=thread),
         ):
-            views._start_usage_token_refresh_thread(
-                [views._UsageTokenRefreshItem("thread", "")]
+            token_usage._start_usage_token_refresh_thread(
+                [token_usage._UsageTokenRefreshItem("thread", "")]
             )
 
-        self.assertFalse(views._USAGE_TOKEN_REFRESH_IN_FLIGHT)
+        self.assertFalse(token_usage._USAGE_TOKEN_REFRESH_IN_FLIGHT)
 
     def test_usage_refresh_thread_is_non_daemon_and_materializes_work(self) -> None:
-        views._USAGE_TOKEN_REFRESH_IN_FLIGHT = False
-        self.addCleanup(setattr, views, "_USAGE_TOKEN_REFRESH_IN_FLIGHT", False)
+        token_usage._USAGE_TOKEN_REFRESH_IN_FLIGHT = False
+        self.addCleanup(setattr, token_usage, "_USAGE_TOKEN_REFRESH_IN_FLIGHT", False)
         thread = MagicMock()
         items = [
-            views._UsageTokenRefreshItem("thread-a", ""),
-            views._UsageTokenRefreshItem("thread-b", ""),
+            token_usage._UsageTokenRefreshItem("thread-a", ""),
+            token_usage._UsageTokenRefreshItem("thread-b", ""),
         ]
 
         with patch(
-            "hitch.main.views.threading.Thread", return_value=thread
+            "hitch.main.token_usage.threading.Thread", return_value=thread
         ) as thread_cls:
-            views._start_usage_token_refresh_thread(iter(items))
+            token_usage._start_usage_token_refresh_thread(iter(items))
 
         thread_cls.assert_called_once()
         self.assertEqual(thread_cls.call_args.kwargs["args"], (tuple(items),))
@@ -9139,10 +9140,10 @@ class IndexViewTests(TestCase):
                 mark_index_complete=False,
             )
         rows = SessionMetadata.objects.order_by("thread_id")
-        candidates = views._usage_token_refresh_candidates(rows)
+        candidates = token_usage._usage_token_refresh_candidates(rows)
 
-        with patch("hitch.main.views._USAGE_TOKEN_REFRESH_BATCH_SIZE", 2):
-            views._refresh_usage_token_cache_best_effort(candidates)
+        with patch("hitch.main.token_usage._USAGE_TOKEN_REFRESH_BATCH_SIZE", 2):
+            token_usage._refresh_usage_token_cache_best_effort(candidates)
 
         caches = ArchivedSessionTokenUsage.objects.order_by("thread_id")
         self.assertEqual(
@@ -9161,7 +9162,7 @@ class IndexViewTests(TestCase):
         for index in range(30):
             _seed_usage_metadata(f"session-{index:02d}", mark_index_complete=False)
         rows = list(SessionMetadata.objects.order_by("thread_id"))
-        first_batch = views._usage_token_refresh_items(rows, {})
+        first_batch = token_usage._usage_token_refresh_items(rows, {})
         first_batch_ids = [item.thread_id for item in first_batch]
 
         self.assertEqual(len(first_batch_ids), 25)
@@ -9173,7 +9174,7 @@ class IndexViewTests(TestCase):
         )
         rows = list(SessionMetadata.objects.order_by("thread_id"))
         second_batch_ids = [
-            item.thread_id for item in views._usage_token_refresh_items(rows, {})
+            item.thread_id for item in token_usage._usage_token_refresh_items(rows, {})
         ]
 
         self.assertEqual(
@@ -9215,12 +9216,12 @@ class IndexViewTests(TestCase):
                 total_tokens=120,
             )
         rows = list(SessionMetadata.objects.order_by("thread_id"))
-        caches = views._token_usage_caches_by_thread_ids(
+        caches = token_usage._token_usage_caches_by_thread_ids(
             row.thread_id for row in rows
         )
 
         batch_ids = [
-            item.thread_id for item in views._usage_token_refresh_items(rows, caches)
+            item.thread_id for item in token_usage._usage_token_refresh_items(rows, caches)
         ]
 
         self.assertEqual(len(batch_ids), 25)

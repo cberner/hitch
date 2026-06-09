@@ -15,6 +15,13 @@ from typing import Any, NamedTuple
 
 _ARCHIVED_SESSIONS_DIR = "archived_sessions"
 
+# Codex's archived rollouts live at most four levels below the
+# ``archived_sessions/`` directory (``archived_sessions/YYYY/MM/DD/rollout-*.jsonl``);
+# five gives a small cushion for future structural changes without re-opening
+# the false-positive case where a user's CODEX_HOME unrelatedly traverses an
+# ``archived_sessions`` parent.
+_ARCHIVED_SESSIONS_ANCESTOR_DEPTH = 5
+
 
 class _RolloutFileState(NamedTuple):
     path: Path
@@ -81,3 +88,25 @@ def _rollout_mtime_ns(rollout_path: Path | None) -> int:
         return 0
     rollout_state = _rollout_file_state_for_path(rollout_path)
     return rollout_state.mtime_ns if rollout_state is not None else 0
+
+
+def _thread_is_archived(thread: Any) -> bool:
+    """Return whether Codex resumed this thread from archived rollout storage."""
+    archived = getattr(thread, "archived", None)
+    if isinstance(archived, bool):
+        return archived
+    path = getattr(thread, "path", None)
+    if not isinstance(path, str) or not path:
+        return False
+    return _rollout_path_is_archived(Path(path))
+
+
+def _rollout_path_is_archived(rollout_path: Path) -> bool:
+    # Walk only the rollout file's immediate ancestry. Scanning the full path
+    # for ``archived_sessions`` would false-positive every active session
+    # whose ``CODEX_HOME`` happens to traverse an unrelated directory of
+    # that name (e.g. ``/data/archived_sessions/<user>/.codex/sessions/...``).
+    return any(
+        parent.name == _ARCHIVED_SESSIONS_DIR
+        for parent in list(rollout_path.parents)[:_ARCHIVED_SESSIONS_ANCESTOR_DEPTH]
+    )
