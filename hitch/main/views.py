@@ -5174,6 +5174,77 @@ def _rollout_path_is_archived(rollout_path: Path) -> bool:
     )
 
 
+def _metadata_indicates_archived(metadata: SessionMetadata | None) -> bool:
+    return metadata is not None and metadata.codex_archived
+
+
+def _metadata_rollout_path_indicates_archived(
+    metadata: SessionMetadata | None,
+) -> bool:
+    if metadata is None:
+        return False
+    rollout_path = _rollout_path_from_value(metadata.codex_path)
+    return rollout_path is not None and _rollout_path_is_archived(rollout_path)
+
+
+def _metadata_cwd_is_disallowed(metadata: SessionMetadata | None) -> bool:
+    return (
+        metadata is not None
+        and bool(metadata.cwd)
+        and not _is_allowed_session_cwd(metadata.cwd)
+    )
+
+
+def _thread_resume_archived_error(exc: InvalidRequestError) -> bool:
+    message = str(exc).lower()
+    return " is archived" in message and "unarchive" in message
+
+
+def _record_session_unarchived(session_id: str) -> None:
+    session_index.update_cached_archived(session_id, archived=False)
+    SessionMetadata.objects.filter(thread_id=session_id).update(codex_path="")
+    ArchivedSessionTokenUsage.objects.filter(thread_id=session_id).delete()
+
+
+def _record_session_rearchived_after_rejected_turn(session_id: str) -> None:
+    session_index.update_cached_archived(session_id, archived=True)
+    SessionMetadata.objects.filter(thread_id=session_id).update(codex_path="")
+    ArchivedSessionTokenUsage.objects.filter(thread_id=session_id).delete()
+
+
+def _unarchive_session_for_turn(
+    session_id: str, settings: SettingsValues, *, codex: Codex | None = None
+) -> None:
+    if codex is None:
+        with codex_pool.borrow_codex(
+            Codex, enable_memories=settings.enable_memories
+        ) as borrowed:
+            borrowed.thread_unarchive(session_id)
+    else:
+        codex.thread_unarchive(session_id)
+
+
+def _archive_session_for_turn(session_id: str, settings: SettingsValues) -> None:
+    with codex_pool.borrow_codex(
+        Codex, enable_memories=settings.enable_memories
+    ) as codex:
+        codex.thread_archive(session_id)
+
+
+def _restore_archived_session_for_rejected_turn(
+    session_id: str, settings: SettingsValues
+) -> None:
+    try:
+        _archive_session_for_turn(session_id, settings)
+        _record_session_rearchived_after_rejected_turn(session_id)
+    except Exception:
+        logger.warning(
+            "failed to restore archived session after rejected follow-up: %s",
+            session_id,
+            exc_info=True,
+        )
+
+
 def _session_detail_metadata(session_id: str) -> SessionMetadata | None:
     metadata = (
         SessionMetadata.objects.select_related("project")
@@ -9477,6 +9548,12 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
 
     input_images_owned = False
     steer_image_paths: list[str] = []
+    session_unarchived_for_turn = False
+
+    def restore_archived_session_for_rejected_turn() -> None:
+        if session_unarchived_for_turn:
+            _restore_archived_session_for_rejected_turn(session_id, settings)
+
     try:
         if raw_active:
             assert instance_id is not None
@@ -9546,12 +9623,35 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         # rollout read (and its lazy state-DB migration) on the request path.
         # Fall back to a live resume for active/workflow/uncached-cwd threads.
         metadata = _session_detail_metadata(session_id)
-        metadata_resume = _metadata_resume_for_inactive_session(
-            session_id,
-            metadata,
-            active_instance=active_instance,
-            active_system_workflow=active_system_workflow,
-            require_system_agent_thread=False,
+
+        def record_session_unarchived_for_accepted_turn() -> None:
+            if not session_unarchived_for_turn:
+                return
+            _record_session_unarchived(session_id)
+            if metadata is not None:
+                metadata.codex_archived = False
+                metadata.codex_archived_at = None
+                metadata.codex_path = ""
+
+        should_unarchive_for_turn = _metadata_indicates_archived(metadata)
+        force_live_resume = _metadata_rollout_path_indicates_archived(metadata)
+        if should_unarchive_for_turn:
+            if _metadata_cwd_is_disallowed(metadata):
+                _cleanup_saved_input_images(input_image_paths)
+                return HttpResponseBadRequest("thread cwd is not an allowed repository")
+            _unarchive_session_for_turn(session_id, settings)
+            session_unarchived_for_turn = True
+            force_live_resume = True
+        metadata_resume = (
+            None
+            if force_live_resume
+            else _metadata_resume_for_inactive_session(
+                session_id,
+                metadata,
+                active_instance=active_instance,
+                active_system_workflow=active_system_workflow,
+                require_system_agent_thread=False,
+            )
         )
         resumed: Any
         thread: Any
@@ -9568,7 +9668,19 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             with codex_pool.borrow_codex(
                 Codex, enable_memories=settings.enable_memories
             ) as codex:
-                resumed = codex._client.thread_resume(session_id)
+                try:
+                    resumed = codex._client.thread_resume(session_id)
+                except InvalidRequestError as exc:
+                    if not _thread_resume_archived_error(exc):
+                        raise
+                    if _metadata_cwd_is_disallowed(metadata):
+                        _cleanup_saved_input_images(input_image_paths)
+                        return HttpResponseBadRequest(
+                            "thread cwd is not an allowed repository"
+                        )
+                    _unarchive_session_for_turn(session_id, settings, codex=codex)
+                    session_unarchived_for_turn = True
+                    resumed = codex._client.thread_resume(session_id)
                 thread = resumed.thread
                 thread_entries = list(_entries_for(thread))
                 models_data = _models_for_plan_mode_fallback(codex)
@@ -9641,6 +9753,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             plan_mode = False
         cwd = _thread_cwd(thread)
         if not cwd:
+            restore_archived_session_for_rejected_turn()
             _cleanup_saved_input_images(input_image_paths)
             return HttpResponseBadRequest("thread has no cwd")
         # The session list surfaces every thread the app-server knows about, not
@@ -9648,6 +9761,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         # automatically inside the discover_repos() allowlist. Re-validate before
         # spawning so a follow-up cannot run a worker in an unintended directory.
         if not _is_allowed_session_cwd(cwd):
+            restore_archived_session_for_rejected_turn()
             _cleanup_saved_input_images(input_image_paths)
             return HttpResponseBadRequest("thread cwd is not an allowed repository")
         # Sandbox policy and approval mode are applied per-turn rather than
@@ -9735,6 +9849,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             if fix_pr_activation:
                 pr_url = _fix_pr_url_for_thread(session_id, thread)
                 if not pr_url:
+                    restore_archived_session_for_rejected_turn()
                     _cleanup_saved_input_images(input_image_paths)
                     return HttpResponseBadRequest(
                         "fix-pr requires an opened PR for this session"
@@ -9743,6 +9858,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                     pr_url=pr_url,
                     **workflow_kwargs,
                 )
+                record_session_unarchived_for_accepted_turn()
                 return redirect("session", session_id=session_id)
             if qa_activation:
                 workflow_kwargs["open_pr_on_lgtm"] = False
@@ -9753,6 +9869,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             if session_auto_merge_branch:
                 workflow_kwargs["auto_merge_branch"] = session_auto_merge_branch
             system_agents.start_pr_qa_workflow(**workflow_kwargs)
+            record_session_unarchived_for_accepted_turn()
             return redirect("session", session_id=session_id)
         spawn_kwargs: dict[str, Any] = {
             "thread_id": session_id,
@@ -9791,12 +9908,14 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 spawn_kwargs["auto_merge_branch"] = auto_merge_branch
         if plan_mode:
             if not collaboration_model:
+                restore_archived_session_for_rejected_turn()
                 _cleanup_saved_input_images(input_image_paths)
                 return HttpResponseBadRequest("plan mode requires a model")
             spawn_kwargs["model"] = collaboration_model
             spawn_kwargs["plan_mode"] = True
         elif collaboration_mode == _DEFAULT_COLLABORATION_MODE:
             if not collaboration_model:
+                restore_archived_session_for_rejected_turn()
                 _cleanup_saved_input_images(input_image_paths)
                 return HttpResponseBadRequest(
                     "default collaboration mode requires a model"
@@ -9840,15 +9959,19 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             if should_forward_web_search_mode:
                 spec_workflow_kwargs["web_search_mode"] = web_search_mode
             system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
+            record_session_unarchived_for_accepted_turn()
             return redirect("session", session_id=session_id)
         codex_pool.spawn_turn(**spawn_kwargs)
+        record_session_unarchived_for_accepted_turn()
         input_images_owned = True
         return redirect("session", session_id=session_id)
     except codex_pool.InputAttachmentLimitExceededError as exc:
+        restore_archived_session_for_rejected_turn()
         _cleanup_saved_input_images(steer_image_paths)
         _cleanup_saved_input_images(input_image_paths)
         return HttpResponseBadRequest(str(exc))
     except Exception:
+        restore_archived_session_for_rejected_turn()
         _cleanup_saved_input_images(steer_image_paths)
         if not input_images_owned:
             _cleanup_saved_input_images(input_image_paths)
