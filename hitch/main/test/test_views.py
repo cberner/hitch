@@ -62,6 +62,7 @@ from hitch.main import (
     session_stage_refresh,
     settings_cookies,
     streaming,
+    system_agent_summary,
     system_agents,
     token_usage,
     views,
@@ -4988,11 +4989,11 @@ class IndexViewTests(TestCase):
 
         with (
             patch(
-                "hitch.main.views._system_agent_runs_by_thread_id",
+                "hitch.main.system_agent_summary._system_agent_runs_by_thread_id",
                 return_value={},
             ) as runs_by_thread_id,
             patch(
-                "hitch.main.views._system_agent_instances_by_thread_id",
+                "hitch.main.system_agent_summary._system_agent_instances_by_thread_id",
                 return_value={},
             ) as instances_by_thread_id,
         ):
@@ -6957,24 +6958,30 @@ class IndexViewTests(TestCase):
         )
 
         with CaptureQueriesContext(connection) as captured:
-            runs_by_thread_id = views._system_agent_runs_by_thread_id(["qa-thread"])
-            instances_by_thread_id = views._system_agent_instances_by_thread_id(
-                ["instance-only-thread"]
+            runs_by_thread_id = (
+                system_agent_summary._system_agent_runs_by_thread_id(["qa-thread"])
+            )
+            instances_by_thread_id = (
+                system_agent_summary._system_agent_instances_by_thread_id(
+                    ["instance-only-thread"]
+                )
             )
             run = runs_by_thread_id["qa-thread"]
             instance = instances_by_thread_id["instance-only-thread"]
             self.assertEqual(
-                views._system_agent_run_label(run), system_agents.QA_DISPLAY_AUTHOR
+                system_agent_summary._system_agent_run_label(run),
+                system_agents.QA_DISPLAY_AUTHOR,
             )
             self.assertEqual(
-                views._system_agent_status(run), SystemAgentRun.STATUS_COMPLETED
+                system_agent_summary._system_agent_status(run),
+                SystemAgentRun.STATUS_COMPLETED,
             )
             self.assertEqual(
-                views._system_agent_run_label(None, instance),
+                system_agent_summary._system_agent_run_label(None, instance),
                 system_agents.AUTONOMOUS_GOAL_DISPLAY_AUTHOR,
             )
             self.assertEqual(
-                views._system_agent_status(None, instance),
+                system_agent_summary._system_agent_status(None, instance),
                 CodexInstance.STATUS_RUNNING,
             )
 
@@ -7181,9 +7188,11 @@ class IndexViewTests(TestCase):
         )
         SystemAgentRun.objects.filter(pk=old_run.pk).update(updated_at=newer_old_time)
 
-        updated_at_by_main_thread = views._qa_activity_updated_at_by_main_thread_id(
-            [_session("active", updated_at=1000)],
-            system_agents.hidden_thread_ids(),
+        updated_at_by_main_thread = (
+            system_agent_summary._qa_activity_updated_at_by_main_thread_id(
+                [_session("active", updated_at=1000)],
+                system_agents.hidden_thread_ids(),
+            )
         )
 
         self.assertEqual(updated_at_by_main_thread, {"active": 2000})
