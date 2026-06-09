@@ -21,6 +21,7 @@ from openai_codex.generated.v2_all import (
 )
 
 from hitch.main import (
+    agent_io,
     codex_events,
     demo,
     gh_observations,
@@ -1260,9 +1261,9 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(
             agent_kinds,
             {
-                system_agents.SPEC_REQUIREMENTS_AGENT_KIND,
-                system_agents.SPEC_RISK_AGENT_KIND,
-                system_agents.SPEC_TEST_AGENT_KIND,
+                agent_io.SPEC_REQUIREMENTS_AGENT_KIND,
+                agent_io.SPEC_RISK_AGENT_KIND,
+                agent_io.SPEC_TEST_AGENT_KIND,
             },
         )
         for call in mock_spawn.call_args_list:
@@ -1484,11 +1485,11 @@ class SpecCriticWorkflowTests(TestCase):
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
             status=CodexInstance.STATUS_RUNNING,
-            agent_kind=system_agents.SPEC_REQUIREMENTS_AGENT_KIND,
+            agent_kind=agent_io.SPEC_REQUIREMENTS_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.SPEC_REQUIREMENTS_AGENT_KIND,
+            agent_kind=agent_io.SPEC_REQUIREMENTS_AGENT_KIND,
             thread_id=instance.thread_id,
             instance=instance,
             status=SystemAgentRun.STATUS_RUNNING,
@@ -1687,13 +1688,13 @@ class SpecCriticWorkflowTests(TestCase):
             approval_mode="auto_review",
         )
         outputs: dict[str, dict[str, object]] = {
-            system_agents.SPEC_REQUIREMENTS_AGENT_KIND: {
+            agent_io.SPEC_REQUIREMENTS_AGENT_KIND: {
                 "summary": "Onboarding needs work.",
                 "requirements": ["Improve onboarding."],
                 "assumptions": [],
                 "repo_signals": ["Existing session UI."],
             },
-            system_agents.SPEC_RISK_AGENT_KIND: {
+            agent_io.SPEC_RISK_AGENT_KIND: {
                 "summary": "Scope is unclear.",
                 "ambiguities": ["Onboarding surface is not specified."],
                 "risks": ["Could expand into unrelated UX work."],
@@ -1736,7 +1737,7 @@ class SpecCriticWorkflowTests(TestCase):
                     },
                 ],
             },
-            system_agents.SPEC_TEST_AGENT_KIND: {
+            agent_io.SPEC_TEST_AGENT_KIND: {
                 "summary": "Test the selected flow.",
                 "acceptance_criteria": ["Chosen flow is covered."],
                 "test_strategy": ["Add a Django view test."],
@@ -1786,7 +1787,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(mock_spawn.call_count, 4)
         self.assertEqual(
             mock_spawn.call_args.kwargs["agent_kind"],
-            system_agents.SPEC_SYNTHESIZER_AGENT_KIND,
+            agent_io.SPEC_SYNTHESIZER_AGENT_KIND,
         )
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -1829,11 +1830,11 @@ class SpecCriticWorkflowTests(TestCase):
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
             status=CodexInstance.STATUS_COMPLETED,
-            agent_kind=system_agents.SPEC_RISK_AGENT_KIND,
+            agent_kind=agent_io.SPEC_RISK_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.SPEC_RISK_AGENT_KIND,
+            agent_kind=agent_io.SPEC_RISK_AGENT_KIND,
             thread_id=instance.thread_id,
             instance=instance,
             status=SystemAgentRun.STATUS_COMPLETED,
@@ -1881,7 +1882,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
         self.assertEqual(
             mock_spawn.call_args.kwargs["agent_kind"],
-            system_agents.SPEC_SYNTHESIZER_AGENT_KIND,
+            agent_io.SPEC_SYNTHESIZER_AGENT_KIND,
         )
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
@@ -1897,19 +1898,19 @@ class SpecCriticWorkflowTests(TestCase):
             state={"original_prompt": "Improve onboarding"},
         )
         analysis_outputs: dict[str, dict[str, object]] = {
-            system_agents.SPEC_REQUIREMENTS_AGENT_KIND: {
+            agent_io.SPEC_REQUIREMENTS_AGENT_KIND: {
                 "summary": "Onboarding needs work.",
                 "requirements": ["Improve onboarding."],
                 "assumptions": [],
                 "repo_signals": [],
             },
-            system_agents.SPEC_RISK_AGENT_KIND: {
+            agent_io.SPEC_RISK_AGENT_KIND: {
                 "summary": "No required clarification.",
                 "ambiguities": [],
                 "risks": [],
                 "questions": [],
             },
-            system_agents.SPEC_TEST_AGENT_KIND: {
+            agent_io.SPEC_TEST_AGENT_KIND: {
                 "summary": "Add focused coverage.",
                 "acceptance_criteria": ["Onboarding behavior is covered."],
                 "test_strategy": ["Add a focused Django test."],
@@ -1936,7 +1937,7 @@ class SpecCriticWorkflowTests(TestCase):
             thread_id="synth-thread",
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             status=CodexInstance.STATUS_RUNNING,
-            agent_kind=system_agents.SPEC_SYNTHESIZER_AGENT_KIND,
+            agent_kind=agent_io.SPEC_SYNTHESIZER_AGENT_KIND,
         )
 
         system_agents._maybe_advance_spec_critic_after_analysis(workflow)
@@ -1948,7 +1949,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(
             SystemAgentRun.objects.filter(
                 workflow=workflow,
-                agent_kind=system_agents.SPEC_SYNTHESIZER_AGENT_KIND,
+                agent_kind=agent_io.SPEC_SYNTHESIZER_AGENT_KIND,
             ).count(),
             1,
         )
@@ -1992,11 +1993,11 @@ class SpecCriticWorkflowTests(TestCase):
             workflow_id=workflow.pk,
             status=CodexInstance.STATUS_COMPLETED,
             events_path=events_path,
-            agent_kind=system_agents.SPEC_REQUIREMENTS_AGENT_KIND,
+            agent_kind=agent_io.SPEC_REQUIREMENTS_AGENT_KIND,
         )
         run = SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.SPEC_REQUIREMENTS_AGENT_KIND,
+            agent_kind=agent_io.SPEC_REQUIREMENTS_AGENT_KIND,
             thread_id=instance.thread_id,
             instance=instance,
             status=SystemAgentRun.STATUS_RUNNING,
@@ -2050,7 +2051,7 @@ class SpecCriticWorkflowTests(TestCase):
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
             status=CodexInstance.STATUS_COMPLETED,
-            agent_kind=system_agents.SPEC_SYNTHESIZER_AGENT_KIND,
+            agent_kind=agent_io.SPEC_SYNTHESIZER_AGENT_KIND,
             events_path=_events_file(
                 self,
                 {"brief": "Implement a focused onboarding pass for new sessions."},
@@ -2058,7 +2059,7 @@ class SpecCriticWorkflowTests(TestCase):
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.SPEC_SYNTHESIZER_AGENT_KIND,
+            agent_kind=agent_io.SPEC_SYNTHESIZER_AGENT_KIND,
             thread_id=instance.thread_id,
             instance=instance,
             status=SystemAgentRun.STATUS_RUNNING,
@@ -2108,12 +2109,12 @@ class SpecCriticWorkflowTests(TestCase):
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
             status=CodexInstance.STATUS_COMPLETED,
-            agent_kind=system_agents.SPEC_SYNTHESIZER_AGENT_KIND,
+            agent_kind=agent_io.SPEC_SYNTHESIZER_AGENT_KIND,
             events_path=_events_file(self, {"brief": "Implement a focused pass."}),
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.SPEC_SYNTHESIZER_AGENT_KIND,
+            agent_kind=agent_io.SPEC_SYNTHESIZER_AGENT_KIND,
             thread_id=instance.thread_id,
             instance=instance,
             status=SystemAgentRun.STATUS_RUNNING,
@@ -2146,11 +2147,11 @@ class SpecCriticWorkflowTests(TestCase):
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             workflow_id=workflow.pk,
             status=CodexInstance.STATUS_COMPLETED,
-            agent_kind=system_agents.SPEC_RISK_AGENT_KIND,
+            agent_kind=agent_io.SPEC_RISK_AGENT_KIND,
         )
         SystemAgentRun.objects.create(
             workflow=workflow,
-            agent_kind=system_agents.SPEC_RISK_AGENT_KIND,
+            agent_kind=agent_io.SPEC_RISK_AGENT_KIND,
             thread_id=instance.thread_id,
             instance=instance,
             status=SystemAgentRun.STATUS_COMPLETED,
@@ -8551,7 +8552,7 @@ class SpecCriticWorkflowTests(TestCase):
             with self.subTest(separator=repr(separator)):
                 verdict = {"feedback": f"left{separator}right", "lgtm": False}
                 fenced = "```json\n" + json.dumps(verdict, ensure_ascii=False) + "\n```"
-                parsed = system_agents._parse_qa_output(fenced)
+                parsed = agent_io._parse_qa_output(fenced)
                 self.assertIsNotNone(parsed)
                 assert parsed is not None
                 self.assertIs(parsed["lgtm"], False)
@@ -8560,11 +8561,11 @@ class SpecCriticWorkflowTests(TestCase):
         # fence is unaffected.
         crlf = '```json\r\n{"feedback": "x", "lgtm": true}\r\n```'
         self.assertEqual(
-            system_agents._parse_qa_output(crlf), {"feedback": "x", "lgtm": True}
+            agent_io._parse_qa_output(crlf), {"feedback": "x", "lgtm": True}
         )
 
     def test_pr_monitor_output_rejects_boolean_numeric_handoff_fields(self) -> None:
-        parsed = system_agents._parse_pr_monitor_output(
+        parsed = agent_io._parse_pr_monitor_output(
             json.dumps(
                 {
                     "status": "blocked",
@@ -8590,7 +8591,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertNotIn("review_count", pr)
 
     def test_pr_monitor_parser_accepts_legacy_ready_status_as_blocked(self) -> None:
-        parsed = system_agents._parse_pr_monitor_output(
+        parsed = agent_io._parse_pr_monitor_output(
             json.dumps(
                 {
                     "status": "ready",
@@ -8607,7 +8608,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(parsed["status"], "blocked")
 
     def test_pr_monitor_parser_preserves_structured_list_identifiers(self) -> None:
-        parsed = system_agents._parse_pr_monitor_output(
+        parsed = agent_io._parse_pr_monitor_output(
             json.dumps(
                 {
                     "status": "blocked",
@@ -9216,7 +9217,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.addCleanup(self.worktree_patcher.stop)
 
     def test_autonomous_goal_candidate_parser_accepts_wrapped_proposal(self) -> None:
-        parsed = system_agents._parse_autonomous_goal_candidate_output(
+        parsed = agent_io._parse_autonomous_goal_candidate_output(
             json.dumps(
                 {
                     "proposal": {
@@ -9260,28 +9261,28 @@ class AutonomousGoalWorkflowTests(TestCase):
         self,
     ) -> None:
         self.assertIsNone(
-            system_agents._parse_autonomous_goal_candidate_output(
+            agent_io._parse_autonomous_goal_candidate_output(
                 json.dumps({"proposal": None, "message": "   "})
             )
         )
         self.assertIsNone(
-            system_agents._parse_autonomous_goal_candidate_output(
+            agent_io._parse_autonomous_goal_candidate_output(
                 json.dumps({"proposal": "not an object", "message": ""})
             )
         )
         self.assertIsNone(
-            system_agents._parse_autonomous_goal_candidate_output(
+            agent_io._parse_autonomous_goal_candidate_output(
                 json.dumps({"proposal": {"title": ""}, "message": ""})
             )
         )
         self.assertIsNone(
-            system_agents._parse_autonomous_goal_candidate_output(
+            agent_io._parse_autonomous_goal_candidate_output(
                 json.dumps({"title": "", "summary": "", "impact": ""})
             )
         )
 
     def test_candidate_memory_summary_falls_back_to_proposal_details(self) -> None:
-        parsed = system_agents._parse_autonomous_goal_candidate_output(
+        parsed = agent_io._parse_autonomous_goal_candidate_output(
             json.dumps(
                 {
                     "proposal": {
@@ -9309,7 +9310,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             "Suggested continuation: Polish and test parser work.",
             parsed["next_steps_summary"],
         )
-        message_fallback = system_agents._parse_autonomous_goal_candidate_output(
+        message_fallback = agent_io._parse_autonomous_goal_candidate_output(
             json.dumps(
                 {
                     "proposal": None,
@@ -12781,7 +12782,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertFalse(run.input["memory_compacted"])
 
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
-    @patch.object(system_agents, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 350)
+    @patch.object(agent_io, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 350)
     def test_candidate_prompt_compacts_large_prior_memory(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -12818,15 +12819,15 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertIn("Compacted from 4 prior candidate summaries", prompt)
         self.assertIn("Files seen across prior runs", prompt)
         self.assertIn("hitch/main/test/test_3.py", prompt)
-        memory_context = system_agents._autonomous_goal_memory_context(autonomous_goal)
+        memory_context = agent_io._autonomous_goal_memory_context(autonomous_goal)
         self.assertLessEqual(
-            len(memory_context.text), system_agents._AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS
+            len(memory_context.text), agent_io._AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS
         )
         run = SystemAgentRun.objects.get(workflow=workflow)
         self.assertEqual(run.input["memory_count"], 4)
         self.assertTrue(run.input["memory_compacted"])
 
-    @patch.object(system_agents, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 900)
+    @patch.object(agent_io, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 900)
     def test_compacted_memory_context_keeps_recent_actionable_summary(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         autonomous_goal = AutonomousGoal.objects.create(
@@ -12850,12 +12851,12 @@ class AutonomousGoalWorkflowTests(TestCase):
                 ],
             )
 
-        memory_context = system_agents._autonomous_goal_memory_context(autonomous_goal)
+        memory_context = agent_io._autonomous_goal_memory_context(autonomous_goal)
 
         self.assertTrue(memory_context.compacted)
         self.assertIn("constraint row generation", memory_context.text)
         self.assertLessEqual(
-            len(memory_context.text), system_agents._AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS
+            len(memory_context.text), agent_io._AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS
         )
 
     def test_compacted_memory_context_includes_older_summary_section(self) -> None:
@@ -12872,18 +12873,18 @@ class AutonomousGoalWorkflowTests(TestCase):
                 summary=f"Run {idx} left a concise continuation.",
                 relevant_files=[f"hitch/main/test/test_{idx}.py"],
             )
-            for idx in range(system_agents._AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT + 1)
+            for idx in range(agent_io._AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT + 1)
         ]
 
-        compacted = system_agents._compact_autonomous_goal_memories(memories)
+        compacted = agent_io._compact_autonomous_goal_memories(memories)
 
         self.assertIn("Older compacted summaries:", compacted)
         self.assertIn(
-            f"Processed file {system_agents._AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT}",
+            f"Processed file {agent_io._AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT}",
             compacted,
         )
 
-    @patch.object(system_agents, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 190)
+    @patch.object(agent_io, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 190)
     def test_fit_memory_context_uses_line_when_full_section_does_not_fit(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         autonomous_goal = AutonomousGoal.objects.create(
@@ -12897,16 +12898,16 @@ class AutonomousGoalWorkflowTests(TestCase):
             summary="Target parser assertions next.",
         )
 
-        compacted = system_agents._fit_autonomous_goal_memory_context([memory], "")
+        compacted = agent_io._fit_autonomous_goal_memory_context([memory], "")
 
         self.assertIn("Target parser assertions next.", compacted)
         self.assertNotIn("Memory ID:", compacted)
         self.assertLessEqual(
-            len(compacted), system_agents._AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS
+            len(compacted), agent_io._AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS
         )
 
-    @patch.object(system_agents, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 450)
-    @patch.object(system_agents, "_AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT", 1)
+    @patch.object(agent_io, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 450)
+    @patch.object(agent_io, "_AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT", 1)
     def test_fit_memory_context_includes_older_compacted_summaries(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         autonomous_goal = AutonomousGoal.objects.create(
@@ -12923,16 +12924,16 @@ class AutonomousGoalWorkflowTests(TestCase):
             for idx in range(2)
         ]
 
-        compacted = system_agents._fit_autonomous_goal_memory_context(memories, "")
+        compacted = agent_io._fit_autonomous_goal_memory_context(memories, "")
 
         self.assertIn("Older compacted summaries:", compacted)
         self.assertIn("Processed file 1", compacted)
         self.assertLessEqual(
-            len(compacted), system_agents._AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS
+            len(compacted), agent_io._AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS
         )
 
-    @patch.object(system_agents, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 260)
-    @patch.object(system_agents, "_AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT", 1)
+    @patch.object(agent_io, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 260)
+    @patch.object(agent_io, "_AUTONOMOUS_GOAL_MEMORY_COMPACT_RECENT_COUNT", 1)
     def test_fit_memory_context_stops_before_older_summary_that_would_overflow(
         self,
     ) -> None:
@@ -12951,16 +12952,16 @@ class AutonomousGoalWorkflowTests(TestCase):
             for idx in range(2)
         ]
 
-        compacted = system_agents._fit_autonomous_goal_memory_context(memories, "")
+        compacted = agent_io._fit_autonomous_goal_memory_context(memories, "")
 
         self.assertIn("File 0", compacted)
         self.assertNotIn("Older compacted summaries:", compacted)
         self.assertNotIn("File 1", compacted)
         self.assertLessEqual(
-            len(compacted), system_agents._AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS
+            len(compacted), agent_io._AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS
         )
 
-    @patch.object(system_agents, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 240)
+    @patch.object(agent_io, "_AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS", 240)
     def test_compacted_memory_context_enforces_budget_with_long_files(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         autonomous_goal = AutonomousGoal.objects.create(
@@ -12980,15 +12981,15 @@ class AutonomousGoalWorkflowTests(TestCase):
                 ],
             )
 
-        memory_context = system_agents._autonomous_goal_memory_context(autonomous_goal)
+        memory_context = agent_io._autonomous_goal_memory_context(autonomous_goal)
 
         self.assertTrue(memory_context.compacted)
         self.assertIn("Compacted from 5 prior candidate summaries", memory_context.text)
         self.assertLessEqual(
-            len(memory_context.text), system_agents._AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS
+            len(memory_context.text), agent_io._AUTONOMOUS_GOAL_MEMORY_CONTEXT_CHARS
         )
 
-    @patch.object(system_agents, "_AUTONOMOUS_GOAL_MEMORY_MAX_ROWS", 2)
+    @patch.object(agent_io, "_AUTONOMOUS_GOAL_MEMORY_MAX_ROWS", 2)
     def test_memory_context_caps_recent_rows_before_compaction(self) -> None:
         project = Project.objects.create(name="Hitch", repo_path="/repo")
         autonomous_goal = AutonomousGoal.objects.create(
@@ -13004,7 +13005,7 @@ class AutonomousGoalWorkflowTests(TestCase):
                 relevant_files=[f"hitch/main/test/test_{idx}.py"],
             )
 
-        memory_context = system_agents._autonomous_goal_memory_context(autonomous_goal)
+        memory_context = agent_io._autonomous_goal_memory_context(autonomous_goal)
 
         self.assertTrue(memory_context.compacted)
         self.assertEqual(memory_context.count, 4)
