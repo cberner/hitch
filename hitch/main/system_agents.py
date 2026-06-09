@@ -50,6 +50,7 @@ from hitch.main.models import (
     UserInputRequest,
 )
 from hitch.main.repos import commit_hash_for_ref, default_branch_commit_hash
+from hitch.main.sdk_values import positive_int, string_from_any
 from hitch.main.worktrees import (
     ManagedWorktree,
     WorktreeCleanupError,
@@ -3708,7 +3709,7 @@ def _push_current_branch_for_pr_workflow(workflow: SystemWorkflow) -> None:
 def _fresh_active_pr_handoff_before_push(
     workflow: SystemWorkflow, stored_handoff: dict[str, Any]
 ) -> dict[str, Any]:
-    selector = _string_from_any(stored_handoff.get("url"))
+    selector = string_from_any(stored_handoff.get("url"))
     try:
         existing = _gh_pr_view(
             workflow, selector=selector or None, source_tool="gh_pr_view"
@@ -3777,9 +3778,9 @@ def _force_push_expected_head_sha(
     handoff = _compact_pr_handoff(active_pr_handoff)
     if _pr_handoff_is_terminal(handoff):
         return ""
-    if _string_from_any(handoff.get("head")) != branch:
+    if string_from_any(handoff.get("head")) != branch:
         return ""
-    return _string_from_any(handoff.get("head_sha"))
+    return string_from_any(handoff.get("head_sha"))
 
 
 def _git_push_rejected_non_fast_forward(
@@ -3929,38 +3930,23 @@ def _gh_error(result: subprocess.CompletedProcess[str]) -> str:
     return " ".join(detail.split())[:500]
 
 
-def _string_from_any(value: Any) -> str:
-    return value.strip() if isinstance(value, str) else ""
-
-
-def _positive_int(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int) and value > 0:
-        return value
-    if isinstance(value, str) and value.isdecimal():
-        parsed = int(value)
-        return parsed if parsed > 0 else None
-    return None
-
-
 def _pr_handoff_from_gh_view(
     payload: Any, *, source_tool: str
 ) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise _GhPrOpenError("`gh pr view` returned a non-object payload")
 
-    url = _string_from_any(payload.get("url"))
+    url = string_from_any(payload.get("url"))
     handoff = (
         _pr_handoff_from_github_url(url, source_tool=source_tool) if url else {}
     )
-    number = _positive_int(payload.get("number"))
+    number = positive_int(payload.get("number"))
     if number is not None:
         handoff["pr_number"] = number
-    state = _string_from_any(payload.get("state")).lower()
+    state = string_from_any(payload.get("state")).lower()
     if state:
         handoff["state"] = state
-    merged_at = _string_from_any(payload.get("mergedAt"))
+    merged_at = string_from_any(payload.get("mergedAt"))
     handoff["merged"] = bool(merged_at) or state == "merged"
     draft = payload.get("isDraft")
     if isinstance(draft, bool):
@@ -3972,7 +3958,7 @@ def _pr_handoff_from_gh_view(
     _copy_gh_string(payload, handoff, "title", "title")
     _copy_gh_string(payload, handoff, "baseRefName", "base")
     _copy_gh_string(payload, handoff, "headRefName", "head")
-    head_sha = _string_from_any(payload.get("headRefOid"))
+    head_sha = string_from_any(payload.get("headRefOid"))
     if head_sha:
         handoff["head_sha"] = head_sha
         handoff["latest_commit_sha"] = head_sha
@@ -3983,7 +3969,7 @@ def _pr_handoff_from_gh_view(
         handoff["merged_at"] = merged_at
     merge_commit = payload.get("mergeCommit")
     if isinstance(merge_commit, dict):
-        merge_commit_sha = _string_from_any(merge_commit.get("oid"))
+        merge_commit_sha = string_from_any(merge_commit.get("oid"))
         if merge_commit_sha:
             handoff["merge_commit_sha"] = merge_commit_sha
     handoff["source_tool"] = source_tool
@@ -3994,7 +3980,7 @@ def _pr_handoff_from_gh_view(
 def _copy_gh_string(
     source: dict[str, Any], target: dict[str, Any], source_key: str, target_key: str
 ) -> None:
-    value = _string_from_any(source.get(source_key))
+    value = string_from_any(source.get(source_key))
     if value:
         target[target_key] = value
 
@@ -4051,7 +4037,7 @@ def _pr_monitor_observation_from_gh(workflow: SystemWorkflow) -> dict[str, Any]:
 
 
 def _pr_handoff_selector(handoff: dict[str, Any]) -> str:
-    url = _string_from_any(handoff.get("url"))
+    url = string_from_any(handoff.get("url"))
     if url:
         return url
     number = handoff.get("pr_number")
@@ -4068,10 +4054,10 @@ def _pr_stage_rate_limit_key(handoff: Mapping[str, Any]) -> str:
     both background schedulers, and every session pointing at the same PR share
     one window.
     """
-    url = _string_from_any(handoff.get("url"))
+    url = string_from_any(handoff.get("url"))
     if url:
         return f"gh:pr-view:{url}"
-    repo = _string_from_any(handoff.get("repository_full_name"))
+    repo = string_from_any(handoff.get("repository_full_name"))
     number = handoff.get("pr_number")
     if isinstance(number, int) and not isinstance(number, bool):
         return f"gh:pr-view:{repo}#{number}" if repo else f"gh:pr-view:#{number}"
@@ -4091,7 +4077,7 @@ def _copy_gh_review_fields(target: dict[str, Any], payload: dict[str, Any]) -> N
         and isinstance((state := review.get("state")), str)
         and state
     ]
-    review_decision = _string_from_any(payload.get("reviewDecision")).upper()
+    review_decision = string_from_any(payload.get("reviewDecision")).upper()
     target["review_count"] = len(reviews)
     if review_decision == "CHANGES_REQUESTED":
         target["review_signal"] = "changes_requested"
@@ -4120,12 +4106,12 @@ def _copy_gh_reaction_fields(target: dict[str, Any], payload: dict[str, Any]) ->
             continue
         count = _reaction_group_count(group)
         total += count
-        content = _string_from_any(group.get("content")).lower()
+        content = string_from_any(group.get("content")).lower()
         if content in {"thumbs_up", "+1", "thumbsup"}:
             thumbs_up += count
     target["reaction_count"] = total
     current_signal = _normalize_review_signal(target.get("review_signal"))
-    review_decision = _string_from_any(payload.get("reviewDecision")).upper()
+    review_decision = string_from_any(payload.get("reviewDecision")).upper()
     review_required = bool(
         review_decision and review_decision not in {"APPROVED", "CHANGES_REQUESTED"}
     )
@@ -4170,7 +4156,7 @@ def _safe_gh_comment_identifier(comment: Any) -> dict[str, Any]:
         item["database_id"] = comment_id
     elif isinstance(comment_id, str):
         item["id"] = comment_id
-    url = _string_from_any(comment.get("url"))
+    url = string_from_any(comment.get("url"))
     if url:
         item["url"] = url
     return item
@@ -4224,13 +4210,13 @@ def _ci_status_from_gh_status_checks(
 
 
 def _gh_check_status(check: dict[str, Any]) -> str:
-    state = _string_from_any(check.get("state")).lower()
+    state = string_from_any(check.get("state")).lower()
     if state:
         normalized = _normalize_ci_status(state)
         if normalized:
             return normalized
-    status = _string_from_any(check.get("status")).lower()
-    conclusion = _string_from_any(check.get("conclusion")).lower()
+    status = string_from_any(check.get("status")).lower()
+    conclusion = string_from_any(check.get("conclusion")).lower()
     if conclusion:
         normalized = _normalize_ci_status(conclusion)
         if normalized:
@@ -4255,7 +4241,7 @@ def _compact_gh_check(check: dict[str, Any]) -> dict[str, str]:
         ("link", "url"),
         ("targetUrl", "url"),
     ):
-        value = _string_from_any(check.get(source_key))
+        value = string_from_any(check.get(source_key))
         if value and target_key not in item:
             item[target_key] = value
     if "name" not in item:
@@ -4266,7 +4252,7 @@ def _compact_gh_check(check: dict[str, Any]) -> dict[str, str]:
 def _gh_pr_review_threads(
     workflow: SystemWorkflow, handoff: dict[str, Any]
 ) -> tuple[list[dict[str, Any]], bool]:
-    repo = _string_from_any(handoff.get("repository_full_name"))
+    repo = string_from_any(handoff.get("repository_full_name"))
     number = handoff.get("pr_number")
     if "/" not in repo or not isinstance(number, int) or isinstance(number, bool):
         return [], True
@@ -4331,14 +4317,14 @@ def _review_threads_page(payload: Any) -> dict[str, Any]:
     return {
         "nodes": [node for node in nodes if isinstance(node, dict)],
         "has_next_page": page_info.get("hasNextPage") is True,
-        "end_cursor": _string_from_any(page_info.get("endCursor")),
+        "end_cursor": string_from_any(page_info.get("endCursor")),
     }
 
 
 def _gh_pr_status_checks(
     workflow: SystemWorkflow, handoff: dict[str, Any]
 ) -> tuple[Any, bool]:
-    repo = _string_from_any(handoff.get("repository_full_name"))
+    repo = string_from_any(handoff.get("repository_full_name"))
     number = handoff.get("pr_number")
     if "/" not in repo or not isinstance(number, int) or isinstance(number, bool):
         return None, True
@@ -4408,7 +4394,7 @@ def _status_checks_page(payload: Any) -> dict[str, Any]:
     return {
         "nodes": [node for node in nodes if isinstance(node, dict)],
         "has_next_page": page_info.get("hasNextPage") is True,
-        "end_cursor": _string_from_any(page_info.get("endCursor")),
+        "end_cursor": string_from_any(page_info.get("endCursor")),
     }
 
 
@@ -4449,7 +4435,7 @@ def _safe_gh_review_thread_identifier(thread: dict[str, Any]) -> dict[str, Any]:
         for comment in reversed(nodes):
             if not isinstance(comment, dict):
                 continue
-            url = _string_from_any(comment.get("url"))
+            url = string_from_any(comment.get("url"))
             if url:
                 item["url"] = url
                 break
@@ -4516,7 +4502,7 @@ def _gh_comment_feedback(payload: dict[str, Any]) -> str:
         reviews = payload.get("reviews")
     for review in _list_dicts(reviews)[-5:]:
         text = _gh_body_item_feedback(
-            f"review {_string_from_any(review.get('state')).lower() or 'comment'}",
+            f"review {string_from_any(review.get('state')).lower() or 'comment'}",
             review,
         )
         if text:
@@ -4531,7 +4517,7 @@ def _gh_review_thread_feedback(threads: list[dict[str, Any]]) -> str:
     ]
     for thread in unresolved[:5]:
         parts = []
-        path = _string_from_any(thread.get("path"))
+        path = string_from_any(thread.get("path"))
         if path:
             parts.append(f"path={path}")
         line = thread.get("line")
@@ -4540,9 +4526,9 @@ def _gh_review_thread_feedback(threads: list[dict[str, Any]]) -> str:
         comments = thread.get("comments")
         nodes = comments.get("nodes") if isinstance(comments, dict) else None
         bodies = [
-            _untrusted_prompt_excerpt(_string_from_any(comment.get("body")), 500)
+            _untrusted_prompt_excerpt(string_from_any(comment.get("body")), 500)
             for comment in _list_dicts(nodes)
-            if _string_from_any(comment.get("body"))
+            if string_from_any(comment.get("body"))
         ]
         if bodies:
             parts.append("text=" + " | ".join(bodies[-3:]))
@@ -4552,14 +4538,14 @@ def _gh_review_thread_feedback(threads: list[dict[str, Any]]) -> str:
 
 
 def _gh_body_item_feedback(label: str, item: dict[str, Any]) -> str:
-    body = _string_from_any(item.get("body"))
+    body = string_from_any(item.get("body"))
     if not body:
         return ""
     author = item.get("author")
     login = (
-        _string_from_any(author.get("login")) if isinstance(author, dict) else ""
+        string_from_any(author.get("login")) if isinstance(author, dict) else ""
     )
-    url = _string_from_any(item.get("url"))
+    url = string_from_any(item.get("url"))
     prefix_parts = [label]
     if login:
         prefix_parts.append(f"author={login}")
@@ -4885,8 +4871,8 @@ def _authoritative_pr_monitor_result(
         monitor_status = (
             "terminal" if _pr_handoff_is_terminal(monitor_pr) else "blocked"
         )
-    parsed_feedback = _string_from_any(parsed.get("feedback"))
-    gh_feedback = _string_from_any(gh_observation.get("feedback"))
+    parsed_feedback = string_from_any(parsed.get("feedback"))
+    gh_feedback = string_from_any(gh_observation.get("feedback"))
     gh_blockers = _string_list(gh_observation.get("blockers"))
     parsed_blockers = _string_list(parsed.get("blockers"))
     monitor_feedback_is_current = _monitor_observation_matches_current(
@@ -4915,14 +4901,14 @@ def _authoritative_pr_monitor_result(
 
 def _gh_observation_has_monitor_text(gh_observation: dict[str, Any]) -> bool:
     return bool(
-        _string_from_any(gh_observation.get("feedback"))
+        string_from_any(gh_observation.get("feedback"))
         or _string_list(gh_observation.get("blockers"))
     )
 
 
 def _monitor_feedback_observation(gh_observation: dict[str, Any]) -> dict[str, Any]:
     return {
-        "feedback": _string_from_any(gh_observation.get("feedback")),
+        "feedback": string_from_any(gh_observation.get("feedback")),
         "pr": _compact_pr_handoff(gh_observation.get("pr")),
     }
 
@@ -4933,8 +4919,8 @@ def _monitor_observation_matches_current(
     *,
     require_feedback: bool = True,
 ) -> bool:
-    monitor_feedback = _string_from_any(monitor_observation.get("feedback"))
-    current_feedback = _string_from_any(gh_observation.get("feedback"))
+    monitor_feedback = string_from_any(monitor_observation.get("feedback"))
+    current_feedback = string_from_any(gh_observation.get("feedback"))
     if require_feedback and not monitor_feedback:
         return False
     if monitor_feedback != current_feedback:
@@ -4952,9 +4938,9 @@ def _pr_monitor_result_from_gh_observation(
     pr = _compact_pr_handoff(gh_observation.get("pr"))
     return {
         "status": "terminal" if _pr_handoff_is_terminal(pr) else "blocked",
-        "summary": _string_from_any(gh_observation.get("summary"))
+        "summary": string_from_any(gh_observation.get("summary"))
         or "Hitch checked the PR gates.",
-        "feedback": _string_from_any(gh_observation.get("feedback")),
+        "feedback": string_from_any(gh_observation.get("feedback")),
         "pr": pr,
         "blockers": _string_list(gh_observation.get("blockers")),
     }
@@ -7379,7 +7365,7 @@ def _pr_followup_monitor_prompt(
     workflow: SystemWorkflow, handoff: dict[str, Any], observation: dict[str, Any]
 ) -> str:
     observed_pr = _pr_handoff_for_monitor_schema(observation.get("pr"))
-    observed_details = _string_from_any(observation.get("feedback")) or (
+    observed_details = string_from_any(observation.get("feedback")) or (
         "No PR comments, unresolved review-thread text, or CI failures were observed."
     )
     return (
@@ -9696,8 +9682,8 @@ def _format_pr_handoff(handoff: dict[str, Any]) -> str:
 
 
 def _pr_handoff_agent_summary(handoff: dict[str, Any]) -> str:
-    repo = _string_from_any(handoff.get("repository_full_name"))
-    url = _string_from_any(handoff.get("url"))
+    repo = string_from_any(handoff.get("repository_full_name"))
+    url = string_from_any(handoff.get("url"))
     number = handoff.get("pr_number")
     parts = ["Active PR:"]
     if isinstance(number, int) and not isinstance(number, bool):

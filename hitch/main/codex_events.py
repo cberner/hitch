@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from hitch.main.models import CodexInstance
+from hitch.main.sdk_values import positive_int, string_from_any
 
 logger = logging.getLogger(__name__)
 
@@ -561,15 +562,15 @@ def _normalized_github_tool(item: dict[str, Any]) -> str:
 def _copy_pr_identity_from_args(target: dict[str, Any], raw_args: Any) -> None:
     if not isinstance(raw_args, dict):
         return
-    repo = _string_from_any(
+    repo = string_from_any(
         raw_args.get("repository_full_name") or raw_args.get("repo_full_name")
     )
     if repo:
         target["repository_full_name"] = repo
-    number = _positive_int(raw_args.get("pr_number") or raw_args.get("pull_number"))
+    number = positive_int(raw_args.get("pr_number") or raw_args.get("pull_number"))
     if number is not None:
         target["pr_number"] = number
-    commit_sha = _string_from_any(raw_args.get("commit_sha"))
+    commit_sha = string_from_any(raw_args.get("commit_sha"))
     if commit_sha:
         target["latest_commit_sha"] = commit_sha
 
@@ -621,11 +622,11 @@ def _json_dict_from_text(value: Any) -> dict[str, Any] | None:
 
 
 def _copy_pr_info_fields(target: dict[str, Any], source: dict[str, Any]) -> None:
-    url = _string_from_any(source.get("display_url") or source.get("url"))
+    url = string_from_any(source.get("display_url") or source.get("url"))
     if url:
         target["url"] = url
         _copy_identity_from_pr_url(target, url)
-    number = _positive_int(source.get("number") or source.get("pr_number"))
+    number = positive_int(source.get("number") or source.get("pr_number"))
     if number is not None:
         target["pr_number"] = number
     for source_key, target_key in (
@@ -641,7 +642,7 @@ def _copy_pr_info_fields(target: dict[str, Any], source: dict[str, Any]) -> None
         ("closed_at", "closed_at"),
         ("merged_at", "merged_at"),
     ):
-        text = _string_from_any(source.get(source_key))
+        text = string_from_any(source.get(source_key))
         if text:
             target[target_key] = _compact_text(text)
     for source_key, target_key in (
@@ -652,7 +653,7 @@ def _copy_pr_info_fields(target: dict[str, Any], source: dict[str, Any]) -> None
         value = source.get(source_key)
         if isinstance(value, bool):
             target[target_key] = value
-    repo = _string_from_any(
+    repo = string_from_any(
         source.get("repository_full_name") or source.get("repo_full_name")
     )
     if repo:
@@ -660,7 +661,7 @@ def _copy_pr_info_fields(target: dict[str, Any], source: dict[str, Any]) -> None
 
 
 def _copy_comment_fields(target: dict[str, Any], source: dict[str, Any]) -> None:
-    url = _string_from_any(source.get("display_url") or source.get("url"))
+    url = string_from_any(source.get("display_url") or source.get("url"))
     if url:
         target["url"] = url
         _copy_identity_from_pr_url(target, url)
@@ -737,7 +738,7 @@ def _copy_ci_fields(
         # for the current PR (its id captured from ``fetch_commit_workflow_runs``
         # below) is attributed to that PR instead of being treated as either an
         # unrelated run or unrelated work that supersedes the PR epoch.
-        observed_run_id = _positive_int(raw_args.get("run_id"))
+        observed_run_id = positive_int(raw_args.get("run_id"))
         if observed_run_id is not None:
             target["observed_run_id"] = observed_run_id
             target["workflow_run_ids"] = _merge_run_ids(
@@ -845,8 +846,8 @@ def _ci_status_from_runs(raw_runs: Any) -> str:
     for run in raw_runs:
         if not isinstance(run, dict):
             continue
-        status = _string_from_any(run.get("status")).lower()
-        conclusion = _string_from_any(run.get("conclusion")).lower()
+        status = string_from_any(run.get("status")).lower()
+        conclusion = string_from_any(run.get("conclusion")).lower()
         if status != "completed":
             has_pending = True
             continue
@@ -880,9 +881,9 @@ def _ci_status_from_jobs(raw_jobs: Any) -> tuple[str, list[str], list[str]]:
     for job in raw_jobs:
         if not isinstance(job, dict):
             continue
-        name = _string_from_any(job.get("name")) or "unnamed job"
-        status = _string_from_any(job.get("status")).lower()
-        conclusion = _string_from_any(job.get("conclusion")).lower()
+        name = string_from_any(job.get("name")) or "unnamed job"
+        status = string_from_any(job.get("status")).lower()
+        conclusion = string_from_any(job.get("conclusion")).lower()
         if status != "completed":
             pending.append(name)
             continue
@@ -989,7 +990,7 @@ def _pr_snapshot_head_changed(current: dict[str, Any], update: dict[str, Any]) -
 def _finalize_pr_snapshot(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     if not snapshot:
         return None
-    url = _string_from_any(snapshot.get("url"))
+    url = string_from_any(snapshot.get("url"))
     if url:
         _copy_identity_from_pr_url(snapshot, url)
     if not url and not (
@@ -1032,13 +1033,13 @@ def _pr_update_belongs_to_current_pr(
     update_snapshot = _finalize_pr_snapshot(dict(update.values))
     if _pr_snapshot_has_identity(update_snapshot):
         return _pr_snapshot_matches_current_pr(current, update_snapshot)
-    update_repo = _string_from_any(update.values.get("repository_full_name"))
+    update_repo = string_from_any(update.values.get("repository_full_name"))
     current_repo = (
-        _string_from_any(current.get("repository_full_name")) if current else ""
+        string_from_any(current.get("repository_full_name")) if current else ""
     )
     if update_repo and current_repo and update_repo != current_repo:
         return False
-    update_commit = _string_from_any(update.values.get("latest_commit_sha"))
+    update_commit = string_from_any(update.values.get("latest_commit_sha"))
     if update_commit:
         return update_commit in _pr_commit_shas(current)
     # No PR identity and no commit SHA. A ``fetch_workflow_run_jobs`` observation
@@ -1074,7 +1075,7 @@ def _workflow_run_ids_from_runs(raw_runs: Any) -> list[int]:
     for run in raw_runs:
         if not isinstance(run, dict):
             continue
-        run_id = _positive_int(
+        run_id = positive_int(
             run.get("id") or run.get("run_id") or run.get("databaseId")
         )
         if run_id is not None and run_id not in ids:
@@ -1104,7 +1105,7 @@ def _pr_commit_shas(snapshot: dict[str, Any] | None) -> set[str]:
     return {
         commit
         for key in ("latest_commit_sha", "head_sha", "merge_commit_sha")
-        if (commit := _string_from_any(snapshot.get(key)))
+        if (commit := string_from_any(snapshot.get(key)))
     }
 
 
@@ -1139,7 +1140,7 @@ def _compact_items(items: list[Any]) -> list[dict[str, Any]]:
                 compact[key] = _compact_text(value)
             elif isinstance(value, int) and not isinstance(value, bool):
                 compact[key] = value
-        body = _string_from_any(item.get("body"))
+        body = string_from_any(item.get("body"))
         if body:
             compact["body"] = _compact_text(" ".join(body.split()))
         if compact:
@@ -1154,21 +1155,6 @@ def _compact_text(value: str) -> str:
     if len(text) <= _PR_TEXT_MAX_CHARS:
         return text
     return f"{text[: _PR_TEXT_MAX_CHARS - 3].rstrip()}..."
-
-
-def _string_from_any(value: Any) -> str:
-    return value.strip() if isinstance(value, str) else ""
-
-
-def _positive_int(value: Any) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int) and value > 0:
-        return value
-    if isinstance(value, str) and value.isdecimal():
-        parsed = int(value)
-        return parsed if parsed > 0 else None
-    return None
 
 
 def _event_observed_at(event: dict[str, Any]) -> int:
