@@ -49,6 +49,7 @@ from hitch.main import (
     codex_pool,
     coding_agents,
     demo,
+    entry_render,
     session_index,
     session_stage,
     streaming,
@@ -2436,7 +2437,7 @@ class ActiveTurnTrimTests(TestCase):
             ]
         )
 
-        self.assertEqual(views._user_message_text(item), "[image]")
+        self.assertEqual(entry_render.user_message_text(item), "[image]")
 
     def test_steer_attachment_ledger_does_not_change_active_turn_marker(self) -> None:
         active = CodexInstance.objects.create(

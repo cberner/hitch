@@ -72,10 +72,10 @@ from hitch.main import (
 from hitch.main.db import run_ignoring_database_locks
 from hitch.main.diffs import build_worktree_diff
 from hitch.main.entry_render import (
-    _collapse_flat_entries,
-    _find_final_agent_idx,
-    _render_entries,
-    _user_message_text,
+    collapse_flat_entries,
+    find_final_agent_idx,
+    render_entries,
+    user_message_text,
 )
 from hitch.main.formatting import render_markdown
 from hitch.main.local_merges import local_branch_names
@@ -95,10 +95,10 @@ from hitch.main.models import (
 )
 from hitch.main.repos import discover_repos, git_common_dir, same_repo_or_worktree
 from hitch.main.sdk_values import (
-    _plain_sdk_value,
-    _sdk_model_dump_value,
-    _string_value,
-    _value_for,
+    plain_sdk_value,
+    sdk_model_dump_value,
+    string_value,
+    value_for,
 )
 from hitch.main.worktrees import (
     WorktreeCleanupError,
@@ -2417,7 +2417,7 @@ def _session_row_for_thread(
     }
     if not system_only:
         metadata = metadata_by_thread.get(thread_id)
-        codex_path = _string_value(getattr(thread, "path", None))
+        codex_path = string_value(getattr(thread, "path", None))
         if not codex_path and metadata is not None:
             codex_path = metadata.codex_path
         row.update(
@@ -2638,7 +2638,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             and stage_workflow is None
             and log_pr_snapshot is not None
             and system_agents.pr_snapshot_stage_refresh_due(
-                cwd=_string_value(session.get("cwd")),
+                cwd=string_value(session.get("cwd")),
                 snapshot=log_pr_snapshot,
                 attempted_at=_datetime_value(
                     session.get("stage_pr_refresh_attempted_at")
@@ -2721,7 +2721,7 @@ def _stage_from_cached_session_row(
     if cached_stage.key == session_stage.PR.key:
         pr_snapshot = _pr_snapshot_for_rollout_path(rollout_state.path)
         if pr_snapshot is not None and system_agents.pr_snapshot_stage_refresh_due(
-            cwd=_string_value(session.get("cwd")),
+            cwd=string_value(session.get("cwd")),
             snapshot=pr_snapshot,
             attempted_at=_datetime_value(session.get("stage_pr_refresh_attempted_at")),
         ):
@@ -2879,7 +2879,7 @@ def _cached_stage_for_session_row(
 ) -> session_stage.SessionStage | None:
     if rollout_state is None:
         return None
-    cached = session_stage.stage_for_key(_string_value(session.get("stage_cache_key")))
+    cached = session_stage.stage_for_key(string_value(session.get("stage_cache_key")))
     if cached is None:
         return None
     return (
@@ -3026,13 +3026,13 @@ def _workflow_pr_handoff_survives_lifecycle(
 def _pr_snapshot_identity(snapshot: Mapping[str, Any] | None) -> tuple[str, int] | None:
     if not snapshot:
         return None
-    url = _string_value(snapshot.get("url"))
+    url = string_value(snapshot.get("url"))
     if url:
         match = _GITHUB_PR_IDENTITY_RE.search(url)
         if match is not None:
             owner, repo, number = match.groups()
             return f"{owner}/{repo}", int(number)
-    repo = _string_value(snapshot.get("repository_full_name"))
+    repo = string_value(snapshot.get("repository_full_name"))
     number = snapshot.get("pr_number")
     if repo and isinstance(number, int) and not isinstance(number, bool):
         return repo, number
@@ -5422,7 +5422,7 @@ def _metadata_resume_for_inactive_session(
     if rollout_data is None:
         return None
     thread = _metadata_thread(metadata, rollout_path=rollout_path)
-    entries = tuple(_collapse_flat_entries(list(rollout_data.flat_entries)))
+    entries = tuple(collapse_flat_entries(list(rollout_data.flat_entries)))
     if not _entries_include_transcript(entries):
         return None
     latest_instance = _latest_instance_for_next_message(session_id)
@@ -5691,7 +5691,7 @@ def _rollout_intermediate_entry_for_detail(
         raise Http404("intermediate entry not found") from exc
     if rollout_data is None:
         raise Http404("session not found")
-    entries = list(_collapse_flat_entries(list(rollout_data.flat_entries)))
+    entries = list(collapse_flat_entries(list(rollout_data.flat_entries)))
     if not _entries_include_transcript(entries):
         raise Http404("session not found")
     entries = _apply_system_authors(entries, session_id)
@@ -6961,8 +6961,8 @@ def _next_message_config(
     approval_mode: str | None = None,
 ) -> list[dict[str, str]]:
     """Return the settings that will govern the next submitted message."""
-    model = _string_value(getattr(resumed, "model", None))
-    reasoning = _string_value(getattr(resumed, "reasoning_effort", None))
+    model = string_value(getattr(resumed, "model", None))
+    reasoning = string_value(getattr(resumed, "reasoning_effort", None))
     plan_model_value = plan_model or "Unknown"
     sandbox_value = _option_label(
         _SANDBOX_POLICY_OPTIONS,
@@ -8029,9 +8029,9 @@ def _entries_for(thread: Any) -> Iterator[dict[str, Any]]:
     """
     flat = _entries_from_rollout(thread)
     if flat is not None:
-        yield from _collapse_flat_entries(flat)
+        yield from collapse_flat_entries(flat)
         return
-    yield from _render_entries(thread)
+    yield from render_entries(thread)
 
 
 def _entries_from_rollout(thread: Any) -> list[dict[str, Any]] | None:
@@ -10076,7 +10076,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 or collaboration_mode == _DEFAULT_COLLABORATION_MODE
                 or qa_workflow_activation
             )
-            and not _string_value(getattr(resumed, "model", None))
+            and not string_value(getattr(resumed, "model", None))
         ):
             with codex_pool.borrow_codex(
                 Codex, enable_memories=settings.enable_memories
@@ -10162,10 +10162,10 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             auto_merge_branch = ""
         if qa_workflow_activation:
             workflow_model = (
-                _string_value(getattr(resumed, "model", None)) or settings.model
+                string_value(getattr(resumed, "model", None)) or settings.model
             )
             workflow_reasoning_effort = (
-                _string_value(getattr(resumed, "reasoning_effort", None))
+                string_value(getattr(resumed, "reasoning_effort", None))
                 or settings.reasoning_effort
             )
             workflow_kwargs: dict[str, Any] = {
@@ -10224,10 +10224,10 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             spawn_kwargs["enable_memories"] = True
         if auto_pr_enabled or auto_qa_enabled:
             auto_review_model = (
-                _string_value(getattr(resumed, "model", None)) or settings.model
+                string_value(getattr(resumed, "model", None)) or settings.model
             )
             auto_review_reasoning_effort = (
-                _string_value(getattr(resumed, "reasoning_effort", None))
+                string_value(getattr(resumed, "reasoning_effort", None))
                 or settings.reasoning_effort
             )
             if auto_pr_enabled:
@@ -10263,10 +10263,10 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             and not collaboration_mode
         ):
             workflow_model = (
-                _string_value(getattr(resumed, "model", None)) or settings.model
+                string_value(getattr(resumed, "model", None)) or settings.model
             )
             workflow_reasoning_effort = (
-                _string_value(getattr(resumed, "reasoning_effort", None))
+                string_value(getattr(resumed, "reasoning_effort", None))
                 or settings.reasoning_effort
             )
             spec_workflow_kwargs: dict[str, Any] = {
@@ -10365,7 +10365,7 @@ def _pr_url_for_thread(thread: Any) -> str | None:
         items = [thread_item.root for thread_item in getattr(turn, "items", []) or []]
         if not _is_pr_creation_prompt_turn(items):
             continue
-        final_idx = _find_final_agent_idx(items)
+        final_idx = find_final_agent_idx(items)
         if final_idx == -1:
             continue
         # The model can emit the create_pull_request MCP call in the same
@@ -10381,7 +10381,7 @@ def _pr_url_for_thread(thread: Any) -> str | None:
         urls: list[str] = []
         for item in items:
             if _github_pr_tool_call_used(item):
-                urls.extend(_pr_urls_from_value(_value_for(item, "result")))
+                urls.extend(_pr_urls_from_value(value_for(item, "result")))
         return urls[-1] if urls else None
     if turns:
         return None
@@ -10404,11 +10404,11 @@ def _current_pr_url_for_thread(
         if thread_url:
             return thread_url
     workflow_handoff = system_agents.pr_handoff_for_workflow(stage_pr_workflow)
-    workflow_url = _string_value(workflow_handoff.get("url"))
+    workflow_url = string_value(workflow_handoff.get("url"))
     if workflow_url:
         return workflow_url
     snapshot = pr_observation.snapshot
-    return _string_value(snapshot.get("url") if snapshot else None) or None
+    return string_value(snapshot.get("url") if snapshot else None) or None
 
 
 def _fix_pr_url_for_thread(session_id: str, thread: Any) -> str | None:
@@ -10440,7 +10440,7 @@ def _pr_observation_result_for_thread(thread: Any) -> codex_events.PrObservation
         mcp_items = tuple(_mcp_tool_items_for_items(items))
         is_pr_prompt = _turn_starts_pr_observation_epoch(items, mcp_items)
         is_pr_workflow_notice = _is_pr_workflow_notice_turn(items)
-        final_idx = _find_final_agent_idx(items)
+        final_idx = find_final_agent_idx(items)
         # Scan the whole turn rather than ``items[:final_idx]``: the create_
         # pull_request ``mcpToolCall`` (and any other GitHub MCP result) can
         # land AFTER the final-answer ``agentMessage`` when the model emits
@@ -10467,31 +10467,31 @@ def _pr_observation_result_for_thread(thread: Any) -> codex_events.PrObservation
 
 def _mcp_tool_items_for_items(items: Iterable[Any]) -> Iterator[dict[str, Any]]:
     for item in items:
-        if _value_for(item, "type") != "mcpToolCall":
+        if value_for(item, "type") != "mcpToolCall":
             continue
         yield {
             "type": "mcpToolCall",
-            "server": _string_value(_value_for(item, "server")),
-            "tool": _string_value(_value_for(item, "tool")),
-            "arguments": _plain_sdk_value(_value_for(item, "arguments")) or {},
-            "result": _plain_sdk_value(_value_for(item, "result")),
+            "server": string_value(value_for(item, "server")),
+            "tool": string_value(value_for(item, "tool")),
+            "arguments": plain_sdk_value(value_for(item, "arguments")) or {},
+            "result": plain_sdk_value(value_for(item, "result")),
         }
 
 
 def _is_pr_creation_prompt_turn(items: list[Any]) -> bool:
     for item in items:
-        if _value_for(item, "type") != "userMessage":
+        if value_for(item, "type") != "userMessage":
             continue
-        if _is_pr_creation_prompt(_user_message_text(item)):
+        if _is_pr_creation_prompt(user_message_text(item)):
             return True
     return False
 
 
 def _is_pr_workflow_notice_turn(items: list[Any]) -> bool:
     for item in items:
-        if _value_for(item, "type") != "userMessage":
+        if value_for(item, "type") != "userMessage":
             continue
-        if _is_pr_workflow_notice(_user_message_text(item)):
+        if _is_pr_workflow_notice(user_message_text(item)):
             return True
     return False
 
@@ -10519,15 +10519,15 @@ def _is_pr_workflow_notice(text: str) -> bool:
 
 def _turn_has_lifecycle_activity(items: list[Any]) -> bool:
     return any(
-        _value_for(item, "type") in {"userMessage", "agentMessage"} for item in items
+        value_for(item, "type") in {"userMessage", "agentMessage"} for item in items
     )
 
 
 def _github_pr_tool_call_used(item: Any) -> bool:
-    if _value_for(item, "type") != "mcpToolCall":
+    if value_for(item, "type") != "mcpToolCall":
         return False
-    server = _string_value(_value_for(item, "server"))
-    tool = _string_value(_value_for(item, "tool"))
+    server = string_value(value_for(item, "server"))
+    tool = string_value(value_for(item, "tool"))
     detail = f"{server} / {tool}".strip()
     return _GITHUB_PR_TOOL_RE.search(detail) is not None
 
@@ -10547,15 +10547,15 @@ def _pr_urls_from_value(value: Any) -> list[str]:
         for child in value:
             urls.extend(_pr_urls_from_value(child))
         return urls
-    text = _string_value(_value_for(value, "text"))
+    text = string_value(value_for(value, "text"))
     if text:
         return _GITHUB_PR_URL_RE.findall(text)
-    dumped = _sdk_model_dump_value(value)
+    dumped = sdk_model_dump_value(value)
     if dumped is not value:
         return _pr_urls_from_value(dumped)
     urls = []
     for attr in ("url", "display_url", "displayUrl", "structured_content", "content"):
-        urls.extend(_pr_urls_from_value(_value_for(value, attr)))
+        urls.extend(_pr_urls_from_value(value_for(value, attr)))
     return urls
 
 
@@ -10872,7 +10872,7 @@ def _thread_cwd(thread: Any) -> str | None:
 def _session_template_thread(thread: Any) -> _SessionTemplateThread:
     updated_at = getattr(thread, "updated_at", "")
     return _SessionTemplateThread(
-        id=_string_value(getattr(thread, "id", "")),
+        id=string_value(getattr(thread, "id", "")),
         cwd=_thread_cwd(thread) or "",
         updated_at="" if updated_at is None else updated_at,
     )

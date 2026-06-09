@@ -5,7 +5,7 @@ Each turn's user message and final agent reply become top-level entries; all
 intermediate agent commentary and tool calls fold into a single collapsible
 "intermediate" entry so long sessions don't bury the answer. The same shaping is
 applied to the flat per-item entries produced by the rollout parser
-(``_collapse_flat_entries``) so resumed/replayed threads render identically.
+(``collapse_flat_entries``) so resumed/replayed threads render identically.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from hitch.main.formatting import looks_like_markdown, render_markdown
-from hitch.main.sdk_values import _int_value, _sequence_value, _string_value, _value_for
+from hitch.main.sdk_values import int_value, sequence_value, string_value, value_for
 
 _NON_MESSAGE_LABELS = {
     "commandExecution": "Command",
@@ -34,8 +34,8 @@ _NON_MESSAGE_LABELS = {
 }
 
 
-def _collapse_flat_entries(flat: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
-    """Apply the same intermediate-collapsing as ``_render_entries`` to the
+def collapse_flat_entries(flat: list[dict[str, Any]]) -> Iterator[dict[str, Any]]:
+    """Apply the same intermediate-collapsing as ``render_entries`` to the
     flat per-item entries produced by the rollout parser.
 
     Turn boundaries are detected via the user kind because the rollout file
@@ -63,7 +63,7 @@ def _emit_collapsed_turn(turn: list[dict[str, Any]]) -> Iterator[dict[str, Any]]
                 intermediate = []
             yield _finalize_agent_entry(_strip_phase(entry))
         elif entry["kind"] == "user":
-            # `_collapse_flat_entries` splits on every user past the first, so
+            # `collapse_flat_entries` splits on every user past the first, so
             # any user reaching this branch is the leading entry of the turn
             # and intermediate is empty.
             yield entry
@@ -120,7 +120,7 @@ def _finalize_agent_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return entry
 
 
-def _render_entries(thread: Any) -> Iterator[dict[str, Any]]:
+def render_entries(thread: Any) -> Iterator[dict[str, Any]]:
     """Walk every turn's items in order, surfacing the user message and the
     final agent reply as top-level entries and folding everything else
     (intermediate agent commentary plus every tool-call variant) into a
@@ -136,7 +136,7 @@ def _render_entries(thread: Any) -> Iterator[dict[str, Any]]:
     for turn in getattr(thread, "turns", []) or []:
         timestamp = getattr(turn, "started_at", None)
         items = [thread_item.root for thread_item in turn.items]
-        final_idx = _find_final_agent_idx(items)
+        final_idx = find_final_agent_idx(items)
         intermediate: list[dict[str, Any]] = []
 
         for i, item in enumerate(items):
@@ -159,7 +159,7 @@ def _render_entries(thread: Any) -> Iterator[dict[str, Any]]:
                     intermediate = []
                 yield {
                     "kind": "user",
-                    "text": _user_message_text(item),
+                    "text": user_message_text(item),
                     "timestamp": timestamp,
                 }
             elif item.type == "agentMessage":
@@ -188,7 +188,7 @@ def _render_entries(thread: Any) -> Iterator[dict[str, Any]]:
             yield _make_intermediate_entry(intermediate)
 
 
-def _find_final_agent_idx(items: list[Any]) -> int:
+def find_final_agent_idx(items: list[Any]) -> int:
     """Index of the agent message to display as this turn's final response, or
     -1 if there is no agent message that could be the final.
 
@@ -226,21 +226,21 @@ def _phase_value(item: Any) -> str | None:
 
 
 def _memory_citation_from_item(item: Any) -> dict[str, Any] | None:
-    value = _value_for(item, "memory_citation")
+    value = value_for(item, "memory_citation")
     if value is None:
-        value = _value_for(item, "memoryCitation")
+        value = value_for(item, "memoryCitation")
     if value is None:
         return None
 
     entries: list[dict[str, Any]] = []
-    for raw_entry in _sequence_value(_value_for(value, "entries")):
-        path = _string_value(_value_for(raw_entry, "path"))
-        line_start = _int_value(_value_for(raw_entry, "line_start"))
+    for raw_entry in sequence_value(value_for(value, "entries")):
+        path = string_value(value_for(raw_entry, "path"))
+        line_start = int_value(value_for(raw_entry, "line_start"))
         if line_start == 0:
-            line_start = _int_value(_value_for(raw_entry, "lineStart"))
-        line_end = _int_value(_value_for(raw_entry, "line_end"))
+            line_start = int_value(value_for(raw_entry, "lineStart"))
+        line_end = int_value(value_for(raw_entry, "line_end"))
         if line_end == 0:
-            line_end = _int_value(_value_for(raw_entry, "lineEnd"))
+            line_end = int_value(value_for(raw_entry, "lineEnd"))
         if not path or line_start == 0 or line_end == 0:
             continue
         entries.append(
@@ -248,16 +248,16 @@ def _memory_citation_from_item(item: Any) -> dict[str, Any] | None:
                 "path": path,
                 "line_start": line_start,
                 "line_end": line_end,
-                "note": _string_value(_value_for(raw_entry, "note")),
+                "note": string_value(value_for(raw_entry, "note")),
             }
         )
 
     thread_ids = [
         thread_id
-        for raw_id in _sequence_value(
-            _value_for(value, "thread_ids") or _value_for(value, "threadIds")
+        for raw_id in sequence_value(
+            value_for(value, "thread_ids") or value_for(value, "threadIds")
         )
-        if (thread_id := _string_value(raw_id))
+        if (thread_id := string_value(raw_id))
     ]
     # See _memory_citation_from_bodies in rollout.py: ``count`` covers both
     # citation kinds because the popover renders entries and thread_ids
@@ -274,8 +274,8 @@ def _make_tool_call_entry(item: Any, timestamp: Any) -> dict[str, Any]:
         "kind": "tool_call",
         "type": item_type,
         "label": _NON_MESSAGE_LABELS.get(item_type, item_type),
-        "detail": _tool_call_detail(item, item_type),
-        "status": _tool_call_status(item),
+        "detail": tool_call_detail(item, item_type),
+        "status": tool_call_status(item),
         "timestamp": timestamp,
     }
 
@@ -291,7 +291,7 @@ def _make_intermediate_entry(items: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _user_message_text(item: Any) -> str:
+def user_message_text(item: Any) -> str:
     parts: list[str] = []
     for input_item in item.content:
         inner = input_item.root
@@ -310,7 +310,7 @@ def _user_message_text(item: Any) -> str:
     return "\n".join(parts)
 
 
-def _tool_call_detail(item: Any, item_type: str) -> str:
+def tool_call_detail(item: Any, item_type: str) -> str:
     """Return a short, human-readable description of a tool-call item.
 
     Returns an empty string for item types that do not carry useful inline
@@ -355,7 +355,7 @@ def _tool_call_detail(item: Any, item_type: str) -> str:
             return ""
 
 
-def _tool_call_status(item: Any) -> str | None:
+def tool_call_status(item: Any) -> str | None:
     """Return a non-success status string (e.g. ``failed``) or None.
 
     Hides ``completed`` so the common case stays uncluttered; surfaces
