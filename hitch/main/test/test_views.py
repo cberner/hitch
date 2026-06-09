@@ -53,6 +53,7 @@ from hitch.main import (
     entry_render,
     input_images,
     session_index,
+    session_pr_plan,
     session_stage,
     settings_cookies,
     streaming,
@@ -2390,7 +2391,7 @@ class PendingPlanStateTests(TestCase):
             {"kind": "approval_declined", "detail": "git push"},
         ]
 
-        self.assertTrue(views._entries_await_plan_approval(entries))
+        self.assertTrue(session_pr_plan._entries_await_plan_approval(entries))
 
     def test_agent_answer_clears_pending_plan(self) -> None:
         entries = [
@@ -2400,7 +2401,7 @@ class PendingPlanStateTests(TestCase):
             {"kind": "agent", "text": "Done"},
         ]
 
-        self.assertFalse(views._entries_await_plan_approval(entries))
+        self.assertFalse(session_pr_plan._entries_await_plan_approval(entries))
 
     def test_only_latest_pending_plan_is_actionable(self) -> None:
         entries = [
@@ -2410,7 +2411,7 @@ class PendingPlanStateTests(TestCase):
             {"kind": "plan", "text": "# Current Plan"},
         ]
 
-        views._mark_pending_plan_actions(entries)
+        session_pr_plan._mark_pending_plan_actions(entries)
 
         self.assertFalse(entries[1]["show_plan_actions"])
         self.assertTrue(entries[3]["show_plan_actions"])
@@ -2423,7 +2424,7 @@ class PendingPlanStateTests(TestCase):
             {"kind": "agent", "text": "Done"},
         ]
 
-        views._mark_pending_plan_actions(entries)
+        session_pr_plan._mark_pending_plan_actions(entries)
 
         self.assertFalse(entries[1]["show_plan_actions"])
 
