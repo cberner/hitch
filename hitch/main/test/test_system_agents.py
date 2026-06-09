@@ -28,6 +28,7 @@ from hitch.main import (
     gh_observations,
     pr_handoff,
     rate_limit,
+    spec_critic_prompts,
     streaming,
     system_agents,
 )
@@ -15793,11 +15794,11 @@ class AutonomousGoalWorkflowTests(TestCase):
         judgment = {"confidence": "high", "summary": "", "rationale": ""}
 
         self.assertEqual(
-            system_agents._below_threshold_notice_title({}, autonomous_goal),
+            spec_critic_prompts._below_threshold_notice_title({}, autonomous_goal),
             "Skipped proposal from Improve tests",
         )
         self.assertEqual(
-            system_agents._below_threshold_notice_summary(
+            spec_critic_prompts._below_threshold_notice_summary(
                 {}, judgment, autonomous_goal.confidence_threshold
             ),
             "Found a candidate, but judge confidence was high and this goal "
