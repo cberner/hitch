@@ -5,6 +5,7 @@ from django.contrib import admin
 from django.urls import path
 
 import hitch.main.views
+from hitch.main import session_approval
 
 urlpatterns = [
     path("", hitch.main.views.index, name="index"),
@@ -130,17 +131,17 @@ urlpatterns = [
     ),
     path(
         "approval/<int:approval_id>/",
-        hitch.main.views.resolve_approval,
+        session_approval.resolve_approval,
         name="resolve_approval",
     ),
     path(
         "input/<int:input_id>/",
-        hitch.main.views.resolve_input_request,
+        session_approval.resolve_input_request,
         name="resolve_input_request",
     ),
     path(
         "sessions/<str:session_id>/stop/",
-        hitch.main.views.stop_session,
+        session_approval.stop_session,
         name="stop_session",
     ),
     path("admin/", admin.site.urls),
