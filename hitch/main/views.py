@@ -104,9 +104,12 @@ from hitch.main.rollout_state import (
     _RolloutFileState,
 )
 from hitch.main.sdk_values import (
+    datetime_value,
+    latest_updated_at,
     plain_sdk_value,
     sdk_model_dump_value,
     string_value,
+    updated_at_seconds,
     value_for,
 )
 from hitch.main.settings_cookies import (
@@ -1437,7 +1440,7 @@ def _sorted_visible_index_rows(
             [
                 {
                     "id": row["thread_id"],
-                    "updated_at": _latest_updated_at(
+                    "updated_at": latest_updated_at(
                         row["codex_updated_at"],
                         qa_updated_at_by_main_thread.get(row["thread_id"]),
                     ),
@@ -1495,7 +1498,7 @@ def _session_row_for_metadata(
     row = {
         "id": metadata.thread_id,
         "cwd": metadata.cwd,
-        "updated_at": _latest_updated_at(
+        "updated_at": latest_updated_at(
             metadata.codex_updated_at,
             qa_updated_at_by_main_thread.get(metadata.thread_id),
         ),
@@ -1581,19 +1584,19 @@ def _qa_activity_updated_at_by_metadata_thread_ids(
         if not main_thread_id:
             continue
         hidden_metadata = hidden_metadata_by_thread_id.get(run.thread_id)
-        local_run_updated_at = _latest_updated_at(run.updated_at, run.workflow.updated_at)
+        local_run_updated_at = latest_updated_at(run.updated_at, run.workflow.updated_at)
         if hidden_metadata is None:
             run_updated_at = local_run_updated_at
-        elif (_updated_at_seconds(local_run_updated_at) or 0.0) > (
-            _updated_at_seconds(hidden_metadata.codex_last_synced_at) or 0.0
+        elif (updated_at_seconds(local_run_updated_at) or 0.0) > (
+            updated_at_seconds(hidden_metadata.codex_last_synced_at) or 0.0
         ):
-            run_updated_at = _latest_updated_at(
+            run_updated_at = latest_updated_at(
                 hidden_metadata.codex_updated_at,
                 local_run_updated_at,
             )
         else:
             run_updated_at = hidden_metadata.codex_updated_at
-        updated_at_by_main_thread[main_thread_id] = _latest_updated_at(
+        updated_at_by_main_thread[main_thread_id] = latest_updated_at(
             updated_at_by_main_thread.get(main_thread_id),
             run_updated_at,
         )
@@ -2445,7 +2448,7 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
             and system_agents.pr_snapshot_stage_refresh_due(
                 cwd=string_value(session.get("cwd")),
                 snapshot=log_pr_snapshot,
-                attempted_at=_datetime_value(
+                attempted_at=datetime_value(
                     session.get("stage_pr_refresh_attempted_at")
                 ),
             )
@@ -2528,7 +2531,7 @@ def _stage_from_cached_session_row(
         if pr_snapshot is not None and system_agents.pr_snapshot_stage_refresh_due(
             cwd=string_value(session.get("cwd")),
             snapshot=pr_snapshot,
-            attempted_at=_datetime_value(session.get("stage_pr_refresh_attempted_at")),
+            attempted_at=datetime_value(session.get("stage_pr_refresh_attempted_at")),
         ):
             # Serve the cached stage now and refresh off-request; the result is
             # persisted to the stage cache for a later render to read back.
@@ -2730,8 +2733,8 @@ def _workflow_after_main_lifecycle(
         ):
             return workflow
         return None
-    main_updated_seconds = _updated_at_seconds(main_updated_at)
-    workflow_updated_seconds = _updated_at_seconds(workflow.updated_at)
+    main_updated_seconds = updated_at_seconds(main_updated_at)
+    workflow_updated_seconds = updated_at_seconds(workflow.updated_at)
     main_is_newer = (
         main_updated_seconds is not None
         and workflow_updated_seconds is not None
@@ -2756,8 +2759,8 @@ def _workflow_pr_handoff_survives_lifecycle(
     hitch_handoff = system_agents.hitch_pr_handoff_for_workflow(workflow)
     if _pr_snapshot_identity(hitch_handoff) != handoff_identity:
         return False
-    main_updated_seconds = _updated_at_seconds(main_updated_at)
-    workflow_updated_seconds = _updated_at_seconds(workflow.updated_at)
+    main_updated_seconds = updated_at_seconds(main_updated_at)
+    workflow_updated_seconds = updated_at_seconds(workflow.updated_at)
     return (
         main_updated_seconds is None
         or workflow_updated_seconds is None
@@ -5260,8 +5263,8 @@ def _metadata_thread(
         path=path,
         name=metadata.codex_name,
         preview=metadata.codex_preview,
-        created_at=_updated_at_seconds(metadata.codex_created_at),
-        updated_at=_updated_at_seconds(metadata.codex_updated_at),
+        created_at=updated_at_seconds(metadata.codex_created_at),
+        updated_at=updated_at_seconds(metadata.codex_updated_at),
         archived=metadata.codex_archived
         or (rollout_path is not None and _rollout_path_is_archived(rollout_path)),
         thread_source=metadata.codex_thread_source,
@@ -5860,9 +5863,9 @@ def _qa_activity_updated_at_by_main_thread_id(
         if not main_thread_id:
             continue
         run_updated_at = hidden_updated_at_by_thread_id.get(run.thread_id)
-        if _updated_at_seconds(run_updated_at) is None:
-            run_updated_at = _latest_updated_at(run.updated_at, run.workflow.updated_at)
-        updated_at_by_main_thread[main_thread_id] = _latest_updated_at(
+        if updated_at_seconds(run_updated_at) is None:
+            run_updated_at = latest_updated_at(run.updated_at, run.workflow.updated_at)
+        updated_at_by_main_thread[main_thread_id] = latest_updated_at(
             updated_at_by_main_thread.get(main_thread_id),
             run_updated_at,
         )
@@ -5872,44 +5875,15 @@ def _qa_activity_updated_at_by_main_thread_id(
 def _session_updated_at(
     thread: Any, qa_updated_at_by_main_thread: Mapping[str, Any]
 ) -> Any:
-    return _latest_updated_at(
+    return latest_updated_at(
         getattr(thread, "updated_at", None),
         qa_updated_at_by_main_thread.get(getattr(thread, "id", "")),
     )
 
 
 def _updated_at_sort_key(updated_at: Any) -> float:
-    seconds = _updated_at_seconds(updated_at)
+    seconds = updated_at_seconds(updated_at)
     return seconds if seconds is not None else 0.0
-
-
-def _updated_at_seconds(updated_at: Any) -> float | None:
-    if isinstance(updated_at, bool):
-        return None
-    if isinstance(updated_at, int | float):
-        return float(updated_at)
-    if isinstance(updated_at, datetime):
-        return updated_at.timestamp()
-    return None
-
-
-def _datetime_value(value: Any) -> datetime | None:
-    return value if isinstance(value, datetime) else None
-
-
-def _latest_updated_at(*values: Any) -> Any:
-    latest: Any = None
-    latest_seconds: float | None = None
-    for value in values:
-        seconds = _updated_at_seconds(value)
-        if seconds is None:
-            continue
-        if latest_seconds is None or seconds > latest_seconds:
-            latest = value
-            latest_seconds = seconds
-    if isinstance(latest, datetime):
-        return int(latest.timestamp())
-    return latest if latest is not None else 0
 
 
 def _demo_system_thread_ids() -> set[str]:
@@ -6313,7 +6287,7 @@ def _usage_token_refresh_items(
 def _usage_token_refresh_sort_key(
     metadata: _UsageTokenRefreshSource,
 ) -> tuple[float, str]:
-    last_checked_at = _updated_at_seconds(metadata.usage_last_checked_at)
+    last_checked_at = updated_at_seconds(metadata.usage_last_checked_at)
     return (
         last_checked_at if last_checked_at is not None else 0.0,
         metadata.thread_id,

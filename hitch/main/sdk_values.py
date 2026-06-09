@@ -9,6 +9,7 @@ values and none of them should have to import the others to do so.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 
@@ -60,3 +61,32 @@ def int_value(value: Any) -> int:
     if isinstance(value, int):
         return value
     return 0
+
+
+def datetime_value(value: Any) -> datetime | None:
+    return value if isinstance(value, datetime) else None
+
+
+def updated_at_seconds(updated_at: Any) -> float | None:
+    if isinstance(updated_at, bool):
+        return None
+    if isinstance(updated_at, int | float):
+        return float(updated_at)
+    if isinstance(updated_at, datetime):
+        return updated_at.timestamp()
+    return None
+
+
+def latest_updated_at(*values: Any) -> Any:
+    latest: Any = None
+    latest_seconds: float | None = None
+    for value in values:
+        seconds = updated_at_seconds(value)
+        if seconds is None:
+            continue
+        if latest_seconds is None or seconds > latest_seconds:
+            latest = value
+            latest_seconds = seconds
+    if isinstance(latest, datetime):
+        return int(latest.timestamp())
+    return latest if latest is not None else 0
