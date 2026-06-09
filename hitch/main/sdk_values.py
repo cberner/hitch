@@ -67,6 +67,15 @@ def string_from_any(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def truncate_for_prompt(text: str, max_chars: int) -> str:
+    normalized = " ".join(text.split())
+    if len(normalized) <= max_chars:
+        return normalized
+    if max_chars <= 3:
+        return normalized[:max_chars]
+    return f"{normalized[: max_chars - 3].rstrip()}..."
+
+
 def positive_int(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
