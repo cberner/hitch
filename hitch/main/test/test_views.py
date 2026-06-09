@@ -50,6 +50,7 @@ from hitch.main import (
     coding_agents,
     demo,
     entry_render,
+    input_images,
     session_index,
     session_stage,
     streaming,
@@ -10056,8 +10057,8 @@ class NewSessionViewTests(TestCase):
             )
 
     def test_input_image_upload_handler_rejects_limits_during_parse(self) -> None:
-        with patch("hitch.main.views._INPUT_IMAGE_MAX_BYTES", 8):
-            handler = views._InputImageLimitUploadHandler()
+        with patch("hitch.main.input_images._INPUT_IMAGE_MAX_BYTES", 8):
+            handler = input_images._InputImageLimitUploadHandler()
             with self.assertRaisesMessage(
                 SuspiciousOperation,
                 "image attachment is too large",
@@ -10069,7 +10070,7 @@ class NewSessionViewTests(TestCase):
                     9,
                 )
 
-            handler = views._InputImageLimitUploadHandler()
+            handler = input_images._InputImageLimitUploadHandler()
             handler.new_file("input_images", "screen.png", "image/png", None)
             with self.assertRaisesMessage(
                 SuspiciousOperation,
@@ -10077,7 +10078,7 @@ class NewSessionViewTests(TestCase):
             ):
                 handler.receive_data_chunk(b"123456789", 0)
 
-        handler = views._InputImageLimitUploadHandler()
+        handler = input_images._InputImageLimitUploadHandler()
         with self.assertRaisesMessage(
             SuspiciousOperation,
             "at most 4 image attachments are allowed",
@@ -10092,10 +10093,10 @@ class NewSessionViewTests(TestCase):
 
     def test_input_image_request_size_cap_runs_before_parse(self) -> None:
         request = RequestFactory().post(reverse("new_session"), data={})
-        request.META["CONTENT_LENGTH"] = str(views._INPUT_IMAGE_MAX_REQUEST_BYTES + 1)
+        request.META["CONTENT_LENGTH"] = str(input_images._INPUT_IMAGE_MAX_REQUEST_BYTES + 1)
 
         self.assertEqual(
-            views._input_image_request_size_error(request),
+            input_images._input_image_request_size_error(request),
             "image attachments are too large",
         )
 
@@ -10105,7 +10106,7 @@ class NewSessionViewTests(TestCase):
         def view(request: Any) -> Any:
             self.assertIsInstance(
                 request.upload_handlers[0],
-                views._InputImageLimitUploadHandler,
+                input_images._InputImageLimitUploadHandler,
             )
             return HttpResponse("ok")
 
@@ -10114,7 +10115,7 @@ class NewSessionViewTests(TestCase):
         request.META["CONTENT_TYPE"] = "Multipart/form-data; boundary=BOUNDARY"
         cast(Any, request)._dont_enforce_csrf_checks = True
 
-        response = views._limit_input_image_uploads(view)(request)
+        response = input_images._limit_input_image_uploads(view)(request)
 
         self.assertEqual(response.status_code, 200)
         self.assertTrue(getattr(views.new_session, "csrf_exempt", False))
@@ -10220,7 +10221,7 @@ class NewSessionViewTests(TestCase):
                     mock_spawn.assert_not_called()
                     self.assertFalse((Path(raw) / "attachments").exists())
 
-            with patch("hitch.main.views._INPUT_IMAGE_MAX_BYTES", len(_PNG_BYTES) - 1):
+            with patch("hitch.main.input_images._INPUT_IMAGE_MAX_BYTES", len(_PNG_BYTES) - 1):
                 response = self.client.post(
                     reverse("new_session"),
                     data={
@@ -14034,7 +14035,7 @@ class SendMessageViewTests(TestCase):
                     mock_codex.assert_not_called()
                     self.assertFalse((Path(raw) / "attachments").exists())
 
-            with patch("hitch.main.views._INPUT_IMAGE_MAX_BYTES", len(_PNG_BYTES) - 1):
+            with patch("hitch.main.input_images._INPUT_IMAGE_MAX_BYTES", len(_PNG_BYTES) - 1):
                 response = self.client.post(
                     reverse("send_message", kwargs={"session_id": "abc"}),
                     data={
