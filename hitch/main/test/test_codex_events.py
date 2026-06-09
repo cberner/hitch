@@ -2339,7 +2339,7 @@ class LatestPrSnapshotFromEventPathsTests(SimpleTestCase):
         self.assertEqual(snapshot["review_count"], 0)
         # The clear is recorded as an explicit ``""`` (rather than popping the
         # key) so the cross-worker handoff merge in
-        # ``system_agents._merge_pr_handoff_dicts`` can drop the stale
+        # ``pr_handoff._merge_pr_handoff_dicts`` can drop the stale
         # persisted verdict from an earlier monitor/feedback run.
         self.assertEqual(snapshot["review_signal"], "")
 

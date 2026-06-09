@@ -919,7 +919,7 @@ def _merge_pr_snapshot_update(
         # explicit clear so a clean reviews re-observation drops a stale
         # ``changes_requested`` left over from an earlier observation. The
         # clear is recorded as ``""`` in the snapshot (not popped) so it
-        # propagates through ``system_agents._merge_pr_handoff_dicts``
+        # propagates through ``pr_handoff._merge_pr_handoff_dicts``
         # cross-worker. Reaction-derived ``thumbs_up`` is held back from
         # the clear since the reviews tool does not speak for it.
         if value is None:
