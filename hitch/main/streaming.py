@@ -695,7 +695,10 @@ def _is_done(instance_id: int) -> bool:
         close_old_connections()
     if instance.status in (CodexInstance.STATUS_COMPLETED, CodexInstance.STATUS_FAILED):
         return True
-    return bool(instance.pid) and not codex_pool.worker_is_alive(instance)
+    if bool(instance.pid) and not codex_pool.worker_is_alive(instance):
+        _reconcile_dead_for_thread(instance.thread_id)
+        return True
+    return False
 
 
 def _current_status(instance_id: int) -> str:
@@ -713,6 +716,16 @@ def _current_status(instance_id: int) -> str:
 def _latest_id_for_thread(session_id: str) -> int | None:
     try:
         return codex_pool.latest_id_for_thread(session_id)
+    finally:
+        close_old_connections()
+
+
+def _reconcile_dead_for_thread(session_id: str) -> None:
+    try:
+        run_ignoring_database_locks(
+            lambda: codex_pool.reconcile_dead_for_thread(session_id),
+            description="stream dead-worker reconcile",
+        )
     finally:
         close_old_connections()
 

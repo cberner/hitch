@@ -9123,7 +9123,10 @@ class StreamForInstanceTests(TestCase):
         data_frames = [f for f in frames if f.startswith(b"data: ")]
         self.assertEqual(len(data_frames), 1)
         self.assertTrue(frames[-1].startswith(b"event: end"))
-        mock_identity.assert_called_once_with(4321, instance.pk)
+        self.assertIn(b'"failed"', frames[-1])
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
+        mock_identity.assert_any_call(4321, instance.pk)
         mock_alive.assert_not_called()
 
     @patch("hitch.main.streaming._POLL_INTERVAL", 0.001)
@@ -9211,3 +9214,6 @@ class StreamForInstanceTests(TestCase):
         data_frames = [f for f in frames if f.startswith(b"data: ")]
         self.assertEqual(len(data_frames), 1)
         self.assertTrue(frames[-1].startswith(b"event: end"))
+        self.assertIn(b'"failed"', frames[-1])
+        instance.refresh_from_db()
+        self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
