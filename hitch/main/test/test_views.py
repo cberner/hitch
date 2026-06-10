@@ -56,6 +56,7 @@ from hitch.main import (
     entry_render,
     gh_cli,
     input_images,
+    pr_stage_refresh_state,
     session_index,
     session_pr_plan,
     session_resume,
@@ -4302,7 +4303,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(first_response.status_code, 200)
         self.assertEqual(second_response.status_code, 200)
         workflow.refresh_from_db()
-        self.assertIn(system_agents._PR_STAGE_REFRESH_STATE_KEY, workflow.state)
+        self.assertIn(pr_stage_refresh_state._PR_STAGE_REFRESH_STATE_KEY, workflow.state)
         self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
         mock_gh_pr_view.assert_called_once()
         mock_logger.exception.assert_called_once()

@@ -30,6 +30,7 @@ from hitch.main import (
     gh_observations,
     pr_handoff,
     pr_monitor_format,
+    pr_stage_refresh_state,
     qa_prompts,
     rate_limit,
     spec_critic_prompts,
@@ -1095,7 +1096,7 @@ class SessionPrStageRefreshTests(TestCase):
                     cwd=cwd, snapshot=snapshot, attempted_at=None
                 )
             )
-            rate_limit.claim(system_agents._pr_stage_rate_limit_key(snapshot))
+            rate_limit.claim(pr_stage_refresh_state._pr_stage_rate_limit_key(snapshot))
             self.assertFalse(
                 system_agents.pr_snapshot_stage_refresh_due(
                     cwd=cwd, snapshot=snapshot, attempted_at=None
@@ -3997,7 +3998,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertTrue(handoff["mergeable"])
         self.assertEqual(handoff["source_tool"], "gh_pr_create")
         self.assertEqual(
-            workflow.state[system_agents._PR_HITCH_HANDOFF_STATE_KEY],
+            workflow.state[pr_stage_refresh_state._PR_HITCH_HANDOFF_STATE_KEY],
             {
                 "url": "https://github.com/cberner/hitch/pull/170",
                 "repository_full_name": "cberner/hitch",
@@ -6804,7 +6805,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(handoff["head_sha"], "followupsha")
         self.assertEqual(handoff["source_tool"], "gh_pr_create")
         self.assertEqual(
-            workflow.state[system_agents._PR_HITCH_HANDOFF_STATE_KEY],
+            workflow.state[pr_stage_refresh_state._PR_HITCH_HANDOFF_STATE_KEY],
             {
                 "url": "https://github.com/cberner/hitch/pull/174",
                 "repository_full_name": "cberner/hitch",
