@@ -17,8 +17,8 @@ from collections.abc import Iterable
 from django.db.models import Q
 from django.utils import timezone
 
-from hitch.main.db import run_ignoring_database_locks
 from hitch.main.models import SessionMetadata, SystemWorkflow
+from hitch.main.runtime.db import run_ignoring_database_locks
 from hitch.main.sessions import session_stage
 
 

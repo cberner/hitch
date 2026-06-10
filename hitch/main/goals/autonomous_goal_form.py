@@ -12,8 +12,8 @@ from typing import NamedTuple
 
 from django.http import HttpRequest
 
-from hitch.main.codex_pool import _VALID_WEB_SEARCH_MODES
 from hitch.main.models import AutonomousGoal
+from hitch.main.runtime.codex_pool import _VALID_WEB_SEARCH_MODES
 from hitch.main.sessions.settings_cookies import _MAX_BIGAUTOFIELD
 from hitch.main.workflows.agent_io import _AUTONOMOUS_GOAL_TITLE_MAX_LEN
 

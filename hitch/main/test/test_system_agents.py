@@ -20,7 +20,7 @@ from openai_codex.generated.v2_all import (
     TurnStatus,
 )
 
-from hitch.main import codex_events, demo, rate_limit, streaming
+from hitch.main import demo
 from hitch.main.goals import autonomous_goal_prompts, autonomous_goal_proposal_stack
 from hitch.main.local_merges import (
     AutoMergeReviewPatch,
@@ -38,6 +38,7 @@ from hitch.main.models import (
     SystemWorkflow,
     UserInputRequest,
 )
+from hitch.main.runtime import codex_events, rate_limit, streaming
 from hitch.main.workflows import (
     agent_io,
     gh_cli,

@@ -5,7 +5,7 @@ from typing import Any, override
 
 from django.test import TestCase
 
-from hitch.main import rollout
+from hitch.main.runtime import rollout
 from hitch.main.workflows import system_agents
 
 

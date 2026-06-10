@@ -14,19 +14,19 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
-from hitch.main import codex_pool, disk_cleanup, health, host_probes
-from hitch.main.disk_cleanup import HitchDiskUsage
-from hitch.main.host_probes import (
-    LeakedScope,
-    ScopeProcess,
-    WorkerScopeProbe,
-)
 from hitch.main.models import (
     ApprovalRequest,
     CodexInstance,
     ProposedSession,
     SystemWorkflow,
     UserInputRequest,
+)
+from hitch.main.runtime import codex_pool, disk_cleanup, health, host_probes
+from hitch.main.runtime.disk_cleanup import HitchDiskUsage
+from hitch.main.runtime.host_probes import (
+    LeakedScope,
+    ScopeProcess,
+    WorkerScopeProbe,
 )
 
 

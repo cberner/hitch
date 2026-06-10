@@ -1,7 +1,7 @@
 from django.db import OperationalError
 from django.test import SimpleTestCase
 
-from hitch.main.db import is_database_locked_error, run_ignoring_database_locks
+from hitch.main.runtime.db import is_database_locked_error, run_ignoring_database_locks
 
 
 class IsDatabaseLockedErrorTests(SimpleTestCase):
@@ -34,7 +34,7 @@ class RunIgnoringDatabaseLocksTests(SimpleTestCase):
         def locked() -> int:
             raise OperationalError("database is locked")
 
-        with self.assertLogs("hitch.main.db", level="WARNING") as logs:
+        with self.assertLogs("hitch.main.runtime.db", level="WARNING") as logs:
             result = run_ignoring_database_locks(locked, description="probe write")
 
         self.assertIsNone(result)

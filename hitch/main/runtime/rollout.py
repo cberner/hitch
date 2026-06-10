@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from hitch.main import codex_events
+from hitch.main.runtime import codex_events
 
 logger = logging.getLogger(__name__)
 

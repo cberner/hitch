@@ -17,7 +17,6 @@ from typing import Any
 from django.conf import settings as django_settings
 from django.db import close_old_connections
 
-from hitch.main import codex_events, rollout
 from hitch.main.models import (
     ApprovalRequest,
     CodexInstance,
@@ -25,11 +24,12 @@ from hitch.main.models import (
     SystemWorkflow,
     UserInputRequest,
 )
-from hitch.main.rollout_state import (
+from hitch.main.runtime import codex_events, rollout
+from hitch.main.runtime.rollout_state import (
     _rollout_file_state_from_value,
     _RolloutFileState,
 )
-from hitch.main.sdk_values import (
+from hitch.main.runtime.sdk_values import (
     datetime_value,
     string_value,
 )

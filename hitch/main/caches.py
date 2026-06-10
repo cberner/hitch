@@ -22,7 +22,7 @@ from openai_codex.generated.v2_all import (
     RateLimitSnapshot,
 )
 
-from hitch.main import codex_pool, rate_limit
+from hitch.main.runtime import codex_pool, rate_limit
 
 logger = logging.getLogger(__name__)
 

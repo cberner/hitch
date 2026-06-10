@@ -28,7 +28,7 @@ from openai_codex.generated.v2_all import (
     TurnStatus,
 )
 
-from hitch.main import codex_events, codex_pool, demo, rate_limit, rollout
+from hitch.main import demo
 from hitch.main.diffs import build_worktree_diff_text
 from hitch.main.goals.autonomous_goal_prompts import (
     _AUTONOMOUS_GOAL_FAILED_ATTEMPTS_STATE_KEY,
@@ -82,7 +82,8 @@ from hitch.main.models import (
     UserInputRequest,
 )
 from hitch.main.repos import commit_hash_for_ref, default_branch_commit_hash
-from hitch.main.sdk_values import (
+from hitch.main.runtime import codex_events, codex_pool, rate_limit, rollout
+from hitch.main.runtime.sdk_values import (
     positive_int,
     string_from_any,
     truncate_for_prompt,

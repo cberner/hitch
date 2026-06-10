@@ -13,16 +13,17 @@ from typing import Any
 from django.http import HttpRequest
 from django.urls import reverse
 
-from hitch.main import caches, coding_agents, disk_cleanup
+from hitch.main import caches, coding_agents
 from hitch.main import repos as repos_module
 from hitch.main import worktrees as worktrees_module
-from hitch.main.input_images import _INPUT_IMAGE_ACCEPT
 from hitch.main.models import (
     Project,
     ProposedSession,
     SessionMetadata,
     UserSettings,
 )
+from hitch.main.runtime import disk_cleanup
+from hitch.main.runtime.input_images import _INPUT_IMAGE_ACCEPT
 from hitch.main.sessions.session_pr_plan import _PR_SLASH_PROMPT
 from hitch.main.sessions.settings_cookies import (
     _APPROVAL_COOKIE,

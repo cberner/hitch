@@ -19,8 +19,8 @@ from datetime import datetime, timedelta
 from django.db import transaction
 from django.utils import timezone
 
-from hitch.main.db import run_ignoring_database_locks
 from hitch.main.models import RefreshThrottle
+from hitch.main.runtime.db import run_ignoring_database_locks
 
 # Default floor on how often any one resource may be pinged across the whole app.
 DEFAULT_MIN_INTERVAL = timedelta(minutes=2)

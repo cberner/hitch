@@ -453,7 +453,7 @@ class SessionIndexSyncState(models.Model):
 class RefreshThrottle(models.Model):
     """Central debounce ledger: the last time any path pinged an external resource.
 
-    Backs ``hitch.main.rate_limit``. Keys are opaque strings naming "the same
+    Backs ``hitch.main.runtime.rate_limit``. Keys are opaque strings naming "the same
     thing" -- a GitHub PR (its URL) or the Codex account rate-limit endpoint --
     so the floor on how often that resource is hit is shared across web renders,
     both background schedulers, and detached worker subprocesses. Module-level

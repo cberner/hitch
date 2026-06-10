@@ -41,10 +41,10 @@ from django.utils import timezone
 from openai_codex import AppServerConfig, Codex, TransportClosedError
 from openai_codex.generated.v2_all import ThreadSource, WebSearchMode
 
-from hitch.main import rate_limit, server_lifecycle
-from hitch.main.codex_tools import registered_dynamic_tool_specs
-from hitch.main.db import is_database_locked_error
 from hitch.main.models import ApprovalRequest, CodexInstance, UserInputRequest
+from hitch.main.runtime import rate_limit, server_lifecycle
+from hitch.main.runtime.codex_tools import registered_dynamic_tool_specs
+from hitch.main.runtime.db import is_database_locked_error
 
 logger = logging.getLogger(__name__)
 

@@ -43,19 +43,7 @@ from openai_codex.generated.v2_all import (
     ThreadSource,
 )
 
-from hitch.main import (
-    caches,
-    codex_events,
-    codex_pool,
-    coding_agents,
-    demo,
-    input_images,
-    streaming,
-    views,
-)
-from hitch.main import (
-    rollout as rollout_module,
-)
+from hitch.main import caches, coding_agents, demo, views
 from hitch.main.goals import autonomous_goal_prompts, autonomous_goal_proposal_stack, autonomous_goal_run_display
 from hitch.main.models import (
     ApprovalRequest,
@@ -72,7 +60,9 @@ from hitch.main.models import (
     UserInputRequest,
     UserSettings,
 )
-from hitch.main.rollout_state import _RolloutFileState
+from hitch.main.runtime import codex_events, codex_pool, input_images, streaming
+from hitch.main.runtime import rollout as rollout_module
+from hitch.main.runtime.rollout_state import _RolloutFileState
 from hitch.main.sessions import (
     entry_render,
     session_entry_display,
@@ -742,7 +732,7 @@ class SessionDetailFastPathTests(TestCase):
         )
 
         with patch(
-            "hitch.main.rollout._load_rollout_lines",
+            "hitch.main.runtime.rollout._load_rollout_lines",
             wraps=rollout_module._load_rollout_lines,
         ) as load_rollout_lines:
             response = self.client.get(
@@ -929,7 +919,7 @@ class SessionDetailFastPathTests(TestCase):
         )
 
         with patch(
-            "hitch.main.rollout._load_rollout_lines",
+            "hitch.main.runtime.rollout._load_rollout_lines",
             wraps=rollout_module._load_rollout_lines,
         ) as load_rollout_lines:
             response = self.client.get(
@@ -1627,7 +1617,7 @@ class SessionDetailFastPathTests(TestCase):
             thread=_session("active-detail", name="Active detail", path=str(rollout_path))
         )
 
-        with patch("hitch.main.codex_pool.worker_is_alive", return_value=True):
+        with patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True):
             response = self.client.get(
                 reverse("session", kwargs={"session_id": "active-detail"})
             )
@@ -1709,7 +1699,7 @@ class SessionDetailFastPathTests(TestCase):
             )
         )
 
-        with patch("hitch.main.codex_pool.worker_is_alive", return_value=True):
+        with patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True):
             response = self.client.get(
                 reverse("session", kwargs={"session_id": "active-with-pr-workflow"})
             )
@@ -2323,7 +2313,7 @@ class SessionDetailFastPathTests(TestCase):
             thread=_session("active", name="Active session")
         )
 
-        with patch("hitch.main.codex_pool.worker_is_alive", return_value=True):
+        with patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True):
             response = self.client.get(reverse("session", kwargs={"session_id": "active"}))
 
         self.assertEqual(response.status_code, 200)
@@ -8141,7 +8131,7 @@ class IndexViewTests(TestCase):
         # pre-append numbers but stamped with the post-append mtime, so the
         # stale value reads back as "current" and never refreshes once the
         # session goes idle.
-        from hitch.main import rollout
+        from hitch.main.runtime import rollout
 
         rollout_path = _make_rollout(
             self,
@@ -10013,7 +10003,7 @@ class NewSessionViewTests(TestCase):
             )
 
     def test_input_image_upload_handler_rejects_limits_during_parse(self) -> None:
-        with patch("hitch.main.input_images._INPUT_IMAGE_MAX_BYTES", 8):
+        with patch("hitch.main.runtime.input_images._INPUT_IMAGE_MAX_BYTES", 8):
             handler = input_images._InputImageLimitUploadHandler()
             with self.assertRaisesMessage(
                 SuspiciousOperation,
@@ -10177,7 +10167,7 @@ class NewSessionViewTests(TestCase):
                     mock_spawn.assert_not_called()
                     self.assertFalse((Path(raw) / "attachments").exists())
 
-            with patch("hitch.main.input_images._INPUT_IMAGE_MAX_BYTES", len(_PNG_BYTES) - 1):
+            with patch("hitch.main.runtime.input_images._INPUT_IMAGE_MAX_BYTES", len(_PNG_BYTES) - 1):
                 response = self.client.post(
                     reverse("new_session"),
                     data={
@@ -14389,7 +14379,7 @@ class SendMessageViewTests(TestCase):
                     mock_codex.assert_not_called()
                     self.assertFalse((Path(raw) / "attachments").exists())
 
-            with patch("hitch.main.input_images._INPUT_IMAGE_MAX_BYTES", len(_PNG_BYTES) - 1):
+            with patch("hitch.main.runtime.input_images._INPUT_IMAGE_MAX_BYTES", len(_PNG_BYTES) - 1):
                 response = self.client.post(
                     reverse("send_message", kwargs={"session_id": "abc"}),
                     data={
@@ -17358,8 +17348,8 @@ class SessionStreamViewTests(TestCase):
             + f"?baseline={baseline}&active={active}&workflow={workflow}&demo={demo}"
         )
 
-    @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
-    @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
+    @patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
+    @patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001)
     def test_returns_idle_heartbeat_stream_without_active_worker(self) -> None:
         # Without an active worker the SSE channel stays open emitting
         # heartbeat events with ``working: false`` so the page's connection
@@ -17393,8 +17383,8 @@ class SessionStreamViewTests(TestCase):
         self.assertIn(b"event: heartbeat", body)
         self.assertIn(b'"working": false', body)
 
-    @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
-    @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
+    @patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
+    @patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001)
     def test_returns_working_heartbeat_stream_for_active_system_workflow(self) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -17427,7 +17417,7 @@ class SessionStreamViewTests(TestCase):
         self.assertIn(b'"statusLabel": "Pending"', body)
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_stream_reloads_and_blocks_when_hidden_system_worker_died(
         self, mock_worker_alive: MagicMock, mock_spawn: MagicMock
     ) -> None:
@@ -17469,8 +17459,8 @@ class SessionStreamViewTests(TestCase):
         self.assertEqual(run.status, SystemAgentRun.STATUS_FAILED)
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
 
-    @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
-    @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
+    @patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
+    @patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001)
     def test_system_workflow_heartbeat_clears_empty_pr_progress(self) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -17590,7 +17580,7 @@ class SessionStreamViewTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         mock_global_reconcile.assert_called_once()
 
-    @patch("hitch.main.streaming._POLL_INTERVAL", 0.01)
+    @patch("hitch.main.runtime.streaming._POLL_INTERVAL", 0.01)
     def test_forwards_worker_events_through_view(self) -> None:
         # End-to-end through the URL routing: a RUNNING instance with
         # events on disk gets tailed, and once the status flips before the
@@ -17621,7 +17611,7 @@ class SessionStreamViewTests(TestCase):
         self.assertIn(b"item/started", body)
         self.assertIn(b'"status": "completed"', body)
 
-    @patch("hitch.main.streaming._POLL_INTERVAL", 0.001)
+    @patch("hitch.main.runtime.streaming._POLL_INTERVAL", 0.001)
     def test_active_worker_stream_reloads_when_demo_status_changes(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             events_path = str(Path(raw) / "events.jsonl")

@@ -14,10 +14,10 @@ from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from hitch.main import codex_events, codex_pool, rollout
 from hitch.main.models import CodexInstance, SessionMetadata, SystemWorkflow
-from hitch.main.rollout_state import _rollout_path_for
-from hitch.main.sdk_values import (
+from hitch.main.runtime import codex_events, codex_pool, rollout
+from hitch.main.runtime.rollout_state import _rollout_path_for
+from hitch.main.runtime.sdk_values import (
     plain_sdk_value,
     sdk_model_dump_value,
     string_value,

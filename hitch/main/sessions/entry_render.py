@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from typing import Any
 
 from hitch.main.formatting import looks_like_markdown, render_markdown
-from hitch.main.sdk_values import int_value, sequence_value, string_value, value_for
+from hitch.main.runtime.sdk_values import int_value, sequence_value, string_value, value_for
 
 _NON_MESSAGE_LABELS = {
     "commandExecution": "Command",

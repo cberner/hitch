@@ -6,8 +6,8 @@ from typing import Any, override
 from django.core.management.base import BaseCommand
 from openai_codex import Codex
 
-from hitch.main import codex_pool
 from hitch.main.models import Project
+from hitch.main.runtime import codex_pool
 from hitch.main.sessions import session_index
 
 

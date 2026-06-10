@@ -15,7 +15,6 @@ from django.http import Http404, HttpRequest
 from django.urls import reverse
 from django.utils import timezone
 
-from hitch.main import codex_events
 from hitch.main.goals import autonomous_goal_prompts, autonomous_goal_proposal_stack
 from hitch.main.models import (
     AutonomousGoal,
@@ -25,6 +24,7 @@ from hitch.main.models import (
     SystemAgentRun,
     SystemWorkflow,
 )
+from hitch.main.runtime import codex_events
 from hitch.main.sessions import token_usage
 from hitch.main.sessions.session_settings import (
     _active_project_from_request,
