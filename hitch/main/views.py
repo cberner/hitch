@@ -268,6 +268,7 @@ from hitch.main.system_agent_summary import (
     _updated_at_sort_key,
 )
 from hitch.main.worktrees import (
+    ManagedWorktree,
     WorktreeCleanupError,
     WorktreeCreationError,
     cleanup_managed_worktree_path,
@@ -5500,16 +5501,9 @@ def _finish_candidate_proposal_start(
         is_hidden_system_session=False,
     )
     candidate_session.refresh_from_db()
-    remembered_values = settings._replace(last_selected_repo=cwd)
-    user = _authenticated_user(request)
-    if user is not None:
-        _save_user_settings(user, remembered_values)
-        cookie_updates = _settings_cookie_updates(remembered_values)
-    else:
-        cookie_updates = {**cookie_updates, _LAST_SELECTED_REPO_COOKIE: cwd}
-    response = redirect("session", session_id=candidate_session.thread_id)
-    _apply_cookie_updates(response, cookie_updates)
-    return response
+    return _remember_repo_and_redirect(
+        request, settings, cookie_updates, cwd=cwd, thread_id=candidate_session.thread_id
+    )
 
 
 def _start_candidate_proposal_session(
@@ -5843,6 +5837,40 @@ def _render_new_session_page(request: HttpRequest) -> HttpResponse:
     return response
 
 
+def _cleanup_worktree_quietly(managed_worktree: ManagedWorktree | None) -> None:
+    if managed_worktree is None:
+        return
+    try:
+        cleanup_worktree(managed_worktree)
+    except WorktreeCleanupError:
+        logger.exception(
+            "failed to clean up managed worktree %s", managed_worktree.path
+        )
+
+
+def _remember_repo_and_redirect(
+    request: HttpRequest,
+    settings: SettingsValues,
+    cookie_updates: dict[str, str],
+    *,
+    cwd: str,
+    thread_id: str,
+) -> HttpResponse:
+    """Persist the chosen repo as the last-selected one and redirect to the
+    new session. Authenticated users get it saved on their settings row;
+    anonymous users get the signed cookie."""
+    remembered_values = settings._replace(last_selected_repo=cwd)
+    user = _authenticated_user(request)
+    if user is not None:
+        _save_user_settings(user, remembered_values)
+        cookie_updates = _settings_cookie_updates(remembered_values)
+    else:
+        cookie_updates = {**cookie_updates, _LAST_SELECTED_REPO_COOKIE: cwd}
+    response = redirect("session", session_id=thread_id)
+    _apply_cookie_updates(response, cookie_updates)
+    return response
+
+
 def _post_new_session(request: HttpRequest) -> HttpResponse:
     intent = _message_intent(request)
     pr_activation = _is_pr_activation(request)
@@ -6062,16 +6090,9 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             auto_merge_branch=auto_merge_branch,
         )
         _finish_new_session_proposal_start_claim(proposed_session, session_metadata)
-        remembered_values = settings._replace(last_selected_repo=cwd)
-        user = _authenticated_user(request)
-        if user is not None:
-            _save_user_settings(user, remembered_values)
-            cookie_updates = _settings_cookie_updates(remembered_values)
-        else:
-            cookie_updates = {**cookie_updates, _LAST_SELECTED_REPO_COOKIE: cwd}
-        response = redirect("session", session_id=thread_id)
-        _apply_cookie_updates(response, cookie_updates)
-        return response
+        return _remember_repo_and_redirect(
+            request, settings, cookie_updates, cwd=cwd, thread_id=thread_id
+        )
 
     managed_worktree = None
     if use_worktrees:
@@ -6095,13 +6116,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
     )
     input_image_paths, input_image_error = _save_posted_input_images(request)
     if input_image_error is not None:
-        if managed_worktree is not None:
-            try:
-                cleanup_worktree(managed_worktree)
-            except WorktreeCleanupError:
-                logger.exception(
-                    "failed to clean up managed worktree %s", managed_worktree.path
-                )
+        _cleanup_worktree_quietly(managed_worktree)
         return HttpResponseBadRequest(input_image_error)
 
     # Detach a worker subprocess so the initial turn keeps running past a
@@ -6164,13 +6179,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         try:
             thread_id = codex_pool.create_session_thread(**spec_create_thread_kwargs)
         except Exception:
-            if managed_worktree is not None:
-                try:
-                    cleanup_worktree(managed_worktree)
-                except WorktreeCleanupError:
-                    logger.exception(
-                        "failed to clean up managed worktree %s", managed_worktree.path
-                    )
+            _cleanup_worktree_quietly(managed_worktree)
             raise
         spec_workflow_kwargs: dict[str, Any] = {
             "main_thread_id": thread_id,
@@ -6196,13 +6205,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             # The worktree is only referenced by the not-yet-started workflow, so
             # reclaim it before bubbling up rather than leaking it on disk (and
             # into the cwd allowlist) on every failed-then-retried new session.
-            if managed_worktree is not None:
-                try:
-                    cleanup_worktree(managed_worktree)
-                except WorktreeCleanupError:
-                    logger.exception(
-                        "failed to clean up managed worktree %s", managed_worktree.path
-                    )
+            _cleanup_worktree_quietly(managed_worktree)
             raise
         spec_thread_name = (
             proposed_session.title
@@ -6220,16 +6223,9 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
             auto_qa_enabled=auto_qa_enabled,
         )
         _accept_proposed_session_for_session(proposed_session, session_metadata)
-        remembered_values = settings._replace(last_selected_repo=cwd)
-        user = _authenticated_user(request)
-        if user is not None:
-            _save_user_settings(user, remembered_values)
-            cookie_updates = _settings_cookie_updates(remembered_values)
-        else:
-            cookie_updates = {**cookie_updates, _LAST_SELECTED_REPO_COOKIE: cwd}
-        response = redirect("session", session_id=thread_id)
-        _apply_cookie_updates(response, cookie_updates)
-        return response
+        return _remember_repo_and_redirect(
+            request, settings, cookie_updates, cwd=cwd, thread_id=thread_id
+        )
     input_images_owned = False
     proposal_claimed = False
     if proposed_session is not None:
@@ -6239,13 +6235,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         )
         if claim_response is not None:
             _cleanup_saved_input_images(input_image_paths)
-            if managed_worktree is not None:
-                try:
-                    cleanup_worktree(managed_worktree)
-                except WorktreeCleanupError:
-                    logger.exception(
-                        "failed to clean up managed worktree %s", managed_worktree.path
-                    )
+            _cleanup_worktree_quietly(managed_worktree)
             return claim_response
         proposal_claimed = True
     try:
@@ -6257,13 +6247,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         if proposal_claimed:
             assert proposed_session is not None
             _reset_new_session_proposal_start_claim(proposed_session)
-        if managed_worktree is not None:
-            try:
-                cleanup_worktree(managed_worktree)
-            except WorktreeCleanupError:
-                logger.exception(
-                    "failed to clean up managed worktree %s", managed_worktree.path
-                )
+        _cleanup_worktree_quietly(managed_worktree)
         raise
     session_metadata = session_index.upsert_local_session(
         thread_id=instance.thread_id,
@@ -6279,16 +6263,9 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         codex_path=codex_pool.thread_path_for_instance(instance),
     )
     _finish_new_session_proposal_start_claim(proposed_session, session_metadata)
-    remembered_values = settings._replace(last_selected_repo=cwd)
-    user = _authenticated_user(request)
-    if user is not None:
-        _save_user_settings(user, remembered_values)
-        cookie_updates = _settings_cookie_updates(remembered_values)
-    else:
-        cookie_updates = {**cookie_updates, _LAST_SELECTED_REPO_COOKIE: cwd}
-    response = redirect("session", session_id=instance.thread_id)
-    _apply_cookie_updates(response, cookie_updates)
-    return response
+    return _remember_repo_and_redirect(
+        request, settings, cookie_updates, cwd=cwd, thread_id=instance.thread_id
+    )
 
 
 @_limit_input_image_uploads
