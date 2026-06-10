@@ -357,6 +357,55 @@ class _PrQaHandler(engine.WorkflowHandler):
     steps = _PR_QA_STEPS
 
     @override
+    def spawn_recovery_specs(self) -> tuple[engine.SpawnRecoverySpec, ...]:
+        spawn_stale = system_agents._WORKFLOW_SPAWN_STALE_TIMEOUT
+        return (
+            engine.SpawnRecoverySpec(
+                kind=self.kind,
+                step=system_agents.STEP_QA_RUNNING,
+                stale_timeout=spawn_stale,
+                needs_recovery=lambda w: not _qa_review_in_flight(w),
+                recover=lambda w: system_agents._respawn_or_block(
+                    w,
+                    _spawn_pr_qa_run,
+                    "failed to restart QA agent after its spawn handler died: {exc!r}",
+                ),
+            ),
+            engine.SpawnRecoverySpec(
+                kind=self.kind,
+                step=system_agents.STEP_PR_PROMPT_RUNNING,
+                stale_timeout=spawn_stale,
+                needs_recovery=lambda w: not _pr_prompt_turn_in_flight(w),
+                recover=lambda w: system_agents._respawn_or_block(
+                    w,
+                    _spawn_pr_prompt,
+                    "failed to restart PR prompt after its spawn handler died: {exc!r}",
+                ),
+            ),
+            engine.SpawnRecoverySpec(
+                kind=self.kind,
+                step=system_agents.STEP_PR_MONITORING,
+                stale_timeout=spawn_stale,
+                needs_recovery=lambda w: _pr_monitor_spawn_needs_recovery(w),
+                recover=lambda w: system_agents._respawn_or_block(
+                    w,
+                    _spawn_pr_followup_monitor_run,
+                    "failed to restart PR follow-up monitor: {exc!r}",
+                ),
+            ),
+            *(
+                engine.SpawnRecoverySpec(
+                    kind=self.kind,
+                    step=step,
+                    stale_timeout=spawn_stale,
+                    needs_recovery=lambda w: not system_agents._workflow_turn_settling(w),
+                    recover=system_agents._block_zombie_workflow_turn,
+                )
+                for step in system_agents._ZOMBIE_TURN_STEP_MESSAGES
+            ),
+        )
+
+    @override
     def on_agent_finished(
         self,
         instance: CodexInstance,

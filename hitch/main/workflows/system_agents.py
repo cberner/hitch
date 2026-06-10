@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, override
@@ -165,7 +164,6 @@ _WORKFLOW_ROUTE_CLAIM_TIMEOUT = timedelta(minutes=10)
 # The window sits well above ``_WORKFLOW_ROUTE_CLAIM_TIMEOUT`` so a slow-but-live
 # spawn is never raced into a double review or a spurious failure.
 _WORKFLOW_SPAWN_STALE_TIMEOUT = timedelta(minutes=15)
-_SPEC_CRITIC_CLASSIFY_STALE_TIMEOUT = timedelta(minutes=5)
 # Transient PR-QA steps whose worker is a visible coding/feedback turn spawned
 # right after the step is committed, and whose prompt is *not* reconstructable
 # (the QA feedback or the user's text is gone). A lost spawn here cannot be
@@ -517,30 +515,10 @@ def reconcile_terminal_workflow_instances(
     return reconciled
 
 
-@dataclass(frozen=True)
-class _SpawnRecoverySpec:
-    """How to recover one ``(kind, step)`` workflow stranded by a dead spawn.
-
-    A workflow commits its next step and *then* spawns the worker for it. If the
-    process dies in that gap no ``CodexInstance`` row is created, so the terminal
-    reconcilers have nothing to route and the workflow sits in ``step`` forever.
-    ``needs_recovery`` is the authoritative "no live or finish-routing worker
-    owns this step" predicate (re-checked under the claim lock so a worker that
-    appears mid-sweep is never double-driven); ``recover`` re-drives the spawn or
-    -- when the turn's prompt is unrecoverable -- blocks the workflow.
-    """
-
-    kind: str
-    step: str
-    stale_timeout: timedelta
-    needs_recovery: Callable[[SystemWorkflow], bool]
-    recover: Callable[[SystemWorkflow], None]
-
-
 def _drive_orphaned_workflow_spawns(workflows: list[SystemWorkflow]) -> int:
     """Re-drive (or block) every workflow stranded by a dead spawn handler.
 
-    One table-driven sweep over :data:`_SPAWN_RECOVERY_SPECS` replaces the former
+    One sweep over the handlers' registered recovery specs replaces the former
     per-step reconcilers: for each stale RUNNING workflow whose step has a spec
     and whose expected worker is missing, claim the step and run its recovery.
     ``needs_recovery`` is re-checked after the claim (a worker may have appeared
@@ -550,7 +528,7 @@ def _drive_orphaned_workflow_spawns(workflows: list[SystemWorkflow]) -> int:
     now = timezone.now()
     reconciled = 0
     for workflow in workflows:
-        spec = _SPAWN_RECOVERY_SPECS.get((workflow.kind, workflow.step))
+        spec = engine.spawn_recovery_spec(workflow.kind, workflow.step)
         if spec is None:
             continue
         stale_before = now - spec.stale_timeout
@@ -588,83 +566,6 @@ def _block_zombie_workflow_turn(workflow: SystemWorkflow) -> None:
         f"{label} never started: its spawn handler died before the worker "
         "launched. Restart the workflow to continue.",
     )
-
-
-_SPAWN_RECOVERY_SPECS: dict[tuple[str, str], _SpawnRecoverySpec] = {
-    (spec.kind, spec.step): spec
-    for spec in (
-        _SpawnRecoverySpec(
-            kind=SystemWorkflow.KIND_PR_QA,
-            step=STEP_QA_RUNNING,
-            stale_timeout=_WORKFLOW_SPAWN_STALE_TIMEOUT,
-            needs_recovery=lambda w: not pr_qa._qa_review_in_flight(w),
-            recover=lambda w: _respawn_or_block(
-                w,
-                pr_qa._spawn_pr_qa_run,
-                "failed to restart QA agent after its spawn handler died: {exc!r}",
-            ),
-        ),
-        _SpawnRecoverySpec(
-            kind=SystemWorkflow.KIND_PR_QA,
-            step=STEP_PR_PROMPT_RUNNING,
-            stale_timeout=_WORKFLOW_SPAWN_STALE_TIMEOUT,
-            needs_recovery=lambda w: not pr_qa._pr_prompt_turn_in_flight(w),
-            recover=lambda w: _respawn_or_block(
-                w,
-                pr_qa._spawn_pr_prompt,
-                "failed to restart PR prompt after its spawn handler died: {exc!r}",
-            ),
-        ),
-        _SpawnRecoverySpec(
-            kind=SystemWorkflow.KIND_PR_QA,
-            step=STEP_PR_MONITORING,
-            stale_timeout=_WORKFLOW_SPAWN_STALE_TIMEOUT,
-            needs_recovery=lambda w: pr_qa._pr_monitor_spawn_needs_recovery(w),
-            recover=lambda w: _respawn_or_block(
-                w,
-                pr_qa._spawn_pr_followup_monitor_run,
-                "failed to restart PR follow-up monitor: {exc!r}",
-            ),
-        ),
-        *(
-            _SpawnRecoverySpec(
-                kind=SystemWorkflow.KIND_PR_QA,
-                step=step,
-                stale_timeout=_WORKFLOW_SPAWN_STALE_TIMEOUT,
-                needs_recovery=lambda w: not _workflow_turn_settling(w),
-                recover=_block_zombie_workflow_turn,
-            )
-            for step in _ZOMBIE_TURN_STEP_MESSAGES
-        ),
-        _SpawnRecoverySpec(
-            kind=SPEC_CRITIC_WORKFLOW_KIND,
-            step=STEP_SPEC_CRITIC_CLASSIFYING,
-            stale_timeout=_SPEC_CRITIC_CLASSIFY_STALE_TIMEOUT,
-            needs_recovery=lambda w: True,
-            recover=lambda w: spec_critic._start_spec_critic_classification(w),
-        ),
-        _SpawnRecoverySpec(
-            kind=SPEC_CRITIC_WORKFLOW_KIND,
-            step=STEP_SPEC_CRITIC_ANALYZING,
-            stale_timeout=_SPEC_CRITIC_CLASSIFY_STALE_TIMEOUT,
-            # Only the "claimed ANALYZING but never spawned the agents" orphan is
-            # recoverable; once any run exists, terminal-instance reconciliation
-            # owns it (and re-spawning would duplicate agents).
-            needs_recovery=lambda w: not w.agent_runs.exists(),
-            recover=lambda w: spec_critic._begin_spec_critic_analysis(w),
-        ),
-        _SpawnRecoverySpec(
-            kind=SPEC_CRITIC_WORKFLOW_KIND,
-            step=STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED,
-            stale_timeout=_SPEC_CRITIC_CLASSIFY_STALE_TIMEOUT,
-            # Only the skip path leaves this step RUNNING (the synthesis path sets
-            # it together with COMPLETED), so finalizing with the original prompt
-            # is correct.
-            needs_recovery=lambda w: _state_bool(w, "skipped_classification"),
-            recover=lambda w: spec_critic._finalize_spec_critic_skip(w),
-        ),
-    )
-}
 
 
 def _workflow_turn_settling(workflow: SystemWorkflow) -> bool:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from datetime import timedelta
 from typing import Any, override
 
 from django.db import IntegrityError, close_old_connections, transaction
@@ -69,6 +70,9 @@ from hitch.main.workflows.workflow_state import (
 )
 
 logger = logging.getLogger(__name__)
+
+# A classification/analysis claim older than this with no worker is stranded.
+_SPEC_CRITIC_CLASSIFY_STALE_TIMEOUT = timedelta(minutes=5)
 
 
 _SPEC_CRITIC_CLASSIFIER_OUTPUT_SCHEMA: dict[str, Any] = {
@@ -332,6 +336,39 @@ def _spec_critic_implementation_turn_exists(workflow: SystemWorkflow) -> bool:
 @engine.register
 class _SpecCriticHandler(engine.WorkflowHandler):
     kind = system_agents.SPEC_CRITIC_WORKFLOW_KIND
+
+    @override
+    def spawn_recovery_specs(self) -> tuple[engine.SpawnRecoverySpec, ...]:
+        return (
+            engine.SpawnRecoverySpec(
+                kind=self.kind,
+                step=system_agents.STEP_SPEC_CRITIC_CLASSIFYING,
+                stale_timeout=_SPEC_CRITIC_CLASSIFY_STALE_TIMEOUT,
+                needs_recovery=lambda w: True,
+                recover=lambda w: _start_spec_critic_classification(w),
+            ),
+            engine.SpawnRecoverySpec(
+                kind=self.kind,
+                step=system_agents.STEP_SPEC_CRITIC_ANALYZING,
+                stale_timeout=_SPEC_CRITIC_CLASSIFY_STALE_TIMEOUT,
+                # Only the "claimed ANALYZING but never spawned the agents"
+                # orphan is recoverable; once any run exists, terminal-instance
+                # reconciliation owns it (re-spawning would duplicate agents).
+                needs_recovery=lambda w: not w.agent_runs.exists(),
+                recover=lambda w: _begin_spec_critic_analysis(w),
+            ),
+            engine.SpawnRecoverySpec(
+                kind=self.kind,
+                step=system_agents.STEP_SPEC_CRITIC_IMPLEMENTATION_SPAWNED,
+                stale_timeout=_SPEC_CRITIC_CLASSIFY_STALE_TIMEOUT,
+                # Only the skip path leaves this step RUNNING (the synthesis
+                # path sets it together with COMPLETED), so finalizing with
+                # the original prompt is correct.
+                needs_recovery=lambda w: _state_bool(w, "skipped_classification"),
+                recover=lambda w: _finalize_spec_critic_skip(w),
+            ),
+        )
+
     steps = frozenset(
         {
             system_agents.STEP_SPEC_CRITIC_CLASSIFYING,

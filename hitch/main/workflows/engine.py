@@ -10,6 +10,9 @@ declared step set so an illegal step can never be persisted silently.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import timedelta
 from typing import ClassVar
 
 from hitch.main.models import CodexInstance, SystemAgentRun, SystemWorkflow
@@ -18,6 +21,27 @@ from hitch.main.models import CodexInstance, SystemAgentRun, SystemWorkflow
 # failed workflow on ``blocked`` and the stale-workflow archiver moves
 # long-blocked rows to ``archived``.
 ADMINISTRATIVE_STEPS = frozenset({"blocked", "archived"})
+
+
+@dataclass(frozen=True)
+class SpawnRecoverySpec:
+    """How to recover one ``(kind, step)`` workflow stranded by a dead spawn.
+
+    A workflow commits its next step and *then* spawns the worker for it. If
+    the process dies in that gap no ``CodexInstance`` row is created, so the
+    terminal reconcilers have nothing to route and the workflow sits in
+    ``step`` forever. ``needs_recovery`` is the authoritative "no live or
+    finish-routing worker owns this step" predicate (re-checked under the
+    claim lock so a worker that appears mid-sweep is never double-driven);
+    ``recover`` re-drives the spawn or -- when the turn's prompt is
+    unrecoverable -- blocks the workflow.
+    """
+
+    kind: str
+    step: str
+    stale_timeout: timedelta
+    needs_recovery: Callable[[SystemWorkflow], bool]
+    recover: Callable[[SystemWorkflow], None]
 
 
 class WorkflowHandler:
@@ -53,6 +77,14 @@ class WorkflowHandler:
         self, instance: CodexInstance, workflow: SystemWorkflow
     ) -> None:
         """A workflow-owned PURPOSE_USER turn finished. Default: ignore."""
+
+    def spawn_recovery_specs(self) -> tuple[SpawnRecoverySpec, ...]:
+        """How to recover this kind's workflows stranded by a dead spawn.
+
+        Default: no recoverable steps; the stale-workflow archiver is the
+        only backstop for the kind.
+        """
+        return ()
 
 
 _HANDLERS: list[WorkflowHandler] = []
@@ -107,3 +139,14 @@ def legal_steps(kind: str) -> frozenset[str] | None:
     if not known:
         return None
     return frozenset(declared) | ADMINISTRATIVE_STEPS
+
+
+def spawn_recovery_spec(kind: str, step: str) -> SpawnRecoverySpec | None:
+    """The registered recovery spec for ``(kind, step)``, if any."""
+    for handler in _HANDLERS:
+        if handler.kind != kind:
+            continue
+        for spec in handler.spawn_recovery_specs():
+            if spec.step == step:
+                return spec
+    return None
