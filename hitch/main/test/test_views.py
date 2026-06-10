@@ -54,6 +54,7 @@ from hitch.main import (
     coding_agents,
     demo,
     entry_render,
+    gh_cli,
     input_images,
     session_index,
     session_pr_plan,
@@ -4293,7 +4294,7 @@ class IndexViewTests(TestCase):
             codex_updated_at=now,
             codex_last_synced_at=now,
         )
-        mock_gh_pr_view.side_effect = system_agents._GhPrOpenError("gh unavailable")
+        mock_gh_pr_view.side_effect = gh_cli._GhPrOpenError("gh unavailable")
 
         first_response = self.client.get(reverse("index"))
         second_response = self.client.get(reverse("index"))

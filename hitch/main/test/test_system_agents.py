@@ -26,6 +26,7 @@ from hitch.main import (
     autonomous_goal_proposal_stack,
     codex_events,
     demo,
+    gh_cli,
     gh_observations,
     pr_handoff,
     pr_monitor_format,
@@ -3771,7 +3772,7 @@ class SpecCriticWorkflowTests(TestCase):
         "hitch.main.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_stores_handoff_and_starts_monitor(
         self, mock_spawn: MagicMock, mock_run: MagicMock, mock_observe: MagicMock
@@ -3893,7 +3894,7 @@ class SpecCriticWorkflowTests(TestCase):
         "hitch.main.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation({"pr_number": 170}),
     )
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_opens_pr_with_gh_cli(
         self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
@@ -4006,7 +4007,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
 
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     def test_pr_prompt_completion_completes_without_changes_when_no_commits(
         self, mock_run: MagicMock, mock_spawn_turn: MagicMock
     ) -> None:
@@ -4057,7 +4058,7 @@ class SpecCriticWorkflowTests(TestCase):
         )
 
     @patch("hitch.main.system_agents._pr_monitor_observation_from_gh", return_value={})
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     @patch("hitch.main.system_agents._surface_workflow_failure")
     def test_pr_prompt_completion_blocks_when_no_commits_but_worktree_dirty(
         self,
@@ -4135,7 +4136,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_PR_NO_CHANGES)
         mock_surface.assert_not_called()
 
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     @patch("hitch.main.system_agents._surface_workflow_failure")
     def test_pr_prompt_completion_refuses_to_push_default_branch(
         self, mock_surface: MagicMock, mock_run: MagicMock
@@ -4188,7 +4189,7 @@ class SpecCriticWorkflowTests(TestCase):
         )
         mock_surface.assert_called_once()
 
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     def test_pr_branch_push_force_with_lease_after_non_fast_forward_rejection(
         self, mock_run: MagicMock
     ) -> None:
@@ -4220,7 +4221,7 @@ class SpecCriticWorkflowTests(TestCase):
             SimpleNamespace(returncode=0, stdout="", stderr=""),
         ]
 
-        system_agents._push_current_branch_with_git_cli(
+        gh_cli._push_current_branch_with_git_cli(
             workflow,
             active_pr_handoff=workflow.state[system_agents._PR_HANDOFF_STATE_KEY],
         )
@@ -4242,7 +4243,7 @@ class SpecCriticWorkflowTests(TestCase):
             ],
         )
 
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     def test_pr_branch_push_does_not_force_when_active_pr_head_differs(
         self, mock_run: MagicMock
     ) -> None:
@@ -4272,8 +4273,8 @@ class SpecCriticWorkflowTests(TestCase):
             ),
         ]
 
-        with self.assertRaises(system_agents._GhPrOpenError):
-            system_agents._push_current_branch_with_git_cli(
+        with self.assertRaises(gh_cli._GhPrOpenError):
+            gh_cli._push_current_branch_with_git_cli(
                 workflow,
                 active_pr_handoff=workflow.state[system_agents._PR_HANDOFF_STATE_KEY],
             )
@@ -4289,7 +4290,7 @@ class SpecCriticWorkflowTests(TestCase):
         "hitch.main.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation({"pr_number": 173}),
     )
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_ignores_terminal_branch_pr(
         self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
@@ -4403,7 +4404,7 @@ class SpecCriticWorkflowTests(TestCase):
         return_value=_gh_monitor_observation({"pr_number": 174}),
     )
     @patch("hitch.main.system_agents.codex_events.latest_pr_snapshot_for_instance")
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_ignores_terminal_worker_snapshot(
         self,
@@ -4526,7 +4527,7 @@ class SpecCriticWorkflowTests(TestCase):
         "hitch.main.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation({"pr_number": 171}),
     )
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_keeps_created_pr_when_view_fails(
         self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
@@ -4623,7 +4624,7 @@ class SpecCriticWorkflowTests(TestCase):
         "hitch.main.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_without_snapshot_monitors_existing_handoff(
         self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
@@ -4697,7 +4698,7 @@ class SpecCriticWorkflowTests(TestCase):
         "hitch.main.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_force_pushes_existing_handoff_without_snapshot(
         self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
@@ -4785,7 +4786,7 @@ class SpecCriticWorkflowTests(TestCase):
         "hitch.main.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_force_pushes_authoritative_worker_snapshot(
         self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
@@ -5013,7 +5014,7 @@ class SpecCriticWorkflowTests(TestCase):
         feedback = gh_observations._gh_review_thread_feedback(threads)
         self.assertIn("outdated conversation", feedback)
 
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     def test_pr_monitor_observation_fetches_github_state_with_gh(
         self, mock_run: MagicMock
     ) -> None:
@@ -5180,7 +5181,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("This branch misses the retry", feedback)
         self.assertIn("name=lint", feedback)
 
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     def test_pr_monitor_observation_clears_stale_ci_when_rollup_is_null(
         self, mock_run: MagicMock
     ) -> None:
@@ -5274,7 +5275,7 @@ class SpecCriticWorkflowTests(TestCase):
         for call in mock_run.call_args_list:
             self.assertEqual(
                 call.kwargs["timeout"],
-                system_agents._GH_PR_MONITOR_TIMEOUT_SECONDS,
+                gh_cli._GH_PR_MONITOR_TIMEOUT_SECONDS,
             )
 
     def test_pr_monitor_truncated_status_check_page_remains_pending(self) -> None:
@@ -6288,7 +6289,7 @@ class SpecCriticWorkflowTests(TestCase):
         "hitch.main.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation({"head_sha": "newsha"}),
     )
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_feedback_completion_restarts_monitor_with_updated_handoff(
         self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
@@ -6399,7 +6400,7 @@ class SpecCriticWorkflowTests(TestCase):
         "hitch.main.system_agents._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_feedback_completion_force_pushes_rebased_pr_branch(
         self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
@@ -6500,7 +6501,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(commands[5][:3], ["gh", "pr", "view"])
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     def test_pr_open_force_pushes_observed_current_branch_pr_without_handoff(
         self, mock_run: MagicMock
     ) -> None:
@@ -6565,7 +6566,7 @@ class SpecCriticWorkflowTests(TestCase):
         )
         self.assertEqual(commands[5][:3], ["gh", "pr", "view"])
 
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     def test_pr_open_revalidates_stored_pr_before_force_pushing(
         self, mock_run: MagicMock
     ) -> None:
@@ -6613,7 +6614,7 @@ class SpecCriticWorkflowTests(TestCase):
             ),
         ]
 
-        with self.assertRaises(system_agents._GhPrOpenError):
+        with self.assertRaises(gh_cli._GhPrOpenError):
             system_agents._open_or_find_pr_with_gh_cli(workflow)
 
         commands = [call.args[0] for call in mock_run.call_args_list]
@@ -6644,7 +6645,7 @@ class SpecCriticWorkflowTests(TestCase):
             ],
         )
 
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     def test_pr_branch_push_does_not_force_without_matching_active_pr_head(
         self, mock_run: MagicMock
     ) -> None:
@@ -6675,8 +6676,8 @@ class SpecCriticWorkflowTests(TestCase):
             ),
         ]
 
-        with self.assertRaises(system_agents._GhPrOpenError):
-            system_agents._push_current_branch_with_git_cli(workflow)
+        with self.assertRaises(gh_cli._GhPrOpenError):
+            gh_cli._push_current_branch_with_git_cli(workflow)
 
         commands = [call.args[0] for call in mock_run.call_args_list]
         self.assertEqual(
@@ -6700,7 +6701,7 @@ class SpecCriticWorkflowTests(TestCase):
             {"pr_number": 174, "head": "followup", "head_sha": "followupsha"}
         ),
     )
-    @patch("hitch.main.system_agents.subprocess.run")
+    @patch("hitch.main.gh_cli.subprocess.run")
     @patch("hitch.main.system_agents.codex_pool.spawn_new_session")
     def test_pr_feedback_completion_opens_followup_pr_for_stale_handoff(
         self, mock_spawn: MagicMock, mock_run: MagicMock, _mock_observe: MagicMock
@@ -7164,7 +7165,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch(
         "hitch.main.system_agents._pr_monitor_observation_from_gh",
-        side_effect=system_agents._GhPrOpenError("auth failed"),
+        side_effect=gh_cli._GhPrOpenError("auth failed"),
     )
     @patch("hitch.main.system_agents.codex_pool.spawn_turn")
     def test_gh_error_pr_monitor_backoff_blocks_after_retry_limit(
