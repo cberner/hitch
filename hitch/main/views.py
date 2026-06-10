@@ -338,6 +338,29 @@ class SessionPageSource:
     exhausted: bool = False
 
 
+@dataclass
+class _SessionListQuery:
+    """Shared inputs for building one session-list page.
+
+    Bundles the viewer/filter context that every page builder needs so it is
+    threaded through the pagination variants as one value. The id sets and
+    ``project_cache`` are intentionally shared and mutable: builders add
+    thread-derived hidden/system ids as they fetch Codex pages, and the cache
+    memoizes per-cwd project lookups across rows of the same request.
+    """
+
+    projects: list[Project]
+    current_project: Project | None
+    project_visibility: SessionProjectVisibility | None
+    system_only: bool
+    accepted_visible_thread_ids: set[str]
+    hidden_thread_ids: set[str]
+    system_thread_ids: set[str]
+    runs_by_thread_id: dict[str, SystemAgentRun]
+    instances_by_thread_id: dict[str, CodexInstance]
+    project_cache: dict[str, Project | None] = dataclass_field(default_factory=dict)
+
+
 class _SessionTemplateThread(NamedTuple):
     id: str
     cwd: str
@@ -548,15 +571,24 @@ def _session_list_page(
     system_thread_ids = (
         hidden_thread_ids | _demo_system_thread_ids() if system_only else set()
     )
-    runs_by_thread_id = (
-        system_agent_summary._system_agent_runs_by_thread_id(system_thread_ids)
-        if system_only
-        else {}
-    )
-    instances_by_thread_id = (
-        system_agent_summary._system_agent_instances_by_thread_id(system_thread_ids)
-        if system_only
-        else {}
+    query = _SessionListQuery(
+        projects=projects,
+        current_project=current_project,
+        project_visibility=project_visibility,
+        system_only=system_only,
+        accepted_visible_thread_ids=accepted_visible_thread_ids,
+        hidden_thread_ids=hidden_thread_ids,
+        system_thread_ids=system_thread_ids,
+        runs_by_thread_id=(
+            system_agent_summary._system_agent_runs_by_thread_id(system_thread_ids)
+            if system_only
+            else {}
+        ),
+        instances_by_thread_id=(
+            system_agent_summary._system_agent_instances_by_thread_id(system_thread_ids)
+            if system_only
+            else {}
+        ),
     )
     required_archived = current_settings.show_archived_sessions
     active_complete = session_index.is_complete(archived=False)
@@ -579,18 +611,7 @@ def _session_list_page(
         or not _session_index_sources_complete(include_archived=required_archived)
     ):
         return _session_list_page_from_codex(
-            codex,
-            request,
-            current_settings=current_settings,
-            projects=projects,
-            current_project=current_project,
-            project_visibility=project_visibility,
-            hidden_thread_ids=hidden_thread_ids,
-            system_thread_ids=system_thread_ids,
-            runs_by_thread_id=runs_by_thread_id,
-            instances_by_thread_id=instances_by_thread_id,
-            system_only=system_only,
-            accepted_visible_thread_ids=accepted_visible_thread_ids,
+            codex, request, query, current_settings=current_settings
         )
     request_uses_index_cursor = _request_uses_index_cursor(request)
     refresh_active = (
@@ -633,18 +654,7 @@ def _session_list_page(
             # cursor pagination when Codex is healthy.
             try:
                 return _session_list_page_from_codex(
-                    codex,
-                    request,
-                    current_settings=current_settings,
-                    projects=projects,
-                    current_project=current_project,
-                    project_visibility=project_visibility,
-                    hidden_thread_ids=hidden_thread_ids,
-                    system_thread_ids=system_thread_ids,
-                    runs_by_thread_id=runs_by_thread_id,
-                    instances_by_thread_id=instances_by_thread_id,
-                    system_only=system_only,
-                    accepted_visible_thread_ids=accepted_visible_thread_ids,
+                    codex, request, query, current_settings=current_settings
                 )
             except AppServerError:
                 logger.warning(
@@ -652,17 +662,7 @@ def _session_list_page(
                     "rendering cached sessions"
                 )
     return _session_list_page_from_index(
-        request,
-        current_project=current_project,
-        project_visibility=project_visibility,
-        show_archived=current_settings.show_archived_sessions,
-        hidden_thread_ids=hidden_thread_ids,
-        system_thread_ids=system_thread_ids,
-        runs_by_thread_id=runs_by_thread_id,
-        instances_by_thread_id=instances_by_thread_id,
-        projects=projects,
-        system_only=system_only,
-        accepted_visible_thread_ids=accepted_visible_thread_ids,
+        request, query, show_archived=current_settings.show_archived_sessions
     )
 
 
@@ -695,81 +695,32 @@ def _session_index_sources_complete(*, include_archived: bool) -> bool:
 def _session_list_page_from_codex(
     codex: Codex,
     request: HttpRequest,
+    query: _SessionListQuery,
     *,
     current_settings: SettingsValues,
-    projects: list[Project],
-    current_project: Project | None,
-    project_visibility: SessionProjectVisibility | None,
-    hidden_thread_ids: set[str],
-    system_thread_ids: set[str],
-    runs_by_thread_id: dict[str, SystemAgentRun],
-    instances_by_thread_id: dict[str, CodexInstance],
-    system_only: bool,
-    accepted_visible_thread_ids: set[str],
 ) -> SessionListPage:
-    project_cache: dict[str, Project | None] = {}
-    if not system_only and request.GET.get("materialized_order") == "1":
+    if not query.system_only and request.GET.get("materialized_order") == "1":
         return _materialized_session_list_page_from_codex(
             codex,
             request,
-            projects=projects,
-            current_project=current_project,
-            project_visibility=project_visibility,
-            hidden_thread_ids=hidden_thread_ids,
-            system_thread_ids=system_thread_ids,
-            runs_by_thread_id=runs_by_thread_id,
-            instances_by_thread_id=instances_by_thread_id,
-            project_cache=project_cache,
+            query,
             include_archived=current_settings.show_archived_sessions,
-            system_only=system_only,
-            accepted_visible_thread_ids=accepted_visible_thread_ids,
         )
     if current_settings.show_archived_sessions:
-        return _merged_session_list_page_from_codex(
-            codex,
-            request,
-            projects=projects,
-            current_project=current_project,
-            project_visibility=project_visibility,
-            hidden_thread_ids=hidden_thread_ids,
-            system_thread_ids=system_thread_ids,
-            runs_by_thread_id=runs_by_thread_id,
-            instances_by_thread_id=instances_by_thread_id,
-            project_cache=project_cache,
-            system_only=system_only,
-            accepted_visible_thread_ids=accepted_visible_thread_ids,
-        )
+        return _merged_session_list_page_from_codex(codex, request, query)
     active = _visible_session_page_from_codex(
         codex,
         request,
-        projects=projects,
-        current_project=current_project,
-        project_visibility=project_visibility,
-        hidden_thread_ids=hidden_thread_ids,
-        system_thread_ids=system_thread_ids,
-        runs_by_thread_id=runs_by_thread_id,
-        instances_by_thread_id=instances_by_thread_id,
-        project_cache=project_cache,
+        query,
         archived=False,
         cursor_param="cursor",
-        system_only=system_only,
-        accepted_visible_thread_ids=accepted_visible_thread_ids,
     )
     if active.needs_materialized_order:
         return _materialized_session_list_page_from_codex(
             codex,
             request,
-            projects=projects,
-            current_project=current_project,
-            project_visibility=project_visibility,
-            hidden_thread_ids=hidden_thread_ids,
-            system_thread_ids=system_thread_ids,
-            runs_by_thread_id=runs_by_thread_id,
-            instances_by_thread_id=instances_by_thread_id,
-            project_cache=project_cache,
+            query,
             include_archived=False,
-            system_only=system_only,
-            accepted_visible_thread_ids=accepted_visible_thread_ids,
         )
     if active.materialized_order:
         done = not bool(active.next_offset)
@@ -820,6 +771,17 @@ def _session_list_page_from_warm_index(
             accepted_visible_thread_ids=accepted_visible_thread_ids
         )
         system_thread_ids = hidden_thread_ids | _demo_system_thread_ids()
+    query = _SessionListQuery(
+        projects=projects,
+        current_project=current_project,
+        project_visibility=project_visibility,
+        system_only=system_only,
+        accepted_visible_thread_ids=accepted_visible_thread_ids,
+        hidden_thread_ids=hidden_thread_ids,
+        system_thread_ids=system_thread_ids,
+        runs_by_thread_id={},
+        instances_by_thread_id={},
+    )
     request_uses_index_cursor = _request_uses_index_cursor(request)
     refresh_active = (
         not request_uses_index_cursor
@@ -852,17 +814,7 @@ def _session_list_page_from_warm_index(
             accepted_visible_thread_ids=accepted_visible_thread_ids,
         )
     return _session_list_page_from_index(
-        request,
-        current_project=current_project,
-        project_visibility=project_visibility,
-        show_archived=current_settings.show_archived_sessions,
-        hidden_thread_ids=hidden_thread_ids,
-        system_thread_ids=system_thread_ids,
-        runs_by_thread_id={},
-        instances_by_thread_id={},
-        projects=projects,
-        system_only=system_only,
-        accepted_visible_thread_ids=accepted_visible_thread_ids,
+        request, query, show_archived=current_settings.show_archived_sessions
     )
 
 
@@ -952,46 +904,39 @@ def _system_session_list_page_from_index(
 
 def _session_list_page_from_index(
     request: HttpRequest,
+    query: _SessionListQuery,
     *,
-    current_project: Project | None,
-    project_visibility: SessionProjectVisibility | None,
     show_archived: bool,
-    hidden_thread_ids: set[str],
-    system_thread_ids: set[str],
-    runs_by_thread_id: dict[str, SystemAgentRun],
-    instances_by_thread_id: dict[str, CodexInstance],
-    projects: list[Project],
-    system_only: bool,
-    accepted_visible_thread_ids: set[str],
 ) -> SessionListPage:
     rows = session_index.indexed_sessions()
-    if system_only:
-        _ensure_indexed_system_threads(system_thread_ids, projects=projects)
+    if query.system_only:
+        _ensure_indexed_system_threads(query.system_thread_ids, projects=query.projects)
         rows = session_index.indexed_sessions()
-    if system_only:
         indexed_system_thread_ids = set(
             rows.filter(is_hidden_system_session=True)
-            .exclude(thread_id__in=accepted_visible_thread_ids)
+            .exclude(thread_id__in=query.accepted_visible_thread_ids)
             .values_list("thread_id", flat=True)
         )
-        hidden_thread_ids.update(indexed_system_thread_ids)
-        system_thread_ids.update(indexed_system_thread_ids)
-    if project_visibility is not None:
-        rows = _filter_session_metadata_by_project_visibility(rows, project_visibility)
-    elif current_project is not None:
-        rows = rows.filter(project=current_project)
+        query.hidden_thread_ids.update(indexed_system_thread_ids)
+        query.system_thread_ids.update(indexed_system_thread_ids)
+    if query.project_visibility is not None:
+        rows = _filter_session_metadata_by_project_visibility(
+            rows, query.project_visibility
+        )
+    elif query.current_project is not None:
+        rows = rows.filter(project=query.current_project)
     if not show_archived:
         rows = rows.filter(codex_archived=False)
-    if system_only:
-        rows = rows.filter(thread_id__in=system_thread_ids)
+    if query.system_only:
+        rows = rows.filter(thread_id__in=query.system_thread_ids)
     else:
         rows = _filter_visible_session_metadata_rows(
             rows,
-            accepted_visible_thread_ids=accepted_visible_thread_ids,
+            accepted_visible_thread_ids=query.accepted_visible_thread_ids,
         )
-        if hidden_thread_ids:
-            rows = rows.exclude(thread_id__in=hidden_thread_ids)
-    if system_only:
+        if query.hidden_thread_ids:
+            rows = rows.exclude(thread_id__in=query.hidden_thread_ids)
+    if query.system_only:
         metadata_rows = list(rows)
         qa_updated_at_by_main_thread: dict[str, Any] = {}
         sessions = [
@@ -1001,9 +946,9 @@ def _session_list_page_from_index(
                 session := _session_row_for_metadata(
                     metadata,
                     qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
-                    runs_by_thread_id=runs_by_thread_id,
-                    instances_by_thread_id=instances_by_thread_id,
-                    system_only=system_only,
+                    runs_by_thread_id=query.runs_by_thread_id,
+                    instances_by_thread_id=query.instances_by_thread_id,
+                    system_only=True,
                 )
             )
             is not None
@@ -1012,7 +957,9 @@ def _session_list_page_from_index(
     else:
         sessions, qa_updated_at_by_main_thread = _sorted_visible_index_rows(
             rows,
-            hidden_thread_ids=hidden_thread_ids if hidden_thread_ids else None,
+            hidden_thread_ids=(
+                query.hidden_thread_ids if query.hidden_thread_ids else None
+            ),
         )
     index_cursor = _index_cursor_sort_key(request.GET.get("cursor", ""))
     if index_cursor is not None:
@@ -1025,7 +972,7 @@ def _session_list_page_from_index(
     else:
         offset = _non_negative_int(request.GET.get("offset", ""))
     page_sort_rows = sessions[offset : offset + _SESSION_PAGE_SIZE]
-    if system_only:
+    if query.system_only:
         page = page_sort_rows
     else:
         page_thread_ids = [str(session["id"]) for session in page_sort_rows]
@@ -1041,9 +988,9 @@ def _session_list_page_from_index(
                 session := _session_row_for_metadata(
                     metadata,
                     qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
-                    runs_by_thread_id=runs_by_thread_id,
-                    instances_by_thread_id=instances_by_thread_id,
-                    system_only=system_only,
+                    runs_by_thread_id=query.runs_by_thread_id,
+                    instances_by_thread_id=query.instances_by_thread_id,
+                    system_only=False,
                 )
             )
             is not None
@@ -1066,34 +1013,19 @@ def _session_list_page_from_index(
 def _materialized_session_list_page_from_codex(
     codex: Codex,
     request: HttpRequest,
+    query: _SessionListQuery,
     *,
-    projects: list[Project],
-    current_project: Project | None,
-    project_visibility: SessionProjectVisibility | None,
-    hidden_thread_ids: set[str],
-    system_thread_ids: set[str],
-    runs_by_thread_id: dict[str, SystemAgentRun],
-    instances_by_thread_id: dict[str, CodexInstance],
-    project_cache: dict[str, Project | None],
     include_archived: bool,
-    system_only: bool,
-    accepted_visible_thread_ids: set[str],
 ) -> SessionListPage:
     threads = _all_threads(codex)
     if include_archived:
         threads.extend(_all_threads(codex, archived=True))
-    _add_thread_derived_hidden_ids(
-        hidden_thread_ids,
-        system_thread_ids,
-        threads,
-        system_only=system_only,
-        accepted_visible_thread_ids=accepted_visible_thread_ids,
-    )
+    _add_thread_derived_hidden_ids(query, threads)
     for thread in threads:
-        session_index.upsert_thread(thread, projects=projects)
+        session_index.upsert_thread(thread, projects=query.projects)
     metadata_by_thread = _metadata_by_thread_id(threads)
     qa_updated_at_by_main_thread = _qa_activity_updated_at_by_main_thread_id(
-        threads, hidden_thread_ids
+        threads, query.hidden_thread_ids
     )
     sessions = [
         session
@@ -1101,17 +1033,9 @@ def _materialized_session_list_page_from_codex(
         if (
             session := _session_row_for_thread(
                 thread,
-                projects=projects,
-                current_project=current_project,
-                project_visibility=project_visibility,
+                query,
                 metadata_by_thread=metadata_by_thread,
                 qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
-                hidden_thread_ids=hidden_thread_ids,
-                system_thread_ids=system_thread_ids,
-                runs_by_thread_id=runs_by_thread_id,
-                instances_by_thread_id=instances_by_thread_id,
-                project_cache=project_cache,
-                system_only=system_only,
             )
         )
         is not None
@@ -1136,17 +1060,7 @@ def _materialized_session_list_page_from_codex(
 def _merged_session_list_page_from_codex(
     codex: Codex,
     request: HttpRequest,
-    *,
-    projects: list[Project],
-    current_project: Project | None,
-    project_visibility: SessionProjectVisibility | None,
-    hidden_thread_ids: set[str],
-    system_thread_ids: set[str],
-    runs_by_thread_id: dict[str, SystemAgentRun],
-    instances_by_thread_id: dict[str, CodexInstance],
-    project_cache: dict[str, Project | None],
-    system_only: bool,
-    accepted_visible_thread_ids: set[str],
+    query: _SessionListQuery,
 ) -> SessionListPage:
     active = _session_page_source(request, archived=False, cursor_param="cursor")
     archived = _session_page_source(
@@ -1164,21 +1078,7 @@ def _merged_session_list_page_from_codex(
         candidates = [
             source
             for source in sources
-            if _peek_source_session(
-                source,
-                codex,
-                projects=projects,
-                current_project=current_project,
-                project_visibility=project_visibility,
-                hidden_thread_ids=hidden_thread_ids,
-                system_thread_ids=system_thread_ids,
-                runs_by_thread_id=runs_by_thread_id,
-                instances_by_thread_id=instances_by_thread_id,
-                project_cache=project_cache,
-                system_only=system_only,
-                accepted_visible_thread_ids=accepted_visible_thread_ids,
-            )
-            is not None
+            if _peek_source_session(source, codex, query) is not None
         ]
         if not candidates:
             break
@@ -1195,19 +1095,7 @@ def _merged_session_list_page_from_codex(
             sessions.append(session)
     if materialized_fallback_allowed and active.qa_activity_requires_materialized_order:
         return _materialized_session_list_page_from_codex(
-            codex,
-            request,
-            projects=projects,
-            current_project=current_project,
-            project_visibility=project_visibility,
-            hidden_thread_ids=hidden_thread_ids,
-            system_thread_ids=system_thread_ids,
-            runs_by_thread_id=runs_by_thread_id,
-            instances_by_thread_id=instances_by_thread_id,
-            project_cache=project_cache,
-            include_archived=True,
-            system_only=system_only,
-            accepted_visible_thread_ids=accepted_visible_thread_ids,
+            codex, request, query, include_archived=True
         )
     active_cursor, active_offset, active_done = _source_next_cursor(active)
     archived_cursor, archived_offset, archived_done = _source_next_cursor(archived)
@@ -1238,17 +1126,7 @@ def _session_page_source(
 def _peek_source_session(
     source: SessionPageSource,
     codex: Codex,
-    *,
-    projects: list[Project],
-    current_project: Project | None,
-    project_visibility: SessionProjectVisibility | None,
-    hidden_thread_ids: set[str],
-    system_thread_ids: set[str],
-    runs_by_thread_id: dict[str, SystemAgentRun],
-    instances_by_thread_id: dict[str, CodexInstance],
-    project_cache: dict[str, Project | None],
-    system_only: bool,
-    accepted_visible_thread_ids: set[str],
+    query: _SessionListQuery,
 ) -> dict[str, Any] | None:
     if source.candidate is not None or source.exhausted:
         return source.candidate
@@ -1261,23 +1139,17 @@ def _peek_source_session(
             source.page = _thread_list_page(
                 codex, archived=source.archived, cursor=source.cursor
             )
-            _add_thread_derived_hidden_ids(
-                hidden_thread_ids,
-                system_thread_ids,
-                source.page.threads,
-                system_only=system_only,
-                accepted_visible_thread_ids=accepted_visible_thread_ids,
-            )
+            _add_thread_derived_hidden_ids(query, source.page.threads)
             for thread in source.page.threads:
-                session_index.upsert_thread(thread, projects=projects)
+                session_index.upsert_thread(thread, projects=query.projects)
             source.next_page_cursor = source.page.next_cursor
             source.metadata_by_thread = _metadata_by_thread_id(source.page.threads)
             detect_materialized_order = (
-                not system_only and not source.archived and source.offset == 0
+                not query.system_only and not source.archived and source.offset == 0
             )
             qa_activity = _qa_activity_page_state(
                 source.page.threads,
-                hidden_thread_ids,
+                query.hidden_thread_ids,
                 detect_materialized_order=detect_materialized_order,
             )
             source.qa_updated_at_by_main_thread = qa_activity.updated_at_by_main_thread
@@ -1304,17 +1176,9 @@ def _peek_source_session(
             thread = source.page.threads[index]
             session = _session_row_for_thread(
                 thread,
-                projects=projects,
-                current_project=current_project,
-                project_visibility=project_visibility,
+                query,
                 metadata_by_thread=metadata_by_thread,
                 qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
-                hidden_thread_ids=hidden_thread_ids,
-                system_thread_ids=system_thread_ids,
-                runs_by_thread_id=runs_by_thread_id,
-                instances_by_thread_id=instances_by_thread_id,
-                project_cache=project_cache,
-                system_only=system_only,
             )
             if session is not None:
                 source.candidate = session
@@ -1347,19 +1211,10 @@ def _source_next_cursor(source: SessionPageSource) -> tuple[str, int, bool]:
 def _visible_session_page_from_codex(
     codex: Codex,
     request: HttpRequest,
+    query: _SessionListQuery,
     *,
-    projects: list[Project],
-    current_project: Project | None,
-    project_visibility: SessionProjectVisibility | None,
-    hidden_thread_ids: set[str],
-    system_thread_ids: set[str],
-    runs_by_thread_id: dict[str, SystemAgentRun],
-    instances_by_thread_id: dict[str, CodexInstance],
-    project_cache: dict[str, Project | None],
     archived: bool,
     cursor_param: str,
-    system_only: bool,
-    accepted_visible_thread_ids: set[str],
 ) -> VisibleSessionPage:
     cursor = request.GET.get(cursor_param, "")
     offset = _non_negative_int(request.GET.get(_cursor_offset_param(cursor_param), ""))
@@ -1375,18 +1230,12 @@ def _visible_session_page_from_codex(
             return VisibleSessionPage(_sort_session_rows(sessions), "", 0)
         seen_cursors.add(cursor)
         page = _thread_list_page(codex, archived=archived, cursor=cursor)
-        _add_thread_derived_hidden_ids(
-            hidden_thread_ids,
-            system_thread_ids,
-            page.threads,
-            system_only=system_only,
-            accepted_visible_thread_ids=accepted_visible_thread_ids,
-        )
+        _add_thread_derived_hidden_ids(query, page.threads)
         for thread in page.threads:
-            session_index.upsert_thread(thread, projects=projects)
+            session_index.upsert_thread(thread, projects=query.projects)
         can_materialize_qa_activity = (
             materialized_fallback_allowed
-            and not system_only
+            and not query.system_only
             and not archived
             and offset == 0
         )
@@ -1402,7 +1251,7 @@ def _visible_session_page_from_codex(
         metadata_by_thread = _metadata_by_thread_id(page.threads)
         qa_activity = _qa_activity_page_state(
             page.threads,
-            hidden_thread_ids,
+            query.hidden_thread_ids,
             detect_materialized_order=can_materialize_qa_activity,
         )
         qa_updated_at_by_main_thread = qa_activity.updated_at_by_main_thread
@@ -1414,17 +1263,9 @@ def _visible_session_page_from_codex(
         for index, thread in enumerate(page.threads[offset:], start=offset):
             session = _session_row_for_thread(
                 thread,
-                projects=projects,
-                current_project=current_project,
-                project_visibility=project_visibility,
+                query,
                 metadata_by_thread=metadata_by_thread,
                 qa_updated_at_by_main_thread=qa_updated_at_by_main_thread,
-                hidden_thread_ids=hidden_thread_ids,
-                system_thread_ids=system_thread_ids,
-                runs_by_thread_id=runs_by_thread_id,
-                instances_by_thread_id=instances_by_thread_id,
-                project_cache=project_cache,
-                system_only=system_only,
             )
             if session is not None:
                 sessions.append(session)
@@ -1510,19 +1351,14 @@ def _page_has_cross_page_qa_activity(
 
 
 def _add_thread_derived_hidden_ids(
-    hidden_thread_ids: set[str],
-    system_thread_ids: set[str],
-    threads: Iterable[Any],
-    *,
-    system_only: bool,
-    accepted_visible_thread_ids: set[str],
+    query: _SessionListQuery, threads: Iterable[Any]
 ) -> None:
     thread_hidden_ids = system_agents.hidden_thread_ids_from_threads(
-        threads, accepted_visible_thread_ids=accepted_visible_thread_ids
+        threads, accepted_visible_thread_ids=query.accepted_visible_thread_ids
     )
-    hidden_thread_ids.update(thread_hidden_ids)
-    if system_only:
-        system_thread_ids.update(thread_hidden_ids)
+    query.hidden_thread_ids.update(thread_hidden_ids)
+    if query.system_only:
+        query.system_thread_ids.update(thread_hidden_ids)
 
 
 def _thread_list_page(codex: Codex, *, archived: bool, cursor: str) -> ThreadListPage:
@@ -1550,34 +1386,26 @@ def _thread_list_page(codex: Codex, *, archived: bool, cursor: str) -> ThreadLis
 
 def _session_row_for_thread(
     thread: Any,
+    query: _SessionListQuery,
     *,
-    projects: list[Project],
-    current_project: Project | None,
-    project_visibility: SessionProjectVisibility | None,
     metadata_by_thread: dict[str, SessionMetadata],
     qa_updated_at_by_main_thread: Mapping[str, Any],
-    hidden_thread_ids: set[str],
-    system_thread_ids: set[str],
-    runs_by_thread_id: dict[str, SystemAgentRun],
-    instances_by_thread_id: dict[str, CodexInstance],
-    project_cache: dict[str, Project | None],
-    system_only: bool,
 ) -> dict[str, Any] | None:
     thread_id = getattr(thread, "id", None)
     if not isinstance(thread_id, str) or not thread_id:
         return None
-    if system_only:
-        if thread_id not in system_thread_ids:
+    if query.system_only:
+        if thread_id not in query.system_thread_ids:
             return None
-    elif thread_id in hidden_thread_ids:
+    elif thread_id in query.hidden_thread_ids:
         return None
     session_project = _project_for_thread_cached(
-        thread, metadata_by_thread, projects, project_cache
+        thread, metadata_by_thread, query.projects, query.project_cache
     )
-    if project_visibility is not None:
-        if not _session_project_is_visible(session_project, project_visibility):
+    if query.project_visibility is not None:
+        if not _session_project_is_visible(session_project, query.project_visibility):
             return None
-    elif current_project is not None and session_project != current_project:
+    elif query.current_project is not None and session_project != query.current_project:
         return None
     row = {
         "id": thread_id,
@@ -1588,7 +1416,7 @@ def _session_row_for_thread(
         "is_archived": _thread_is_archived(thread),
         "project": session_project,
     }
-    if not system_only:
+    if not query.system_only:
         metadata = metadata_by_thread.get(thread_id)
         codex_path = string_value(getattr(thread, "path", None))
         if not codex_path and metadata is not None:
@@ -1611,10 +1439,12 @@ def _session_row_for_thread(
                 ),
             }
         )
-    if system_only:
-        run = runs_by_thread_id.get(thread_id)
+    if query.system_only:
+        run = query.runs_by_thread_id.get(thread_id)
         instance = (
-            run.instance if run is not None else instances_by_thread_id.get(thread_id)
+            run.instance
+            if run is not None
+            else query.instances_by_thread_id.get(thread_id)
         )
         row.update(
             {
@@ -4901,6 +4731,29 @@ def session_demo_proxy(
     return demo.proxy_demo_request(request, session_id, path, path_prefix=prefix)
 
 
+class _TurnRejectedError(Exception):
+    """Reject a send_message turn with this response.
+
+    Raised by the spawn pipeline inside send_message's try block so every
+    rejection path funnels through one cleanup site (restore an unarchived
+    session, delete saved input images) instead of each branch repeating it.
+    """
+
+    def __init__(self, response: HttpResponse) -> None:
+        super().__init__()
+        self.response = response
+
+
+def _stored_model_and_effort(resumed: Any, settings: SettingsValues) -> tuple[str, str]:
+    """Thread's recorded model/effort, falling back to the request settings."""
+    model = string_value(getattr(resumed, "model", None)) or settings.model
+    effort = (
+        string_value(getattr(resumed, "reasoning_effort", None))
+        or settings.reasoning_effort
+    )
+    return model, effort
+
+
 @_limit_input_image_uploads
 @require_http_methods(["POST"])
 def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
@@ -5038,10 +4891,12 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 )
                 if started is not None:
                     return redirect("session", session_id=session_id)
-                _cleanup_saved_input_images(input_image_paths)
-                return HttpResponseBadRequest("QA workflow could not be paused")
-            _cleanup_saved_input_images(input_image_paths)
-            return HttpResponseBadRequest("PR workflow is running for this session")
+                raise _TurnRejectedError(
+                    HttpResponseBadRequest("QA workflow could not be paused")
+                )
+            raise _TurnRejectedError(
+                HttpResponseBadRequest("PR workflow is running for this session")
+            )
         # If steering is unavailable or races a terminal worker, preserve the
         # submitted prompt by treating it as an ordinary follow-up turn.
         # ``raw_active`` posts still do not retarget a different active worker.
@@ -5069,8 +4924,9 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         force_live_resume = _metadata_rollout_path_indicates_archived(metadata)
         if should_unarchive_for_turn:
             if _metadata_cwd_is_disallowed(metadata):
-                _cleanup_saved_input_images(input_image_paths)
-                return HttpResponseBadRequest("thread cwd is not an allowed repository")
+                raise _TurnRejectedError(
+                    HttpResponseBadRequest("thread cwd is not an allowed repository")
+                )
             _unarchive_session_for_turn(session_id, settings)
             session_unarchived_for_turn = True
             force_live_resume = True
@@ -5106,10 +4962,11 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                     if not _thread_resume_archived_error(exc):
                         raise
                     if _metadata_cwd_is_disallowed(metadata):
-                        _cleanup_saved_input_images(input_image_paths)
-                        return HttpResponseBadRequest(
-                            "thread cwd is not an allowed repository"
-                        )
+                        raise _TurnRejectedError(
+                            HttpResponseBadRequest(
+                                "thread cwd is not an allowed repository"
+                            )
+                        ) from exc
                     _unarchive_session_for_turn(session_id, settings, codex=codex)
                     session_unarchived_for_turn = True
                     resumed = codex._client.thread_resume(session_id)
@@ -5185,17 +5042,15 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             plan_mode = False
         cwd = _thread_cwd(thread)
         if not cwd:
-            restore_archived_session_for_rejected_turn()
-            _cleanup_saved_input_images(input_image_paths)
-            return HttpResponseBadRequest("thread has no cwd")
+            raise _TurnRejectedError(HttpResponseBadRequest("thread has no cwd"))
         # The session list surfaces every thread the app-server knows about, not
         # just those created via ``new_session``, so the resumed ``cwd`` is not
         # automatically inside the discover_repos() allowlist. Re-validate before
         # spawning so a follow-up cannot run a worker in an unintended directory.
         if not _is_allowed_session_cwd(cwd):
-            restore_archived_session_for_rejected_turn()
-            _cleanup_saved_input_images(input_image_paths)
-            return HttpResponseBadRequest("thread cwd is not an allowed repository")
+            raise _TurnRejectedError(
+                HttpResponseBadRequest("thread cwd is not an allowed repository")
+            )
         # Sandbox policy and approval mode are applied per-turn rather than
         # persisted on the thread, so follow-up messages have to re-forward
         # the cookies or every turn after the first silently reverts to Codex
@@ -5256,12 +5111,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             auto_merge_to_local_branch = False
             auto_merge_branch = ""
         if qa_workflow_activation:
-            workflow_model = (
-                string_value(getattr(resumed, "model", None)) or settings.model
-            )
-            workflow_reasoning_effort = (
-                string_value(getattr(resumed, "reasoning_effort", None))
-                or settings.reasoning_effort
+            workflow_model, workflow_reasoning_effort = _stored_model_and_effort(
+                resumed, settings
             )
             workflow_kwargs: dict[str, Any] = {
                 "main_thread_id": session_id,
@@ -5281,10 +5132,10 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             if fix_pr_activation:
                 pr_url = _fix_pr_url_for_thread(session_id, thread)
                 if not pr_url:
-                    restore_archived_session_for_rejected_turn()
-                    _cleanup_saved_input_images(input_image_paths)
-                    return HttpResponseBadRequest(
-                        "fix-pr requires an opened PR for this session"
+                    raise _TurnRejectedError(
+                        HttpResponseBadRequest(
+                            "fix-pr requires an opened PR for this session"
+                        )
                     )
                 system_agents.start_pr_monitor_workflow(
                     pr_url=pr_url,
@@ -5321,12 +5172,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         if settings.enable_memories:
             spawn_kwargs["enable_memories"] = True
         if auto_pr_enabled or auto_qa_enabled:
-            auto_review_model = (
-                string_value(getattr(resumed, "model", None)) or settings.model
-            )
-            auto_review_reasoning_effort = (
-                string_value(getattr(resumed, "reasoning_effort", None))
-                or settings.reasoning_effort
+            auto_review_model, auto_review_reasoning_effort = _stored_model_and_effort(
+                resumed, settings
             )
             if auto_pr_enabled:
                 spawn_kwargs["auto_pr_enabled"] = True
@@ -5340,17 +5187,17 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 spawn_kwargs["auto_merge_branch"] = auto_merge_branch
         if plan_mode:
             if not collaboration_model:
-                restore_archived_session_for_rejected_turn()
-                _cleanup_saved_input_images(input_image_paths)
-                return HttpResponseBadRequest("plan mode requires a model")
+                raise _TurnRejectedError(
+                    HttpResponseBadRequest("plan mode requires a model")
+                )
             spawn_kwargs["model"] = collaboration_model
             spawn_kwargs["plan_mode"] = True
         elif collaboration_mode == _DEFAULT_COLLABORATION_MODE:
             if not collaboration_model:
-                restore_archived_session_for_rejected_turn()
-                _cleanup_saved_input_images(input_image_paths)
-                return HttpResponseBadRequest(
-                    "default collaboration mode requires a model"
+                raise _TurnRejectedError(
+                    HttpResponseBadRequest(
+                        "default collaboration mode requires a model"
+                    )
                 )
             spawn_kwargs["model"] = collaboration_model
             spawn_kwargs["collaboration_mode"] = collaboration_mode
@@ -5362,12 +5209,8 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             and not plan_mode
             and not collaboration_mode
         ):
-            workflow_model = (
-                string_value(getattr(resumed, "model", None)) or settings.model
-            )
-            workflow_reasoning_effort = (
-                string_value(getattr(resumed, "reasoning_effort", None))
-                or settings.reasoning_effort
+            workflow_model, workflow_reasoning_effort = _stored_model_and_effort(
+                resumed, settings
             )
             spec_workflow_kwargs: dict[str, Any] = {
                 "main_thread_id": session_id,
@@ -5397,6 +5240,11 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         record_session_unarchived_for_accepted_turn()
         input_images_owned = True
         return redirect("session", session_id=session_id)
+    except _TurnRejectedError as rejected:
+        restore_archived_session_for_rejected_turn()
+        _cleanup_saved_input_images(steer_image_paths)
+        _cleanup_saved_input_images(input_image_paths)
+        return rejected.response
     except codex_pool.InputAttachmentLimitExceededError as exc:
         restore_archived_session_for_rejected_turn()
         _cleanup_saved_input_images(steer_image_paths)
