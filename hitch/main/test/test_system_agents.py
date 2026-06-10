@@ -46,6 +46,7 @@ from hitch.main.workflows import (
     gh_observations,
     pr_handoff,
     pr_monitor_format,
+    pr_qa,
     pr_stage_refresh_state,
     qa_prompts,
     spec_critic,
@@ -296,7 +297,7 @@ class PrQaWorkflowTests(TestCase):
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
         )
 
-        workflow = system_agents.start_pr_qa_workflow(
+        workflow = pr_qa.start_pr_qa_workflow(
             main_thread_id="main-thread",
             cwd="/repo",
             sandbox_policy="workspaceWrite",
@@ -479,7 +480,7 @@ class PrQaWorkflowTests(TestCase):
         self.assertEqual(reconciled, 0)
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents._qa_review_in_flight", side_effect=[False, True])
+    @patch("hitch.main.workflows.pr_qa._qa_review_in_flight", side_effect=[False, True])
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_reconcile_skips_qa_when_review_appears_during_claim(
         self, mock_spawn: MagicMock, _mock_in_flight: MagicMock
@@ -859,7 +860,7 @@ class SessionPrStageRefreshTests(TestCase):
             },
         )
 
-    @patch("hitch.main.workflows.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.pr_qa._gh_pr_view")
     def test_refresh_respects_limit(self, mock_gh_pr_view: MagicMock) -> None:
         mock_gh_pr_view.return_value = {
             "url": "https://github.com/cberner/hitch/pull/201",
@@ -871,12 +872,12 @@ class SessionPrStageRefreshTests(TestCase):
             for index in range(3):
                 self._due_pr_workflow(f"limit-main-{index}", cwd)
 
-            refreshed = system_agents.refresh_unarchived_session_pr_stages(limit=1)
+            refreshed = pr_qa.refresh_unarchived_session_pr_stages(limit=1)
 
         self.assertEqual(refreshed, 1)
         self.assertEqual(mock_gh_pr_view.call_count, 1)
 
-    @patch("hitch.main.workflows.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.pr_qa._gh_pr_view")
     def test_refresh_skips_workflow_lost_to_concurrent_claim(
         self, mock_gh_pr_view: MagicMock
     ) -> None:
@@ -885,23 +886,22 @@ class SessionPrStageRefreshTests(TestCase):
         # claim must fail and skip the gh poll rather than double-poll GitHub.
         with tempfile.TemporaryDirectory() as cwd:
             workflow = self._due_pr_workflow("claimed-main", cwd)
-            self.assertTrue(system_agents.pr_handoff_stage_refresh_due(workflow))
+            self.assertTrue(pr_qa.pr_handoff_stage_refresh_due(workflow))
             SystemWorkflow.objects.filter(pk=workflow.pk).update(
                 updated_at=workflow.updated_at + timedelta(seconds=1)
             )
 
-            self.assertFalse(system_agents._claim_pr_stage_refresh(workflow))
+            self.assertFalse(pr_qa._claim_pr_stage_refresh(workflow))
 
             # A lost claim makes the convergence loop skip the row entirely.
-            with patch.object(
-                system_agents, "_claim_pr_stage_refresh", return_value=False
+            with patch.object(pr_qa, "_claim_pr_stage_refresh", return_value=False
             ):
-                refreshed = system_agents.refresh_unarchived_session_pr_stages()
+                refreshed = pr_qa.refresh_unarchived_session_pr_stages()
 
         self.assertEqual(refreshed, 0)
         mock_gh_pr_view.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.pr_qa._gh_pr_view")
     def test_refresh_unarchived_session_pr_stages_refreshes_all_due_latest_workflows(
         self, mock_gh_pr_view: MagicMock
     ) -> None:
@@ -1044,7 +1044,7 @@ class SessionPrStageRefreshTests(TestCase):
 
             mock_gh_pr_view.side_effect = refreshed_pr
 
-            refreshed = system_agents.refresh_unarchived_session_pr_stages()
+            refreshed = pr_qa.refresh_unarchived_session_pr_stages()
 
         self.assertEqual(refreshed, 4)
         self.assertEqual(mock_gh_pr_view.call_count, 4)
@@ -1091,24 +1091,24 @@ class SessionPrStageRefreshTests(TestCase):
         }
         with tempfile.TemporaryDirectory() as cwd:
             self.assertTrue(
-                system_agents.pr_snapshot_stage_refresh_due(
+                pr_qa.pr_snapshot_stage_refresh_due(
                     cwd=cwd, snapshot=snapshot, attempted_at=None
                 )
             )
             rate_limit.claim(pr_stage_refresh_state._pr_stage_rate_limit_key(snapshot))
             self.assertFalse(
-                system_agents.pr_snapshot_stage_refresh_due(
+                pr_qa.pr_snapshot_stage_refresh_due(
                     cwd=cwd, snapshot=snapshot, attempted_at=None
                 )
             )
             # A forced refresh ignores the global window.
             self.assertTrue(
-                system_agents.pr_snapshot_stage_refresh_due(
+                pr_qa.pr_snapshot_stage_refresh_due(
                     cwd=cwd, snapshot=snapshot, attempted_at=None, force=True
                 )
             )
 
-    @patch("hitch.main.workflows.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.pr_qa._gh_pr_view")
     def test_pr_snapshot_refresh_is_globally_debounced_per_pr(
         self, mock_gh_pr_view: MagicMock
     ) -> None:
@@ -1122,11 +1122,11 @@ class SessionPrStageRefreshTests(TestCase):
         }
         mock_gh_pr_view.return_value = dict(snapshot)
         with tempfile.TemporaryDirectory() as cwd:
-            system_agents.refreshed_pr_snapshot_for_stage(cwd=cwd, snapshot=snapshot)
-            system_agents.refreshed_pr_snapshot_for_stage(cwd=cwd, snapshot=snapshot)
+            pr_qa.refreshed_pr_snapshot_for_stage(cwd=cwd, snapshot=snapshot)
+            pr_qa.refreshed_pr_snapshot_for_stage(cwd=cwd, snapshot=snapshot)
             self.assertEqual(mock_gh_pr_view.call_count, 1)
             # A forced refresh bypasses the debounce.
-            system_agents.refreshed_pr_snapshot_for_stage(
+            pr_qa.refreshed_pr_snapshot_for_stage(
                 cwd=cwd, snapshot=snapshot, force=True
             )
             self.assertEqual(mock_gh_pr_view.call_count, 2)
@@ -2226,7 +2226,7 @@ class SpecCriticWorkflowTests(TestCase):
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
         )
 
-        workflow = system_agents.start_pr_qa_workflow(
+        workflow = pr_qa.start_pr_qa_workflow(
             main_thread_id="main-thread",
             cwd="/repo",
             sandbox_policy=None,
@@ -2256,7 +2256,7 @@ class SpecCriticWorkflowTests(TestCase):
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
         )
 
-        workflow = system_agents.start_pr_qa_workflow(
+        workflow = pr_qa.start_pr_qa_workflow(
             main_thread_id="main-thread",
             cwd="/repo",
             sandbox_policy=None,
@@ -2287,7 +2287,7 @@ class SpecCriticWorkflowTests(TestCase):
     def test_local_auto_merge_workflow_blocks_without_strict_patch(
         self, mock_spawn: MagicMock, _mock_patch: MagicMock
     ) -> None:
-        workflow = system_agents.start_pr_qa_workflow(
+        workflow = pr_qa.start_pr_qa_workflow(
             main_thread_id="main-thread",
             cwd="/repo",
             sandbox_policy=None,
@@ -2377,7 +2377,7 @@ class SpecCriticWorkflowTests(TestCase):
             step=system_agents.STEP_QA_RUNNING,
         )
 
-        workflow = system_agents.start_pr_qa_workflow(
+        workflow = pr_qa.start_pr_qa_workflow(
             main_thread_id="main-thread",
             cwd="/repo",
             sandbox_policy=None,
@@ -2424,7 +2424,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.state["next_user_message_index"], 3)
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     def test_auto_pr_waits_when_turn_finishes_with_proposed_plan(
         self, mock_start: MagicMock
     ) -> None:
@@ -2455,7 +2455,7 @@ class SpecCriticWorkflowTests(TestCase):
                 self.assertIsNone(instance.auto_pr_triggered_at)
         mock_start.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     def test_auto_pr_waits_when_rollout_renders_pending_plan(
         self, mock_start: MagicMock
     ) -> None:
@@ -2514,7 +2514,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIsNone(instance.auto_pr_triggered_at)
         mock_start.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     def test_auto_pr_starts_after_literal_proposed_plan_example(
         self, mock_start: MagicMock
     ) -> None:
@@ -2574,7 +2574,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIsNotNone(instance.auto_pr_triggered_at)
         mock_start.assert_called_once()
 
-    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     def test_auto_qa_starts_review_workflow_after_completed_user_turn(
         self, mock_start: MagicMock
     ) -> None:
@@ -2639,7 +2639,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(kwargs["approval_mode"], system_agents.SYSTEM_AGENT_APPROVAL_MODE)
         self.assertEqual(kwargs["sandbox_policy"], "workspaceWrite")
 
-    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     def test_auto_qa_does_not_start_when_approval_requires_visible_control(
         self, mock_start: MagicMock
     ) -> None:
@@ -2657,7 +2657,7 @@ class SpecCriticWorkflowTests(TestCase):
                 self.assertIsNone(instance.auto_qa_triggered_at)
         mock_start.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     def test_auto_pr_does_not_start_when_approval_requires_visible_control(
         self, mock_start: MagicMock
     ) -> None:
@@ -2680,7 +2680,7 @@ class SpecCriticWorkflowTests(TestCase):
                 self.assertIsNone(instance.auto_pr_triggered_at)
         mock_start.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     def test_auto_pr_takes_precedence_over_auto_qa(self, mock_start: MagicMock) -> None:
         instance = _instance(auto_pr_enabled=True, auto_qa_enabled=True)
 
@@ -2691,7 +2691,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIsNone(instance.auto_qa_triggered_at)
         self.assertNotIn("open_pr_on_lgtm", mock_start.call_args.kwargs)
 
-    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     def test_auto_qa_forwards_local_auto_merge_setting(
         self, mock_start: MagicMock
     ) -> None:
@@ -2706,7 +2706,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertFalse(mock_start.call_args.kwargs["open_pr_on_lgtm"])
         self.assertEqual(mock_start.call_args.kwargs["auto_merge_branch"], "main")
 
-    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     def test_auto_merge_start_block_records_failed_metadata(
         self, mock_start: MagicMock
     ) -> None:
@@ -2755,7 +2755,7 @@ class SpecCriticWorkflowTests(TestCase):
             "failed to start QA agent: no merge base",
         )
 
-    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     def test_auto_pr_does_not_stamp_when_workflow_start_fails(
         self, mock_start: MagicMock
     ) -> None:
@@ -2768,7 +2768,7 @@ class SpecCriticWorkflowTests(TestCase):
         instance.refresh_from_db()
         self.assertIsNone(instance.auto_pr_triggered_at)
 
-    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     def test_auto_qa_does_not_stamp_when_workflow_start_fails(
         self, mock_start: MagicMock
     ) -> None:
@@ -2781,7 +2781,7 @@ class SpecCriticWorkflowTests(TestCase):
         instance.refresh_from_db()
         self.assertIsNone(instance.auto_qa_triggered_at)
 
-    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     def test_auto_pr_claims_turn_before_starting_workflow(
         self, mock_start: MagicMock
     ) -> None:
@@ -3495,7 +3495,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.state["next_user_message_index"], 4)
         self.assertEqual(workflow.state["last_feedback"], "Looks good")
 
-    @patch("hitch.main.workflows.system_agents.merge_worktree_diff_to_branch")
+    @patch("hitch.main.workflows.pr_qa.merge_worktree_diff_to_branch")
     def test_qa_lgtm_merges_configured_local_branch(
         self, mock_merge: MagicMock
     ) -> None:
@@ -3565,7 +3565,7 @@ class SpecCriticWorkflowTests(TestCase):
         )
 
     @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
-    @patch("hitch.main.workflows.system_agents.merge_worktree_diff_to_branch")
+    @patch("hitch.main.workflows.pr_qa.merge_worktree_diff_to_branch")
     def test_qa_lgtm_blocks_when_local_branch_merge_fails(
         self, mock_merge: MagicMock, mock_surface: MagicMock
     ) -> None:
@@ -3629,7 +3629,7 @@ class SpecCriticWorkflowTests(TestCase):
             proposal.outcome_metadata["auto_merge_error"], "patch conflict"
         )
 
-    @patch("hitch.main.workflows.system_agents.merge_worktree_diff_to_branch")
+    @patch("hitch.main.workflows.pr_qa.merge_worktree_diff_to_branch")
     @patch(
         "hitch.main.workflows.system_agents.build_auto_merge_review_patch",
         return_value=AutoMergeReviewPatch(
@@ -3719,7 +3719,7 @@ class SpecCriticWorkflowTests(TestCase):
         )
 
     @patch(
-        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -3732,7 +3732,7 @@ class SpecCriticWorkflowTests(TestCase):
             agent_kind=system_agents.PR_FOLLOWUP_MONITOR_AGENT_KIND,
         )
 
-        workflow = system_agents.start_pr_monitor_workflow(
+        workflow = pr_qa.start_pr_monitor_workflow(
             main_thread_id="main-thread",
             cwd="/repo",
             pr_url="https://github.com/cberner/hitch/pull/169",
@@ -3769,7 +3769,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(run.input["pr_handoff"]["pr_number"], 169)
 
     @patch(
-        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
@@ -3891,7 +3891,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("gh_observation", run.input)
 
     @patch(
-        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation({"pr_number": 170}),
     )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
@@ -4057,7 +4057,7 @@ class SpecCriticWorkflowTests(TestCase):
             CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
         )
 
-    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh", return_value={})
+    @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh", return_value={})
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
     @patch("hitch.main.workflows.system_agents._surface_workflow_failure")
     def test_pr_prompt_completion_blocks_when_no_commits_but_worktree_dirty(
@@ -4129,7 +4129,7 @@ class SpecCriticWorkflowTests(TestCase):
             error="codex call failed",
         )
 
-        system_agents._handle_system_feedback_finished(instance)
+        pr_qa._handle_system_feedback_finished(instance)
 
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
@@ -4287,7 +4287,7 @@ class SpecCriticWorkflowTests(TestCase):
         )
 
     @patch(
-        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation({"pr_number": 173}),
     )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
@@ -4400,10 +4400,10 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
 
     @patch(
-        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation({"pr_number": 174}),
     )
-    @patch("hitch.main.workflows.system_agents.codex_events.latest_pr_snapshot_for_instance")
+    @patch("hitch.main.workflows.autonomous_goals.codex_events.latest_pr_snapshot_for_instance")
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_pr_prompt_completion_ignores_terminal_worker_snapshot(
@@ -4524,7 +4524,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
 
     @patch(
-        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation({"pr_number": 171}),
     )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
@@ -4621,7 +4621,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_surface.assert_called_once()
 
     @patch(
-        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
@@ -4695,7 +4695,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
 
     @patch(
-        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
@@ -4783,7 +4783,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
 
     @patch(
-        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
@@ -4905,7 +4905,7 @@ class SpecCriticWorkflowTests(TestCase):
             }
         )
 
-        prompt = system_agents._pr_followup_monitor_prompt(workflow, {}, observation)
+        prompt = pr_qa._pr_followup_monitor_prompt(workflow, {}, observation)
         formatted = pr_monitor_format._pr_handoff_for_monitor_schema(observation["pr"])
 
         self.assertIsNone(formatted["ci_status"])
@@ -5154,7 +5154,7 @@ class SpecCriticWorkflowTests(TestCase):
             ),
         ]
 
-        observation = system_agents._pr_monitor_observation_from_gh(workflow)
+        observation = pr_qa._pr_monitor_observation_from_gh(workflow)
 
         commands = [call.args[0] for call in mock_run.call_args_list]
         self.assertEqual(
@@ -5262,7 +5262,7 @@ class SpecCriticWorkflowTests(TestCase):
             ),
         ]
 
-        observation = system_agents._pr_monitor_observation_from_gh(workflow)
+        observation = pr_qa._pr_monitor_observation_from_gh(workflow)
 
         pr = observation["pr"]
         self.assertEqual(pr["ci_status"], "pending")
@@ -5478,7 +5478,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("Active PR: #169", mock_spawn.call_args.kwargs["prompt"])
         self.assertIn("name=lint", mock_spawn.call_args.kwargs["prompt"])
 
-    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
     def test_monitor_refreshes_gh_observation_after_agent_wait(
         self, mock_observe: MagicMock
     ) -> None:
@@ -5556,7 +5556,7 @@ class SpecCriticWorkflowTests(TestCase):
             mock_observe.assert_called_once_with(workflow)
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
     def test_monitor_uses_refreshed_gh_feedback_for_followup(
         self, mock_observe: MagicMock, mock_spawn: MagicMock
     ) -> None:
@@ -5709,7 +5709,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
     def test_monitor_reruns_when_refresh_has_unrelated_text(
         self,
         mock_observe: MagicMock,
@@ -5877,7 +5877,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
     def test_pending_backoff_preserves_current_monitor_feedback_until_gates_pass(
         self, mock_observe: MagicMock, mock_spawn: MagicMock
     ) -> None:
@@ -5981,7 +5981,7 @@ class SpecCriticWorkflowTests(TestCase):
             }
             workflow.save(update_fields=["state", "updated_at"])
 
-            refreshed = system_agents.refresh_due_pr_monitor_backoffs(
+            refreshed = pr_qa.refresh_due_pr_monitor_backoffs(
                 workflow_id=workflow.pk
             )
 
@@ -6005,7 +6005,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
     def test_clean_pending_backoff_reruns_monitor_when_feedback_appears(
         self,
         mock_observe: MagicMock,
@@ -6119,7 +6119,7 @@ class SpecCriticWorkflowTests(TestCase):
             }
             workflow.save(update_fields=["state", "updated_at"])
 
-            refreshed = system_agents.refresh_due_pr_monitor_backoffs(
+            refreshed = pr_qa.refresh_due_pr_monitor_backoffs(
                 workflow_id=workflow.pk
             )
 
@@ -6140,7 +6140,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
     def test_pending_backoff_reruns_monitor_when_feedback_observation_changes(
         self,
         mock_observe: MagicMock,
@@ -6255,7 +6255,7 @@ class SpecCriticWorkflowTests(TestCase):
             }
             workflow.save(update_fields=["state", "updated_at"])
 
-            refreshed = system_agents.refresh_due_pr_monitor_backoffs(
+            refreshed = pr_qa.refresh_due_pr_monitor_backoffs(
                 workflow_id=workflow.pk
             )
 
@@ -6286,7 +6286,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn_turn.assert_not_called()
 
     @patch(
-        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation({"head_sha": "newsha"}),
     )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
@@ -6397,7 +6397,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(commands[4][:3], ["gh", "pr", "view"])
 
     @patch(
-        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
     @patch("hitch.main.workflows.gh_cli.subprocess.run")
@@ -6543,7 +6543,7 @@ class SpecCriticWorkflowTests(TestCase):
             SimpleNamespace(returncode=0, stdout=json.dumps(refreshed_pr), stderr=""),
         ]
 
-        handoff = system_agents._open_or_find_pr_with_gh_cli(workflow)
+        handoff = pr_qa._open_or_find_pr_with_gh_cli(workflow)
 
         self.assertEqual(handoff["url"], "https://github.com/cberner/hitch/pull/169")
         self.assertEqual(handoff["head_sha"], "newsha")
@@ -6615,7 +6615,7 @@ class SpecCriticWorkflowTests(TestCase):
         ]
 
         with self.assertRaises(gh_cli._GhPrOpenError):
-            system_agents._open_or_find_pr_with_gh_cli(workflow)
+            pr_qa._open_or_find_pr_with_gh_cli(workflow)
 
         commands = [call.args[0] for call in mock_run.call_args_list]
         self.assertEqual(
@@ -6696,7 +6696,7 @@ class SpecCriticWorkflowTests(TestCase):
         )
 
     @patch(
-        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(
             {"pr_number": 174, "head": "followup", "head_sha": "followupsha"}
         ),
@@ -6870,7 +6870,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
 
     @patch(
-        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation({"ci_status": "pending"}),
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -6939,7 +6939,7 @@ class SpecCriticWorkflowTests(TestCase):
         _mock_observe.assert_called_once()
 
     @patch(
-        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(
             {
                 "review_signal": "approved",
@@ -6976,7 +6976,7 @@ class SpecCriticWorkflowTests(TestCase):
                 },
             )
 
-            refreshed = system_agents.refresh_due_pr_monitor_backoffs()
+            refreshed = pr_qa.refresh_due_pr_monitor_backoffs()
 
         self.assertEqual(refreshed, 1)
         mock_observe.assert_called_once()
@@ -6991,7 +6991,7 @@ class SpecCriticWorkflowTests(TestCase):
             ).exists()
         )
 
-    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
     def test_future_pr_monitor_backoff_does_not_poll_github(
         self, mock_observe: MagicMock
     ) -> None:
@@ -7019,13 +7019,13 @@ class SpecCriticWorkflowTests(TestCase):
                 },
             )
 
-            refreshed = system_agents.refresh_due_pr_monitor_backoffs()
+            refreshed = pr_qa.refresh_due_pr_monitor_backoffs()
 
         self.assertEqual(refreshed, 0)
         mock_observe.assert_not_called()
 
     @patch(
-        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(
             {
                 "review_signal": "approved",
@@ -7046,7 +7046,7 @@ class SpecCriticWorkflowTests(TestCase):
         )
 
         def observe_once(_workflow: SystemWorkflow) -> dict[str, object]:
-            self.assertEqual(system_agents.refresh_due_pr_monitor_backoffs(), 0)
+            self.assertEqual(pr_qa.refresh_due_pr_monitor_backoffs(), 0)
             return observation
 
         mock_observe.side_effect = observe_once
@@ -7075,7 +7075,7 @@ class SpecCriticWorkflowTests(TestCase):
                 },
             )
 
-            refreshed = system_agents.refresh_due_pr_monitor_backoffs()
+            refreshed = pr_qa.refresh_due_pr_monitor_backoffs()
 
         self.assertEqual(refreshed, 1)
         mock_observe.assert_called_once()
@@ -7084,7 +7084,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_PR_READY)
         self.assertNotIn(system_agents._PR_MONITOR_BACKOFF_STATE_KEY, workflow.state)
 
-    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
     def test_reconcile_does_not_poll_due_pr_monitor_backoff(
         self, mock_observe: MagicMock
     ) -> None:
@@ -7123,7 +7123,7 @@ class SpecCriticWorkflowTests(TestCase):
         backoff = workflow.state[system_agents._PR_MONITOR_BACKOFF_STATE_KEY]
         self.assertNotIn("claim_token", backoff)
 
-    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_missing_cwd_pr_monitor_backoff_blocks_after_retry_limit(
         self, mock_spawn: MagicMock, mock_observe: MagicMock
@@ -7152,7 +7152,7 @@ class SpecCriticWorkflowTests(TestCase):
             },
         )
 
-        refreshed = system_agents.refresh_due_pr_monitor_backoffs()
+        refreshed = pr_qa.refresh_due_pr_monitor_backoffs()
 
         self.assertEqual(refreshed, 1)
         mock_observe.assert_not_called()
@@ -7164,7 +7164,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
 
     @patch(
-        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
         side_effect=gh_cli._GhPrOpenError("auth failed"),
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
@@ -7196,7 +7196,7 @@ class SpecCriticWorkflowTests(TestCase):
                 },
             )
 
-            refreshed = system_agents.refresh_due_pr_monitor_backoffs()
+            refreshed = pr_qa.refresh_due_pr_monitor_backoffs()
 
         self.assertEqual(refreshed, 1)
         mock_observe.assert_called_once()
@@ -7526,7 +7526,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     def test_stop_active_workflow_blocks_pr_monitor_backoff_without_hidden_run(
         self, mock_spawn: MagicMock, mock_observe: MagicMock
@@ -7648,7 +7648,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.assert_called_once()
 
     @patch(
-        "hitch.main.workflows.system_agents._pr_monitor_observation_from_gh",
+        "hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh",
         return_value=_gh_monitor_observation(),
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -7703,7 +7703,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_observe.assert_called_once_with(workflow)
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.workflows.system_agents._spawn_pr_followup_monitor_run")
+    @patch("hitch.main.workflows.pr_qa._spawn_pr_followup_monitor_run")
     def test_reconcile_stale_pr_monitor_blocks_on_restart_failure(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -7743,7 +7743,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("failed to restart PR follow-up monitor", workflow.state["error"])
         self.assertIn("boom", workflow.state["error"])
 
-    @patch("hitch.main.workflows.system_agents._spawn_pr_followup_monitor_run")
+    @patch("hitch.main.workflows.pr_qa._spawn_pr_followup_monitor_run")
     def test_reconcile_stale_pr_monitor_waits_for_route_claimed_monitor(
         self, mock_spawn: MagicMock
     ) -> None:
@@ -7798,7 +7798,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_PR_MONITORING)
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents._handle_pr_qa_agent_finished")
+    @patch("hitch.main.workflows.pr_qa._handle_pr_qa_agent_finished")
     def test_system_agent_finish_claims_instance_before_routing(
         self, mock_route: MagicMock
     ) -> None:
@@ -7848,7 +7848,7 @@ class SpecCriticWorkflowTests(TestCase):
         cases = [
             (
                 CodexInstance.PURPOSE_SYSTEM_FEEDBACK,
-                "hitch.main.workflows.system_agents._handle_system_feedback_finished",
+                "hitch.main.workflows.pr_qa._handle_system_feedback_finished",
             ),
             (
                 CodexInstance.PURPOSE_USER,
@@ -7877,7 +7877,7 @@ class SpecCriticWorkflowTests(TestCase):
                 self.assertTrue(handled)
                 mock_handler.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents._handle_system_feedback_finished")
+    @patch("hitch.main.workflows.pr_qa._handle_system_feedback_finished")
     def test_reconcile_terminal_workflow_turn_clears_claim_when_routing_raises(
         self, mock_handler: MagicMock
     ) -> None:
@@ -7916,8 +7916,8 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(mock_handler.call_count, 2)
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.system_agents._spawn_pr_followup_monitor_run")
-    @patch("hitch.main.workflows.system_agents._spawn_pr_qa_run")
+    @patch("hitch.main.workflows.pr_qa._spawn_pr_followup_monitor_run")
+    @patch("hitch.main.workflows.pr_qa._spawn_pr_qa_run")
     def test_reconcile_terminal_workflow_turns_ignores_prior_completed_turn(
         self,
         mock_spawn_qa: MagicMock,
@@ -8092,7 +8092,7 @@ class SpecCriticWorkflowTests(TestCase):
             kwargs["prompt"],
         )
 
-    @patch("hitch.main.workflows.system_agents._spawn_pr_qa_run")
+    @patch("hitch.main.workflows.pr_qa._spawn_pr_qa_run")
     def test_completed_qa_feedback_clears_dead_worker_retry_state(
         self, mock_spawn_qa: MagicMock
     ) -> None:
@@ -8222,9 +8222,9 @@ class SpecCriticWorkflowTests(TestCase):
             kwargs["prompt"],
         )
 
-    @patch("hitch.main.workflows.system_agents._spawn_pr_followup_monitor_run")
+    @patch("hitch.main.workflows.pr_qa._spawn_pr_followup_monitor_run")
     @patch(
-        "hitch.main.workflows.system_agents._open_or_find_pr_with_gh_cli",
+        "hitch.main.workflows.pr_qa._open_or_find_pr_with_gh_cli",
         return_value={
             "url": "https://github.com/cberner/hitch/pull/169",
             "repository_full_name": "cberner/hitch",
@@ -8339,7 +8339,7 @@ class SpecCriticWorkflowTests(TestCase):
             status=CodexInstance.STATUS_RUNNING,
         )
 
-        started = system_agents.start_user_steering_turn(
+        started = pr_qa.start_user_steering_turn(
             workflow, prompt="  also update docs  "
         )
 
@@ -8397,7 +8397,7 @@ class SpecCriticWorkflowTests(TestCase):
             status=CodexInstance.STATUS_RUNNING,
         )
 
-        started = system_agents.start_user_steering_turn(
+        started = pr_qa.start_user_steering_turn(
             workflow, prompt="also update docs"
         )
 
@@ -8938,7 +8938,7 @@ class SpecCriticWorkflowTests(TestCase):
             },
         )
 
-        system_agents._merge_pr_handoff(
+        pr_qa._merge_pr_handoff(
             workflow, {"pr_number": 169, "latest_commit_sha": "new"}
         )
 
@@ -8967,7 +8967,7 @@ class SpecCriticWorkflowTests(TestCase):
             },
         )
 
-        system_agents._merge_pr_handoff(
+        pr_qa._merge_pr_handoff(
             workflow,
             {
                 "url": "https://github.com/cberner/hitch/pull/170",
@@ -9015,7 +9015,7 @@ class SpecCriticWorkflowTests(TestCase):
             },
         )
 
-        system_agents._merge_pr_handoff(
+        pr_qa._merge_pr_handoff(
             workflow,
             {
                 "url": "https://github.com/cberner/hitch/pull/171",
@@ -14518,7 +14518,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             "proposed",
         )
 
-    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     def test_draft_pr_implementation_completion_records_pr_workflow(
         self, mock_start: MagicMock
     ) -> None:
@@ -14559,7 +14559,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             proposal.outcome_metadata["auto_pr_workflow_id"], pr_workflow.pk
         )
 
-    @patch("hitch.main.workflows.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.workflows.pr_qa.start_pr_qa_workflow")
     def test_auto_qa_implementation_completion_records_qa_workflow(
         self, mock_start: MagicMock
     ) -> None:

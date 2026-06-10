@@ -25,7 +25,7 @@ from hitch.main.runtime.sdk_values import (
     value_for,
 )
 from hitch.main.sessions.entry_render import find_final_agent_idx, user_message_text
-from hitch.main.workflows import pr_stage, pr_stage_refresh_state, system_agents
+from hitch.main.workflows import pr_qa, pr_stage, pr_stage_refresh_state, system_agents
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +158,7 @@ def _workflow_pr_handoff_survives_lifecycle(
     *,
     main_updated_at: Any,
 ) -> bool:
-    handoff = system_agents.pr_handoff_for_workflow(workflow)
+    handoff = pr_qa.pr_handoff_for_workflow(workflow)
     handoff_identity = _pr_snapshot_identity(handoff)
     if handoff_identity is None:
         return False
@@ -284,7 +284,7 @@ def _current_pr_url_for_thread(
         thread_url = latest_pr_url if latest_pr_url_loaded else _pr_url_for_thread(thread)
         if thread_url:
             return thread_url
-    workflow_handoff = system_agents.pr_handoff_for_workflow(stage_pr_workflow)
+    workflow_handoff = pr_qa.pr_handoff_for_workflow(stage_pr_workflow)
     workflow_url = string_value(workflow_handoff.get("url"))
     if workflow_url:
         return workflow_url

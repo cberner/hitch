@@ -39,7 +39,7 @@ from hitch.main.sessions.session_pr_plan import (
     _pr_snapshot_identity,
     _workflow_after_main_lifecycle,
 )
-from hitch.main.workflows import pr_stage, system_agents
+from hitch.main.workflows import pr_qa, pr_stage
 
 logger = logging.getLogger(__name__)
 
@@ -117,26 +117,26 @@ def _refresh_session_pr_stage(session_id: str) -> None:
     )
     if (
         stage_pr_workflow is not None
-        and system_agents.pr_monitor_backoff_stage_refresh_due(stage_pr_workflow)
+        and pr_qa.pr_monitor_backoff_stage_refresh_due(stage_pr_workflow)
     ):
-        system_agents.refresh_due_pr_monitor_backoffs(
+        pr_qa.refresh_due_pr_monitor_backoffs(
             limit=1, workflow_id=stage_pr_workflow.pk
         )
         return
     if stage_pr_workflow is not None:
-        system_agents.refreshed_pr_handoff_for_stage(stage_pr_workflow)
+        pr_qa.refreshed_pr_handoff_for_stage(stage_pr_workflow)
         return
     snapshot = pr_observation.snapshot
     if metadata is None or snapshot is None or rollout_state is None:
         return
-    if not system_agents.pr_snapshot_stage_refresh_due(
+    if not pr_qa.pr_snapshot_stage_refresh_due(
         cwd=metadata.cwd,
         snapshot=snapshot,
         attempted_at=metadata.derived_stage_pr_refresh_attempted_at,
     ):
         return
     pr_stage._mark_cached_pr_stage_refresh_attempt(session_id)
-    refreshed = system_agents.refreshed_pr_snapshot_for_stage(
+    refreshed = pr_qa.refreshed_pr_snapshot_for_stage(
         cwd=metadata.cwd, snapshot=snapshot
     )
     stage = session_stage.derive_stage(pr_snapshot=refreshed)
@@ -213,20 +213,20 @@ def _attach_session_stage_context(sessions: list[dict[str, Any]]) -> None:
         # Serve the last-known PR stage now; when a gh refresh is due, flag the
         # badge as refreshing and do the actual refresh off-request so the page
         # is not blocked on a ``gh`` call (the result lands on a later render).
-        workflow_pr_snapshot = system_agents.pr_handoff_for_workflow(stage_workflow)
+        workflow_pr_snapshot = pr_qa.pr_handoff_for_workflow(stage_workflow)
         # Only the PR stage gets the refreshing badge: an active worker or a
         # waiting-for-input row shows its own stage, and flagging that refreshing
         # would schedule a needless worker and reload.
         pr_stage_displayed = active_instance is None and not awaiting_user_input
         refresh_due = pr_stage_displayed and (
-            system_agents.pr_handoff_stage_refresh_due(stage_workflow)
-            or system_agents.pr_monitor_backoff_stage_refresh_due(stage_workflow)
+            pr_qa.pr_handoff_stage_refresh_due(stage_workflow)
+            or pr_qa.pr_monitor_backoff_stage_refresh_due(stage_workflow)
         )
         if (
             pr_stage_displayed
             and stage_workflow is None
             and log_pr_snapshot is not None
-            and system_agents.pr_snapshot_stage_refresh_due(
+            and pr_qa.pr_snapshot_stage_refresh_due(
                 cwd=string_value(session.get("cwd")),
                 snapshot=log_pr_snapshot,
                 attempted_at=datetime_value(
@@ -309,7 +309,7 @@ def _stage_from_cached_session_row(
     refreshing = False
     if cached_stage.key == session_stage.PR.key:
         pr_snapshot = _pr_snapshot_for_rollout_path(rollout_state.path)
-        if pr_snapshot is not None and system_agents.pr_snapshot_stage_refresh_due(
+        if pr_snapshot is not None and pr_qa.pr_snapshot_stage_refresh_due(
             cwd=string_value(session.get("cwd")),
             snapshot=pr_snapshot,
             attempted_at=datetime_value(session.get("stage_pr_refresh_attempted_at")),
