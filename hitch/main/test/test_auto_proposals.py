@@ -51,7 +51,7 @@ class AutoProposalSchedulerTests(SimpleTestCase):
         self.assertTrue(auto_proposals._auto_proposal_scheduler_enabled())
 
     @patch(
-        "hitch.main.goals.auto_proposals.system_agents.maybe_start_auto_proposal_workflows",
+        "hitch.main.goals.auto_proposals.autonomous_goals.maybe_start_auto_proposal_workflows",
         return_value=2,
     )
     @patch("hitch.main.goals.auto_proposals._refresh_unarchived_session_state_best_effort")
@@ -69,7 +69,7 @@ class AutoProposalSchedulerTests(SimpleTestCase):
         mock_start.assert_called_once_with()
 
     @patch("hitch.main.goals.auto_proposals.logger.exception")
-    @patch("hitch.main.goals.auto_proposals.system_agents.maybe_start_auto_proposal_workflows")
+    @patch("hitch.main.goals.auto_proposals.autonomous_goals.maybe_start_auto_proposal_workflows")
     @patch("hitch.main.goals.auto_proposals._refresh_unarchived_session_state_best_effort")
     @patch("hitch.main.goals.auto_proposals.codex_pool.reconcile_dead")
     def test_scheduler_tick_keeps_running_after_errors(

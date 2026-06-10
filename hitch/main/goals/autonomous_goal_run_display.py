@@ -31,7 +31,7 @@ from hitch.main.sessions.session_settings import (
     _project_for_proposed_session,
 )
 from hitch.main.sessions.settings_cookies import _MAX_BIGAUTOFIELD
-from hitch.main.workflows import system_agents
+from hitch.main.workflows import autonomous_goals, system_agents
 
 AutonomousGoalRunState = Literal[
     "blocked",
@@ -76,13 +76,13 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
     )
     auto_proposals_paused_by_quota = (
         any(goal.auto_proposal_enabled for goal in goals)
-        and system_agents._auto_proposals_paused_by_usage_quota_throttled()
+        and autonomous_goals._auto_proposals_paused_by_usage_quota_throttled()
     )
     workflows = (
         SystemWorkflow.objects.filter(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
             main_thread_id__in=[
-                system_agents._autonomous_goal_main_thread_id(goal_id)
+                autonomous_goals._autonomous_goal_main_thread_id(goal_id)
                 for goal_id in goal_ids
             ],
         )
@@ -98,7 +98,7 @@ def _attach_autonomous_goal_run_state(goals: list[AutonomousGoal]) -> None:
     )
     for goal in goals:
         latest_workflow = workflows_by_thread.get(
-            system_agents._autonomous_goal_main_thread_id(goal.pk)
+            autonomous_goals._autonomous_goal_main_thread_id(goal.pk)
         )
         goal.run_running = (  # type: ignore[attr-defined]
             latest_workflow is not None
@@ -241,7 +241,7 @@ def _autonomous_goal_no_change_ids(
             or not last_no_proposal_sha
         ):
             continue
-        current_sha = system_agents._autonomous_goal_auto_proposal_base_sha(goal)
+        current_sha = autonomous_goals._autonomous_goal_auto_proposal_base_sha(goal)
         if current_sha == last_no_proposal_sha:
             no_change_goal_ids.add(goal.pk)
     return no_change_goal_ids
@@ -449,7 +449,7 @@ def _autonomous_goal_recorded_thread_tokens(
     workflow: SystemWorkflow, instance: CodexInstance
 ) -> int:
     token_totals = workflow.state.get(
-        system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY
+        autonomous_goals._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY
     )
     if not isinstance(token_totals, dict):
         return 0
