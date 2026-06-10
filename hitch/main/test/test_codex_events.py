@@ -4,7 +4,7 @@ from pathlib import Path
 
 from django.test import SimpleTestCase
 
-from hitch.main import codex_events
+from hitch.main.runtime import codex_events
 
 
 def _event(

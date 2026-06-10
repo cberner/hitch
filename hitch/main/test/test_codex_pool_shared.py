@@ -16,7 +16,7 @@ from unittest import mock
 from django.test import SimpleTestCase, override_settings
 from openai_codex import TransportClosedError
 
-from hitch.main import codex_pool
+from hitch.main.runtime import codex_pool
 
 _LOCKED = "app-server closed stdout. stderr_tail=... (code: 5) database is locked"
 
@@ -418,7 +418,7 @@ class CodexPoolKeepaliveTests(SimpleTestCase):
             mock.patch.object(
                 codex_pool, "_codex_pool_keepalive_enabled", return_value=True
             ),
-            mock.patch("hitch.main.server_lifecycle.threading.Thread") as thread_cls,
+            mock.patch("hitch.main.runtime.server_lifecycle.threading.Thread") as thread_cls,
         ):
             started = codex_pool.start_codex_pool_keepalive()
             # Idempotent: a second call does not start another thread.
@@ -431,22 +431,22 @@ class CodexPoolKeepaliveTests(SimpleTestCase):
 
     @override_settings(TESTING=False)
     def test_keepalive_enabled_only_for_server_processes(self) -> None:
-        with mock.patch("hitch.main.codex_pool.sys.argv", ["manage.py", "test"]):
+        with mock.patch("hitch.main.runtime.codex_pool.sys.argv", ["manage.py", "test"]):
             self.assertFalse(codex_pool._codex_pool_keepalive_enabled())
-        with mock.patch("hitch.main.codex_pool.sys.argv", ["gunicorn", "hitch.wsgi"]):
+        with mock.patch("hitch.main.runtime.codex_pool.sys.argv", ["gunicorn", "hitch.wsgi"]):
             self.assertTrue(codex_pool._codex_pool_keepalive_enabled())
         with (
             mock.patch.dict(os.environ, {}, clear=True),
-            mock.patch("hitch.main.codex_pool.sys.argv", ["manage.py", "runserver"]),
+            mock.patch("hitch.main.runtime.codex_pool.sys.argv", ["manage.py", "runserver"]),
         ):
             self.assertFalse(codex_pool._codex_pool_keepalive_enabled())
         with (
             mock.patch.dict(os.environ, {"RUN_MAIN": "true"}, clear=True),
-            mock.patch("hitch.main.codex_pool.sys.argv", ["manage.py", "runserver"]),
+            mock.patch("hitch.main.runtime.codex_pool.sys.argv", ["manage.py", "runserver"]),
         ):
             self.assertTrue(codex_pool._codex_pool_keepalive_enabled())
         with mock.patch(
-            "hitch.main.codex_pool.sys.argv",
+            "hitch.main.runtime.codex_pool.sys.argv",
             ["manage.py", "runserver", "--noreload"],
         ):
             self.assertTrue(codex_pool._codex_pool_keepalive_enabled())

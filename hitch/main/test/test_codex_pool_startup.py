@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 from django.test import SimpleTestCase, override_settings
 from openai_codex import TransportClosedError
 
-from hitch.main import codex_pool
+from hitch.main.runtime import codex_pool
 
 _LOCKED = "app-server closed stdout. stderr_tail=... (code: 5) database is locked"
 
@@ -32,7 +32,7 @@ class StartCodexWithRetryTests(SimpleTestCase):
     def test_returns_immediately_on_clean_start(self) -> None:
         sentinel = object()
         factory = MagicMock(return_value=sentinel)
-        with patch("hitch.main.codex_pool.time.sleep") as mock_sleep:
+        with patch("hitch.main.runtime.codex_pool.time.sleep") as mock_sleep:
             result = codex_pool._start_codex_with_retry(factory)
 
         self.assertIs(result, sentinel)
@@ -48,7 +48,7 @@ class StartCodexWithRetryTests(SimpleTestCase):
                 sentinel,
             ]
         )
-        with patch("hitch.main.codex_pool.time.sleep") as mock_sleep:
+        with patch("hitch.main.runtime.codex_pool.time.sleep") as mock_sleep:
             result = codex_pool._start_codex_with_retry(factory)
 
         self.assertIs(result, sentinel)
@@ -60,7 +60,7 @@ class StartCodexWithRetryTests(SimpleTestCase):
         boom = TransportClosedError("app-server closed stdout. stderr_tail=segfault")
         factory = MagicMock(side_effect=boom)
         with (
-            patch("hitch.main.codex_pool.time.sleep"),
+            patch("hitch.main.runtime.codex_pool.time.sleep"),
             self.assertRaises(TransportClosedError),
         ):
             codex_pool._start_codex_with_retry(factory)
@@ -70,7 +70,7 @@ class StartCodexWithRetryTests(SimpleTestCase):
     def test_reraises_after_exhausting_attempts(self) -> None:
         factory = MagicMock(side_effect=TransportClosedError(_LOCKED))
         with (
-            patch("hitch.main.codex_pool.time.sleep"),
+            patch("hitch.main.runtime.codex_pool.time.sleep"),
             self.assertRaises(TransportClosedError),
         ):
             codex_pool._start_codex_with_retry(factory)
@@ -93,7 +93,7 @@ class RunCodexOpWithRetryTests(SimpleTestCase):
         codex = _FakeCodex()
         factory = MagicMock(return_value=codex)
         operation = MagicMock(return_value="ok")
-        with patch("hitch.main.codex_pool.time.sleep") as mock_sleep:
+        with patch("hitch.main.runtime.codex_pool.time.sleep") as mock_sleep:
             result = codex_pool.run_codex_op_with_retry(factory, operation)
 
         self.assertEqual(result, "ok")
@@ -119,7 +119,7 @@ class RunCodexOpWithRetryTests(SimpleTestCase):
                 raise TransportClosedError(_LOCKED)
             return "ok"
 
-        with patch("hitch.main.codex_pool.time.sleep") as mock_sleep:
+        with patch("hitch.main.runtime.codex_pool.time.sleep") as mock_sleep:
             result = codex_pool.run_codex_op_with_retry(
                 cast("Callable[[], Any]", factory), operation
             )
@@ -138,7 +138,7 @@ class RunCodexOpWithRetryTests(SimpleTestCase):
             side_effect=TransportClosedError("app-server closed stdout. crash")
         )
         with (
-            patch("hitch.main.codex_pool.time.sleep"),
+            patch("hitch.main.runtime.codex_pool.time.sleep"),
             self.assertRaises(TransportClosedError),
         ):
             codex_pool.run_codex_op_with_retry(factory, operation)
@@ -152,7 +152,7 @@ class RunCodexOpWithRetryTests(SimpleTestCase):
         factory = MagicMock(side_effect=TransportClosedError(_LOCKED))
         operation = MagicMock()
         with (
-            patch("hitch.main.codex_pool.time.sleep"),
+            patch("hitch.main.runtime.codex_pool.time.sleep"),
             self.assertRaises(TransportClosedError),
         ):
             codex_pool.run_codex_op_with_retry(factory, operation)
@@ -165,7 +165,7 @@ class RunCodexOpWithRetryTests(SimpleTestCase):
         factory = MagicMock(return_value=codex)
         operation = MagicMock(side_effect=ValueError("boom"))
         with (
-            patch("hitch.main.codex_pool.time.sleep"),
+            patch("hitch.main.runtime.codex_pool.time.sleep"),
             self.assertRaises(ValueError),
         ):
             codex_pool.run_codex_op_with_retry(factory, operation)
@@ -176,7 +176,7 @@ class RunCodexOpWithRetryTests(SimpleTestCase):
         factory = MagicMock(side_effect=lambda: _FakeCodex())
         operation = MagicMock(side_effect=TransportClosedError(_LOCKED))
         with (
-            patch("hitch.main.codex_pool.time.sleep"),
+            patch("hitch.main.runtime.codex_pool.time.sleep"),
             self.assertRaises(TransportClosedError),
         ):
             codex_pool.run_codex_op_with_retry(factory, operation)
@@ -231,7 +231,7 @@ class OpenCodexResumedTests(SimpleTestCase):
 
         configured: list[object] = []
         with (
-            patch("hitch.main.codex_pool.time.sleep") as mock_sleep,
+            patch("hitch.main.runtime.codex_pool.time.sleep") as mock_sleep,
             codex_pool.open_codex_resumed(
                 cast("Callable[[], Any]", factory),
                 thread_id="t1",
@@ -251,7 +251,7 @@ class OpenCodexResumedTests(SimpleTestCase):
     def test_non_locked_resume_error_is_not_retried(self) -> None:
         codex = _ResumableCodex(fail_times=1, error=TransportClosedError("crash"))
         with (
-            patch("hitch.main.codex_pool.time.sleep"),
+            patch("hitch.main.runtime.codex_pool.time.sleep"),
             self.assertRaises(TransportClosedError),
             codex_pool.open_codex_resumed(
                 cast("Callable[[], Any]", lambda: codex), thread_id="t1"
@@ -264,7 +264,7 @@ class OpenCodexResumedTests(SimpleTestCase):
     def test_locked_worker_construction_uses_worker_retry_budget(self) -> None:
         factory = MagicMock(side_effect=TransportClosedError(_LOCKED))
         with (
-            patch("hitch.main.codex_pool.time.sleep"),
+            patch("hitch.main.runtime.codex_pool.time.sleep"),
             self.assertRaises(TransportClosedError),
             codex_pool.open_codex_resumed(
                 cast("Callable[[], Any]", factory), thread_id="t1"
@@ -290,7 +290,7 @@ class OpenCodexResumedTests(SimpleTestCase):
             return server
 
         with (
-            patch("hitch.main.codex_pool.time.sleep"),
+            patch("hitch.main.runtime.codex_pool.time.sleep"),
             self.assertRaises(TransportClosedError),
             codex_pool.open_codex_resumed(
                 cast("Callable[[], Any]", factory), thread_id="t1"
@@ -322,8 +322,8 @@ class ReconcileDeadIfDueTests(SimpleTestCase):
     @override_settings(TESTING=False)
     def test_runs_sweep_when_claim_wins(self) -> None:
         with (
-            patch("hitch.main.codex_pool.reconcile_dead", return_value=3) as sweep,
-            patch("hitch.main.codex_pool.rate_limit.claim", return_value=True) as claim,
+            patch("hitch.main.runtime.codex_pool.reconcile_dead", return_value=3) as sweep,
+            patch("hitch.main.runtime.codex_pool.rate_limit.claim", return_value=True) as claim,
         ):
             self.assertEqual(codex_pool.reconcile_dead_if_due(), 3)
         sweep.assert_called_once_with()
@@ -332,8 +332,8 @@ class ReconcileDeadIfDueTests(SimpleTestCase):
     @override_settings(TESTING=False)
     def test_skips_sweep_when_claim_loses(self) -> None:
         with (
-            patch("hitch.main.codex_pool.reconcile_dead") as sweep,
-            patch("hitch.main.codex_pool.rate_limit.claim", return_value=False),
+            patch("hitch.main.runtime.codex_pool.reconcile_dead") as sweep,
+            patch("hitch.main.runtime.codex_pool.rate_limit.claim", return_value=False),
         ):
             self.assertEqual(codex_pool.reconcile_dead_if_due(), 0)
         sweep.assert_not_called()
@@ -341,8 +341,8 @@ class ReconcileDeadIfDueTests(SimpleTestCase):
     @override_settings(TESTING=True)
     def test_always_sweeps_under_testing(self) -> None:
         with (
-            patch("hitch.main.codex_pool.reconcile_dead", return_value=1) as sweep,
-            patch("hitch.main.codex_pool.rate_limit.claim") as claim,
+            patch("hitch.main.runtime.codex_pool.reconcile_dead", return_value=1) as sweep,
+            patch("hitch.main.runtime.codex_pool.rate_limit.claim") as claim,
         ):
             self.assertEqual(codex_pool.reconcile_dead_if_due(), 1)
         sweep.assert_called_once_with()

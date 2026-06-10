@@ -17,7 +17,7 @@ from django.utils import timezone
 from openai_codex import Codex
 from openai_codex.errors import AppServerError
 
-from hitch.main import codex_events, demo
+from hitch.main import demo
 from hitch.main.diffs import DiffFile, DiffLine, DiffView
 from hitch.main.models import (
     CodexInstance,
@@ -27,6 +27,7 @@ from hitch.main.models import (
     SystemAgentRun,
     SystemWorkflow,
 )
+from hitch.main.runtime import codex_events
 from hitch.main.sessions.entry_render import tool_call_detail, tool_call_status
 from hitch.main.sessions.session_pr_plan import (
     _pr_snapshot_for_thread,
@@ -448,7 +449,7 @@ class SessionViewTests(TestCase):
     def setUp(self) -> None:
         super().setUp()
         patcher = patch(
-            "hitch.main.codex_pool.worker_is_alive",
+            "hitch.main.runtime.codex_pool.worker_is_alive",
             side_effect=_worker_is_live_for_test,
         )
         patcher.start()
@@ -2874,7 +2875,7 @@ class SessionViewActiveWorkerTests(TestCase):
     def setUp(self) -> None:
         super().setUp()
         patcher = patch(
-            "hitch.main.codex_pool.worker_is_alive",
+            "hitch.main.runtime.codex_pool.worker_is_alive",
             side_effect=_worker_is_live_for_test,
         )
         patcher.start()

@@ -4,8 +4,8 @@ from typing import Any, override
 
 from django.core.management.base import BaseCommand, CommandError, CommandParser
 
-from hitch.main import codex_pool
 from hitch.main.models import Project
+from hitch.main.runtime import codex_pool
 from hitch.main.workflows import system_agents
 
 

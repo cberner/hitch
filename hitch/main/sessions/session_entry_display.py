@@ -13,13 +13,14 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from hitch.main import codex_events, codex_pool, demo, rollout, streaming
+from hitch.main import demo
 from hitch.main.formatting import render_markdown
 from hitch.main.models import (
     CodexInstance,
     SystemAgentRun,
     SystemWorkflow,
 )
+from hitch.main.runtime import codex_events, codex_pool, rollout, streaming
 from hitch.main.sessions.entry_render import (
     collapse_flat_entries,
     render_entries,

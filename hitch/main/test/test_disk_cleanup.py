@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
-from hitch.main import demo, disk_cleanup
+from hitch.main import demo
 from hitch.main.models import (
     CodexInstance,
     GlobalSettings,
@@ -19,6 +19,7 @@ from hitch.main.models import (
     SessionMetadata,
     SystemWorkflow,
 )
+from hitch.main.runtime import disk_cleanup
 
 
 class DiskCleanupTests(TestCase):
@@ -67,10 +68,10 @@ class DiskCleanupTests(TestCase):
                 HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=20,
             ),
             patch(
-                "hitch.main.disk_cleanup.shutil.disk_usage",
+                "hitch.main.runtime.disk_cleanup.shutil.disk_usage",
                 return_value=SimpleNamespace(total=1000, used=used),
             ),
-            patch("hitch.main.disk_cleanup._directory_size", side_effect=sizes),
+            patch("hitch.main.runtime.disk_cleanup._directory_size", side_effect=sizes),
         ):
             return disk_cleanup.cleanup_hitch_disk_usage_if_needed()
 
@@ -86,12 +87,12 @@ class DiskCleanupTests(TestCase):
         self.assertEqual(disk_cleanup._max_allowed_percent(), 35.5)
 
     @override_settings(HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=35)
-    @patch("hitch.main.disk_cleanup.logger.exception")
+    @patch("hitch.main.runtime.disk_cleanup.logger.exception")
     def test_max_allowed_percent_falls_back_when_saved_global_read_fails(
         self, mock_log_exception: MagicMock
     ) -> None:
         with patch(
-            "hitch.main.disk_cleanup.GlobalSettings.objects.filter",
+            "hitch.main.runtime.disk_cleanup.GlobalSettings.objects.filter",
             side_effect=RuntimeError("database unavailable"),
         ):
             self.assertEqual(disk_cleanup._max_allowed_percent(), 35.0)
@@ -101,7 +102,7 @@ class DiskCleanupTests(TestCase):
         )
 
     @override_settings(HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=35)
-    @patch("hitch.main.disk_cleanup.logger.warning")
+    @patch("hitch.main.runtime.disk_cleanup.logger.warning")
     def test_invalid_saved_global_max_allowed_percent_uses_default(
         self, mock_warning: MagicMock
     ) -> None:
@@ -122,7 +123,7 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
         ):
@@ -165,7 +166,7 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
         ):
@@ -197,9 +198,9 @@ class DiskCleanupTests(TestCase):
     def test_partition_prefilter_skips_walk_when_under_limit(self) -> None:
         with (
             tempfile.TemporaryDirectory() as raw,
-            patch("hitch.main.disk_cleanup._directory_size") as mock_size,
+            patch("hitch.main.runtime.disk_cleanup._directory_size") as mock_size,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
             ) as mock_cleanup,
         ):
             root = Path(raw)
@@ -214,7 +215,7 @@ class DiskCleanupTests(TestCase):
                     HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=20,
                 ),
                 patch(
-                    "hitch.main.disk_cleanup.shutil.disk_usage",
+                    "hitch.main.runtime.disk_cleanup.shutil.disk_usage",
                     return_value=SimpleNamespace(total=1000, used=200),
                 ),
             ):
@@ -228,11 +229,11 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 side_effect=[False, True],
             ) as mock_cleanup,
             patch(
-                "hitch.main.disk_cleanup._directory_size",
+                "hitch.main.runtime.disk_cleanup._directory_size",
                 side_effect=[300, 150, 150],
             ) as mock_size,
         ):
@@ -263,7 +264,7 @@ class DiskCleanupTests(TestCase):
                     HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=20,
                 ),
                 patch(
-                    "hitch.main.disk_cleanup.shutil.disk_usage",
+                    "hitch.main.runtime.disk_cleanup.shutil.disk_usage",
                     return_value=SimpleNamespace(total=1000, used=1000),
                 ),
             ):
@@ -280,11 +281,11 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
             patch(
-                "hitch.main.disk_cleanup._directory_size",
+                "hitch.main.runtime.disk_cleanup._directory_size",
                 side_effect=[500, 125, 125, 125, 125, 200],
             ) as mock_size,
         ):
@@ -311,7 +312,7 @@ class DiskCleanupTests(TestCase):
                     HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=20,
                 ),
                 patch(
-                    "hitch.main.disk_cleanup.shutil.disk_usage",
+                    "hitch.main.runtime.disk_cleanup.shutil.disk_usage",
                     return_value=SimpleNamespace(total=1000, used=1000),
                 ),
             ):
@@ -328,7 +329,7 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
         ):
@@ -361,7 +362,7 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
         ):
@@ -428,14 +429,14 @@ class DiskCleanupTests(TestCase):
                     HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=20,
                 ),
                 patch(
-                    "hitch.main.disk_cleanup.shutil.disk_usage",
+                    "hitch.main.runtime.disk_cleanup.shutil.disk_usage",
                     return_value=SimpleNamespace(
                         total=limit_bytes * 5,
                         used=limit_bytes * 5,
                     ),
                 ),
                 patch(
-                    "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                    "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                     side_effect=cleanup_path,
                 ),
             ):
@@ -451,14 +452,14 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 side_effect=[WorktreeCleanupError("boom"), True],
             ) as mock_cleanup,
             patch(
-                "hitch.main.disk_cleanup._directory_size",
+                "hitch.main.runtime.disk_cleanup._directory_size",
                 side_effect=[300, 150, 150],
             ) as mock_size,
-            patch("hitch.main.disk_cleanup.logger.exception"),
+            patch("hitch.main.runtime.disk_cleanup.logger.exception"),
         ):
             root = Path(raw)
             hitch_home = root / ".hitch"
@@ -487,7 +488,7 @@ class DiskCleanupTests(TestCase):
                     HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT=20,
                 ),
                 patch(
-                    "hitch.main.disk_cleanup.shutil.disk_usage",
+                    "hitch.main.runtime.disk_cleanup.shutil.disk_usage",
                     return_value=SimpleNamespace(total=1000, used=1000),
                 ),
             ):
@@ -504,7 +505,7 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
         ):
@@ -530,7 +531,7 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
         ):
@@ -559,7 +560,7 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
         ):
@@ -588,7 +589,7 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
         ):
@@ -618,7 +619,7 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
         ):
@@ -649,7 +650,7 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
         ):
@@ -682,7 +683,7 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
         ):
@@ -699,7 +700,7 @@ class DiskCleanupTests(TestCase):
                 / f"{old_created_at.strftime('%Y%m%d%H%M%S')}-abcdef12"
             )
             with patch(
-                "hitch.main.disk_cleanup.discover_managed_worktrees",
+                "hitch.main.runtime.disk_cleanup.discover_managed_worktrees",
                 return_value=[orphan_path],
             ):
                 cleaned = self._run_cleanup(
@@ -717,7 +718,7 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
         ):
@@ -743,7 +744,7 @@ class DiskCleanupTests(TestCase):
             )
             self._session(thread_id="visible", cwd=metadata_path)
             with patch(
-                "hitch.main.disk_cleanup.discover_managed_worktrees",
+                "hitch.main.runtime.disk_cleanup.discover_managed_worktrees",
                 return_value=[
                     outside_path,
                     Path(metadata_path),
@@ -765,7 +766,7 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
         ):
@@ -777,7 +778,7 @@ class DiskCleanupTests(TestCase):
                 / f"{timezone.now().strftime('%Y%m%d%H%M%S')}-abcdef12"
             )
             with patch(
-                "hitch.main.disk_cleanup.discover_managed_worktrees",
+                "hitch.main.runtime.disk_cleanup.discover_managed_worktrees",
                 return_value=[orphan_path],
             ):
                 cleaned = self._run_cleanup(
@@ -793,7 +794,7 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
         ):
@@ -817,7 +818,7 @@ class DiskCleanupTests(TestCase):
                 status=CodexInstance.STATUS_RUNNING,
             )
             with patch(
-                "hitch.main.disk_cleanup.discover_managed_worktrees",
+                "hitch.main.runtime.disk_cleanup.discover_managed_worktrees",
                 return_value=[orphan_path],
             ):
                 cleaned = self._run_cleanup(
@@ -833,7 +834,7 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
         ):
@@ -882,7 +883,7 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
         ):
@@ -913,7 +914,7 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
         ):
@@ -945,7 +946,7 @@ class DiskCleanupTests(TestCase):
         with (
             tempfile.TemporaryDirectory() as raw,
             patch(
-                "hitch.main.disk_cleanup.cleanup_managed_worktree_path",
+                "hitch.main.runtime.disk_cleanup.cleanup_managed_worktree_path",
                 return_value=True,
             ) as mock_cleanup,
         ):

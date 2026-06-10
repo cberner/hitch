@@ -19,7 +19,6 @@ from django.conf import settings
 from django.db.models import Q, QuerySet
 from django.utils import timezone
 
-from hitch.main import codex_pool, disk_cleanup, host_probes
 from hitch.main.context_processors import server_git_hash
 from hitch.main.models import (
     ApprovalRequest,
@@ -28,6 +27,7 @@ from hitch.main.models import (
     SystemWorkflow,
     UserInputRequest,
 )
+from hitch.main.runtime import codex_pool, disk_cleanup, host_probes
 from hitch.main.workflows import system_agents
 from hitch.main.worktrees import discover_managed_worktrees
 

@@ -18,8 +18,8 @@ from django.test import TestCase, override_settings, tag
 from django.urls import reverse
 from openai_codex import AppServerConfig, Codex
 
-from hitch.main import codex_pool
 from hitch.main.models import CodexInstance
+from hitch.main.runtime import codex_pool
 
 
 @contextmanager
@@ -95,7 +95,7 @@ class CodexIntegrationTests(TestCase):
         with (
             _fresh_codex_home(),
             patch(
-                "hitch.main.codex_pool._launch_worker_process",
+                "hitch.main.runtime.codex_pool._launch_worker_process",
                 return_value=type("_Stub", (), {"pid": 1})(),
             ),
         ):
@@ -131,7 +131,7 @@ class CodexIntegrationTests(TestCase):
                 override_settings(CODEX_EVENTS_DIR=Path(events_dir)),
                 patch("hitch.main.repos.discover_repos", return_value=[Path(repo)]),
                 patch(
-                    "hitch.main.codex_pool._launch_worker_process",
+                    "hitch.main.runtime.codex_pool._launch_worker_process",
                     return_value=SimpleNamespace(pid=4321),
                 ) as mock_launch,
             ):

@@ -6,8 +6,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from hitch.main import rollout
 from hitch.main.models import CodexInstance, SystemWorkflow
+from hitch.main.runtime import rollout
 from hitch.main.workflows import system_agents
 
 

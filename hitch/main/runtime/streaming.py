@@ -27,8 +27,7 @@ from typing import Any
 
 from django.db import close_old_connections
 
-from hitch.main import codex_events, codex_pool, formatting
-from hitch.main.db import run_ignoring_database_locks
+from hitch.main import formatting
 from hitch.main.models import (
     CodexInstance,
     SessionDemo,
@@ -36,6 +35,8 @@ from hitch.main.models import (
     SystemWorkflow,
     UserInputRequest,
 )
+from hitch.main.runtime import codex_events, codex_pool
+from hitch.main.runtime.db import run_ignoring_database_locks
 from hitch.main.workflows import system_agents
 
 # Cadence at which we re-poll the events file when it has no new bytes. Short

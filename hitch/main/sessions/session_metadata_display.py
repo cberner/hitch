@@ -22,7 +22,7 @@ from hitch.main.models import (
     SystemAgentRun,
     SystemWorkflow,
 )
-from hitch.main.sdk_values import latest_updated_at, updated_at_seconds
+from hitch.main.runtime.sdk_values import latest_updated_at, updated_at_seconds
 from hitch.main.sessions import session_index
 from hitch.main.sessions.session_cursor import _index_cursor_for_sort_key, _IndexCursor
 from hitch.main.sessions.system_agent_summary import (

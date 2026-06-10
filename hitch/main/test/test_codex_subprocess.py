@@ -48,7 +48,7 @@ from openai_codex.generated.v2_all import (
 from openai_codex.models import Notification
 from pydantic import BaseModel
 
-from hitch.main import codex_events, codex_pool, coding_agents, demo, formatting, streaming
+from hitch.main import coding_agents, demo, formatting
 from hitch.main.management.commands import codex_worker as codex_worker_module
 from hitch.main.management.commands.codex_worker import (
     _DEFAULT_COLLABORATION_INSTRUCTIONS,
@@ -67,6 +67,7 @@ from hitch.main.models import (
     SystemWorkflow,
     UserInputRequest,
 )
+from hitch.main.runtime import codex_events, codex_pool, streaming
 
 
 def _events_dir() -> tempfile.TemporaryDirectory[str]:
@@ -181,8 +182,8 @@ class SpawnNewSessionTests(TestCase):
                 web_search_mode='live"\napproval_policy="never'
             )
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
-    @patch("hitch.main.codex_pool.Codex")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool.Codex")
     def test_creates_thread_then_spawns_worker(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
@@ -232,8 +233,8 @@ class SpawnNewSessionTests(TestCase):
             approval_mode=None,
         )
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
-    @patch("hitch.main.codex_pool.Codex")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool.Codex")
     def test_systemd_launch_leaves_pid_for_worker_and_records_unit(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
@@ -255,8 +256,8 @@ class SpawnNewSessionTests(TestCase):
             "hitch-codex-worker-7.service",
         )
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
-    @patch("hitch.main.codex_pool.Codex")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool.Codex")
     def test_systemd_post_launch_pid_write_does_not_clobber_worker_pid(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
@@ -294,8 +295,8 @@ class SpawnNewSessionTests(TestCase):
             "hitch-codex-worker-7.service",
         )
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
-    @patch("hitch.main.codex_pool.Codex")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool.Codex")
     def test_spawn_new_session_persists_auto_qa_and_auto_merge_fields(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
@@ -324,8 +325,8 @@ class SpawnNewSessionTests(TestCase):
         self.assertTrue(instance.auto_merge_to_local_branch)
         self.assertEqual(instance.auto_merge_branch, "release")
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
-    @patch("hitch.main.codex_pool.Codex")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool.Codex")
     def test_initial_thread_name_derivation(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
@@ -351,8 +352,8 @@ class SpawnNewSessionTests(TestCase):
                     codex_pool.spawn_new_session(cwd="/repo", prompt=prompt)
                 codex._client.thread_set_name.assert_called_once_with("t", expected)
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
-    @patch("hitch.main.codex_pool.Codex")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool.Codex")
     def test_initial_thread_name_can_use_explicit_task_title(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
@@ -374,8 +375,8 @@ class SpawnNewSessionTests(TestCase):
             "thread-abc", "Add parser coverage"
         )
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
-    @patch("hitch.main.codex_pool.Codex")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool.Codex")
     def test_forwards_base_instructions_to_thread_start(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
@@ -399,8 +400,8 @@ class SpawnNewSessionTests(TestCase):
         self.assertEqual(payload["baseInstructions"], "Base override.")
         self.assertEqual(instance.base_instructions, "Base override.")
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
-    @patch("hitch.main.codex_pool.Codex")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool.Codex")
     def test_system_agent_thread_start_forwards_source_without_hitch_tools(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
@@ -422,7 +423,7 @@ class SpawnNewSessionTests(TestCase):
         self.assertEqual(payload["threadSource"], ThreadSource.subagent.value)
         self.assertNotIn("dynamicTools", payload)
 
-    @patch("hitch.main.codex_pool.Codex")
+    @patch("hitch.main.runtime.codex_pool.Codex")
     def test_create_session_thread_forwards_base_instructions(
         self, mock_codex: MagicMock
     ) -> None:
@@ -446,8 +447,8 @@ class SpawnNewSessionTests(TestCase):
         self.assertEqual(payload["dynamicTools"][0]["name"], "propose_session")
         codex._client.thread_set_name.assert_called_once_with("thread-abc", "QA")
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
-    @patch("hitch.main.codex_pool.Codex")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool.Codex")
     def test_forwards_model_effort_sandbox_and_approval(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
@@ -487,8 +488,8 @@ class SpawnNewSessionTests(TestCase):
             approval_mode="deny_all",
         )
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
-    @patch("hitch.main.codex_pool.Codex")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool.Codex")
     def test_enable_memories_sets_config_override_and_worker_flag(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
@@ -517,8 +518,8 @@ class SpawnNewSessionTests(TestCase):
             enable_memories=True,
         )
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
-    @patch("hitch.main.codex_pool.Codex")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool.Codex")
     def test_web_search_mode_sets_config_override_and_worker_flag(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
@@ -549,8 +550,8 @@ class SpawnNewSessionTests(TestCase):
             web_search_mode="live",
         )
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
-    @patch("hitch.main.codex_pool.Codex")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool.Codex")
     def test_plan_mode_forwards_model_to_worker(
         self, mock_codex: MagicMock, mock_launch: MagicMock
     ) -> None:
@@ -758,7 +759,7 @@ class PruneWorkerLogsDbTests(SimpleTestCase):
 
 
 class SpawnFailureTests(TestCase):
-    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     def test_marks_instance_failed_when_launch_raises(
         self, mock_launch: MagicMock
     ) -> None:
@@ -792,7 +793,7 @@ class SpawnFailureTests(TestCase):
 
 
 class SpawnTurnTests(TestCase):
-    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     def test_resumes_existing_thread_without_calling_codex(
         self, mock_launch: MagicMock
     ) -> None:
@@ -825,7 +826,7 @@ class SpawnTurnTests(TestCase):
             approval_mode=None,
         )
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     def test_spawn_turn_persists_auto_qa_enabled(self, mock_launch: MagicMock) -> None:
         mock_launch.return_value = SimpleNamespace(pid=1234)
 
@@ -844,7 +845,7 @@ class SpawnTurnTests(TestCase):
         self.assertTrue(instance.auto_qa_enabled)
         self.assertFalse(instance.auto_pr_enabled)
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     def test_spawn_turn_marks_only_user_reviewer_approval_modes_live_editable(
         self, mock_launch: MagicMock
     ) -> None:
@@ -871,7 +872,7 @@ class SpawnTurnTests(TestCase):
 
                 self.assertEqual(instance.approval_mode_live_editable, expected)
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     def test_plan_mode_turn_forwards_model_and_plan_flag(
         self, mock_launch: MagicMock
     ) -> None:
@@ -898,7 +899,7 @@ class SpawnTurnTests(TestCase):
             plan_mode=True,
         )
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     def test_copies_developer_instructions_from_previous_turn(
         self, mock_launch: MagicMock
     ) -> None:
@@ -926,7 +927,7 @@ class SpawnTurnTests(TestCase):
 
         self.assertEqual(instance.developer_instructions, "Prefer small, typed changes.")
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     def test_copies_base_instructions_from_previous_turn(
         self, mock_launch: MagicMock
     ) -> None:
@@ -951,7 +952,7 @@ class SpawnTurnTests(TestCase):
 
         self.assertEqual(instance.base_instructions, "Base override.")
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     def test_omitted_web_search_mode_does_not_inherit_previous_turn(
         self, mock_launch: MagicMock
     ) -> None:
@@ -982,7 +983,7 @@ class SpawnTurnTests(TestCase):
             approval_mode=None,
         )
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     def test_explicit_blank_web_search_mode_clears_previous_turn(
         self, mock_launch: MagicMock
     ) -> None:
@@ -1016,7 +1017,7 @@ class SpawnTurnTests(TestCase):
             approval_mode=None,
         )
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     def test_explicit_base_instructions_override_previous_turn(
         self, mock_launch: MagicMock
     ) -> None:
@@ -1044,7 +1045,7 @@ class SpawnTurnTests(TestCase):
 
         self.assertEqual(instance.base_instructions, "Fresh base.")
 
-    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     def test_explicit_developer_instructions_override_previous_turn(
         self, mock_launch: MagicMock
     ) -> None:
@@ -1075,7 +1076,7 @@ class SpawnTurnTests(TestCase):
         self.assertEqual(instance.user_message_index, 7)
 
     @unittest.skipUnless(Path("/proc").exists(), "requires Linux /proc")
-    @patch("hitch.main.codex_pool._launch_worker_process")
+    @patch("hitch.main.runtime.codex_pool._launch_worker_process")
     def test_tracks_real_popen_handles_for_reaping(
         self, mock_launch: MagicMock
     ) -> None:
@@ -1111,7 +1112,7 @@ class SpawnTurnTests(TestCase):
 
 class LaunchWorkerProcessTests(TestCase):
     @override_settings(CODEX_WORKER_ISOLATION="direct")
-    @patch("hitch.main.codex_pool.subprocess.Popen")
+    @patch("hitch.main.runtime.codex_pool.subprocess.Popen")
     def test_direct_launches_manage_command_in_new_session(self, mock_popen: MagicMock) -> None:
         mock_popen.return_value = SimpleNamespace(pid=999)
 
@@ -1188,9 +1189,9 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         CODEX_WORKER_MEMORY_SWAP_MAX="0",
         CODEX_WORKER_SLICE="hitch-codex-workers.slice",
     )
-    @patch("hitch.main.codex_pool._ensure_systemd_worker_slice")
-    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
-    @patch("hitch.main.codex_pool.subprocess.Popen")
+    @patch("hitch.main.runtime.codex_pool._ensure_systemd_worker_slice")
+    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
+    @patch("hitch.main.runtime.codex_pool.subprocess.Popen")
     def test_systemd_launches_worker_in_memory_capped_service(
         self,
         mock_popen: MagicMock,
@@ -1255,9 +1256,9 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         mock_ensure_slice.assert_called_once_with()
 
     @override_settings(CODEX_WORKER_ISOLATION="systemd")
-    @patch("hitch.main.codex_pool._ensure_systemd_worker_slice")
-    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
-    @patch("hitch.main.codex_pool.subprocess.Popen")
+    @patch("hitch.main.runtime.codex_pool._ensure_systemd_worker_slice")
+    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
+    @patch("hitch.main.runtime.codex_pool.subprocess.Popen")
     def test_systemd_launch_keeps_slow_client_pending(
         self,
         mock_popen: MagicMock,
@@ -1284,8 +1285,8 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0",
         CODEX_PARENT_SLICE="",
     )
-    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
-    @patch("hitch.main.codex_pool.subprocess.run")
+    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.runtime.codex_pool.subprocess.run")
     def test_configures_worker_slice_aggregate_memory_cap(
         self, mock_run: MagicMock, mock_which: MagicMock
     ) -> None:
@@ -1319,8 +1320,8 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="",
         CODEX_PARENT_SLICE="",
     )
-    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
-    @patch("hitch.main.codex_pool.subprocess.run")
+    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.runtime.codex_pool.subprocess.run")
     def test_slice_resets_cleared_caps_to_infinity(
         self, mock_run: MagicMock, _mock_which: MagicMock
     ) -> None:
@@ -1488,8 +1489,8 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         )
 
     @override_settings(CODEX_WORKER_SLICE="", CODEX_PARENT_SLICE="hitch.slice")
-    @patch("hitch.main.codex_pool.shutil.which")
-    @patch("hitch.main.codex_pool.subprocess.run")
+    @patch("hitch.main.runtime.codex_pool.shutil.which")
+    @patch("hitch.main.runtime.codex_pool.subprocess.run")
     def test_skips_all_slice_configuration_when_worker_slice_disabled(
         self, mock_run: MagicMock, mock_which: MagicMock
     ) -> None:
@@ -1508,8 +1509,8 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         CODEX_WORKER_SLICE_MEMORY_HIGH="8G",
         CODEX_WORKER_SLICE_MEMORY_MAX="10G",
     )
-    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
-    @patch("hitch.main.codex_pool.subprocess.run")
+    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.runtime.codex_pool.subprocess.run")
     def test_worker_slice_configuration_failure_is_fatal(
         self, mock_run: MagicMock, _mock_which: MagicMock
     ) -> None:
@@ -1545,12 +1546,12 @@ class LaunchWorkerProcessSystemdTests(TestCase):
     def test_parent_slice_properties_drops_out_of_range_weight(self) -> None:
         # Out of the cgroup-v2 1..10000 range: dropped (slice keeps its current
         # weight) with a loud warning rather than failing every worker spawn.
-        with self.assertLogs("hitch.main.codex_pool", level="WARNING"):
+        with self.assertLogs("hitch.main.runtime.codex_pool", level="WARNING"):
             self.assertEqual(codex_pool._systemd_parent_slice_properties(), [])
 
     @override_settings(CODEX_PARENT_SLICE_CPU_WEIGHT="heavy")
     def test_parent_slice_properties_drops_non_integer_weight(self) -> None:
-        with self.assertLogs("hitch.main.codex_pool", level="WARNING"):
+        with self.assertLogs("hitch.main.runtime.codex_pool", level="WARNING"):
             self.assertEqual(codex_pool._systemd_parent_slice_properties(), [])
 
     @override_settings(
@@ -1561,8 +1562,8 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         CODEX_PARENT_SLICE="hitch.slice",
         CODEX_PARENT_SLICE_CPU_WEIGHT="20",
     )
-    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
-    @patch("hitch.main.codex_pool.subprocess.run")
+    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.runtime.codex_pool.subprocess.run")
     def test_biases_parent_slice_after_workers_slice(
         self, mock_run: MagicMock, _mock_which: MagicMock
     ) -> None:
@@ -1596,8 +1597,8 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0",
         CODEX_PARENT_SLICE="",
     )
-    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
-    @patch("hitch.main.codex_pool.subprocess.run")
+    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.runtime.codex_pool.subprocess.run")
     def test_parent_slice_configuration_skipped_when_disabled(
         self, mock_run: MagicMock, _mock_which: MagicMock
     ) -> None:
@@ -1613,15 +1614,15 @@ class LaunchWorkerProcessSystemdTests(TestCase):
             mock_run.call_args.args[0][4], "hitch-codex-workers.slice"
         )
 
-    @patch("hitch.main.codex_pool.shutil.which", return_value=None)
+    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value=None)
     def test_apply_slice_properties_requires_systemctl(
         self, _mock_which: MagicMock
     ) -> None:
         with self.assertRaisesRegex(RuntimeError, "systemctl is required"):
             codex_pool._apply_slice_properties("hitch.slice", ["CPUWeight=20"])
 
-    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
-    @patch("hitch.main.codex_pool.subprocess.run", side_effect=OSError("boom"))
+    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.runtime.codex_pool.subprocess.run", side_effect=OSError("boom"))
     def test_apply_slice_properties_wraps_exec_failure(
         self, _mock_run: MagicMock, _mock_which: MagicMock
     ) -> None:
@@ -1630,8 +1631,8 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         ):
             codex_pool._apply_slice_properties("hitch.slice", ["CPUWeight=20"])
 
-    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
-    @patch("hitch.main.codex_pool.subprocess.run")
+    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.runtime.codex_pool.subprocess.run")
     def test_apply_slice_properties_reports_status_without_detail(
         self, mock_run: MagicMock, _mock_which: MagicMock
     ) -> None:
@@ -1643,7 +1644,7 @@ class LaunchWorkerProcessSystemdTests(TestCase):
             codex_pool._apply_slice_properties("hitch.slice", ["CPUWeight=20"])
 
     @override_settings(CODEX_WORKER_ISOLATION="systemd")
-    @patch("hitch.main.codex_pool.shutil.which", return_value=None)
+    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value=None)
     def test_systemd_launch_fails_closed_when_systemd_run_missing(
         self, mock_which: MagicMock
     ) -> None:
@@ -1653,9 +1654,9 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         mock_which.assert_called_once_with("systemd-run")
 
     @override_settings(CODEX_WORKER_ISOLATION="auto")
-    @patch("hitch.main.codex_pool._systemd_user_manager_available", return_value=False)
-    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
-    @patch("hitch.main.codex_pool.subprocess.Popen")
+    @patch("hitch.main.runtime.codex_pool._systemd_user_manager_available", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
+    @patch("hitch.main.runtime.codex_pool.subprocess.Popen")
     def test_auto_launch_falls_back_to_direct_when_user_manager_unavailable(
         self,
         mock_popen: MagicMock,
@@ -1674,10 +1675,10 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         mock_user_manager.assert_called_once_with()
 
     @override_settings(CODEX_WORKER_ISOLATION="auto")
-    @patch("hitch.main.codex_pool._systemd_user_manager_available", return_value=True)
-    @patch("hitch.main.codex_pool._ensure_systemd_worker_slice")
-    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
-    @patch("hitch.main.codex_pool.subprocess.Popen")
+    @patch("hitch.main.runtime.codex_pool._systemd_user_manager_available", return_value=True)
+    @patch("hitch.main.runtime.codex_pool._ensure_systemd_worker_slice")
+    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
+    @patch("hitch.main.runtime.codex_pool.subprocess.Popen")
     def test_auto_launch_uses_systemd_when_user_manager_available(
         self,
         mock_popen: MagicMock,
@@ -1700,10 +1701,10 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         mock_ensure_slice.assert_called_once_with()
 
     @override_settings(CODEX_WORKER_ISOLATION="auto")
-    @patch("hitch.main.codex_pool._systemd_user_manager_available", return_value=True)
-    @patch("hitch.main.codex_pool._ensure_systemd_worker_slice")
-    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
-    @patch("hitch.main.codex_pool.subprocess.Popen")
+    @patch("hitch.main.runtime.codex_pool._systemd_user_manager_available", return_value=True)
+    @patch("hitch.main.runtime.codex_pool._ensure_systemd_worker_slice")
+    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
+    @patch("hitch.main.runtime.codex_pool.subprocess.Popen")
     def test_auto_launch_fails_closed_when_systemd_run_fails(
         self,
         mock_popen: MagicMock,
@@ -1728,9 +1729,9 @@ class LaunchWorkerProcessSystemdTests(TestCase):
         self.assertEqual(mock_popen.call_count, 1)
 
     @override_settings(CODEX_WORKER_ISOLATION="systemd")
-    @patch("hitch.main.codex_pool._ensure_systemd_worker_slice")
-    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
-    @patch("hitch.main.codex_pool.subprocess.Popen")
+    @patch("hitch.main.runtime.codex_pool._ensure_systemd_worker_slice")
+    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemd-run")
+    @patch("hitch.main.runtime.codex_pool.subprocess.Popen")
     def test_systemd_launch_fails_promptly_when_systemd_run_exits_nonzero(
         self,
         mock_popen: MagicMock,
@@ -1762,7 +1763,7 @@ class LaunchWorkerProcessSystemdTests(TestCase):
             codex_pool._launch_worker_process(instance_id=7)
 
     @override_settings(CODEX_WORKER_ISOLATION="direct")
-    @patch("hitch.main.codex_pool.subprocess.Popen")
+    @patch("hitch.main.runtime.codex_pool.subprocess.Popen")
     def test_forwards_optional_cli_args(
         self, mock_popen: MagicMock
     ) -> None:
@@ -1815,7 +1816,7 @@ class SwapCapHierarchyWarningTests(TestCase):
     def test_warns_when_zero_slice_cap_nullifies_worker_cushion(self) -> None:
         with (
             override_settings(**self.BASE),
-            self.assertLogs("hitch.main.codex_pool", level="WARNING") as logs,
+            self.assertLogs("hitch.main.runtime.codex_pool", level="WARNING") as logs,
         ):
             codex_pool._warn_on_swap_cap_hierarchy()
         self.assertTrue(
@@ -1833,7 +1834,7 @@ class SwapCapHierarchyWarningTests(TestCase):
         # rather than letting the cleared setting silently do nothing.
         with (
             override_settings(**self.BASE),
-            self.assertLogs("hitch.main.codex_pool", level="WARNING") as logs,
+            self.assertLogs("hitch.main.runtime.codex_pool", level="WARNING") as logs,
         ):
             codex_pool._warn_on_swap_cap_hierarchy()
         self.assertTrue(
@@ -1849,7 +1850,7 @@ class SwapCapHierarchyWarningTests(TestCase):
         # though it is not a hard zero.
         with (
             override_settings(**self.BASE),
-            self.assertLogs("hitch.main.codex_pool", level="WARNING") as logs,
+            self.assertLogs("hitch.main.runtime.codex_pool", level="WARNING") as logs,
         ):
             codex_pool._warn_on_swap_cap_hierarchy()
         self.assertTrue(any("512M" in line for line in logs.output), logs.output)
@@ -1860,7 +1861,7 @@ class SwapCapHierarchyWarningTests(TestCase):
     def test_silent_when_slice_cap_accommodates_worker_cushion(self) -> None:
         with (
             override_settings(**self.BASE),
-            self.assertNoLogs("hitch.main.codex_pool", level="WARNING"),
+            self.assertNoLogs("hitch.main.runtime.codex_pool", level="WARNING"),
         ):
             codex_pool._warn_on_swap_cap_hierarchy()
 
@@ -1872,7 +1873,7 @@ class SwapCapHierarchyWarningTests(TestCase):
         # cushion applies unhindered and there is nothing to warn about.
         with (
             override_settings(**self.BASE),
-            self.assertNoLogs("hitch.main.codex_pool", level="WARNING"),
+            self.assertNoLogs("hitch.main.runtime.codex_pool", level="WARNING"),
         ):
             codex_pool._warn_on_swap_cap_hierarchy()
 
@@ -1884,7 +1885,7 @@ class SwapCapHierarchyWarningTests(TestCase):
         # cushion to defend, so it must not warn.
         with (
             override_settings(**self.BASE),
-            self.assertNoLogs("hitch.main.codex_pool", level="WARNING"),
+            self.assertNoLogs("hitch.main.runtime.codex_pool", level="WARNING"),
         ):
             codex_pool._warn_on_swap_cap_hierarchy()
 
@@ -1899,7 +1900,7 @@ class SwapCapHierarchyWarningTests(TestCase):
         # A high-only worker has no hard MemoryMax, so its swap cap is never
         # emitted (mirrors _memory_cgroup_properties) and there is no effective
         # cushion for the slice to nullify — nothing to warn about.
-        with self.assertNoLogs("hitch.main.codex_pool", level="WARNING"):
+        with self.assertNoLogs("hitch.main.runtime.codex_pool", level="WARNING"):
             codex_pool._warn_on_swap_cap_hierarchy()
 
     @override_settings(
@@ -1913,7 +1914,7 @@ class SwapCapHierarchyWarningTests(TestCase):
         # Without a worker memory limit the swap cap is never emitted onto the
         # scope (mirrors _memory_cgroup_properties), so there is no cushion that
         # the slice could nullify.
-        with self.assertNoLogs("hitch.main.codex_pool", level="WARNING"):
+        with self.assertNoLogs("hitch.main.runtime.codex_pool", level="WARNING"):
             codex_pool._warn_on_swap_cap_hierarchy()
 
     def test_parse_memory_bytes_handles_units_and_rejects_ambiguous(self) -> None:
@@ -1932,8 +1933,8 @@ class SwapCapHierarchyWarningTests(TestCase):
         CODEX_WORKER_MEMORY_SWAP_MAX="1G",
         CODEX_WORKER_SLICE_MEMORY_SWAP_MAX="0",
     )
-    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
-    @patch("hitch.main.codex_pool.subprocess.run")
+    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.runtime.codex_pool.subprocess.run")
     def test_ensure_slice_warns_once_per_process(
         self, mock_run: MagicMock, _mock_which: MagicMock
     ) -> None:
@@ -1941,7 +1942,7 @@ class SwapCapHierarchyWarningTests(TestCase):
         original = codex_pool._swap_hierarchy_warned
         codex_pool._swap_hierarchy_warned = False
         try:
-            with self.assertLogs("hitch.main.codex_pool", level="WARNING") as logs:
+            with self.assertLogs("hitch.main.runtime.codex_pool", level="WARNING") as logs:
                 codex_pool._ensure_systemd_worker_slice()
                 # A second launch must not re-emit the same warning.
                 codex_pool._ensure_systemd_worker_slice()
@@ -1986,7 +1987,7 @@ class IsAliveTests(TestCase):
         # basename) holds arbitrary non-UTF-8 bytes. Reading its state must not
         # raise UnicodeDecodeError out of the liveness check.
         raw = b"1234 (we\xffird) R 1 0 0 0 -1"
-        with patch("hitch.main.codex_pool.Path") as mock_path:
+        with patch("hitch.main.runtime.codex_pool.Path") as mock_path:
             proc_root = mock_path.return_value
             proc_root.exists.return_value = True
             stat_path = proc_root.__truediv__.return_value.__truediv__.return_value
@@ -2056,8 +2057,8 @@ class IsAliveTests(TestCase):
         finally:
             _forget_worker_pid(pid)
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=False)
-    @patch("hitch.main.codex_pool.is_alive", return_value=True)
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.is_alive", return_value=True)
     def test_worker_is_alive_rejects_recycled_untracked_pid(
         self, mock_alive: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -2074,33 +2075,33 @@ class IsAliveTests(TestCase):
         mock_alive.assert_not_called()
 
     def test_linux_proc_state_defensive_branches(self) -> None:
-        with patch("hitch.main.codex_pool.Path") as mock_path:
+        with patch("hitch.main.runtime.codex_pool.Path") as mock_path:
             proc_root = mock_path.return_value
             proc_root.exists.return_value = False
             self.assertIsNone(codex_pool._linux_proc_state(1))
 
-        with patch("hitch.main.codex_pool.Path") as mock_path:
+        with patch("hitch.main.runtime.codex_pool.Path") as mock_path:
             proc_root = mock_path.return_value
             proc_root.exists.return_value = True
             stat_path = proc_root.__truediv__.return_value.__truediv__.return_value
             stat_path.read_bytes.side_effect = FileNotFoundError
             self.assertEqual(codex_pool._linux_proc_state(1), "")
 
-        with patch("hitch.main.codex_pool.Path") as mock_path:
+        with patch("hitch.main.runtime.codex_pool.Path") as mock_path:
             proc_root = mock_path.return_value
             proc_root.exists.return_value = True
             stat_path = proc_root.__truediv__.return_value.__truediv__.return_value
             stat_path.read_bytes.return_value = b"malformed"
             self.assertIsNone(codex_pool._linux_proc_state(1))
 
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_permission_error_means_alive(self, mock_kill: MagicMock) -> None:
         # ``os.kill(pid, 0)`` raises PermissionError when the pid exists but
         # is owned by another user; the process is still alive in that case.
         mock_kill.side_effect = PermissionError
         self.assertTrue(codex_pool.is_alive(1234))
 
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_other_os_error_is_treated_as_dead(self, mock_kill: MagicMock) -> None:
         mock_kill.side_effect = OSError
         self.assertFalse(codex_pool.is_alive(1234))
@@ -2166,7 +2167,7 @@ class ReconcileAndLookupTests(TestCase):
             purpose=purpose,
         )
 
-    @patch("hitch.main.codex_pool.worker_is_alive")
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive")
     def test_reconcile_marks_only_dead_pending_rows_failed(
         self, mock_worker_alive: MagicMock
     ) -> None:
@@ -2188,10 +2189,10 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(completed.status, CodexInstance.STATUS_COMPLETED)
         self.assertIn("exited", dead_running.error)
 
-    @patch("hitch.main.disk_cleanup.run_finished_session_disk_cleanup")
-    @patch("hitch.main.codex_pool.cleanup_requested_input_images_for")
-    @patch("hitch.main.codex_pool._notify_system_agents_if_needed")
-    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    @patch("hitch.main.runtime.disk_cleanup.run_finished_session_disk_cleanup")
+    @patch("hitch.main.runtime.codex_pool.cleanup_requested_input_images_for")
+    @patch("hitch.main.runtime.codex_pool._notify_system_agents_if_needed")
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_mark_dead_instances_failed_does_not_fan_out_disk_cleanup(
         self,
         _mock_alive: MagicMock,
@@ -2214,7 +2215,7 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(n, 1)
         mock_disk_cleanup.assert_not_called()
 
-    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_dead_records_last_auto_approval_timeout(
         self, _mock_worker_alive: MagicMock
     ) -> None:
@@ -2256,7 +2257,7 @@ class ReconcileAndLookupTests(TestCase):
         self.assertIn("auto-approval review timed out", instance.error)
         self.assertIn("pkill -f target/release/bench", instance.error)
 
-    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_dead_records_pending_auto_approval(
         self, _mock_worker_alive: MagicMock
     ) -> None:
@@ -2305,7 +2306,7 @@ class ReconcileAndLookupTests(TestCase):
         self.assertIn("auto-approval review in progress", instance.error)
         self.assertIn("/bin/bash -lc 'just test'", instance.error)
 
-    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_dead_ignores_completed_auto_approval_start(
         self, _mock_worker_alive: MagicMock
     ) -> None:
@@ -2361,7 +2362,7 @@ class ReconcileAndLookupTests(TestCase):
         self.assertIn("agent last said: Continuing after approved command.", instance.error)
         self.assertNotIn("auto-approval review in progress", instance.error)
 
-    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_dead_records_last_agent_message(
         self, _mock_worker_alive: MagicMock
     ) -> None:
@@ -2401,7 +2402,7 @@ class ReconcileAndLookupTests(TestCase):
             instance.error,
         )
 
-    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_dead_records_worker_log_tail(
         self, _mock_worker_alive: MagicMock
     ) -> None:
@@ -2434,7 +2435,7 @@ class ReconcileAndLookupTests(TestCase):
         self.assertIn("worker log:", instance.error)
         self.assertIn("SystemExit: transport closed", instance.error)
 
-    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_dead_ignores_worker_log_tail_when_test_logging_disabled(
         self, _mock_worker_alive: MagicMock
     ) -> None:
@@ -2461,7 +2462,7 @@ class ReconcileAndLookupTests(TestCase):
             "worker process exited before reporting completion",
         )
 
-    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_cancels_pending_requests_of_dead_worker(
         self, _mock_alive: MagicMock
     ) -> None:
@@ -2493,7 +2494,7 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(input_request.response, {"answers": {}})
         self.assertIsNotNone(input_request.responded_at)
 
-    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_preserves_resolved_request_of_dead_worker(
         self, _mock_alive: MagicMock
     ) -> None:
@@ -2512,7 +2513,7 @@ class ReconcileAndLookupTests(TestCase):
         approval.refresh_from_db()
         self.assertEqual(approval.decision, ApprovalRequest.DECISION_ACCEPT)
 
-    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_preserves_row_that_completed_during_sweep(
         self, _mock_alive: MagicMock
     ) -> None:
@@ -2533,9 +2534,9 @@ class ReconcileAndLookupTests(TestCase):
         self.assertEqual(instance.error, "")
         self.assertIsNone(instance.ended_at)
 
-    @patch("hitch.main.codex_pool.cleanup_requested_input_images_for")
-    @patch("hitch.main.codex_pool._notify_system_agents_if_needed")
-    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.cleanup_requested_input_images_for")
+    @patch("hitch.main.runtime.codex_pool._notify_system_agents_if_needed")
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_still_routes_instance_that_completed_during_sweep(
         self,
         _mock_alive: MagicMock,
@@ -2595,7 +2596,7 @@ class ReconcileAndLookupTests(TestCase):
 
     @patch("hitch.main.workflows.system_agents.reconcile_terminal_workflow_instances")
     @patch("hitch.main.workflows.system_agents.on_codex_instance_finished", return_value=True)
-    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_dead_for_workflow_scopes_pending_rows(
         self,
         _mock_worker_alive: MagicMock,
@@ -2642,7 +2643,7 @@ class ReconcileAndLookupTests(TestCase):
             workflow_id=target_workflow.pk,
         )
 
-    @patch("hitch.main.codex_pool.reconcile_orphaned_workers", return_value=0)
+    @patch("hitch.main.runtime.codex_pool.reconcile_orphaned_workers", return_value=0)
     @patch("hitch.main.workflows.system_agents.reconcile_terminal_workflow_instances")
     def test_reconcile_dead_for_workflow_reaps_orphans(
         self, _mock_reconcile: MagicMock, mock_reap: MagicMock
@@ -2680,7 +2681,7 @@ class ReconcileAndLookupTests(TestCase):
 
         mock_notify.assert_not_called()
 
-    @patch("hitch.main.codex_pool.worker_is_alive")
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive")
     def test_reconcile_dead_retains_pending_attachments(
         self, mock_worker_alive: MagicMock
     ) -> None:
@@ -2889,7 +2890,7 @@ class ReconcileAndLookupTests(TestCase):
         self.assertTrue(instance.input_attachment_cleanup_requested)
 
     @patch("hitch.main.workflows.system_agents.on_codex_instance_finished")
-    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_notifies_system_agents_for_dead_system_rows(
         self, _mock_worker_alive: MagicMock, mock_notify: MagicMock
     ) -> None:
@@ -2909,7 +2910,7 @@ class ReconcileAndLookupTests(TestCase):
 
     @patch("hitch.main.demo.on_codex_instance_finished")
     @patch("hitch.main.workflows.system_agents.on_codex_instance_finished")
-    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_does_not_double_route_demo_system_agent(
         self,
         _mock_worker_alive: MagicMock,
@@ -2933,7 +2934,7 @@ class ReconcileAndLookupTests(TestCase):
 
     @patch("hitch.main.demo.on_codex_instance_finished")
     @patch("hitch.main.workflows.system_agents.on_codex_instance_finished", return_value=False)
-    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_keeps_demo_fallback_when_system_agents_noop(
         self,
         _mock_worker_alive: MagicMock,
@@ -2954,8 +2955,8 @@ class ReconcileAndLookupTests(TestCase):
         mock_system_notify.assert_called_once()
         mock_demo_notify.assert_called_once_with(system_agent)
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=False)
-    @patch("hitch.main.codex_pool.is_alive", return_value=True)
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.is_alive", return_value=True)
     def test_reconcile_marks_recycled_pid_failed(
         self, mock_alive: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -3092,8 +3093,8 @@ class ReapScopeCgroupTests(TestCase):
             systemd_scope_unit=systemd_scope_unit,
         )
 
-    @patch("hitch.main.codex_pool._scope_has_live_worker", return_value=False)
-    @patch("hitch.main.codex_pool._force_kill_instance")
+    @patch("hitch.main.runtime.codex_pool._scope_has_live_worker", return_value=False)
+    @patch("hitch.main.runtime.codex_pool._force_kill_instance")
     def test_kills_cgroup_of_scoped_worker(
         self, mock_force_kill: MagicMock, _mock_live: MagicMock
     ) -> None:
@@ -3103,7 +3104,7 @@ class ReapScopeCgroupTests(TestCase):
 
         mock_force_kill.assert_called_once_with(instance)
 
-    @patch("hitch.main.codex_pool._force_kill_instance")
+    @patch("hitch.main.runtime.codex_pool._force_kill_instance")
     def test_skips_non_scoped_worker(self, mock_force_kill: MagicMock) -> None:
         # A direct launch has no cgroup to sweep, and its already-dead pid must
         # never be re-signaled (it may have been recycled).
@@ -3111,8 +3112,8 @@ class ReapScopeCgroupTests(TestCase):
 
         mock_force_kill.assert_not_called()
 
-    @patch("hitch.main.codex_pool._scope_has_live_worker", return_value=True)
-    @patch("hitch.main.codex_pool._force_kill_instance")
+    @patch("hitch.main.runtime.codex_pool._scope_has_live_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool._force_kill_instance")
     def test_skips_scope_reused_by_a_live_worker(
         self, mock_force_kill: MagicMock, _mock_live: MagicMock
     ) -> None:
@@ -3125,8 +3126,8 @@ class ReapScopeCgroupTests(TestCase):
 
         mock_force_kill.assert_not_called()
 
-    @patch("hitch.main.codex_pool._scope_has_live_worker", return_value=False)
-    @patch("hitch.main.codex_pool._force_kill_instance")
+    @patch("hitch.main.runtime.codex_pool._scope_has_live_worker", return_value=False)
+    @patch("hitch.main.runtime.codex_pool._force_kill_instance")
     def test_swallows_missing_scope(
         self, mock_force_kill: MagicMock, _mock_live: MagicMock
     ) -> None:
@@ -3137,8 +3138,8 @@ class ReapScopeCgroupTests(TestCase):
 
         codex_pool._reap_scope_cgroup(instance)  # must not raise
 
-    @patch("hitch.main.codex_pool._scope_has_live_worker", return_value=False)
-    @patch("hitch.main.codex_pool._force_kill_instance")
+    @patch("hitch.main.runtime.codex_pool._scope_has_live_worker", return_value=False)
+    @patch("hitch.main.runtime.codex_pool._force_kill_instance")
     def test_swallows_kill_failure(
         self, mock_force_kill: MagicMock, _mock_live: MagicMock
     ) -> None:
@@ -3147,9 +3148,9 @@ class ReapScopeCgroupTests(TestCase):
 
         codex_pool._reap_scope_cgroup(instance)  # best-effort: must not raise
 
-    @patch("hitch.main.codex_pool._scope_has_live_worker", return_value=False)
-    @patch("hitch.main.codex_pool._force_kill_instance")
-    @patch("hitch.main.codex_pool.worker_is_alive", return_value=False)
+    @patch("hitch.main.runtime.codex_pool._scope_has_live_worker", return_value=False)
+    @patch("hitch.main.runtime.codex_pool._force_kill_instance")
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=False)
     def test_reconcile_reaps_dead_systemd_worker_cgroup(
         self,
         _mock_alive: MagicMock,
@@ -3360,9 +3361,9 @@ class ReconcileOrphanedWorkersTests(TestCase):
             purpose=purpose,
         )
 
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
     def test_kills_worker_whose_instance_is_terminal(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
     ) -> None:
@@ -3374,9 +3375,9 @@ class ReconcileOrphanedWorkersTests(TestCase):
         self.assertEqual(killed, 1)
         mock_killpg.assert_called_once_with(5001, signal.SIGKILL)
 
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
     def test_kills_worker_with_no_instance_row(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
     ) -> None:
@@ -3387,11 +3388,11 @@ class ReconcileOrphanedWorkersTests(TestCase):
         self.assertEqual(killed, 1)
         mock_killpg.assert_called_once_with(5002, signal.SIGKILL)
 
-    @patch("hitch.main.codex_pool._force_kill_instance")
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool._worker_unit_from_pid_cgroup", return_value=None)
-    @patch("hitch.main.codex_pool._pid_is_our_worker")
-    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.codex_pool._force_kill_instance")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._worker_unit_from_pid_cgroup", return_value=None)
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker")
+    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
     def test_kills_systemd_worker_with_no_instance_row(
         self,
         mock_iter: MagicMock,
@@ -3418,14 +3419,14 @@ class ReconcileOrphanedWorkersTests(TestCase):
             target.systemd_scope_unit, codex_pool._scope_unit_for_instance(999999)
         )
 
-    @patch("hitch.main.codex_pool._force_kill_instance")
-    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._force_kill_instance")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
     @patch(
-        "hitch.main.codex_pool._worker_unit_from_pid_cgroup",
+        "hitch.main.runtime.codex_pool._worker_unit_from_pid_cgroup",
         return_value="hitch-codex-worker-999999.scope",
     )
-    @patch("hitch.main.codex_pool._pid_is_our_worker")
-    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker")
+    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
     def test_kills_legacy_scope_worker_with_no_instance_row(
         self,
         mock_iter: MagicMock,
@@ -3447,11 +3448,11 @@ class ReconcileOrphanedWorkersTests(TestCase):
         target = mock_force_kill.call_args.args[0]
         self.assertEqual(target.systemd_scope_unit, "hitch-codex-worker-999999.scope")
 
-    @patch("hitch.main.codex_pool._force_kill_instance")
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool._worker_unit_from_pid_cgroup", return_value=None)
-    @patch("hitch.main.codex_pool._pid_is_our_worker")
-    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.codex_pool._force_kill_instance")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._worker_unit_from_pid_cgroup", return_value=None)
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker")
+    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
     def test_kills_systemd_worker_when_row_lacks_unit(
         self,
         mock_iter: MagicMock,
@@ -3480,10 +3481,10 @@ class ReconcileOrphanedWorkersTests(TestCase):
             target.systemd_scope_unit, codex_pool._scope_unit_for_instance(done.pk)
         )
 
-    @patch("hitch.main.codex_pool._force_kill_instance")
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool._pid_is_our_worker")
-    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.codex_pool._force_kill_instance")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker")
+    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
     def test_kills_legacy_scope_worker_when_row_lacks_unit(
         self,
         mock_iter: MagicMock,
@@ -3497,7 +3498,7 @@ class ReconcileOrphanedWorkersTests(TestCase):
         )
         mock_iter.return_value = [(5006, done.pk)]
         with patch(
-            "hitch.main.codex_pool._worker_unit_from_pid_cgroup",
+            "hitch.main.runtime.codex_pool._worker_unit_from_pid_cgroup",
             return_value=f"hitch-codex-worker-{done.pk}.scope",
         ):
             killed = codex_pool.reconcile_orphaned_workers()
@@ -3510,9 +3511,9 @@ class ReconcileOrphanedWorkersTests(TestCase):
             target.systemd_scope_unit, f"hitch-codex-worker-{done.pk}.scope"
         )
 
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
     def test_spares_running_user_and_system_workers(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
     ) -> None:
@@ -3535,9 +3536,9 @@ class ReconcileOrphanedWorkersTests(TestCase):
         self.assertEqual(killed, 0)
         mock_killpg.assert_not_called()
 
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
     def test_reaps_only_the_orphan_among_a_mix(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
     ) -> None:
@@ -3550,9 +3551,9 @@ class ReconcileOrphanedWorkersTests(TestCase):
         self.assertEqual(killed, 1)
         mock_killpg.assert_called_once_with(5007, signal.SIGKILL)
 
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=False)
-    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=False)
+    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
     def test_does_not_kill_when_identity_recheck_fails(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
     ) -> None:
@@ -3565,10 +3566,10 @@ class ReconcileOrphanedWorkersTests(TestCase):
         self.assertEqual(killed, 0)
         mock_killpg.assert_not_called()
 
-    @patch("hitch.main.codex_pool._force_kill_instance")
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.codex_pool._force_kill_instance")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
     def test_scoped_worker_killed_via_force_kill_instance(
         self,
         mock_iter: MagicMock,
@@ -3590,9 +3591,9 @@ class ReconcileOrphanedWorkersTests(TestCase):
         mock_force_kill.assert_called_once()
         mock_killpg.assert_not_called()
 
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
     def test_spares_terminal_worker_within_grace(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
     ) -> None:
@@ -3609,9 +3610,9 @@ class ReconcileOrphanedWorkersTests(TestCase):
         self.assertEqual(killed, 0)
         mock_killpg.assert_not_called()
 
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
     def test_kills_terminal_worker_past_grace(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
     ) -> None:
@@ -3627,9 +3628,9 @@ class ReconcileOrphanedWorkersTests(TestCase):
         self.assertEqual(killed, 1)
         mock_killpg.assert_called_once_with(5012, signal.SIGKILL)
 
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
     def test_spares_supervised_worker_mid_terminal_commit(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
     ) -> None:
@@ -3647,9 +3648,9 @@ class ReconcileOrphanedWorkersTests(TestCase):
         self.assertEqual(killed, 0)
         mock_killpg.assert_not_called()
 
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
     def test_reaps_supervised_worker_wedged_past_grace(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, mock_killpg: MagicMock
     ) -> None:
@@ -3671,9 +3672,9 @@ class ReconcileOrphanedWorkersTests(TestCase):
         self.assertEqual(killed, 1)
         mock_killpg.assert_called_once_with(5015, signal.SIGKILL)
 
-    @patch("hitch.main.codex_pool.os.killpg", side_effect=ProcessLookupError)
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.codex_pool.os.killpg", side_effect=ProcessLookupError)
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
     def test_kill_already_gone_counts_as_not_killed(
         self, mock_iter: MagicMock, _mock_identity: MagicMock, _mock_killpg: MagicMock
     ) -> None:
@@ -3683,8 +3684,8 @@ class ReconcileOrphanedWorkersTests(TestCase):
 
         self.assertEqual(codex_pool.reconcile_orphaned_workers(), 0)
 
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
     def test_kills_nothing_when_expected_set_unreadable(
         self, mock_iter: MagicMock, mock_killpg: MagicMock
     ) -> None:
@@ -3702,10 +3703,10 @@ class ReconcileOrphanedWorkersTests(TestCase):
         self.assertEqual(killed, 0)
         mock_killpg.assert_not_called()
 
-    @patch("hitch.main.codex_pool._finalize_reaped_instance")
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool._iter_running_worker_pids")
+    @patch("hitch.main.runtime.codex_pool._finalize_reaped_instance")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool._iter_running_worker_pids")
     def test_finalizes_each_reaped_instance(
         self,
         mock_iter: MagicMock,
@@ -3747,7 +3748,7 @@ class FinalizeReapedInstanceTests(TestCase):
             workflow_id=workflow_id,
         )
 
-    @patch("hitch.main.codex_pool._resolve_dangling_requests")
+    @patch("hitch.main.runtime.codex_pool._resolve_dangling_requests")
     def test_failed_turn_resolves_dangling_requests(
         self, mock_resolve: MagicMock
     ) -> None:
@@ -3757,8 +3758,8 @@ class FinalizeReapedInstanceTests(TestCase):
 
         mock_resolve.assert_called_once_with(failed.pk)
 
-    @patch("hitch.main.codex_pool.cleanup_requested_input_images_for")
-    @patch("hitch.main.codex_pool._notify_system_agents_if_needed")
+    @patch("hitch.main.runtime.codex_pool.cleanup_requested_input_images_for")
+    @patch("hitch.main.runtime.codex_pool._notify_system_agents_if_needed")
     def test_routes_finish_hooks_for_reaped_terminal_turn(
         self, mock_notify: MagicMock, mock_cleanup: MagicMock
     ) -> None:
@@ -3783,7 +3784,7 @@ class FinalizeReapedInstanceTests(TestCase):
         running.refresh_from_db()
         self.assertEqual(running.status, CodexInstance.STATUS_RUNNING)
 
-    @patch("hitch.main.disk_cleanup.run_finished_session_disk_cleanup")
+    @patch("hitch.main.runtime.disk_cleanup.run_finished_session_disk_cleanup")
     def test_does_not_fan_out_disk_cleanup(
         self, mock_disk_cleanup: MagicMock
     ) -> None:
@@ -4115,7 +4116,7 @@ class NukeCodexAppServersTests(SimpleTestCase):
         if ppid is not None:
             (pid_dir / "stat").write_text(f"{pid} (codex) S {ppid} 0 0\n")
 
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_sigkills_each_app_server(self, mock_kill: MagicMock) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             proc_root = Path(tmp)
@@ -4128,7 +4129,7 @@ class NukeCodexAppServersTests(SimpleTestCase):
         mock_kill.assert_any_call(111, signal.SIGKILL)
         mock_kill.assert_any_call(222, signal.SIGKILL)
 
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_signals_both_wrapper_and_native_child(
         self, mock_kill: MagicMock
     ) -> None:
@@ -4147,7 +4148,7 @@ class NukeCodexAppServersTests(SimpleTestCase):
         mock_kill.assert_any_call(111, signal.SIGKILL)
         mock_kill.assert_any_call(222, signal.SIGKILL)
 
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_recycled_pid_failing_recheck_is_not_signaled(
         self, mock_kill: MagicMock
     ) -> None:
@@ -4158,7 +4159,7 @@ class NukeCodexAppServersTests(SimpleTestCase):
             self._write_app_server(proc_root, 111)
 
             with patch(
-                "hitch.main.codex_pool._iter_codex_app_server_pids",
+                "hitch.main.runtime.codex_pool._iter_codex_app_server_pids",
                 return_value=iter([111, 999]),
             ):
                 killed = codex_pool.nuke_codex_app_servers(proc_root=proc_root)
@@ -4166,7 +4167,7 @@ class NukeCodexAppServersTests(SimpleTestCase):
         self.assertEqual(killed, 1)
         mock_kill.assert_called_once_with(111, signal.SIGKILL)
 
-    @patch("hitch.main.codex_pool.os.kill", side_effect=ProcessLookupError)
+    @patch("hitch.main.runtime.codex_pool.os.kill", side_effect=ProcessLookupError)
     def test_already_gone_pid_is_not_counted(self, _mock_kill: MagicMock) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             proc_root = Path(tmp)
@@ -4176,7 +4177,7 @@ class NukeCodexAppServersTests(SimpleTestCase):
                 codex_pool.nuke_codex_app_servers(proc_root=proc_root), 0
             )
 
-    @patch("hitch.main.codex_pool.os.kill", side_effect=PermissionError)
+    @patch("hitch.main.runtime.codex_pool.os.kill", side_effect=PermissionError)
     def test_unsignalable_pid_is_skipped(self, _mock_kill: MagicMock) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             proc_root = Path(tmp)
@@ -4268,9 +4269,9 @@ class InterruptActiveTests(TestCase):
             status=status,
         )
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_first_stop_sends_sigterm_and_records_timestamp(
         self,
         mock_kill: MagicMock,
@@ -4299,9 +4300,9 @@ class InterruptActiveTests(TestCase):
         # already issued" and escalate to SIGKILL.
         self.assertIsNotNone(instance.interrupt_requested_at)
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_second_stop_escalates_to_sigkill(
         self,
         mock_kill: MagicMock,
@@ -4327,10 +4328,10 @@ class InterruptActiveTests(TestCase):
         self.assertEqual(instance.error, "forcibly stopped by user")
         self.assertIsNotNone(instance.ended_at)
 
-    @patch("hitch.main.disk_cleanup.run_finished_session_disk_cleanup")
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.disk_cleanup.run_finished_session_disk_cleanup")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_force_stop_does_not_fan_out_disk_cleanup(
         self,
         _mock_kill: MagicMock,
@@ -4351,11 +4352,11 @@ class InterruptActiveTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         mock_disk_cleanup.assert_not_called()
 
-    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
-    @patch("hitch.main.codex_pool.subprocess.run")
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.runtime.codex_pool.subprocess.run")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_second_stop_escalates_systemd_worker_to_systemctl_kill(
         self,
         mock_kill: MagicMock,
@@ -4403,11 +4404,11 @@ class InterruptActiveTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertEqual(instance.error, "forcibly stopped by user")
 
-    @patch("hitch.main.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
-    @patch("hitch.main.codex_pool.subprocess.run")
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool.shutil.which", return_value="/usr/bin/systemctl")
+    @patch("hitch.main.runtime.codex_pool.subprocess.run")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_second_stop_treats_vanished_systemd_unit_as_stopped(
         self,
         mock_kill: MagicMock,
@@ -4446,8 +4447,8 @@ class InterruptActiveTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertEqual(instance.error, "forcibly stopped by user")
 
-    @patch("hitch.main.codex_pool.os.kill")
-    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
     def test_no_active_worker_is_a_noop(
         self, mock_killpg: MagicMock, mock_kill: MagicMock
     ) -> None:
@@ -4459,9 +4460,9 @@ class InterruptActiveTests(TestCase):
         mock_kill.assert_not_called()
         mock_killpg.assert_not_called()
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=False)
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_dead_or_recycled_pid_skips_signal_but_marks_row_failed(
         self,
         mock_kill: MagicMock,
@@ -4482,8 +4483,8 @@ class InterruptActiveTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertEqual(instance.error, "interrupted by user")
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_worker_exit_between_identity_and_sigterm_marks_failed(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -4498,8 +4499,8 @@ class InterruptActiveTests(TestCase):
         instance.refresh_from_db()
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_eperm_from_sigterm_leaves_row_active(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -4517,8 +4518,8 @@ class InterruptActiveTests(TestCase):
         self.assertEqual(instance.error, "")
         self.assertIsNone(instance.interrupt_requested_at)
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
     def test_worker_exit_between_identity_and_sigkill_marks_failed(
         self, mock_killpg: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -4537,8 +4538,8 @@ class InterruptActiveTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
         self.assertEqual(instance.error, "forcibly stopped by user")
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
     def test_completed_status_under_race_is_preserved_on_sigkill(
         self, mock_killpg: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -4564,8 +4565,8 @@ class InterruptActiveTests(TestCase):
         instance.refresh_from_db()
         self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
     def test_eperm_from_sigkill_leaves_row_active(
         self, mock_killpg: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -4585,8 +4586,8 @@ class InterruptActiveTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_RUNNING)
         self.assertEqual(instance.error, "")
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_completed_status_under_race_is_preserved_on_first_stop(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -4614,9 +4615,9 @@ class InterruptActiveTests(TestCase):
         self.assertEqual(instance.status, CodexInstance.STATUS_COMPLETED)
         self.assertEqual(instance.error, "")
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker")
-    @patch("hitch.main.codex_pool.os.kill")
-    @patch("hitch.main.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker")
+    @patch("hitch.main.runtime.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
     def test_unset_pid_is_noop(
         self,
         mock_killpg: MagicMock,
@@ -4663,8 +4664,8 @@ class InterruptInstanceTests(TestCase):
             status=status,
         )
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_stops_specific_instance(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -4694,8 +4695,8 @@ class InterruptInstanceTests(TestCase):
             codex_pool.interrupt_instance(99999, expected_thread_id="t")
         )
 
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_thread_id_mismatch_refuses(
         self, mock_kill: MagicMock, mock_killpg: MagicMock
     ) -> None:
@@ -4711,8 +4712,8 @@ class InterruptInstanceTests(TestCase):
         instance.refresh_from_db()
         self.assertEqual(instance.status, CodexInstance.STATUS_RUNNING)
 
-    @patch("hitch.main.codex_pool.os.killpg")
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool.os.killpg")
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_already_terminal_returns_none(
         self, mock_kill: MagicMock, mock_killpg: MagicMock
     ) -> None:
@@ -4750,7 +4751,7 @@ class SteerInstanceTests(TestCase):
             status=status,
         )
 
-    @patch("hitch.main.codex_pool._steer_instance")
+    @patch("hitch.main.runtime.codex_pool._steer_instance")
     def test_steer_active_targets_latest_active_instance(
         self, mock_steer: MagicMock
     ) -> None:
@@ -4772,7 +4773,7 @@ class SteerInstanceTests(TestCase):
         self.assertEqual(result, active)
         mock_steer.assert_called_once_with(active, prompt="also do this")
 
-    @patch("hitch.main.codex_pool._steer_instance")
+    @patch("hitch.main.runtime.codex_pool._steer_instance")
     def test_steer_active_returns_none_without_active_instance(
         self, mock_steer: MagicMock
     ) -> None:
@@ -4781,8 +4782,8 @@ class SteerInstanceTests(TestCase):
         self.assertIsNone(result)
         mock_steer.assert_not_called()
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_queues_payload_and_signals_running_instance(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -4814,8 +4815,8 @@ class SteerInstanceTests(TestCase):
             )
             self.assertFalse(codex_pool.control_path_for(bystander).exists())
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_queues_image_paths_for_steer(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -4848,8 +4849,8 @@ class SteerInstanceTests(TestCase):
             self.assertEqual(target.input_image_paths, [])
             self.assertEqual(target.input_attachment_paths, ["/tmp/screen.png"])
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_queues_image_only_steer(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -4879,8 +4880,8 @@ class SteerInstanceTests(TestCase):
                 },
             )
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_image_steer_records_ledger_before_control_request(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -4902,7 +4903,7 @@ class SteerInstanceTests(TestCase):
             )
 
             with patch(
-                "hitch.main.codex_pool._append_control_request",
+                "hitch.main.runtime.codex_pool._append_control_request",
                 side_effect=append_and_assert_tracked,
             ):
                 result = codex_pool.steer_instance(
@@ -4915,8 +4916,8 @@ class SteerInstanceTests(TestCase):
             self.assertIsNotNone(result)
             mock_kill.assert_called_once_with(4321, signal.SIGUSR1)
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_starting_instance_queues_without_signal(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -4938,8 +4939,8 @@ class SteerInstanceTests(TestCase):
             mock_kill.assert_not_called()
             self.assertTrue(codex_pool.control_path_for(instance).exists())
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_starting_image_steer_does_not_change_initial_inputs(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -4963,8 +4964,8 @@ class SteerInstanceTests(TestCase):
             self.assertEqual(instance.input_image_paths, [])
             self.assertEqual(instance.input_attachment_paths, ["/tmp/steer.png"])
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_terminal_after_image_tracking_rolls_back_steer_ledger(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -4986,7 +4987,7 @@ class SteerInstanceTests(TestCase):
             )
 
             with patch(
-                "hitch.main.codex_pool._add_input_attachment_paths",
+                "hitch.main.runtime.codex_pool._add_input_attachment_paths",
                 side_effect=add_and_finish,
             ):
                 result = codex_pool.steer_instance(
@@ -5022,8 +5023,8 @@ class SteerInstanceTests(TestCase):
                 ["/tmp/first.png", "/tmp/second.png"],
             )
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_image_steer_rejects_aggregate_attachment_over_cap(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -5055,8 +5056,8 @@ class SteerInstanceTests(TestCase):
             instance.refresh_from_db()
             self.assertEqual(instance.input_attachment_paths, existing_paths)
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_image_steer_rejects_thread_attachment_over_cap(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -5094,8 +5095,8 @@ class SteerInstanceTests(TestCase):
             active.refresh_from_db()
             self.assertEqual(active.input_attachment_paths, [])
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_starting_instance_reports_not_steered_if_terminal_after_append(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -5117,7 +5118,7 @@ class SteerInstanceTests(TestCase):
                 events_path=str(Path(raw) / "events.jsonl"),
             )
             with patch(
-                "hitch.main.codex_pool._append_control_request",
+                "hitch.main.runtime.codex_pool._append_control_request",
                 side_effect=append_and_finish,
             ):
                 result = codex_pool.steer_instance(
@@ -5131,8 +5132,8 @@ class SteerInstanceTests(TestCase):
             mock_kill.assert_not_called()
             self.assertTrue(codex_pool.control_path_for(instance).exists())
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_starting_image_steer_rolls_back_if_terminal_after_append(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -5156,7 +5157,7 @@ class SteerInstanceTests(TestCase):
                 events_path=str(Path(raw) / "events.jsonl"),
             )
             with patch(
-                "hitch.main.codex_pool._append_control_request",
+                "hitch.main.runtime.codex_pool._append_control_request",
                 side_effect=append_and_finish,
             ):
                 result = codex_pool.steer_instance(
@@ -5174,7 +5175,7 @@ class SteerInstanceTests(TestCase):
             self.assertEqual(instance.input_attachment_paths, [])
             self.assertTrue(image_path.exists())
 
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_thread_id_mismatch_refuses(self, mock_kill: MagicMock) -> None:
         with tempfile.TemporaryDirectory() as raw:
             instance = self._make(
@@ -5192,7 +5193,7 @@ class SteerInstanceTests(TestCase):
             mock_kill.assert_not_called()
             self.assertFalse(codex_pool.control_path_for(instance).exists())
 
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_terminal_instance_refuses(self, mock_kill: MagicMock) -> None:
         with tempfile.TemporaryDirectory() as raw:
             instance = self._make(
@@ -5210,8 +5211,8 @@ class SteerInstanceTests(TestCase):
             mock_kill.assert_not_called()
             self.assertFalse(codex_pool.control_path_for(instance).exists())
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=False)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=False)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_dead_pid_marks_failed_but_reports_not_steered(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -5234,8 +5235,8 @@ class SteerInstanceTests(TestCase):
             self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
             self.assertEqual(instance.error, "worker process unavailable for steer")
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_process_lookup_error_marks_failed_but_reports_not_steered(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -5259,8 +5260,8 @@ class SteerInstanceTests(TestCase):
             self.assertEqual(instance.status, CodexInstance.STATUS_FAILED)
             self.assertEqual(instance.error, "worker process exited before steer")
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_image_steer_retains_ledger_when_signal_fails(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -5286,8 +5287,8 @@ class SteerInstanceTests(TestCase):
             instance.refresh_from_db()
             self.assertEqual(instance.input_attachment_paths, ["/tmp/screen.png"])
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_running_instance_reports_not_steered_if_terminal_after_signal(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -5316,8 +5317,8 @@ class SteerInstanceTests(TestCase):
             mock_kill.assert_called_once_with(4321, signal.SIGUSR1)
             self.assertTrue(codex_pool.control_path_for(instance).exists())
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_image_steer_rolls_back_ledger_when_terminal_after_signal(
         self, mock_kill: MagicMock, mock_identity: MagicMock
     ) -> None:
@@ -5348,9 +5349,9 @@ class SteerInstanceTests(TestCase):
             instance.refresh_from_db()
             self.assertEqual(instance.input_attachment_paths, [])
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
-    @patch("hitch.main.codex_pool._append_control_request")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._append_control_request")
     def test_control_file_write_error_reports_not_steered(
         self,
         mock_append: MagicMock,
@@ -5375,9 +5376,9 @@ class SteerInstanceTests(TestCase):
             mock_append.assert_called_once()
             mock_kill.assert_not_called()
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker", return_value=True)
-    @patch("hitch.main.codex_pool.os.kill")
-    @patch("hitch.main.codex_pool._append_control_request")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker", return_value=True)
+    @patch("hitch.main.runtime.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._append_control_request")
     def test_control_file_write_error_rolls_back_image_ledger(
         self,
         mock_append: MagicMock,
@@ -5404,8 +5405,8 @@ class SteerInstanceTests(TestCase):
             instance.refresh_from_db()
             self.assertEqual(instance.input_attachment_paths, [])
 
-    @patch("hitch.main.codex_pool._pid_is_our_worker")
-    @patch("hitch.main.codex_pool.os.kill")
+    @patch("hitch.main.runtime.codex_pool._pid_is_our_worker")
+    @patch("hitch.main.runtime.codex_pool.os.kill")
     def test_unset_pid_refuses(self, mock_kill: MagicMock, mock_identity: MagicMock) -> None:
         with tempfile.TemporaryDirectory() as raw:
             instance = self._make(
@@ -5429,8 +5430,8 @@ class SteerInstanceTests(TestCase):
 class PidIsOurWorkerTests(TestCase):
     """The cmdline-based identity guard that protects against PID reuse."""
 
-    @patch("hitch.main.codex_pool.Path")
-    @patch("hitch.main.codex_pool.os.getsid")
+    @patch("hitch.main.runtime.codex_pool.Path")
+    @patch("hitch.main.runtime.codex_pool.os.getsid")
     def test_matches_when_cmdline_carries_instance_id(
         self, mock_getsid: MagicMock, mock_path: MagicMock
     ) -> None:
@@ -5444,8 +5445,8 @@ class PidIsOurWorkerTests(TestCase):
 
         self.assertTrue(codex_pool._pid_is_our_worker(4321, 42))
 
-    @patch("hitch.main.codex_pool.Path")
-    @patch("hitch.main.codex_pool.os.getsid")
+    @patch("hitch.main.runtime.codex_pool.Path")
+    @patch("hitch.main.runtime.codex_pool.os.getsid")
     def test_rejects_when_cmdline_lacks_our_manage_py(
         self, mock_getsid: MagicMock, mock_path: MagicMock
     ) -> None:
@@ -5460,8 +5461,8 @@ class PidIsOurWorkerTests(TestCase):
 
         self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
 
-    @patch("hitch.main.codex_pool.Path")
-    @patch("hitch.main.codex_pool.os.getsid")
+    @patch("hitch.main.runtime.codex_pool.Path")
+    @patch("hitch.main.runtime.codex_pool.os.getsid")
     def test_rejects_when_cmdline_lacks_codex_worker(
         self, mock_getsid: MagicMock, mock_path: MagicMock
     ) -> None:
@@ -5474,8 +5475,8 @@ class PidIsOurWorkerTests(TestCase):
 
         self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
 
-    @patch("hitch.main.codex_pool.Path")
-    @patch("hitch.main.codex_pool.os.getsid")
+    @patch("hitch.main.runtime.codex_pool.Path")
+    @patch("hitch.main.runtime.codex_pool.os.getsid")
     def test_rejects_when_instance_id_flag_missing(
         self, mock_getsid: MagicMock, mock_path: MagicMock
     ) -> None:
@@ -5490,8 +5491,8 @@ class PidIsOurWorkerTests(TestCase):
 
         self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
 
-    @patch("hitch.main.codex_pool.Path")
-    @patch("hitch.main.codex_pool.os.getsid")
+    @patch("hitch.main.runtime.codex_pool.Path")
+    @patch("hitch.main.runtime.codex_pool.os.getsid")
     def test_rejects_wrong_instance_id(
         self, mock_getsid: MagicMock, mock_path: MagicMock
     ) -> None:
@@ -5505,7 +5506,7 @@ class PidIsOurWorkerTests(TestCase):
 
         self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
 
-    @patch("hitch.main.codex_pool.os.getsid")
+    @patch("hitch.main.runtime.codex_pool.os.getsid")
     def test_rejects_when_not_session_leader(
         self, mock_getsid: MagicMock
     ) -> None:
@@ -5513,8 +5514,8 @@ class PidIsOurWorkerTests(TestCase):
 
         self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
 
-    @patch("hitch.main.codex_pool.Path")
-    @patch("hitch.main.codex_pool.os.getsid")
+    @patch("hitch.main.runtime.codex_pool.Path")
+    @patch("hitch.main.runtime.codex_pool.os.getsid")
     def test_scoped_worker_identity_does_not_require_session_leader(
         self, mock_getsid: MagicMock, mock_path: MagicMock
     ) -> None:
@@ -5533,14 +5534,14 @@ class PidIsOurWorkerTests(TestCase):
         )
         mock_getsid.assert_not_called()
 
-    @patch("hitch.main.codex_pool.os.getsid")
+    @patch("hitch.main.runtime.codex_pool.os.getsid")
     def test_rejects_when_pid_gone(self, mock_getsid: MagicMock) -> None:
         mock_getsid.side_effect = ProcessLookupError
 
         self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
 
-    @patch("hitch.main.codex_pool.Path")
-    @patch("hitch.main.codex_pool.os.getsid")
+    @patch("hitch.main.runtime.codex_pool.Path")
+    @patch("hitch.main.runtime.codex_pool.os.getsid")
     def test_falls_back_to_getsid_when_proc_missing(
         self, mock_getsid: MagicMock, mock_path: MagicMock
     ) -> None:
@@ -5554,8 +5555,8 @@ class PidIsOurWorkerTests(TestCase):
 
         self.assertTrue(codex_pool._pid_is_our_worker(4321, 42))
 
-    @patch("hitch.main.codex_pool.Path")
-    @patch("hitch.main.codex_pool.os.getsid")
+    @patch("hitch.main.runtime.codex_pool.Path")
+    @patch("hitch.main.runtime.codex_pool.os.getsid")
     def test_scoped_worker_rejects_when_proc_missing(
         self, mock_getsid: MagicMock, mock_path: MagicMock
     ) -> None:
@@ -5571,8 +5572,8 @@ class PidIsOurWorkerTests(TestCase):
         )
         mock_getsid.assert_not_called()
 
-    @patch("hitch.main.codex_pool.Path")
-    @patch("hitch.main.codex_pool.os.getsid")
+    @patch("hitch.main.runtime.codex_pool.Path")
+    @patch("hitch.main.runtime.codex_pool.os.getsid")
     def test_rejects_when_pid_vanishes_between_getsid_and_cmdline(
         self, mock_getsid: MagicMock, mock_path: MagicMock
     ) -> None:
@@ -5591,8 +5592,8 @@ class PidIsOurWorkerTests(TestCase):
 
         self.assertFalse(codex_pool._pid_is_our_worker(4321, 42))
 
-    @patch("hitch.main.codex_pool.Path")
-    @patch("hitch.main.codex_pool.os.getsid")
+    @patch("hitch.main.runtime.codex_pool.Path")
+    @patch("hitch.main.runtime.codex_pool.os.getsid")
     def test_rejects_on_other_cmdline_read_error(
         self, mock_getsid: MagicMock, mock_path: MagicMock
     ) -> None:
@@ -8327,8 +8328,8 @@ class StreamForInstanceTests(TestCase):
         # Force the cap down so the loop returns promptly without an end
         # event — EventSource will reconnect transparently.
         with (
-            patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.001),
-            patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001),
+            patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.001),
+            patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001),
         ):
             frames = list(streaming.idle_stream("thread-none", baseline_id=None))
         self.assertEqual(frames[0], b"retry: 2000\n\n")
@@ -8347,9 +8348,9 @@ class StreamForInstanceTests(TestCase):
         # time; a fresh pk on the first poll proves an out-of-band turn
         # has landed since then.
         with (
-            patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001),
+            patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001),
             patch(
-                "hitch.main.streaming.codex_pool.latest_id_for_thread",
+                "hitch.main.runtime.streaming.codex_pool.latest_id_for_thread",
                 return_value=42,
             ),
         ):
@@ -8364,9 +8365,9 @@ class StreamForInstanceTests(TestCase):
         # baseline=7 at render; one poll later the DB shows pk=9 even
         # though no row is currently active.
         with (
-            patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001),
+            patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001),
             patch(
-                "hitch.main.streaming.codex_pool.latest_id_for_thread",
+                "hitch.main.runtime.streaming.codex_pool.latest_id_for_thread",
                 return_value=9,
             ),
         ):
@@ -8388,9 +8389,9 @@ class StreamForInstanceTests(TestCase):
             status=SessionDemo.STATUS_ACTIVE
         )
         with (
-            patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001),
+            patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001),
             patch(
-                "hitch.main.streaming.codex_pool.latest_id_for_thread",
+                "hitch.main.runtime.streaming.codex_pool.latest_id_for_thread",
                 return_value=None,
             ),
         ):
@@ -8404,9 +8405,9 @@ class StreamForInstanceTests(TestCase):
         self.assertTrue(frames[-1].startswith(b"event: end"))
         self.assertIn(b'"demo"', frames[-1])
 
-    @patch("hitch.main.streaming._HEARTBEAT_INTERVAL", 0.0)
-    @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
-    @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.005)
+    @patch("hitch.main.runtime.streaming._HEARTBEAT_INTERVAL", 0.0)
+    @patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001)
+    @patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.005)
     def test_idle_stream_resends_heartbeats_at_cadence(self) -> None:
         # With the heartbeat cadence collapsed to zero we should observe
         # multiple heartbeat frames before the per-stream cap closes the
@@ -8417,9 +8418,9 @@ class StreamForInstanceTests(TestCase):
         for frame in heartbeats:
             self.assertIn(b'"working": false', frame)
 
-    @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
-    @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
-    @patch("hitch.main.codex_pool.worker_is_alive", return_value=True)
+    @patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.001)
+    @patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001)
+    @patch("hitch.main.runtime.codex_pool.worker_is_alive", return_value=True)
     def test_system_workflow_stream_reports_working(
         self, _mock_worker_alive: MagicMock
     ) -> None:
@@ -8494,11 +8495,11 @@ class StreamForInstanceTests(TestCase):
         )
 
         with (
-            patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.001),
-            patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001),
-            patch("hitch.main.streaming.codex_pool.reconcile_dead") as mock_global,
+            patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.001),
+            patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001),
+            patch("hitch.main.runtime.streaming.codex_pool.reconcile_dead") as mock_global,
             patch(
-                "hitch.main.streaming.codex_pool.reconcile_dead_for_workflow"
+                "hitch.main.runtime.streaming.codex_pool.reconcile_dead_for_workflow"
             ) as mock_scoped,
         ):
             frames = list(
@@ -8511,9 +8512,9 @@ class StreamForInstanceTests(TestCase):
         mock_scoped.assert_any_call(workflow.pk, main_thread_id="thread-workflow")
         mock_global.assert_not_called()
 
-    @patch("hitch.main.streaming._HEARTBEAT_INTERVAL", 0.0)
-    @patch("hitch.main.streaming._IDLE_MAX_STREAM_SECONDS", 0.05)
-    @patch("hitch.main.streaming._IDLE_POLL_INTERVAL", 0.001)
+    @patch("hitch.main.runtime.streaming._HEARTBEAT_INTERVAL", 0.0)
+    @patch("hitch.main.runtime.streaming._IDLE_MAX_STREAM_SECONDS", 0.05)
+    @patch("hitch.main.runtime.streaming._IDLE_POLL_INTERVAL", 0.001)
     def test_system_workflow_stream_resends_status_heartbeat(self) -> None:
         workflow = SystemWorkflow.objects.create(
             kind=SystemWorkflow.KIND_PR_QA,
@@ -9012,7 +9013,7 @@ class StreamForInstanceTests(TestCase):
         self.assertIn(b"item/started", data_frames[0])
         self.assertNotIn(b"item/partial", b"".join(frames))
 
-    @patch("hitch.main.streaming._POLL_INTERVAL", 0.01)
+    @patch("hitch.main.runtime.streaming._POLL_INTERVAL", 0.01)
     def test_missing_events_file_with_dead_worker_ends_promptly(self) -> None:
         # If the events file never appears but the worker process is also
         # gone, the tailer must bail rather than wait the full appearance
@@ -9028,9 +9029,9 @@ class StreamForInstanceTests(TestCase):
         self.assertTrue(frames[-1].startswith(b"event: end"))
         self.assertNotIn(b'"missing"', frames[-1])
 
-    @patch("hitch.main.streaming._POLL_INTERVAL", 0.005)
-    @patch("hitch.main.streaming._FILE_APPEAR_TIMEOUT", 0.001)
-    @patch("hitch.main.streaming.codex_pool.worker_is_alive", return_value=True)
+    @patch("hitch.main.runtime.streaming._POLL_INTERVAL", 0.005)
+    @patch("hitch.main.runtime.streaming._FILE_APPEAR_TIMEOUT", 0.001)
+    @patch("hitch.main.runtime.streaming.codex_pool.worker_is_alive", return_value=True)
     def test_appearance_timeout_when_file_never_arrives(
         self, _mock_worker_alive: MagicMock
     ) -> None:
@@ -9044,10 +9045,10 @@ class StreamForInstanceTests(TestCase):
         frames = list(streaming.stream_for_instance(instance))
         self.assertIn(b'"missing"', frames[-1])
 
-    @patch("hitch.main.streaming._POLL_INTERVAL", 0.001)
-    @patch("hitch.main.streaming._HEARTBEAT_INTERVAL", 0.0)
-    @patch("hitch.main.streaming._FILE_APPEAR_TIMEOUT", 0.02)
-    @patch("hitch.main.streaming.codex_pool.worker_is_alive", return_value=True)
+    @patch("hitch.main.runtime.streaming._POLL_INTERVAL", 0.001)
+    @patch("hitch.main.runtime.streaming._HEARTBEAT_INTERVAL", 0.0)
+    @patch("hitch.main.runtime.streaming._FILE_APPEAR_TIMEOUT", 0.02)
+    @patch("hitch.main.runtime.streaming.codex_pool.worker_is_alive", return_value=True)
     def test_heartbeat_yielded_while_waiting_for_events_file(
         self, _mock_worker_alive: MagicMock
     ) -> None:
@@ -9081,9 +9082,9 @@ class StreamForInstanceTests(TestCase):
         data_frames = [f for f in frames if f.startswith(b"data: ")]
         self.assertEqual(len(data_frames), 2)
 
-    @patch("hitch.main.streaming._POLL_INTERVAL", 0.005)
-    @patch("hitch.main.streaming._MAX_STREAM_SECONDS", 0.001)
-    @patch("hitch.main.streaming.codex_pool.worker_is_alive", return_value=True)
+    @patch("hitch.main.runtime.streaming._POLL_INTERVAL", 0.005)
+    @patch("hitch.main.runtime.streaming._MAX_STREAM_SECONDS", 0.001)
+    @patch("hitch.main.runtime.streaming.codex_pool.worker_is_alive", return_value=True)
     def test_read_loop_hits_stream_timeout(
         self, _mock_worker_alive: MagicMock
     ) -> None:
@@ -9099,9 +9100,9 @@ class StreamForInstanceTests(TestCase):
             frames = list(streaming.stream_for_instance(instance))
         self.assertIn(b'"timeout"', frames[-1])
 
-    @patch("hitch.main.streaming._POLL_INTERVAL", 0.01)
-    @patch("hitch.main.streaming.codex_pool._pid_is_our_worker", return_value=False)
-    @patch("hitch.main.streaming.codex_pool.is_alive", return_value=True)
+    @patch("hitch.main.runtime.streaming._POLL_INTERVAL", 0.01)
+    @patch("hitch.main.runtime.streaming.codex_pool._pid_is_our_worker", return_value=False)
+    @patch("hitch.main.runtime.streaming.codex_pool.is_alive", return_value=True)
     def test_running_instance_with_recycled_pid_terminates(
         self,
         mock_alive: MagicMock,
@@ -9129,8 +9130,8 @@ class StreamForInstanceTests(TestCase):
         mock_identity.assert_any_call(4321, instance.pk)
         mock_alive.assert_not_called()
 
-    @patch("hitch.main.streaming._POLL_INTERVAL", 0.001)
-    @patch("hitch.main.streaming._HEARTBEAT_INTERVAL", 0.0)
+    @patch("hitch.main.runtime.streaming._POLL_INTERVAL", 0.001)
+    @patch("hitch.main.runtime.streaming._HEARTBEAT_INTERVAL", 0.0)
     def test_heartbeat_yielded_while_worker_is_idle(self) -> None:
         # Idle SSE connections get periodic heartbeat events so the page's
         # connection indicator can refresh and the channel stays open past
@@ -9150,7 +9151,7 @@ class StreamForInstanceTests(TestCase):
                 done_calls[0] += 1
                 return done_calls[0] >= 2
 
-            with patch("hitch.main.streaming._is_done", side_effect=fake_is_done):
+            with patch("hitch.main.runtime.streaming._is_done", side_effect=fake_is_done):
                 frames = list(streaming.stream_for_instance(instance))
 
         heartbeats = [f for f in frames if f.startswith(b"event: heartbeat")]
@@ -9197,7 +9198,7 @@ class StreamForInstanceTests(TestCase):
         # stable sentinel when the row is gone.
         self.assertEqual(streaming._current_status(99999999), "unknown")
 
-    @patch("hitch.main.streaming._POLL_INTERVAL", 0.01)
+    @patch("hitch.main.runtime.streaming._POLL_INTERVAL", 0.01)
     def test_running_instance_with_dead_pid_terminates(self) -> None:
         # The events file exists but the worker died before flipping its
         # status; ``is_alive`` short-circuits the otherwise-infinite read.

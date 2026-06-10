@@ -9,7 +9,7 @@ import time
 from django.db import close_old_connections
 from django.utils import timezone
 
-from hitch.main import codex_pool, disk_cleanup, server_lifecycle
+from hitch.main.runtime import codex_pool, disk_cleanup, server_lifecycle
 from hitch.main.workflows import system_agents
 
 logger = logging.getLogger(__name__)

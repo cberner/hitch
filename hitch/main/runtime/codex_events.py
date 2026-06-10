@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from hitch.main.models import CodexInstance
-from hitch.main.sdk_values import positive_int, string_from_any
+from hitch.main.runtime.sdk_values import positive_int, string_from_any
 
 logger = logging.getLogger(__name__)
 

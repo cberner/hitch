@@ -8,8 +8,8 @@ from typing import override
 from django.test import TestCase
 from django.utils import timezone
 
-from hitch.main import rate_limit
 from hitch.main.models import RefreshThrottle
+from hitch.main.runtime import rate_limit
 
 
 class RateLimitTests(TestCase):

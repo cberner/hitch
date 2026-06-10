@@ -16,14 +16,14 @@ from typing import Any
 
 from django.utils import timezone
 
-from hitch.main import codex_pool
 from hitch.main.models import (
     AutonomousGoal,
     AutonomousGoalMemory,
     ProposedSession,
     SystemWorkflow,
 )
-from hitch.main.sdk_values import truncate_for_prompt
+from hitch.main.runtime import codex_pool
+from hitch.main.runtime.sdk_values import truncate_for_prompt
 from hitch.main.workflows.pr_handoff import _compact_pr_handoff
 
 SPEC_REQUIREMENTS_AGENT_KIND = "spec_critic_requirements"

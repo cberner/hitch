@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from hitch.main.sdk_values import string_from_any, truncate_for_prompt
+from hitch.main.runtime.sdk_values import string_from_any, truncate_for_prompt
 from hitch.main.workflows.agent_io import _string_list
 from hitch.main.workflows.gh_observations import (
     _PR_GATE_BLOCKED,

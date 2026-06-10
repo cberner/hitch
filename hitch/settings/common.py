@@ -150,7 +150,7 @@ HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT = os.environ.get(
     "HITCH_MAX_ALLOWED_DISK_SPACE_PERCENT", "20"
 )
 
-# Per-worker JSONL event logs (see hitch.main.codex_pool). Workers detach from
+# Per-worker JSONL event logs (see hitch.main.runtime.codex_pool). Workers detach from
 # the Django process and write here; the dir must be writable by the user
 # running Django and live somewhere that survives restarts. Kept outside the
 # project tree so setuptools' flat-layout discovery doesn't pick it up.

@@ -9,17 +9,17 @@ from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.test import TestCase
 
-from hitch.main.codex_tools import (
-    ToolContext,
-    handle_dynamic_tool_call,
-    registered_dynamic_tool_specs,
-)
 from hitch.main.goals.proposed_sessions import (
     ProposedSessionError,
     ProposedSessionInput,
     create_proposed_session,
 )
 from hitch.main.models import AutonomousGoal, Project, ProposedSession, SessionMetadata
+from hitch.main.runtime.codex_tools import (
+    ToolContext,
+    handle_dynamic_tool_call,
+    registered_dynamic_tool_specs,
+)
 
 
 class ProposedSessionServiceTests(TestCase):
@@ -196,7 +196,7 @@ class CodexToolTests(TestCase):
         proposal = ProposedSession.objects.get()
         self.assertEqual(proposal.project, project)
 
-    @patch("hitch.main.codex_tools.connection.close")
+    @patch("hitch.main.runtime.codex_tools.connection.close")
     def test_dynamic_tool_call_closes_thread_connection(
         self, mock_close: MagicMock
     ) -> None:
