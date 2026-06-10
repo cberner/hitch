@@ -13,7 +13,7 @@ from openai_codex import Codex
 from hitch.main.models import Project
 from hitch.main.runtime import codex_pool, server_lifecycle
 from hitch.main.sessions import session_index
-from hitch.main.workflows import autonomous_goals, system_agents
+from hitch.main.workflows import autonomous_goals, pr_qa
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +189,7 @@ def refresh_unarchived_session_state(
     except Exception:
         codex_failed = True
         logger.exception("failed to refresh active Codex session metadata")
-    pr_stages_refreshed = system_agents.refresh_unarchived_session_pr_stages(
+    pr_stages_refreshed = pr_qa.refresh_unarchived_session_pr_stages(
         limit=_PR_STAGE_REFRESH_LIMIT_PER_TICK
     )
     return SessionStateRefreshResult(

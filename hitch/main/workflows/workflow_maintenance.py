@@ -10,7 +10,7 @@ from django.db import close_old_connections
 from django.utils import timezone
 
 from hitch.main.runtime import codex_pool, disk_cleanup, server_lifecycle
-from hitch.main.workflows import system_agents
+from hitch.main.workflows import pr_qa, system_agents
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ def _run_workflow_maintenance_scheduler_tick() -> None:
     close_old_connections()
     try:
         codex_pool.reconcile_dead()
-        refreshed = system_agents.refresh_due_pr_monitor_backoffs(
+        refreshed = pr_qa.refresh_due_pr_monitor_backoffs(
             limit=_PR_MONITOR_BACKOFF_LIMIT_PER_TICK
         )
         if refreshed:
@@ -81,7 +81,7 @@ def _run_workflow_maintenance_scheduler_tick() -> None:
         # `gh pr view` stage refresh only ever fires from the session-list
         # request path (capped at one row per render) -- dominating dashboard
         # latency once a session's 5-minute refresh window elapses.
-        pr_stages = system_agents.refresh_unarchived_session_pr_stages(
+        pr_stages = pr_qa.refresh_unarchived_session_pr_stages(
             limit=_PR_STAGE_REFRESH_LIMIT_PER_TICK
         )
         if pr_stages:

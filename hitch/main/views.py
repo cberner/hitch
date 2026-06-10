@@ -255,7 +255,7 @@ from hitch.main.sessions.system_agent_summary import (
     _updated_at_sort_key,
 )
 from hitch.main.workflows import autonomous_goals as goal_workflows
-from hitch.main.workflows import pr_stage, spec_critic, system_agents
+from hitch.main.workflows import pr_qa, pr_stage, spec_critic, system_agents
 from hitch.main.worktrees import (
     ManagedWorktree,
     WorktreeCleanupError,
@@ -2409,15 +2409,15 @@ def _render_session_detail(
         # (up to a 5s timeout) and dominated page latency; instead the badge is
         # flagged as refreshing and the actual gh call runs in the background,
         # persisting the result for a later render to read back.
-        workflow_pr_snapshot = system_agents.pr_handoff_for_workflow(stage_pr_workflow)
+        workflow_pr_snapshot = pr_qa.pr_handoff_for_workflow(stage_pr_workflow)
         # Only flag refreshing when the PR stage is the one actually displayed.
         # An active worker or a waiting-for-input session shows its own stage, so
         # marking that live badge refreshing would let the reload script tear
         # down the running EventSource transcript.
         pr_stage_displayed = active_instance is None and not awaiting_user_input
         stage_refreshing = pr_stage_displayed and (
-            system_agents.pr_handoff_stage_refresh_due(stage_pr_workflow)
-            or system_agents.pr_monitor_backoff_stage_refresh_due(stage_pr_workflow)
+            pr_qa.pr_handoff_stage_refresh_due(stage_pr_workflow)
+            or pr_qa.pr_monitor_backoff_stage_refresh_due(stage_pr_workflow)
         )
         log_pr_snapshot = pr_observation.snapshot
         if (
@@ -2430,7 +2430,7 @@ def _render_session_detail(
                 if metadata is not None and metadata.cwd
                 else _thread_cwd(thread) or ""
             )
-            if system_agents.pr_snapshot_stage_refresh_due(
+            if pr_qa.pr_snapshot_stage_refresh_due(
                 cwd=detail_cwd,
                 snapshot=log_pr_snapshot,
                 attempted_at=(
@@ -4845,7 +4845,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 and not raw_active
                 and _workflow_accepts_qa_pause_steering(active_system_workflow)
             ):
-                started = system_agents.start_user_steering_turn(
+                started = pr_qa.start_user_steering_turn(
                     active_system_workflow,
                     prompt=prompt,
                 )
@@ -5097,7 +5097,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                             "fix-pr requires an opened PR for this session"
                         )
                     )
-                system_agents.start_pr_monitor_workflow(
+                pr_qa.start_pr_monitor_workflow(
                     pr_url=pr_url,
                     **workflow_kwargs,
                 )
@@ -5111,7 +5111,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
             # rather than silently dropping it.
             if session_auto_merge_branch:
                 workflow_kwargs["auto_merge_branch"] = session_auto_merge_branch
-            system_agents.start_pr_qa_workflow(**workflow_kwargs)
+            pr_qa.start_pr_qa_workflow(**workflow_kwargs)
             record_session_unarchived_for_accepted_turn()
             return redirect("session", session_id=session_id)
         spawn_kwargs: dict[str, Any] = {
@@ -5567,7 +5567,7 @@ def _start_candidate_proposal_session(
         if claim_response is not None:
             return claim_response
         try:
-            system_agents.start_pr_qa_workflow(**workflow_kwargs)
+            pr_qa.start_pr_qa_workflow(**workflow_kwargs)
         except Exception:
             _reset_candidate_proposal_start_claim(proposed_session, candidate_session)
             raise
@@ -6059,7 +6059,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         if auto_merge_branch:
             workflow_kwargs["auto_merge_branch"] = auto_merge_branch
         try:
-            system_agents.start_pr_qa_workflow(**workflow_kwargs)
+            pr_qa.start_pr_qa_workflow(**workflow_kwargs)
         except Exception:
             if proposal_claimed:
                 assert proposed_session is not None

@@ -1222,7 +1222,7 @@ class SessionDetailFastPathTests(TestCase):
         )
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.pr_qa._gh_pr_view")
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_refreshes_ready_pr_to_done_merged(
@@ -1312,7 +1312,7 @@ class SessionDetailFastPathTests(TestCase):
         )
         mock_gh_pr_view.assert_called_once()
 
-    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_refreshes_due_pr_monitor_backoff_to_done_merged(
@@ -1375,7 +1375,7 @@ class SessionDetailFastPathTests(TestCase):
         )
         mock_observe.assert_called_once()
 
-    @patch("hitch.main.workflows.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.pr_qa._gh_pr_view")
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_inactive_session_detail_refreshes_cached_pr_stage_to_done_merged(
@@ -2636,7 +2636,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.pr_qa._gh_pr_view")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_refreshes_cached_pr_stage_to_done_merged(
@@ -2735,7 +2735,7 @@ class IndexViewTests(TestCase):
         )
         mock_gh_pr_view.assert_called_once()
 
-    @patch("hitch.main.workflows.system_agents._pr_monitor_observation_from_gh")
+    @patch("hitch.main.workflows.pr_qa._pr_monitor_observation_from_gh")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_refreshes_due_pr_monitor_backoff_to_done_merged(
@@ -2807,7 +2807,7 @@ class IndexViewTests(TestCase):
         mock_observe.assert_called_once()
 
     @patch("hitch.main.sessions.session_stage_refresh._schedule_pr_stage_refresh")
-    @patch("hitch.main.workflows.system_agents.pr_snapshot_stage_refresh_due", return_value=True)
+    @patch("hitch.main.workflows.pr_qa.pr_snapshot_stage_refresh_due", return_value=True)
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_session_list_skips_caching_stale_pr_stage_for_budget_deferred_row(
@@ -2899,7 +2899,7 @@ class IndexViewTests(TestCase):
             self.assertEqual(metadata.derived_stage_source_mtime_ns, 0)
         mock_codex.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.pr_qa._gh_pr_view")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_refreshes_uncached_pr_snapshot_to_done_merged(
@@ -3946,7 +3946,7 @@ class IndexViewTests(TestCase):
         mock_codex.assert_not_called()
         client.thread_list.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.pr_qa._gh_pr_view")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_refreshes_ready_pr_to_done_merged(
@@ -4042,7 +4042,7 @@ class IndexViewTests(TestCase):
         )
         mock_gh_pr_view.assert_called_once()
 
-    @patch("hitch.main.workflows.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.pr_qa._gh_pr_view")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_caps_ready_pr_refreshes(
@@ -4163,7 +4163,7 @@ class IndexViewTests(TestCase):
         self.assertEqual(mock_gh_pr_view.call_count, 2)
 
     @patch("hitch.main.workflows.system_agents.logger")
-    @patch("hitch.main.workflows.system_agents._gh_pr_view")
+    @patch("hitch.main.workflows.pr_qa._gh_pr_view")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_cached_session_list_backs_off_failed_ready_pr_refresh(
@@ -10256,7 +10256,7 @@ class NewSessionViewTests(TestCase):
         assert error is not None
         self.assertNotIn("/tmp/private", error)
 
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.views.codex_pool.create_session_thread")
     @patch("hitch.main.views.Codex")
@@ -11042,7 +11042,7 @@ class NewSessionViewTests(TestCase):
         self.assertFalse(candidate.is_hidden_system_session)
 
     @patch("hitch.main.views.spec_critic.spec_critic_should_run", return_value=True)
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.worktrees.discover_managed_worktrees")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -11136,7 +11136,7 @@ class NewSessionViewTests(TestCase):
         "hitch.main.views.goal_workflows."
         "stop_running_autonomous_goal_stack_after_proposal_resolution"
     )
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.worktrees.discover_managed_worktrees")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -11194,7 +11194,7 @@ class NewSessionViewTests(TestCase):
         self.assertTrue(candidate.is_hidden_system_session)
         mock_stop_stack.assert_not_called()
 
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.worktrees.discover_managed_worktrees")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -12113,7 +12113,7 @@ class NewSessionViewTests(TestCase):
             input_image_paths=image_paths,
         )
 
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.create_session_thread")
     @patch("hitch.main.views.create_worktree_for_session")
@@ -12258,7 +12258,7 @@ class NewSessionViewTests(TestCase):
                     **workflow_kwargs,
                 )
 
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.create_session_thread")
     @patch("hitch.main.repos.discover_repos")
@@ -12292,7 +12292,7 @@ class NewSessionViewTests(TestCase):
         self.assertFalse(metadata.auto_merge_to_local_branch)
         self.assertEqual(metadata.auto_merge_branch, "")
 
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.create_session_thread")
     @patch("hitch.main.repos.discover_repos")
@@ -12338,7 +12338,7 @@ class NewSessionViewTests(TestCase):
         self.assertFalse(metadata.auto_merge_to_local_branch)
         self.assertEqual(metadata.auto_merge_branch, "")
 
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.create_session_thread")
     @patch("hitch.main.repos.discover_repos")
@@ -12377,7 +12377,7 @@ class NewSessionViewTests(TestCase):
             proposal.outcome_metadata,
         )
 
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.create_session_thread")
     @patch("hitch.main.repos.discover_repos")
@@ -12416,7 +12416,7 @@ class NewSessionViewTests(TestCase):
             proposal.outcome_metadata,
         )
 
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.create_session_thread")
     @patch("hitch.main.repos.discover_repos")
@@ -14397,7 +14397,7 @@ class SendMessageViewTests(TestCase):
             mock_codex.assert_not_called()
             self.assertFalse((Path(raw) / "attachments").exists())
 
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_send_message_rejects_workflow_image_uploads_before_side_effects(
@@ -15176,7 +15176,7 @@ class SendMessageViewTests(TestCase):
             input_image_paths=image_paths,
         )
 
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_pr_qa_activation_routes_to_workflow_matrix(
@@ -15255,8 +15255,8 @@ class SendMessageViewTests(TestCase):
                 workflow_kwargs.update(expected)
                 mock_start_workflow.assert_called_once_with(**workflow_kwargs)
 
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
-    @patch("hitch.main.views.system_agents.start_pr_monitor_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_monitor_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_fix_pr_slash_starts_monitor_for_opened_pr(
@@ -15346,7 +15346,7 @@ class SendMessageViewTests(TestCase):
             initial_user_message_index=1,
         )
 
-    @patch("hitch.main.views.system_agents.start_pr_monitor_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_monitor_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_fix_pr_slash_requires_opened_pr(
@@ -15370,7 +15370,7 @@ class SendMessageViewTests(TestCase):
         )
         mock_start_monitor.assert_not_called()
 
-    @patch("hitch.main.views.system_agents.start_pr_monitor_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_monitor_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_fix_pr_slash_rejects_lifecycle_superseded_pr_url(
@@ -15442,7 +15442,7 @@ class SendMessageViewTests(TestCase):
         )
         mock_start_monitor.assert_not_called()
 
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_slash_commands_forward_session_auto_merge_branch_to_workflow(
@@ -15484,7 +15484,7 @@ class SendMessageViewTests(TestCase):
                     "release",
                 )
 
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_qa_slash_command_forwards_hitch_base_instructions_to_workflow(
@@ -15506,7 +15506,7 @@ class SendMessageViewTests(TestCase):
         base_instructions = mock_start_workflow.call_args.kwargs["base_instructions"]
         self.assertIn("You are running inside HITCH", base_instructions)
 
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_pr_slash_command_inherits_session_web_search_when_setting_is_default(
@@ -15535,7 +15535,7 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertEqual(mock_start_workflow.call_args.kwargs["web_search_mode"], "live")
 
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_qa_slash_command_forwards_web_search_setting(
@@ -15558,7 +15558,7 @@ class SendMessageViewTests(TestCase):
         self.assertEqual(kwargs["web_search_mode"], "cached")
         self.assertFalse(kwargs["open_pr_on_lgtm"])
 
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
     def test_qa_slash_command_clears_hitch_base_instructions_for_codex(
@@ -15592,7 +15592,7 @@ class SendMessageViewTests(TestCase):
         )
         self.assertNotIn("You are running inside HITCH", base_instructions)
 
-    @patch("hitch.main.views.system_agents.start_user_steering_turn")
+    @patch("hitch.main.views.pr_qa.start_user_steering_turn")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_running_qa_workflow_routes_normal_follow_up_to_user_steering(
@@ -15627,7 +15627,7 @@ class SendMessageViewTests(TestCase):
         mock_codex.assert_not_called()
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.views.system_agents.start_user_steering_turn")
+    @patch("hitch.main.views.pr_qa.start_user_steering_turn")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
     def test_running_pr_workflow_non_qa_step_blocks_normal_follow_up(
@@ -15657,7 +15657,7 @@ class SendMessageViewTests(TestCase):
         mock_codex.assert_not_called()
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
+    @patch("hitch.main.views.pr_qa.start_pr_qa_workflow")
     @patch("hitch.main.views.Codex")
     def test_duplicate_pr_command_during_running_workflow_redirects(
         self, mock_codex: MagicMock, mock_start_workflow: MagicMock
@@ -21275,7 +21275,7 @@ class PrStageRefreshSchedulingTests(TestCase):
 
     @patch("hitch.main.sessions.session_stage_refresh._schedule_pr_stage_refresh")
     @patch(
-        "hitch.main.sessions.session_stage_refresh.system_agents.pr_snapshot_stage_refresh_due",
+        "hitch.main.sessions.session_stage_refresh.pr_qa.pr_snapshot_stage_refresh_due",
         return_value=True,
     )
     @patch("hitch.main.sessions.session_stage_refresh._pr_snapshot_for_rollout_path")

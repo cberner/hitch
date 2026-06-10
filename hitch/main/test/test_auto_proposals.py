@@ -355,11 +355,11 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
         "hitch.main.workflows.workflow_maintenance.disk_cleanup.run_finished_session_disk_cleanup"
     )
     @patch(
-        "hitch.main.workflows.workflow_maintenance.system_agents.refresh_unarchived_session_pr_stages",
+        "hitch.main.workflows.workflow_maintenance.pr_qa.refresh_unarchived_session_pr_stages",
         return_value=1,
     )
     @patch(
-        "hitch.main.workflows.workflow_maintenance.system_agents.refresh_due_pr_monitor_backoffs",
+        "hitch.main.workflows.workflow_maintenance.pr_qa.refresh_due_pr_monitor_backoffs",
         return_value=2,
     )
     @patch("hitch.main.workflows.workflow_maintenance.codex_pool.reconcile_dead")
@@ -391,7 +391,7 @@ class WorkflowMaintenanceSchedulerTests(SimpleTestCase):
 
 class UnarchivedSessionStateRefreshTests(TestCase):
     @patch(
-        "hitch.main.goals.auto_proposals.system_agents.refresh_unarchived_session_pr_stages",
+        "hitch.main.goals.auto_proposals.pr_qa.refresh_unarchived_session_pr_stages",
         return_value=2,
     )
     @patch("hitch.main.goals.auto_proposals.codex_pool.app_server_config")
@@ -436,7 +436,7 @@ class UnarchivedSessionStateRefreshTests(TestCase):
 
     @patch("hitch.main.goals.auto_proposals.logger.exception")
     @patch(
-        "hitch.main.goals.auto_proposals.system_agents.refresh_unarchived_session_pr_stages",
+        "hitch.main.goals.auto_proposals.pr_qa.refresh_unarchived_session_pr_stages",
         return_value=1,
     )
     @patch("hitch.main.goals.auto_proposals.codex_pool.app_server_config")
