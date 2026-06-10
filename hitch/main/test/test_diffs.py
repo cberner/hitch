@@ -9,17 +9,7 @@ from pygments.lexers import PythonLexer
 
 from hitch.main import diffs as diffs_module
 from hitch.main.diffs import build_worktree_diff, build_worktree_diff_text
-
-
-def _git(repo: Path, *args: str) -> None:
-    env = {
-        **os.environ,
-        "GIT_AUTHOR_NAME": "Hitch Tests",
-        "GIT_AUTHOR_EMAIL": "hitch@example.com",
-        "GIT_COMMITTER_NAME": "Hitch Tests",
-        "GIT_COMMITTER_EMAIL": "hitch@example.com",
-    }
-    subprocess.run(["git", "-C", str(repo), *args], check=True, env=env, capture_output=True)
+from hitch.main.test.support import _git
 
 
 class WorktreeDiffTests(SimpleTestCase):

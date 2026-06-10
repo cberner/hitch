@@ -10,7 +10,6 @@ from unittest.mock import MagicMock, patch
 from urllib.parse import parse_qs, urlparse
 
 from django.conf import settings as django_settings
-from django.core import signing
 from django.http import HttpResponse
 from django.test import Client, TestCase
 from django.urls import reverse
@@ -32,6 +31,11 @@ from hitch.main.models import (
 from hitch.main.session_pr_plan import (
     _pr_snapshot_for_thread,
     _pr_url_for_thread,
+)
+from hitch.main.test.support import (
+    _cookie_value,
+    _rollout_line,
+    _seed_cookies,
 )
 
 # Used for active-worker rendering tests so the session view's
@@ -133,15 +137,6 @@ def _thread(turns: list[SimpleNamespace], **overrides: object) -> SimpleNamespac
     return SimpleNamespace(**defaults)
 
 
-def _rollout_line(
-    line_type: str,
-    payload: dict[str, object],
-    *,
-    timestamp: str = "2025-01-05T12:00:00Z",
-) -> str:
-    return json.dumps({"timestamp": timestamp, "type": line_type, "payload": payload})
-
-
 def _write_rollout_tempfile(lines: list[str], *, binary: bytes | None = None) -> Path:
     if binary is not None:
         with tempfile.NamedTemporaryFile(
@@ -173,19 +168,6 @@ def _get_session(client: Client, session_id: str = "thread-1") -> HttpResponse:
     response = client.get(reverse("session", kwargs={"session_id": session_id}))
     assert isinstance(response, HttpResponse)
     return response
-
-
-def _sign(name: str, value: str) -> str:
-    return signing.get_cookie_signer(salt=name).sign(value)
-
-
-def _seed_cookies(client: Client, **values: str) -> None:
-    for name, value in values.items():
-        client.cookies[name] = _sign(name, value)
-
-
-def _cookie_value(response: HttpResponse, name: str) -> str:
-    return signing.get_cookie_signer(salt=name).unsign(response.cookies[name].value)
 
 
 def _diff_view() -> DiffView:
