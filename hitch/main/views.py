@@ -87,6 +87,13 @@ from hitch.main.input_images import (
     _limit_input_image_uploads,
 )
 from hitch.main.local_merges import local_branch_names
+from hitch.main.message_intent import (
+    _FIX_PR_SLASH_COMMAND,
+    _is_fix_pr_activation,
+    _is_pr_activation,
+    _is_qa_activation,
+    _message_intent,
+)
 from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
@@ -153,7 +160,6 @@ from hitch.main.session_metadata_display import (
     _system_session_metadata_rows,
 )
 from hitch.main.session_pr_plan import (
-    _PR_PROMPT_ALIASES,
     _PR_SLASH_PROMPT,
     _ROLLOUT_COLLABORATION_MODE_NOT_PROVIDED,
     _auto_merge_to_local_branch_for_session,
@@ -320,13 +326,6 @@ class SessionPageSource:
     exhausted: bool = False
 
 
-class _MessageIntent(NamedTuple):
-    prompt: str
-    plan_mode: bool
-    allow_pending_plan_default: bool
-    explicit_plan_mode: bool
-
-
 class _SessionTemplateThread(NamedTuple):
     id: str
     cwd: str
@@ -371,15 +370,11 @@ _VALID_PROJECT_AUTO_PR_MODES = {value for value, _label in Project.AUTO_PR_CHOIC
 # the ORM and surfaces as a backend-specific OverflowError/DataError
 # from ``objects.get`` — a 500 for what should be a clean 400.
 _MAX_BIGAUTOFIELD = 2**63 - 1
-_PLAN_SLASH_COMMAND = "/plan"
 _PLAN_APPROVAL_PROMPT = "Implement the plan."
 _PLAN_REVISION_PROMPT = "Revise the plan."
 _PLAN_ACTION_APPROVE = "approve"
 _PLAN_ACTION_REVISE = "revise"
 _VALID_PLAN_ACTIONS = frozenset({"", _PLAN_ACTION_APPROVE, _PLAN_ACTION_REVISE})
-_PR_SLASH_COMMAND = "/pr"
-_FIX_PR_SLASH_COMMAND = "/fix-pr"
-_QA_SLASH_COMMAND = "/qa"
 _PLAN_MODE_REASONING_EFFORT = ReasoningEffort.medium.value
 _DEFAULT_COLLABORATION_MODE = "default"
 
@@ -5678,71 +5673,6 @@ def _duplicate_saved_input_images(paths: Iterable[str]) -> list[str]:
         _cleanup_saved_input_images(cleanup_paths)
         raise
     return saved_paths
-
-
-def _message_intent(request: HttpRequest) -> _MessageIntent:
-    prompt = request.POST.get("prompt", "").strip()
-    plan_mode = request.POST.get("plan_mode", "").strip().lower() == "true"
-    default_plan_mode_raw = request.POST.get("default_plan_mode")
-    default_plan_mode = (
-        default_plan_mode_raw.strip().lower() == "true"
-        if default_plan_mode_raw is not None
-        else False
-    )
-    default_plan_mode_posted = default_plan_mode_raw is not None
-    plan_mode_changed = (
-        plan_mode != default_plan_mode if default_plan_mode_posted else plan_mode
-    )
-    explicit_plan_mode = (
-        request.POST.get("plan_mode_explicit", "").strip().lower() == "true"
-        or plan_mode_changed
-    )
-    parts = prompt.split(maxsplit=1)
-    if not parts:
-        return _MessageIntent(prompt, plan_mode, True, explicit_plan_mode)
-    command = parts[0].lower()
-    if command == _PLAN_SLASH_COMMAND:
-        return _MessageIntent(
-            parts[1].strip() if len(parts) > 1 else "",
-            True,
-            True,
-            True,
-        )
-    if command == _PR_SLASH_COMMAND:
-        return _MessageIntent(_PR_SLASH_PROMPT, False, False, False)
-    if command == _FIX_PR_SLASH_COMMAND:
-        return _MessageIntent(_FIX_PR_SLASH_COMMAND, False, False, False)
-    if command == _QA_SLASH_COMMAND:
-        return _MessageIntent(_QA_SLASH_PROMPT, False, False, False)
-    if not plan_mode and prompt in _PR_PROMPT_ALIASES:
-        return _MessageIntent(prompt, False, False, False)
-    if not plan_mode and prompt == _QA_SLASH_PROMPT:
-        return _MessageIntent(prompt, False, False, False)
-    return _MessageIntent(prompt, plan_mode, True, explicit_plan_mode)
-
-
-def _is_pr_activation(request: HttpRequest) -> bool:
-    prompt = request.POST.get("prompt", "").strip()
-    parts = prompt.split(maxsplit=1)
-    return (
-        bool(parts and parts[0].lower() == _PR_SLASH_COMMAND)
-        or prompt in _PR_PROMPT_ALIASES
-    )
-
-
-def _is_fix_pr_activation(request: HttpRequest) -> bool:
-    prompt = request.POST.get("prompt", "").strip()
-    parts = prompt.split(maxsplit=1)
-    return bool(parts and parts[0].lower() == _FIX_PR_SLASH_COMMAND)
-
-
-def _is_qa_activation(request: HttpRequest) -> bool:
-    prompt = request.POST.get("prompt", "").strip()
-    parts = prompt.split(maxsplit=1)
-    return (
-        bool(parts and parts[0].lower() == _QA_SLASH_COMMAND)
-        or prompt == _QA_SLASH_PROMPT
-    )
 
 
 def _plan_mode_model_from_models(
