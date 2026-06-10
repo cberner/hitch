@@ -2570,7 +2570,7 @@ def _handle_system_feedback_finished(instance: CodexInstance) -> None:
             _clear_feedback_worker_death_retries(workflow, "pr_feedback")
             _handle_pr_feedback_finished(instance, workflow)
         return
-    workflow.state = _state_without_feedback_worker_death_retry(
+    workflow.state = _state_without_workflow_turn_death_retry(
         workflow.state, "qa_feedback"
     )
     workflow.step = STEP_QA_RUNNING
@@ -2581,17 +2581,24 @@ def _handle_system_feedback_finished(instance: CodexInstance) -> None:
         _block_workflow(workflow, f"failed to restart QA agent: {exc!r}")
 
 
-def _retry_dead_system_feedback_worker(
-    instance: CodexInstance, workflow: SystemWorkflow
+def _claim_workflow_turn_death_retry(
+    workflow: SystemWorkflow, instance: CodexInstance, retry_kind: str
 ) -> bool:
-    retry_kind = _feedback_worker_retry_kind(workflow)
+    """Record one more death-retry for this step if the dead turn may be retried.
+
+    Single source of the retry rule shared by every workflow turn: the
+    workflow must still be active, the worker must have died before
+    reporting completion, and the per-step retry budget
+    (``_WORKFLOW_TURN_DEATH_RETRY_LIMIT``) must not be exhausted. Bumps and
+    persists the per-kind count when it returns True.
+    """
     if (
         not workflow.is_active
         or not retry_kind
         or not _is_worker_exited_before_completion_error(instance.error)
     ):
         return False
-    retries = _feedback_worker_death_retries(workflow.state)
+    retries = _workflow_turn_death_retries(workflow.state)
     retry_count = retries.get(retry_kind, 0)
     if retry_count >= _WORKFLOW_TURN_DEATH_RETRY_LIMIT:
         return False
@@ -2603,6 +2610,15 @@ def _retry_dead_system_feedback_worker(
         },
     }
     workflow.save(update_fields=["state", "updated_at"])
+    return True
+
+
+def _retry_dead_system_feedback_worker(
+    instance: CodexInstance, workflow: SystemWorkflow
+) -> bool:
+    retry_kind = _feedback_worker_retry_kind(workflow)
+    if not _claim_workflow_turn_death_retry(workflow, instance, retry_kind):
+        return False
     try:
         _spawn_workflow_turn(
             workflow,
@@ -2635,14 +2651,6 @@ def _feedback_worker_retry_kind(workflow: SystemWorkflow) -> str:
     return ""
 
 
-def _feedback_worker_death_retries(state: Mapping[str, Any]) -> dict[str, int]:
-    return {
-        key: value
-        for key, value in _workflow_turn_death_retries(state).items()
-        if key in ("qa_feedback", "pr_feedback")
-    }
-
-
 def _workflow_turn_death_retries(state: Mapping[str, Any]) -> dict[str, int]:
     raw = state.get(_WORKFLOW_TURN_DEATH_RETRY_STATE_KEY)
     if not isinstance(raw, dict):
@@ -2657,17 +2665,11 @@ def _workflow_turn_death_retries(state: Mapping[str, Any]) -> dict[str, int]:
 def _clear_feedback_worker_death_retries(
     workflow: SystemWorkflow, retry_kind: str
 ) -> None:
-    state = _state_without_feedback_worker_death_retry(workflow.state, retry_kind)
+    state = _state_without_workflow_turn_death_retry(workflow.state, retry_kind)
     if state == workflow.state:
         return
     workflow.state = state
     workflow.save(update_fields=["state", "updated_at"])
-
-
-def _state_without_feedback_worker_death_retry(
-    state: Mapping[str, Any], retry_kind: str
-) -> dict[str, Any]:
-    return _state_without_workflow_turn_death_retry(state, retry_kind)
 
 
 def _state_without_workflow_turn_death_retry(
@@ -4834,38 +4836,23 @@ def _retry_dead_autonomous_goal_worker(
     workflow: SystemWorkflow,
 ) -> _AutonomousGoalPostCommitAction | None:
     retry_kind = _autonomous_goal_worker_retry_kind(workflow)
-    if (
-        not workflow.is_active
-        or not retry_kind
-        or not _is_worker_exited_before_completion_error(instance.error)
-    ):
-        return None
     candidate: dict[str, Any] | None = None
     if retry_kind == _AUTONOMOUS_GOAL_CANDIDATE_RETRY_KIND:
         action_kind = _AUTONOMOUS_GOAL_RETRY_CANDIDATE_ACTION
-    else:
+    elif retry_kind:
         raw_candidate = workflow.state.get("candidate")
         if not isinstance(raw_candidate, dict):
             return None
         candidate = raw_candidate
         action_kind = _AUTONOMOUS_GOAL_RETRY_JUDGE_ACTION
-
-    retries = _workflow_turn_death_retries(workflow.state)
-    retry_count = retries.get(retry_kind, 0)
-    if retry_count >= _WORKFLOW_TURN_DEATH_RETRY_LIMIT:
+    else:
+        return None
+    if not _claim_workflow_turn_death_retry(workflow, instance, retry_kind):
         return None
 
     run.status = SystemAgentRun.STATUS_FAILED
     run.error = f"autonomous goal worker failed: {instance.error}"
     run.save(update_fields=["status", "error", "updated_at"])
-    workflow.state = {
-        **workflow.state,
-        _WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {
-            **retries,
-            retry_kind: retry_count + 1,
-        },
-    }
-    workflow.save(update_fields=["state", "updated_at"])
     return _AutonomousGoalPostCommitAction(action_kind, candidate)
 
 
