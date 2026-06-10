@@ -270,7 +270,6 @@ STEP_LOCAL_BRANCH_MERGED = "local_branch_merged"
 STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING = "autonomous_goal_candidate_running"
 STEP_AUTONOMOUS_GOAL_JUDGE_RUNNING = "autonomous_goal_judge_running"
 STEP_AUTONOMOUS_GOAL_PROPOSED = "autonomous_goal_proposed"
-STEP_AUTONOMOUS_GOAL_DRAFT_STARTED = "autonomous_goal_draft_started"
 STEP_AUTONOMOUS_GOAL_SKIPPED = "autonomous_goal_skipped"
 STEP_SPEC_CRITIC_CLASSIFYING = "spec_critic_classifying"
 STEP_SPEC_CRITIC_ANALYZING = "spec_critic_analyzing"
@@ -6547,22 +6546,6 @@ def _spec_critic_clarification_plan(
         if question.get("required") is True:
             required.append(_question_for_user_input(question))
     return required, safe_defaults
-
-
-def _request_spec_critic_clarification(
-    workflow: SystemWorkflow,
-    questions: list[dict[str, Any]],
-    safe_defaults: dict[str, str],
-) -> UserInputRequest | None:
-    run = _spec_critic_clarification_run(workflow)
-    if run is None:
-        _block_spec_critic_workflow(
-            workflow, "Spec Critic could not create a clarification request"
-        )
-        return None
-    return _create_spec_critic_clarification_request(
-        workflow, run, questions, safe_defaults
-    )
 
 
 def _spec_critic_clarification_run(

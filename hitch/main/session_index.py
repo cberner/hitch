@@ -102,10 +102,6 @@ def has_pending_pages(*, archived: bool) -> bool:
     )
 
 
-def has_indexed_sessions() -> bool:
-    return SessionMetadata.objects.exclude(codex_updated_at__isnull=True).exists()
-
-
 def refresh_from_codex(
     codex: Codex,
     *,

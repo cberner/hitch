@@ -2797,11 +2797,6 @@ _SHARED_POOL = _SharedCodexPool()
 atexit.register(_SHARED_POOL.close_all)
 
 
-def close_shared_pool() -> None:
-    """Close every pooled app-server (process shutdown / test teardown)."""
-    _SHARED_POOL.close_all()
-
-
 def _shared_pool_enabled() -> bool:
     # Under tests each case patches ``Codex`` fresh and expects construction per
     # call, so caching pooled instances across cases would leak mocks. The pool

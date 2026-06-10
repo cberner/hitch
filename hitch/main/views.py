@@ -180,7 +180,6 @@ from hitch.main.session_pr_plan import (
     _auto_qa_enabled_for_session,
     _count_user_entries,
     _current_pr_url_for_thread,
-    _entries_await_plan_approval,
     _fix_pr_url_for_thread,
     _mark_pending_plan_actions,
     _pr_observation_result_for_thread,
@@ -5409,9 +5408,6 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
         if not input_images_owned:
             _cleanup_saved_input_images(input_image_paths)
         raise
-
-def _thread_awaits_plan_approval(thread: Any) -> bool:
-    return _entries_await_plan_approval(list(_entries_for(thread)))
 
 
 def _posted_input_image_uploads(request: HttpRequest) -> list[UploadedFile]:
