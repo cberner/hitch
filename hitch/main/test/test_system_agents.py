@@ -47,6 +47,7 @@ from hitch.main.workflows import (
     pr_monitor_format,
     pr_stage_refresh_state,
     qa_prompts,
+    spec_critic,
     spec_critic_prompts,
     system_agents,
 )
@@ -1132,56 +1133,56 @@ class SessionPrStageRefreshTests(TestCase):
 
 class SpecCriticWorkflowTests(TestCase):
     @patch(
-        "hitch.main.workflows.system_agents._classify_spec_critic_prompt_with_codex",
+        "hitch.main.workflows.spec_critic._classify_spec_critic_prompt_with_codex",
         return_value=None,
     )
     def test_prompt_classifier_fallback_targets_vague_broad_and_high_impact_prompts(
         self, _mock_classify: MagicMock
     ) -> None:
-        self.assertTrue(system_agents.spec_critic_should_run("Improve the app"))
+        self.assertTrue(spec_critic.spec_critic_should_run("Improve the app"))
         self.assertTrue(
-            system_agents.spec_critic_should_run(
+            spec_critic.spec_critic_should_run(
                 "Implement authentication and permission handling"
             )
         )
         self.assertTrue(
-            system_agents.spec_critic_should_run("Change token rotation")
+            spec_critic.spec_critic_should_run("Change token rotation")
         )
         self.assertFalse(
-            system_agents.spec_critic_should_run(
+            spec_critic.spec_critic_should_run(
                 'Change the settings checkbox label from "Auto-PR" to "Open PR automatically".'
             )
         )
         self.assertFalse(
-            system_agents.spec_critic_should_run(
+            spec_critic.spec_critic_should_run(
                 "Extend the CI benchmark step to include 20000 symbol count. "
                 "Also, I think some of the groups are missing some symbol counts. "
                 "They should all use the same and go up to 20000, after this change."
             )
         )
         self.assertFalse(
-            system_agents.spec_critic_should_run(
+            spec_critic.spec_critic_should_run(
                 "Support fallback handling for Codex CLI output in worker logs without "
                 "changing visible behavior"
             )
         )
-        self.assertTrue(system_agents.spec_critic_should_run("Update all benchmarks"))
+        self.assertTrue(spec_critic.spec_critic_should_run("Update all benchmarks"))
         self.assertTrue(
-            system_agents.spec_critic_should_run(
+            spec_critic.spec_critic_should_run(
                 "Build dashboards for usage reporting across teams projects and "
                 "monthly allocation policies"
             )
         )
         self.assertTrue(
-            system_agents.spec_critic_should_run(
+            spec_critic.spec_critic_should_run(
                 "Build workflows for queue management across repositories projects "
                 "and user sessions"
             )
         )
-        self.assertFalse(system_agents.spec_critic_should_run("Change tokenizer tests"))
-        self.assertFalse(system_agents.spec_critic_should_run("Explain how sessions work"))
+        self.assertFalse(spec_critic.spec_critic_should_run("Change tokenizer tests"))
+        self.assertFalse(spec_critic.spec_critic_should_run("Explain how sessions work"))
 
-    @patch("hitch.main.workflows.system_agents.Codex")
+    @patch("hitch.main.workflows.spec_critic.Codex")
     def test_prompt_classifier_asks_codex_with_smallest_model(
         self, mock_codex_class: MagicMock
     ) -> None:
@@ -1211,7 +1212,7 @@ class SpecCriticWorkflowTests(TestCase):
         ]
 
         self.assertFalse(
-            system_agents.spec_critic_should_run("Improve onboarding", cwd="/repo")
+            spec_critic.spec_critic_should_run("Improve onboarding", cwd="/repo")
         )
 
         codex.thread_start.assert_called_once()
@@ -1220,7 +1221,7 @@ class SpecCriticWorkflowTests(TestCase):
         thread.turn.assert_called_once()
         self.assertEqual(thread.turn.call_args.kwargs["model"], "gpt-5-mini")
 
-    @patch("hitch.main.workflows.system_agents.spec_critic_should_run", return_value=True)
+    @patch("hitch.main.workflows.spec_critic.spec_critic_should_run", return_value=True)
     @patch("hitch.main.workflows.system_agents.threading.Thread", side_effect=_synchronous_thread)
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_spec_critic_starts_hidden_specialized_agents(
@@ -1237,7 +1238,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.side_effect = _spawn
 
         # The background classifier runs inline here and routes to analysis.
-        workflow = system_agents.start_spec_critic_workflow(
+        workflow = spec_critic.start_spec_critic_workflow(
             main_thread_id="main-thread",
             cwd="/repo",
             prompt="Improve onboarding",
@@ -1289,7 +1290,7 @@ class SpecCriticWorkflowTests(TestCase):
     def test_spec_critic_workflow_runs_classifier_in_background(
         self, mock_thread: MagicMock
     ) -> None:
-        workflow = system_agents.start_spec_critic_workflow(
+        workflow = spec_critic.start_spec_critic_workflow(
             main_thread_id="main-thread",
             cwd="/repo",
             prompt="Improve onboarding",
@@ -1303,14 +1304,14 @@ class SpecCriticWorkflowTests(TestCase):
         mock_thread.assert_called_once()
         self.assertEqual(
             mock_thread.call_args.kwargs["target"],
-            system_agents._run_spec_critic_classification,
+            spec_critic._run_spec_critic_classification,
         )
         self.assertEqual(mock_thread.call_args.kwargs["args"], (workflow.pk,))
         self.assertTrue(mock_thread.call_args.kwargs["daemon"])
         mock_thread.return_value.start.assert_called_once_with()
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    @patch("hitch.main.workflows.system_agents.spec_critic_should_run", return_value=True)
+    @patch("hitch.main.workflows.spec_critic.spec_critic_should_run", return_value=True)
     def test_spec_critic_classification_advances_to_analysis_when_needed(
         self, mock_should_run: MagicMock, mock_spawn: MagicMock
     ) -> None:
@@ -1332,7 +1333,7 @@ class SpecCriticWorkflowTests(TestCase):
             state={"original_prompt": "Improve onboarding"},
         )
 
-        system_agents._run_spec_critic_classification(workflow.pk)
+        spec_critic._run_spec_critic_classification(workflow.pk)
 
         mock_should_run.assert_called_once_with("Improve onboarding", cwd="/repo")
         workflow.refresh_from_db()
@@ -1341,7 +1342,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(mock_spawn.call_count, 3)
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.system_agents.spec_critic_should_run", return_value=False)
+    @patch("hitch.main.workflows.spec_critic.spec_critic_should_run", return_value=False)
     def test_spec_critic_classification_skips_to_original_prompt(
         self, mock_should_run: MagicMock, mock_spawn_turn: MagicMock
     ) -> None:
@@ -1362,7 +1363,7 @@ class SpecCriticWorkflowTests(TestCase):
             },
         )
 
-        system_agents._run_spec_critic_classification(workflow.pk)
+        spec_critic._run_spec_critic_classification(workflow.pk)
 
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
@@ -1382,7 +1383,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(kwargs["user_message_index"], 3)
         self.assertTrue(kwargs["auto_pr_enabled"])
 
-    @patch("hitch.main.workflows.system_agents._start_spec_critic_classification")
+    @patch("hitch.main.workflows.spec_critic._start_spec_critic_classification")
     def test_reconcile_rearms_stale_spec_critic_classification(
         self, mock_start: MagicMock
     ) -> None:
@@ -1413,7 +1414,7 @@ class SpecCriticWorkflowTests(TestCase):
         )
         mock_start.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents._start_spec_critic_classification")
+    @patch("hitch.main.workflows.spec_critic._start_spec_critic_classification")
     def test_reconcile_leaves_fresh_spec_critic_classification_alone(
         self, mock_start: MagicMock
     ) -> None:
@@ -1548,7 +1549,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
     @patch(
-        "hitch.main.workflows.system_agents.spec_critic_should_run",
+        "hitch.main.workflows.spec_critic.spec_critic_should_run",
         side_effect=RuntimeError("boom"),
     )
     def test_classification_skips_when_classifier_raises(
@@ -1557,14 +1558,14 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn_turn.return_value = _instance(status=CodexInstance.STATUS_RUNNING)
         workflow = self._classifying_workflow()
 
-        system_agents._run_spec_critic_classification(workflow.pk)
+        spec_critic._run_spec_critic_classification(workflow.pk)
 
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_COMPLETED)
         mock_spawn_turn.assert_called_once()
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_turn")
-    @patch("hitch.main.workflows.system_agents.spec_critic_should_run")
+    @patch("hitch.main.workflows.spec_critic.spec_critic_should_run")
     def test_classification_ignores_workflow_no_longer_classifying(
         self, mock_should_run: MagicMock, mock_spawn_turn: MagicMock
     ) -> None:
@@ -1573,7 +1574,7 @@ class SpecCriticWorkflowTests(TestCase):
             step=system_agents.STEP_SPEC_CRITIC_ANALYZING
         )
 
-        system_agents._run_spec_critic_classification(workflow.pk)
+        spec_critic._run_spec_critic_classification(workflow.pk)
 
         mock_should_run.assert_not_called()
         mock_spawn_turn.assert_not_called()
@@ -1585,7 +1586,7 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn_turn.side_effect = RuntimeError("no worker")
         workflow = self._classifying_workflow()
 
-        system_agents._skip_spec_critic_and_implement(workflow)
+        spec_critic._skip_spec_critic_and_implement(workflow)
 
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
@@ -1599,12 +1600,12 @@ class SpecCriticWorkflowTests(TestCase):
             step=system_agents.STEP_SPEC_CRITIC_ANALYZING
         )
 
-        system_agents._skip_spec_critic_and_implement(workflow)
+        spec_critic._skip_spec_critic_and_implement(workflow)
 
         mock_spawn_turn.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents._skip_spec_critic_and_implement")
-    @patch("hitch.main.workflows.system_agents.spec_critic_should_run", return_value=False)
+    @patch("hitch.main.workflows.spec_critic._skip_spec_critic_and_implement")
+    @patch("hitch.main.workflows.spec_critic.spec_critic_should_run", return_value=False)
     def test_run_classification_swallows_unexpected_routing_errors(
         self, mock_should_run: MagicMock, mock_skip: MagicMock
     ) -> None:
@@ -1612,7 +1613,7 @@ class SpecCriticWorkflowTests(TestCase):
         workflow = self._classifying_workflow()
 
         # Must not raise out of the daemon thread.
-        system_agents._run_spec_critic_classification(workflow.pk)
+        spec_critic._run_spec_critic_classification(workflow.pk)
 
         mock_skip.assert_called_once()
 
@@ -1625,7 +1626,7 @@ class SpecCriticWorkflowTests(TestCase):
             step=system_agents.STEP_SPEC_CRITIC_ANALYZING
         )
 
-        system_agents._advance_spec_critic_to_analysis(workflow)
+        spec_critic._advance_spec_critic_to_analysis(workflow)
 
         mock_spawn.assert_not_called()
 
@@ -1638,7 +1639,7 @@ class SpecCriticWorkflowTests(TestCase):
     ) -> None:
         workflow = self._classifying_workflow()
 
-        system_agents._begin_spec_critic_analysis(workflow)
+        spec_critic._begin_spec_critic_analysis(workflow)
 
         workflow.refresh_from_db()
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
@@ -1662,13 +1663,13 @@ class SpecCriticWorkflowTests(TestCase):
         mock_spawn.side_effect = _spawn
         workflow = self._classifying_workflow()
 
-        system_agents._start_spec_critic_classification(workflow)
+        spec_critic._start_spec_critic_classification(workflow)
 
         workflow.refresh_from_db()
         self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_ANALYZING)
         self.assertEqual(mock_spawn.call_count, 3)
 
-    @patch("hitch.main.workflows.system_agents.spec_critic_should_run", return_value=True)
+    @patch("hitch.main.workflows.spec_critic.spec_critic_should_run", return_value=True)
     @patch("hitch.main.workflows.system_agents.threading.Thread", side_effect=_synchronous_thread)
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_spec_critic_gates_on_required_clarification(
@@ -1684,7 +1685,7 @@ class SpecCriticWorkflowTests(TestCase):
 
         mock_spawn.side_effect = _spawn
         # The background classifier runs inline here and routes to analysis.
-        workflow = system_agents.start_spec_critic_workflow(
+        workflow = spec_critic.start_spec_critic_workflow(
             main_thread_id="main-thread",
             cwd="/repo",
             prompt="Improve onboarding",
@@ -1777,7 +1778,7 @@ class SpecCriticWorkflowTests(TestCase):
 
         input_request.response = {"answers": {"scope": "New session flow"}}
         input_request.save(update_fields=["response"])
-        system_agents.on_user_input_resolved(input_request)
+        spec_critic.on_user_input_resolved(input_request)
 
         workflow.refresh_from_db()
         self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_SYNTHESIZING)
@@ -1850,7 +1851,7 @@ class SpecCriticWorkflowTests(TestCase):
             response={"answers": {"scope": "New sessions", "tone": ""}},
         )
 
-        system_agents.on_user_input_resolved(first_request)
+        spec_critic.on_user_input_resolved(first_request)
 
         workflow.refresh_from_db()
         self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_CLARIFYING)
@@ -1875,7 +1876,7 @@ class SpecCriticWorkflowTests(TestCase):
         follow_up.response = {"answers": {"tone": "Minimal"}}
         follow_up.save(update_fields=["response"])
 
-        system_agents.on_user_input_resolved(follow_up)
+        spec_critic.on_user_input_resolved(follow_up)
 
         workflow.refresh_from_db()
         self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_SYNTHESIZING)
@@ -1944,8 +1945,8 @@ class SpecCriticWorkflowTests(TestCase):
             agent_kind=agent_io.SPEC_SYNTHESIZER_AGENT_KIND,
         )
 
-        system_agents._maybe_advance_spec_critic_after_analysis(workflow)
-        system_agents._maybe_advance_spec_critic_after_analysis(workflow)
+        spec_critic._maybe_advance_spec_critic_after_analysis(workflow)
+        spec_critic._maybe_advance_spec_critic_after_analysis(workflow)
 
         workflow.refresh_from_db()
         self.assertEqual(workflow.step, system_agents.STEP_SPEC_CRITIC_SYNTHESIZING)

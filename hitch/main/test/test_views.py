@@ -9786,8 +9786,8 @@ class NewSessionViewTests(TestCase):
         )
         self.assertEqual(_cookie_value(response, _MODEL_COOKIE), "gpt-5.4")
 
-    @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
-    @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
+    @patch("hitch.main.views.spec_critic.spec_critic_should_run", return_value=True)
+    @patch("hitch.main.views.spec_critic.start_spec_critic_workflow")
     @patch("hitch.main.views.codex_pool.create_session_thread", return_value="thread-spec")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.repos.discover_repos")
@@ -10601,8 +10601,8 @@ class NewSessionViewTests(TestCase):
             auto_merge_branch="release",
         )
 
-    @patch("hitch.main.views.system_agents.spec_critic_should_run")
-    @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
+    @patch("hitch.main.views.spec_critic.spec_critic_should_run")
+    @patch("hitch.main.views.spec_critic.start_spec_critic_workflow")
     @patch("hitch.main.views.Codex")
     @patch("hitch.main.views.codex_pool.spawn_new_session")
     @patch("hitch.main.repos.discover_repos")
@@ -10643,7 +10643,7 @@ class NewSessionViewTests(TestCase):
         mock_spec_critic_should_run.assert_not_called()
         mock_start_spec_critic.assert_not_called()
 
-    @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
+    @patch("hitch.main.views.spec_critic.spec_critic_should_run", return_value=True)
     @patch(
         "hitch.main.views.system_agents."
         "stop_running_autonomous_goal_stack_after_proposal_resolution"
@@ -11041,7 +11041,7 @@ class NewSessionViewTests(TestCase):
         self.assertEqual(proposal.accepted_session, candidate)
         self.assertFalse(candidate.is_hidden_system_session)
 
-    @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
+    @patch("hitch.main.views.spec_critic.spec_critic_should_run", return_value=True)
     @patch("hitch.main.views.system_agents.start_pr_qa_workflow")
     @patch("hitch.main.worktrees.discover_managed_worktrees")
     @patch("hitch.main.repos.discover_repos")
@@ -11285,8 +11285,8 @@ class NewSessionViewTests(TestCase):
         self.assertTrue(candidate.auto_merge_to_local_branch)
         self.assertEqual(candidate.auto_merge_branch, "release")
 
-    @patch("hitch.main.views.system_agents.spec_critic_should_run")
-    @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
+    @patch("hitch.main.views.spec_critic.spec_critic_should_run")
+    @patch("hitch.main.views.spec_critic.start_spec_critic_workflow")
     @patch("hitch.main.worktrees.discover_managed_worktrees")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -14019,8 +14019,8 @@ class SendMessageViewTests(TestCase):
         # The model-sensitive turn recovered the thread model via a live resume.
         mock_codex.assert_called()
 
-    @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
-    @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
+    @patch("hitch.main.views.spec_critic.spec_critic_should_run", return_value=True)
+    @patch("hitch.main.views.spec_critic.start_spec_critic_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
@@ -14063,8 +14063,8 @@ class SendMessageViewTests(TestCase):
             auto_qa_enabled=False,
         )
 
-    @patch("hitch.main.views.system_agents.spec_critic_should_run", return_value=True)
-    @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
+    @patch("hitch.main.views.spec_critic.spec_critic_should_run", return_value=True)
+    @patch("hitch.main.views.spec_critic.start_spec_critic_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")
@@ -14101,8 +14101,8 @@ class SendMessageViewTests(TestCase):
         self.assertTrue(kwargs["auto_merge_to_local_branch"])
         self.assertEqual(kwargs["auto_merge_branch"], "main")
 
-    @patch("hitch.main.views.system_agents.spec_critic_should_run")
-    @patch("hitch.main.views.system_agents.start_spec_critic_workflow")
+    @patch("hitch.main.views.spec_critic.spec_critic_should_run")
+    @patch("hitch.main.views.spec_critic.start_spec_critic_workflow")
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.codex_pool.spawn_turn")
     @patch("hitch.main.views.Codex")

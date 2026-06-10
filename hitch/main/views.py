@@ -254,7 +254,7 @@ from hitch.main.sessions.system_agent_summary import (
     _system_agent_status,
     _updated_at_sort_key,
 )
-from hitch.main.workflows import pr_stage, system_agents
+from hitch.main.workflows import pr_stage, spec_critic, system_agents
 from hitch.main.worktrees import (
     ManagedWorktree,
     WorktreeCleanupError,
@@ -5192,7 +5192,7 @@ def send_message(request: HttpRequest, session_id: str) -> HttpResponse:
                 spec_workflow_kwargs["base_instructions"] = base_instructions
             if should_forward_web_search_mode:
                 spec_workflow_kwargs["web_search_mode"] = web_search_mode
-            system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
+            spec_critic.start_spec_critic_workflow(**spec_workflow_kwargs)
             record_session_unarchived_for_accepted_turn()
             return redirect("session", session_id=session_id)
         codex_pool.spawn_turn(**spawn_kwargs)
@@ -6188,7 +6188,7 @@ def _post_new_session(request: HttpRequest) -> HttpResponse:
         if web_search_mode:
             spec_workflow_kwargs["web_search_mode"] = web_search_mode
         try:
-            system_agents.start_spec_critic_workflow(**spec_workflow_kwargs)
+            spec_critic.start_spec_critic_workflow(**spec_workflow_kwargs)
         except Exception:
             # The worktree is only referenced by the not-yet-started workflow, so
             # reclaim it before bubbling up rather than leaking it on disk (and

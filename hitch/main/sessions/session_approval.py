@@ -20,7 +20,7 @@ from django.views.decorators.http import require_http_methods
 from hitch.main.models import ApprovalRequest, UserInputRequest
 from hitch.main.runtime import codex_pool
 from hitch.main.sessions.settings_cookies import _MAX_BIGAUTOFIELD
-from hitch.main.workflows import system_agents
+from hitch.main.workflows import spec_critic, system_agents
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +160,7 @@ def resolve_input_request(request: HttpRequest, input_id: int) -> HttpResponse:
         return HttpResponse("input request already resolved", status=409)
     input_request.refresh_from_db()
     try:
-        system_agents.on_user_input_resolved(input_request)
+        spec_critic.on_user_input_resolved(input_request)
     except Exception:
         logger.exception("failed to resume workflow for input request %s", input_id)
     return HttpResponse(json.dumps(response), content_type="application/json")
