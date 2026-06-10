@@ -22,6 +22,26 @@ bridge browser approvals and structured input requests. The browser follows
 active turns through `EventSource`/Server-Sent Events, while optional managed
 git worktrees isolate agent edits under `~/.hitch/worktrees`.
 
+The `hitch.main` app is organized into four packages plus the web layer at
+the top level:
+
+- `runtime/` -- the Codex worker/app-server runtime: `codex_pool` (worker
+  spawning, app-server pooling, reconciliation), `streaming` (SSE),
+  `rollout`/`rollout_state` (rollout-file reading), `codex_events`,
+  `disk_cleanup`, `health`, and process/host infrastructure.
+- `workflows/` -- the system-agent workflow engine: `system_agents` (the
+  QA reviewer, PR monitor, autonomous-goal runner, and spec-critic state
+  machines), their prompts, `gh` CLI integration, and PR handoff/stage
+  bookkeeping.
+- `sessions/` -- session-page support: entry/metadata display, settings and
+  signed settings cookies, session indexing, stage derivation, and token
+  usage.
+- `goals/` -- autonomous goals: goal forms/prompts, proposal lifecycle and
+  stacked-diff continuation, and the auto-proposal scheduler.
+- top level -- `views`, `models`, `demo`, `caches`, `formatting`, and the
+  git/repo utilities (`repos`, `worktrees`, `git_support`, `local_merges`,
+  `diffs`).
+
 ## Major frameworks and dependencies
 
 - Python 3.13 or newer
