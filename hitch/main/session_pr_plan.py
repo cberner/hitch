@@ -14,7 +14,14 @@ from collections.abc import Iterable, Iterator, Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from hitch.main import codex_events, codex_pool, pr_stage, rollout, system_agents
+from hitch.main import (
+    codex_events,
+    codex_pool,
+    pr_stage,
+    pr_stage_refresh_state,
+    rollout,
+    system_agents,
+)
 from hitch.main.entry_render import find_final_agent_idx, user_message_text
 from hitch.main.models import CodexInstance, SessionMetadata, SystemWorkflow
 from hitch.main.rollout_state import _rollout_path_for
@@ -161,7 +168,7 @@ def _workflow_pr_handoff_survives_lifecycle(
     handoff_identity = _pr_snapshot_identity(handoff)
     if handoff_identity is None:
         return False
-    hitch_handoff = system_agents.hitch_pr_handoff_for_workflow(workflow)
+    hitch_handoff = pr_stage_refresh_state.hitch_pr_handoff_for_workflow(workflow)
     if _pr_snapshot_identity(hitch_handoff) != handoff_identity:
         return False
     main_updated_seconds = updated_at_seconds(main_updated_at)

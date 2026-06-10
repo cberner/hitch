@@ -146,6 +146,18 @@ from hitch.main.pr_monitor_format import (
     _pr_monitor_actionable_feedback,
     _pr_monitor_feedback,
 )
+from hitch.main.pr_stage_refresh_state import (
+    _PR_STAGE_REFRESH_MIN_SECONDS,
+    _PR_STAGE_REFRESH_STATE_KEY,
+    _hitch_pr_handoff_marker,
+    _mark_hitch_pr_handoff,
+    _mark_pr_stage_refresh_attempt,
+    _pr_handoff_selector,
+    _pr_stage_rate_limit_key,
+    _pr_stage_refresh_attempted_at,
+    _pr_stage_refresh_globally_due,
+    _should_refresh_pr_snapshot_for_stage,
+)
 from hitch.main.qa_prompts import (
     _QA_DESIGN_SYNTHESIS_STATE_KEY,
     _QA_REVIEW_REVISION_STATE_KEY,
@@ -340,7 +352,6 @@ _ZOMBIE_TURN_STEP_MESSAGES = {
     STEP_USER_STEERING_RUNNING: "coding turn",
 }
 _PR_HANDOFF_STATE_KEY = "pr_handoff"
-_PR_HITCH_HANDOFF_STATE_KEY = "hitch_pr_handoff"
 _PR_MONITOR_STATE_KEY = "last_pr_monitor"
 _PR_MONITOR_BACKOFF_STATE_KEY = "pr_monitor_backoff"
 _PR_MONITOR_FEEDBACK_OBSERVATION_KEY = "monitor_feedback_observation"
@@ -365,9 +376,7 @@ QA_APPROVAL_INSERT_INDEX_STATE_KEY = "qa_approval_insert_index"
 AUTO_MERGE_REVIEWED_DIFF_STATE_KEY = "auto_merge_reviewed_diff"
 AUTO_MERGE_REVIEWED_TARGET_SHA_STATE_KEY = "auto_merge_reviewed_target_sha"
 AUTO_MERGE_SESSION_BASE_SHA_STATE_KEY = "auto_merge_session_base_sha"
-_PR_STAGE_REFRESH_MIN_SECONDS = 5 * _SECONDS_PER_MINUTE
 _PR_STAGE_REFRESH_TIMEOUT_SECONDS = 5
-_PR_STAGE_REFRESH_STATE_KEY = "pr_stage_refresh"
 _PR_MONITOR_PENDING_POLL_MIN_SECONDS = 5 * _SECONDS_PER_MINUTE
 _PR_MONITOR_PENDING_POLL_MAX_SECONDS = 30 * _SECONDS_PER_MINUTE
 _GH_PR_VIEW_FIELDS = (
@@ -3226,34 +3235,6 @@ def _pr_monitor_observation_from_gh(workflow: SystemWorkflow) -> dict[str, Any]:
     }
 
 
-def _pr_handoff_selector(handoff: dict[str, Any]) -> str:
-    url = string_from_any(handoff.get("url"))
-    if url:
-        return url
-    number = handoff.get("pr_number")
-    if isinstance(number, int) and not isinstance(number, bool):
-        return str(number)
-    return ""
-
-
-def _pr_stage_rate_limit_key(handoff: Mapping[str, Any]) -> str:
-    """Stable key identifying a PR for the central refresh debounce.
-
-    Keying on PR *identity* -- not the workflow or session that triggered the
-    refresh -- is what makes the floor global: the list view, the detail view,
-    both background schedulers, and every session pointing at the same PR share
-    one window.
-    """
-    url = string_from_any(handoff.get("url"))
-    if url:
-        return f"gh:pr-view:{url}"
-    repo = string_from_any(handoff.get("repository_full_name"))
-    number = handoff.get("pr_number")
-    if isinstance(number, int) and not isinstance(number, bool):
-        return f"gh:pr-view:{repo}#{number}" if repo else f"gh:pr-view:#{number}"
-    return ""
-
-
 def _handle_spec_critic_agent_finished(
     instance: CodexInstance, run: SystemAgentRun, workflow: SystemWorkflow
 ) -> None:
@@ -6052,19 +6033,6 @@ def pr_monitor_backoff_stage_refresh_due(workflow: SystemWorkflow | None) -> boo
     return not _pr_monitor_has_active_agent_run(workflow)
 
 
-def _pr_stage_refresh_globally_due(handoff: Mapping[str, Any]) -> bool:
-    """Whether the central per-PR debounce window is open for this handoff.
-
-    Layered on top of the per-workflow / per-session windows so renders and
-    background workers do not flag a PR as refreshing -- and therefore schedule
-    a worker and trigger a page reload -- when another path refreshed the same
-    PR within the global window. ``refreshed_pr_*`` still claim atomically; this
-    read-only check just keeps the UI from looping on a window that will deny.
-    """
-    key = _pr_stage_rate_limit_key(handoff)
-    return not key or rate_limit.due(key)
-
-
 def refresh_unarchived_session_pr_stages(*, limit: int | None = None) -> int:
     """Refresh GitHub-backed PR stages for unarchived sessions.
 
@@ -6266,73 +6234,6 @@ def _should_refresh_pr_handoff_for_stage(
     return int(timezone.now().timestamp()) - last_attempted_at >= (
         _PR_STAGE_REFRESH_MIN_SECONDS
     )
-
-
-def _should_refresh_pr_snapshot_for_stage(
-    cwd: str,
-    handoff: dict[str, Any],
-    *,
-    attempted_at: datetime | None,
-    force: bool,
-) -> bool:
-    if _pr_handoff_is_terminal(handoff):
-        return False
-    if not _pr_handoff_selector(handoff):
-        return False
-    if not Path(cwd).is_dir():
-        return False
-    if force:
-        return True
-    if attempted_at is None:
-        return True
-    attempted_seconds = int(attempted_at.timestamp())
-    return int(timezone.now().timestamp()) - attempted_seconds >= (
-        _PR_STAGE_REFRESH_MIN_SECONDS
-    )
-
-
-def _mark_pr_stage_refresh_attempt(workflow: SystemWorkflow) -> None:
-    workflow.state = {
-        **workflow.state,
-        _PR_STAGE_REFRESH_STATE_KEY: {
-            "attempted_at": int(timezone.now().timestamp()),
-        },
-    }
-
-
-def _pr_stage_refresh_attempted_at(workflow: SystemWorkflow) -> int:
-    value = workflow.state.get(_PR_STAGE_REFRESH_STATE_KEY)
-    if not isinstance(value, dict):
-        return 0
-    attempted_at = value.get("attempted_at")
-    if isinstance(attempted_at, int) and not isinstance(attempted_at, bool):
-        return attempted_at
-    return 0
-
-
-def hitch_pr_handoff_for_workflow(workflow: SystemWorkflow | None) -> dict[str, Any]:
-    if workflow is None or workflow.kind != SystemWorkflow.KIND_PR_QA:
-        return {}
-    return _hitch_pr_handoff_marker(workflow.state.get(_PR_HITCH_HANDOFF_STATE_KEY))
-
-
-def _mark_hitch_pr_handoff(workflow: SystemWorkflow, handoff: dict[str, Any]) -> None:
-    marker = _hitch_pr_handoff_marker(handoff)
-    if marker:
-        workflow.state = {**workflow.state, _PR_HITCH_HANDOFF_STATE_KEY: marker}
-
-
-def _hitch_pr_handoff_marker(value: Any) -> dict[str, Any]:
-    handoff = _compact_pr_handoff(value)
-    marker: dict[str, Any] = {}
-    for key in ("url", "repository_full_name", "pr_number"):
-        if key in handoff:
-            marker[key] = handoff[key]
-    if "url" in marker or (
-        "repository_full_name" in marker and "pr_number" in marker
-    ):
-        return marker
-    return {}
 
 
 def _fail_run_and_block_workflow(
