@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 from hitch.main import codex_events, codex_pool, rollout
-from hitch.main.entry_render import find_final_agent_idx, user_message_text
 from hitch.main.models import CodexInstance, SessionMetadata, SystemWorkflow
 from hitch.main.rollout_state import _rollout_path_for
 from hitch.main.sdk_values import (
@@ -25,6 +24,7 @@ from hitch.main.sdk_values import (
     updated_at_seconds,
     value_for,
 )
+from hitch.main.sessions.entry_render import find_final_agent_idx, user_message_text
 from hitch.main.workflows import pr_stage, pr_stage_refresh_state, system_agents
 
 logger = logging.getLogger(__name__)

@@ -12,8 +12,9 @@ from django.utils import timezone
 from openai_codex.errors import MethodNotFoundError
 from openai_codex.generated.v2_all import ReasoningEffort
 
-from hitch.main import caches, coding_agents, context_processors, settings_cookies
+from hitch.main import caches, coding_agents, context_processors
 from hitch.main.models import GlobalSettings, Project, UserSettings
+from hitch.main.sessions import settings_cookies
 from hitch.main.test.support import (
     _cookie_value,
     _encode_extra_system_prompt,

@@ -23,8 +23,8 @@ from hitch.main.models import (
     SessionMetadata,
     UserSettings,
 )
-from hitch.main.session_pr_plan import _PR_SLASH_PROMPT
-from hitch.main.settings_cookies import (
+from hitch.main.sessions.session_pr_plan import _PR_SLASH_PROMPT
+from hitch.main.sessions.settings_cookies import (
     _APPROVAL_COOKIE,
     _AUTO_PR_COOKIE,
     _AUTO_QA_COOKIE,

@@ -53,19 +53,12 @@ from hitch.main import (
     demo,
     health,
     rollout,
-    session_index,
-    session_stage,
     streaming,
-    system_agent_summary,
-    token_usage,
 )
 from hitch.main import repos as repos_module
 from hitch.main import worktrees as worktrees_module
 from hitch.main.db import run_ignoring_database_locks
 from hitch.main.diffs import build_worktree_diff
-from hitch.main.entry_render import (
-    collapse_flat_entries,
-)
 from hitch.main.goals.autonomous_goal_form import (
     _attach_autonomous_goal_display_state,
     _validated_autonomous_goal_values,
@@ -87,13 +80,6 @@ from hitch.main.input_images import (
     _limit_input_image_uploads,
 )
 from hitch.main.local_merges import local_branch_names
-from hitch.main.message_intent import (
-    _FIX_PR_SLASH_COMMAND,
-    _is_fix_pr_activation,
-    _is_pr_activation,
-    _is_qa_activation,
-    _message_intent,
-)
 from hitch.main.models import (
     ApprovalRequest,
     ArchivedSessionTokenUsage,
@@ -107,19 +93,6 @@ from hitch.main.models import (
     SystemWorkflow,
     UserSettings,
 )
-from hitch.main.project_visibility import (
-    _filter_proposed_sessions_by_project_visibility,
-    _filter_session_metadata_by_project_visibility,
-    _project_visibility_label,
-    _project_visibility_shows_project_names,
-    _session_list_title,
-    _session_project_is_visible,
-    _session_project_visibility_context,
-    _settings_with_visible_selected_project,
-)
-from hitch.main.project_visibility import (
-    _metadata_by_thread_id as _metadata_by_thread_id,
-)
 from hitch.main.repos import git_common_dir, same_repo_or_worktree
 from hitch.main.rollout_state import (
     _rollout_file_state_from_value,
@@ -132,13 +105,37 @@ from hitch.main.rollout_state import (
 from hitch.main.sdk_values import (
     string_value,
 )
-from hitch.main.session_approval import _parse_instance_id
-from hitch.main.session_cursor import (
+from hitch.main.sessions import session_index, session_stage, system_agent_summary, token_usage
+from hitch.main.sessions.entry_render import (
+    collapse_flat_entries,
+)
+from hitch.main.sessions.message_intent import (
+    _FIX_PR_SLASH_COMMAND,
+    _is_fix_pr_activation,
+    _is_pr_activation,
+    _is_qa_activation,
+    _message_intent,
+)
+from hitch.main.sessions.project_visibility import (
+    _filter_proposed_sessions_by_project_visibility,
+    _filter_session_metadata_by_project_visibility,
+    _project_visibility_label,
+    _project_visibility_shows_project_names,
+    _session_list_title,
+    _session_project_is_visible,
+    _session_project_visibility_context,
+    _settings_with_visible_selected_project,
+)
+from hitch.main.sessions.project_visibility import (
+    _metadata_by_thread_id as _metadata_by_thread_id,
+)
+from hitch.main.sessions.session_approval import _parse_instance_id
+from hitch.main.sessions.session_cursor import (
     _index_cursor,
     _index_cursor_sort_key,
     _is_index_cursor,
 )
-from hitch.main.session_entry_display import (
+from hitch.main.sessions.session_entry_display import (
     _active_instance_for,
     _active_worker_status_text,
     _apply_qa_approval_messages,
@@ -157,7 +154,7 @@ from hitch.main.session_entry_display import (
     _workflow_composer_label,
     _workflow_status_text,
 )
-from hitch.main.session_metadata_display import (
+from hitch.main.sessions.session_metadata_display import (
     _ensure_indexed_system_threads,
     _filter_visible_session_metadata_rows,
     _index_cursor_for_metadata,
@@ -172,7 +169,7 @@ from hitch.main.session_metadata_display import (
     _sorted_visible_index_rows,
     _system_session_metadata_rows,
 )
-from hitch.main.session_pr_plan import (
+from hitch.main.sessions.session_pr_plan import (
     _PR_SLASH_PROMPT,
     _ROLLOUT_COLLABORATION_MODE_NOT_PROVIDED,
     _auto_merge_to_local_branch_for_session,
@@ -186,7 +183,7 @@ from hitch.main.session_pr_plan import (
     _thread_plan_mode_state,
     _workflow_after_main_lifecycle,
 )
-from hitch.main.session_resume import (
+from hitch.main.sessions.session_resume import (
     _entries_include_transcript,
     _metadata_indicates_archived,
     _metadata_resume_for_inactive_session,
@@ -197,7 +194,7 @@ from hitch.main.session_resume import (
     _thread_resume_archived_error,
     _unarchive_session_for_turn,
 )
-from hitch.main.session_settings import (
+from hitch.main.sessions.session_settings import (
     _BARE_REPO_PROJECT_VALUE,
     _QA_SLASH_PROMPT,
     _active_project_from_request,
@@ -221,12 +218,12 @@ from hitch.main.session_settings import (
     _stored_settings,
     _supported_effort_values,
 )
-from hitch.main.session_stage_refresh import (
+from hitch.main.sessions.session_stage_refresh import (
     _attach_session_stage_context,
     _schedule_pr_stage_refresh,
     _thread_ids_awaiting_input,
 )
-from hitch.main.settings_cookies import (
+from hitch.main.sessions.settings_cookies import (
     _APPROVAL_MODE_OPTIONS,
     _DEFAULT_APPROVAL_MODE,
     _EXTRA_SYSTEM_PROMPT_MAX_LEN,
@@ -252,7 +249,7 @@ from hitch.main.settings_cookies import (
     _visible_session_project_ids_cookie_fits,
     _web_search_mode_label,
 )
-from hitch.main.system_agent_summary import (
+from hitch.main.sessions.system_agent_summary import (
     _demo_system_session_url,
     _demo_system_thread_ids,
     _qa_activity_updated_at_by_main_thread_id,

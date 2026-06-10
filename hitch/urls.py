@@ -5,7 +5,7 @@ from django.contrib import admin
 from django.urls import path
 
 import hitch.main.views
-from hitch.main import session_approval
+from hitch.main.sessions import session_approval
 
 urlpatterns = [
     path("", hitch.main.views.index, name="index"),

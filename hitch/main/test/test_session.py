@@ -19,7 +19,6 @@ from openai_codex.errors import AppServerError
 
 from hitch.main import codex_events, demo
 from hitch.main.diffs import DiffFile, DiffLine, DiffView
-from hitch.main.entry_render import tool_call_detail, tool_call_status
 from hitch.main.models import (
     CodexInstance,
     Project,
@@ -28,7 +27,8 @@ from hitch.main.models import (
     SystemAgentRun,
     SystemWorkflow,
 )
-from hitch.main.session_pr_plan import (
+from hitch.main.sessions.entry_render import tool_call_detail, tool_call_status
+from hitch.main.sessions.session_pr_plan import (
     _pr_snapshot_for_thread,
     _pr_url_for_thread,
 )

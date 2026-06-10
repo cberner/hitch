@@ -6,8 +6,8 @@ from typing import NamedTuple
 
 from django.http import HttpRequest
 
-from hitch.main.session_pr_plan import _PR_PROMPT_ALIASES, _PR_SLASH_PROMPT
-from hitch.main.session_settings import _QA_SLASH_PROMPT
+from hitch.main.sessions.session_pr_plan import _PR_PROMPT_ALIASES, _PR_SLASH_PROMPT
+from hitch.main.sessions.session_settings import _QA_SLASH_PROMPT
 
 _PLAN_SLASH_COMMAND = "/plan"
 _PR_SLASH_COMMAND = "/pr"

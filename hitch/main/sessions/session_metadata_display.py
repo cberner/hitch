@@ -14,7 +14,7 @@ from typing import Any
 from django.db.models import Exists, OuterRef, Q, QuerySet
 from django.urls import reverse
 
-from hitch.main import demo, session_index
+from hitch.main import demo
 from hitch.main.models import (
     CodexInstance,
     Project,
@@ -23,8 +23,9 @@ from hitch.main.models import (
     SystemWorkflow,
 )
 from hitch.main.sdk_values import latest_updated_at, updated_at_seconds
-from hitch.main.session_cursor import _index_cursor_for_sort_key, _IndexCursor
-from hitch.main.system_agent_summary import (
+from hitch.main.sessions import session_index
+from hitch.main.sessions.session_cursor import _index_cursor_for_sort_key, _IndexCursor
+from hitch.main.sessions.system_agent_summary import (
     _system_agent_run_label,
     _system_agent_status,
     _updated_at_sort_key,

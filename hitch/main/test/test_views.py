@@ -49,19 +49,8 @@ from hitch.main import (
     codex_pool,
     coding_agents,
     demo,
-    entry_render,
     input_images,
-    session_entry_display,
-    session_index,
-    session_pr_plan,
-    session_resume,
-    session_settings,
-    session_stage,
-    session_stage_refresh,
-    settings_cookies,
     streaming,
-    system_agent_summary,
-    token_usage,
     views,
 )
 from hitch.main import (
@@ -84,6 +73,19 @@ from hitch.main.models import (
     UserSettings,
 )
 from hitch.main.rollout_state import _RolloutFileState
+from hitch.main.sessions import (
+    entry_render,
+    session_entry_display,
+    session_index,
+    session_pr_plan,
+    session_resume,
+    session_settings,
+    session_stage,
+    session_stage_refresh,
+    settings_cookies,
+    system_agent_summary,
+    token_usage,
+)
 from hitch.main.test.support import (
     _cookie_value,
     _encode_extra_system_prompt,
@@ -1536,7 +1538,7 @@ class SessionDetailFastPathTests(TestCase):
             return rollout_data
 
         with patch(
-            "hitch.main.session_resume._session_detail_data_for_metadata_resume",
+            "hitch.main.sessions.session_resume._session_detail_data_for_metadata_resume",
             side_effect=_append_during_read,
         ):
             response = self.client.get(
@@ -1639,7 +1641,7 @@ class SessionDetailFastPathTests(TestCase):
         self.assertEqual(metadata.derived_stage, "")
         self.assertEqual(metadata.derived_stage_source_mtime_ns, 0)
 
-    @patch("hitch.main.session_stage_refresh._schedule_pr_stage_refresh")
+    @patch("hitch.main.sessions.session_stage_refresh._schedule_pr_stage_refresh")
     @patch("hitch.main.caches._start_models_refresh_thread")
     @patch("hitch.main.views.Codex")
     def test_active_session_detail_does_not_flag_pr_workflow_refreshing(
@@ -2814,7 +2816,7 @@ class IndexViewTests(TestCase):
         )
         mock_observe.assert_called_once()
 
-    @patch("hitch.main.session_stage_refresh._schedule_pr_stage_refresh")
+    @patch("hitch.main.sessions.session_stage_refresh._schedule_pr_stage_refresh")
     @patch("hitch.main.workflows.system_agents.pr_snapshot_stage_refresh_due", return_value=True)
     @patch("hitch.main.repos.discover_repos")
     @patch("hitch.main.views.Codex")
@@ -4931,11 +4933,11 @@ class IndexViewTests(TestCase):
 
         with (
             patch(
-                "hitch.main.system_agent_summary._system_agent_runs_by_thread_id",
+                "hitch.main.sessions.system_agent_summary._system_agent_runs_by_thread_id",
                 return_value={},
             ) as runs_by_thread_id,
             patch(
-                "hitch.main.system_agent_summary._system_agent_instances_by_thread_id",
+                "hitch.main.sessions.system_agent_summary._system_agent_instances_by_thread_id",
                 return_value={},
             ) as instances_by_thread_id,
         ):
@@ -5559,7 +5561,7 @@ class IndexViewTests(TestCase):
             patch(
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
-            patch("hitch.main.token_usage._start_usage_token_refresh_thread"),
+            patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread"),
             patch("hitch.main.caches._start_models_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
         ):
@@ -7549,7 +7551,7 @@ class IndexViewTests(TestCase):
         client = _setup_codex(mock_codex)
 
         with (
-            patch("hitch.main.token_usage._start_usage_token_refresh_thread"),
+            patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread"),
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
         ):
@@ -7584,7 +7586,7 @@ class IndexViewTests(TestCase):
         with (
             patch("hitch.main.views.rollout.latest_token_usage") as latest_usage,
             patch("hitch.main.views.rollout.token_usage_history") as usage_history,
-            patch("hitch.main.token_usage._start_usage_token_refresh_thread") as start_refresh,
+            patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread") as start_refresh,
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
@@ -7739,7 +7741,7 @@ class IndexViewTests(TestCase):
             patch(
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
-            patch("hitch.main.token_usage._start_usage_token_refresh_thread"),
+            patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread"),
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
@@ -7768,7 +7770,7 @@ class IndexViewTests(TestCase):
             patch(
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
-            patch("hitch.main.token_usage._start_usage_token_refresh_thread"),
+            patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread"),
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
@@ -7793,7 +7795,7 @@ class IndexViewTests(TestCase):
             patch(
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
-            patch("hitch.main.token_usage._start_usage_token_refresh_thread") as start_tokens,
+            patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread") as start_tokens,
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
         ):
@@ -7845,7 +7847,7 @@ class IndexViewTests(TestCase):
             patch(
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
-            patch("hitch.main.token_usage._start_usage_token_refresh_thread"),
+            patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread"),
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
@@ -7902,7 +7904,7 @@ class IndexViewTests(TestCase):
             patch(
                 "hitch.main.views._start_usage_session_index_refresh_thread"
             ) as start_index_refresh,
-            patch("hitch.main.token_usage._start_usage_token_refresh_thread") as start_tokens,
+            patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread") as start_tokens,
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
@@ -8826,7 +8828,7 @@ class IndexViewTests(TestCase):
         _setup_codex(mock_codex)
 
         with (
-            patch("hitch.main.token_usage._start_usage_token_refresh_thread") as start_refresh,
+            patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread") as start_refresh,
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             patch(
@@ -8899,7 +8901,7 @@ class IndexViewTests(TestCase):
             include_archived=True,
         )
 
-    @patch("hitch.main.token_usage.Codex")
+    @patch("hitch.main.sessions.token_usage.Codex")
     def test_usage_page_schedules_missing_metadata_path_refresh(
         self, mock_codex: MagicMock
     ) -> None:
@@ -8918,7 +8920,7 @@ class IndexViewTests(TestCase):
         client = _setup_codex(mock_codex)
 
         with (
-            patch("hitch.main.token_usage._start_usage_token_refresh_thread") as start_refresh,
+            patch("hitch.main.sessions.token_usage._start_usage_token_refresh_thread") as start_refresh,
             patch("hitch.main.caches._start_models_refresh_thread"),
             patch("hitch.main.caches._start_rate_limits_refresh_thread"),
             self.captureOnCommitCallbacks(execute=True),
@@ -9006,7 +9008,7 @@ class IndexViewTests(TestCase):
             )
 
         with (
-            patch("hitch.main.token_usage._USAGE_TOKEN_REFRESH_CHECKED_UPDATE_BATCH_SIZE", 2),
+            patch("hitch.main.sessions.token_usage._USAGE_TOKEN_REFRESH_CHECKED_UPDATE_BATCH_SIZE", 2),
             CaptureQueriesContext(connection) as queries,
         ):
             token_usage._mark_usage_token_refresh_checked_many(
@@ -9042,8 +9044,8 @@ class IndexViewTests(TestCase):
         thread.start.side_effect = RuntimeError("thread limit")
 
         with (
-            self.assertLogs("hitch.main.token_usage", level="ERROR"),
-            patch("hitch.main.token_usage.threading.Thread", return_value=thread),
+            self.assertLogs("hitch.main.sessions.token_usage", level="ERROR"),
+            patch("hitch.main.sessions.token_usage.threading.Thread", return_value=thread),
         ):
             token_usage._start_usage_token_refresh_thread(
                 [token_usage._UsageTokenRefreshItem("thread", "")]
@@ -9061,7 +9063,7 @@ class IndexViewTests(TestCase):
         ]
 
         with patch(
-            "hitch.main.token_usage.threading.Thread", return_value=thread
+            "hitch.main.sessions.token_usage.threading.Thread", return_value=thread
         ) as thread_cls:
             token_usage._start_usage_token_refresh_thread(iter(items))
 
@@ -9092,7 +9094,7 @@ class IndexViewTests(TestCase):
         rows = SessionMetadata.objects.order_by("thread_id")
         candidates = token_usage._usage_token_refresh_candidates(rows)
 
-        with patch("hitch.main.token_usage._USAGE_TOKEN_REFRESH_BATCH_SIZE", 2):
+        with patch("hitch.main.sessions.token_usage._USAGE_TOKEN_REFRESH_BATCH_SIZE", 2):
             token_usage._refresh_usage_token_cache_best_effort(candidates)
 
         caches = ArchivedSessionTokenUsage.objects.order_by("thread_id")
@@ -12881,7 +12883,7 @@ class SendMessageViewTests(TestCase):
         turns: list[Any] | None = None,
     ) -> None:
         session_resume_codex_patcher = patch(
-            "hitch.main.session_resume.Codex", new=mock_codex
+            "hitch.main.sessions.session_resume.Codex", new=mock_codex
         )
         session_resume_codex_patcher.start()
         self.addCleanup(session_resume_codex_patcher.stop)
@@ -21262,15 +21264,15 @@ class PrStageRefreshSchedulingTests(TestCase):
         with session_stage_refresh._PR_STAGE_REFRESH_INFLIGHT_LOCK:
             session_stage_refresh._PR_STAGE_REFRESH_INFLIGHT.clear()
 
-    @patch("hitch.main.session_stage_refresh._refresh_session_pr_stage")
+    @patch("hitch.main.sessions.session_stage_refresh._refresh_session_pr_stage")
     def test_schedule_runs_inline_under_testing(
         self, mock_refresh: MagicMock
     ) -> None:
         session_stage_refresh._schedule_pr_stage_refresh("sess-1")
         mock_refresh.assert_called_once_with("sess-1")
 
-    @patch("hitch.main.session_stage_refresh._refresh_session_pr_stage")
-    @patch("hitch.main.session_stage_refresh.threading.Thread")
+    @patch("hitch.main.sessions.session_stage_refresh._refresh_session_pr_stage")
+    @patch("hitch.main.sessions.session_stage_refresh.threading.Thread")
     def test_schedule_spawns_one_thread_per_session_off_request(
         self, mock_thread: MagicMock, _mock_refresh: MagicMock
     ) -> None:
@@ -21281,12 +21283,12 @@ class PrStageRefreshSchedulingTests(TestCase):
         mock_thread.assert_called_once()
         mock_thread.return_value.start.assert_called_once()
 
-    @patch("hitch.main.session_stage_refresh._schedule_pr_stage_refresh")
+    @patch("hitch.main.sessions.session_stage_refresh._schedule_pr_stage_refresh")
     @patch(
-        "hitch.main.session_stage_refresh.system_agents.pr_snapshot_stage_refresh_due",
+        "hitch.main.sessions.session_stage_refresh.system_agents.pr_snapshot_stage_refresh_due",
         return_value=True,
     )
-    @patch("hitch.main.session_stage_refresh._pr_snapshot_for_rollout_path")
+    @patch("hitch.main.sessions.session_stage_refresh._pr_snapshot_for_rollout_path")
     def test_cached_pr_row_drops_refreshing_when_budget_exhausted(
         self,
         mock_snapshot: MagicMock,
