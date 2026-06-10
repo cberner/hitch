@@ -48,6 +48,7 @@ from hitch.main import (
     agent_io,
     autonomous_goal_prompts,
     autonomous_goal_proposal_stack,
+    autonomous_goal_run_display,
     caches,
     codex_events,
     codex_pool,
@@ -19131,7 +19132,10 @@ class AutonomousGoalViewTests(TestCase):
             }
         )
 
-        self.assertEqual(views._proposed_session_stack_label(proposed_session), "")
+        self.assertEqual(
+            autonomous_goal_run_display._proposed_session_stack_label(proposed_session),
+            "",
+        )
 
     @patch("hitch.main.repos.discover_repos", return_value=[Path("/repo")])
     @patch("hitch.main.views.Codex")
