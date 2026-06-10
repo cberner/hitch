@@ -460,16 +460,6 @@ def _cached_stage_for_session_row(
     )
 
 
-def _stage_entries_for_rollout_path(rollout_path: Path | None) -> list[dict[str, Any]]:
-    if rollout_path is None:
-        return []
-    try:
-        return list(rollout.iter_entries(rollout_path))
-    except Exception:
-        logger.exception("failed to parse rollout %s for session stage", rollout_path)
-        return []
-
-
 def _session_stage_data_for_rollout_path(
     rollout_path: Path | None,
 ) -> tuple[list[dict[str, Any]], codex_events.PrObservationResult]:

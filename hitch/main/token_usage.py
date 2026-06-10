@@ -325,13 +325,6 @@ def _coerce_usage_int(value: Any) -> int:
     return value if isinstance(value, int) and value > 0 else 0
 
 
-def _daily_token_usage_for(thread: Any) -> dict[str, dict[str, int]]:
-    rollout_path = _rollout_path_for(thread)
-    if rollout_path is None:
-        return {}
-    return _daily_token_usage_from_history(rollout.token_usage_history(rollout_path))
-
-
 def _daily_token_usage_from_history(
     history: list[dict[str, int]],
 ) -> dict[str, dict[str, int]]:
@@ -364,10 +357,6 @@ def _format_token_count(value: int) -> str:
 # cache as a breakdown rather than adding it back into displayed totals.
 def _non_cached_input_tokens(usage: Mapping[str, int]) -> int:
     return max(usage.get("input_tokens", 0) - usage.get("cached_input_tokens", 0), 0)
-
-
-def _display_total_tokens(usage: Mapping[str, int]) -> int:
-    return max(usage.get("total_tokens", 0) - usage.get("cached_input_tokens", 0), 0)
 
 
 def _lifetime_token_usage_for_metadata(
@@ -448,12 +437,6 @@ def _usage_token_refresh_candidates(
         for metadata in metadata_rows
         if metadata.thread_id
     ]
-
-
-def _usage_token_refresh_may_be_pending(
-    metadata: _UsageTokenRefreshSource, cache: ArchivedSessionTokenUsage | None
-) -> bool:
-    return _usage_token_cache_state(metadata, cache).refresh_pending
 
 
 def _usage_token_cache_state(
@@ -866,12 +849,6 @@ def _merge_daily_token_usage(
         bucket["input"] += values.get("input", 0)
         bucket["output"] += values.get("output", 0)
         bucket["cached"] += values.get("cached", 0)
-
-
-def _add_token_usage_history_by_date(
-    usage_by_date: dict[str, dict[str, int]], thread: Any
-) -> None:
-    _merge_daily_token_usage(usage_by_date, _daily_token_usage_for(thread))
 
 
 def _empty_raw_token_usage() -> dict[str, int]:

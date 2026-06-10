@@ -297,15 +297,6 @@ def _session_row_for_metadata(
     return row
 
 
-def _qa_activity_updated_at_by_metadata_thread_id(
-    metadata_rows: Iterable[SessionMetadata], hidden_thread_ids: set[str] | None = None
-) -> dict[str, Any]:
-    return _qa_activity_updated_at_by_metadata_thread_ids(
-        [metadata.thread_id for metadata in metadata_rows],
-        hidden_thread_ids,
-    )
-
-
 def _qa_activity_updated_at_by_metadata_thread_ids(
     main_thread_ids: Iterable[str], hidden_thread_ids: set[str] | None
 ) -> dict[str, Any]:

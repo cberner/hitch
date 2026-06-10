@@ -26,7 +26,6 @@ IMPLEMENTATION = SessionStage("implementation", "Implementation", "active")
 QA = SessionStage("qa", "QA", "active")
 PR = SessionStage("pr", "PR", "active")
 AWAITING_INPUT = SessionStage("awaiting_input", "Awaiting Input", "warning")
-WAITING_FOR_USER = AWAITING_INPUT
 BLOCKED = SessionStage("blocked", "Blocked", "warning")
 DONE_MERGED = SessionStage("done_merged", "Done: Merged", "done")
 DONE_CLOSED = SessionStage("done_closed", "Done: Closed", "done")

@@ -73,7 +73,6 @@ _FILE_APPEAR_TIMEOUT = 30.0
 _QA_AGENT_DISPLAY_AUTHOR = "QA agent"
 _QA_AGENT_KIND = "pr_qa"
 _PR_MONITOR_AGENT_KIND = "pr_followup_monitor"
-_STEP_QA_RUNNING = "qa_running"
 _STEP_FEEDBACK_RUNNING = "feedback_running"
 _STEP_USER_STEERING_RUNNING = "user_steering_running"
 _STEP_PR_PROMPT_RUNNING = "pr_prompt_running"
