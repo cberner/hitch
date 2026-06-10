@@ -6,7 +6,7 @@ from django.core.management.base import BaseCommand, CommandError, CommandParser
 
 from hitch.main.models import Project
 from hitch.main.runtime import codex_pool
-from hitch.main.workflows import system_agents
+from hitch.main.workflows import autonomous_goals
 
 
 class Command(BaseCommand):
@@ -25,5 +25,5 @@ class Command(BaseCommand):
             if project is None:
                 raise CommandError("project not found")
         codex_pool.reconcile_dead()
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
         return f"Started {started} auto-proposal workflow(s)."

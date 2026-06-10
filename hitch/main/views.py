@@ -254,6 +254,7 @@ from hitch.main.sessions.system_agent_summary import (
     _system_agent_status,
     _updated_at_sort_key,
 )
+from hitch.main.workflows import autonomous_goals as goal_workflows
 from hitch.main.workflows import pr_stage, spec_critic, system_agents
 from hitch.main.worktrees import (
     ManagedWorktree,
@@ -1999,7 +2000,7 @@ def delete_autonomous_goal(
         )
         if autonomous_goal is None:
             raise Http404("autonomous goal not found")
-        if not system_agents.stop_running_autonomous_goal_workflow(
+        if not goal_workflows.stop_running_autonomous_goal_workflow(
             autonomous_goal.pk, stop_error
         ):
             return HttpResponseBadRequest("autonomous goal run could not be stopped")
@@ -2068,7 +2069,7 @@ def run_autonomous_goal(request: HttpRequest, autonomous_goal_id: int) -> HttpRe
     ).first()
     if autonomous_goal is None:
         raise Http404("autonomous goal not found")
-    system_agents.start_autonomous_goal_workflow(
+    goal_workflows.start_autonomous_goal_workflow(
         autonomous_goal=autonomous_goal,
         use_worktrees=True,
     )
@@ -2084,7 +2085,7 @@ def run_autonomous_goals(request: HttpRequest) -> HttpResponse:
         project=project,
         deleted_at__isnull=True,
     ):
-        system_agents.start_autonomous_goal_workflow(
+        goal_workflows.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal,
             use_worktrees=True,
         )
@@ -2240,7 +2241,7 @@ def _stop_autonomous_goal_stack_after_proposal_resolution(
 ) -> bool:
     if proposed_session.autonomous_goal_id is None:
         return True
-    return system_agents.stop_running_autonomous_goal_stack_after_proposal_resolution(
+    return goal_workflows.stop_running_autonomous_goal_stack_after_proposal_resolution(
         proposed_session.autonomous_goal_id,
         proposed_session.pk,
         proposed_session.outcome_status,

@@ -13,7 +13,7 @@ from openai_codex import Codex
 from hitch.main.models import Project
 from hitch.main.runtime import codex_pool, server_lifecycle
 from hitch.main.sessions import session_index
-from hitch.main.workflows import system_agents
+from hitch.main.workflows import autonomous_goals, system_agents
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +111,7 @@ def _run_auto_proposal_scheduler_tick(
         next_cursor = _refresh_unarchived_session_state_best_effort(
             scheduler_codex, start_cursor=start_cursor
         )
-        started = system_agents.maybe_start_auto_proposal_workflows()
+        started = autonomous_goals.maybe_start_auto_proposal_workflows()
         if started:
             logger.info("started %s auto-proposal workflow(s)", started)
     except Exception:

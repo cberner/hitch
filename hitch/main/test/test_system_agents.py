@@ -41,6 +41,7 @@ from hitch.main.models import (
 from hitch.main.runtime import codex_events, rate_limit, streaming
 from hitch.main.workflows import (
     agent_io,
+    autonomous_goals,
     gh_cli,
     gh_observations,
     pr_handoff,
@@ -1222,7 +1223,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(thread.turn.call_args.kwargs["model"], "gpt-5-mini")
 
     @patch("hitch.main.workflows.spec_critic.spec_critic_should_run", return_value=True)
-    @patch("hitch.main.workflows.system_agents.threading.Thread", side_effect=_synchronous_thread)
+    @patch("hitch.main.workflows.autonomous_goals.threading.Thread", side_effect=_synchronous_thread)
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_spec_critic_starts_hidden_specialized_agents(
         self, mock_spawn: MagicMock, mock_thread: MagicMock, mock_should_run: MagicMock
@@ -1286,7 +1287,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertIn("ambiguity and risk agent", prompts)
         self.assertIn("acceptance and test strategist", prompts)
 
-    @patch("hitch.main.workflows.system_agents.threading.Thread")
+    @patch("hitch.main.workflows.autonomous_goals.threading.Thread")
     def test_spec_critic_workflow_runs_classifier_in_background(
         self, mock_thread: MagicMock
     ) -> None:
@@ -1646,7 +1647,7 @@ class SpecCriticWorkflowTests(TestCase):
 
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     @patch(
-        "hitch.main.workflows.system_agents.threading.Thread",
+        "hitch.main.workflows.autonomous_goals.threading.Thread",
         side_effect=RuntimeError("no thread"),
     )
     def test_start_classification_runs_analysis_inline_when_thread_fails(
@@ -1670,7 +1671,7 @@ class SpecCriticWorkflowTests(TestCase):
         self.assertEqual(mock_spawn.call_count, 3)
 
     @patch("hitch.main.workflows.spec_critic.spec_critic_should_run", return_value=True)
-    @patch("hitch.main.workflows.system_agents.threading.Thread", side_effect=_synchronous_thread)
+    @patch("hitch.main.workflows.autonomous_goals.threading.Thread", side_effect=_synchronous_thread)
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_spec_critic_gates_on_required_clarification(
         self, mock_spawn: MagicMock, mock_thread: MagicMock, mock_should_run: MagicMock
@@ -9137,18 +9138,18 @@ class AutoProposalQuotaPauseTests(TestCase):
         )
 
         self.assertTrue(
-            system_agents._rate_limit_window_below_auto_proposal_quota(
+            autonomous_goals._rate_limit_window_below_auto_proposal_quota(
                 just_below_threshold, now=now
             )
         )
         self.assertFalse(
-            system_agents._rate_limit_window_below_auto_proposal_quota(
+            autonomous_goals._rate_limit_window_below_auto_proposal_quota(
                 at_threshold, now=now
             )
         )
 
     @patch("hitch.main.workflows.system_agents.timezone.now")
-    @patch("hitch.main.workflows.system_agents.Codex")
+    @patch("hitch.main.workflows.autonomous_goals.Codex")
     def test_auto_proposal_quota_pause_reads_account_rate_limits(
         self, mock_codex: MagicMock, mock_now: MagicMock
     ) -> None:
@@ -9166,7 +9167,7 @@ class AutoProposalQuotaPauseTests(TestCase):
             )
         )
 
-        paused = system_agents._auto_proposals_paused_by_usage_quota()
+        paused = autonomous_goals._auto_proposals_paused_by_usage_quota()
 
         self.assertTrue(paused)
         ctx._client.request.assert_called_once_with(
@@ -9176,29 +9177,29 @@ class AutoProposalQuotaPauseTests(TestCase):
         )
 
     @patch("hitch.main.workflows.system_agents.timezone.now")
-    @patch("hitch.main.workflows.system_agents._auto_proposals_paused_by_usage_quota")
+    @patch("hitch.main.workflows.autonomous_goals._auto_proposals_paused_by_usage_quota")
     def test_quota_throttle_caches_verdict_within_ttl(
         self, mock_quota: MagicMock, mock_now: MagicMock
     ) -> None:
-        system_agents._reset_auto_proposal_quota_cache()
-        self.addCleanup(system_agents._reset_auto_proposal_quota_cache)
+        autonomous_goals._reset_auto_proposal_quota_cache()
+        self.addCleanup(autonomous_goals._reset_auto_proposal_quota_cache)
         start = datetime(2026, 1, 1, tzinfo=UTC)
         mock_quota.return_value = True
 
         mock_now.return_value = start
-        self.assertTrue(system_agents._auto_proposals_paused_by_usage_quota_throttled())
+        self.assertTrue(autonomous_goals._auto_proposals_paused_by_usage_quota_throttled())
 
         # A second call one minute later reuses the cached verdict without
         # re-querying, even though the underlying check would now say False.
         mock_quota.return_value = False
         mock_now.return_value = start + timedelta(minutes=1)
-        self.assertTrue(system_agents._auto_proposals_paused_by_usage_quota_throttled())
+        self.assertTrue(autonomous_goals._auto_proposals_paused_by_usage_quota_throttled())
         mock_quota.assert_called_once()
 
         # Past the TTL the remote check runs again and the verdict refreshes.
         mock_now.return_value = start + timedelta(minutes=6)
         self.assertFalse(
-            system_agents._auto_proposals_paused_by_usage_quota_throttled()
+            autonomous_goals._auto_proposals_paused_by_usage_quota_throttled()
         )
         self.assertEqual(mock_quota.call_count, 2)
 
@@ -9207,15 +9208,15 @@ class AutonomousGoalWorkflowTests(TestCase):
     @override
     def setUp(self) -> None:
         super().setUp()
-        system_agents._reset_auto_proposal_quota_cache()
+        autonomous_goals._reset_auto_proposal_quota_cache()
         self.quota_patcher = patch(
-            "hitch.main.workflows.system_agents._auto_proposals_paused_by_usage_quota",
+            "hitch.main.workflows.autonomous_goals._auto_proposals_paused_by_usage_quota",
             return_value=False,
         )
         self.mock_auto_proposals_paused_by_quota = self.quota_patcher.start()
         self.addCleanup(self.quota_patcher.stop)
         self.worktree_patcher = patch(
-            "hitch.main.workflows.system_agents.create_worktree_for_session",
+            "hitch.main.workflows.autonomous_goals.create_worktree_for_session",
             return_value=MagicMock(path=Path("/repo-worktree")),
         )
         self.mock_create_worktree = self.worktree_patcher.start()
@@ -9353,7 +9354,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        workflow = system_agents.start_autonomous_goal_workflow(
+        workflow = autonomous_goals.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal
         )
 
@@ -9443,7 +9444,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        workflow = system_agents.start_autonomous_goal_workflow(
+        workflow = autonomous_goals.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal
         )
 
@@ -9609,7 +9610,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             goal = kwargs["autonomous_goal"]
             workflow = SystemWorkflow.objects.create(
                 kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-                main_thread_id=system_agents._autonomous_goal_main_thread_id(goal.pk),
+                main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(goal.pk),
                 cwd=goal.project.repo_path,
                 status=SystemWorkflow.STATUS_RUNNING,
                 step=system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING,
@@ -9621,10 +9622,10 @@ class AutonomousGoalWorkflowTests(TestCase):
             return workflow, True
 
         with patch(
-            "hitch.main.workflows.system_agents._create_autonomous_goal_workflow_record",
+            "hitch.main.workflows.autonomous_goals._create_autonomous_goal_workflow_record",
             side_effect=fake_create,
         ):
-            workflow = system_agents.start_autonomous_goal_workflow(
+            workflow = autonomous_goals.start_autonomous_goal_workflow(
                 autonomous_goal=autonomous_goal
             )
 
@@ -9635,10 +9636,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.state["error"], "autonomous goal no longer exists")
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.workflows.system_agents.create_worktree_for_session")
+    @patch("hitch.main.workflows.autonomous_goals.create_worktree_for_session")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_workflow_starts_candidate_thread_in_worktree_when_requested(
         self,
@@ -9659,7 +9660,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_worktree.return_value = MagicMock(path=Path("/repo-worktree"))
 
-        workflow = system_agents.start_autonomous_goal_workflow(
+        workflow = autonomous_goals.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal,
             use_worktrees=True,
         )
@@ -9682,13 +9683,13 @@ class AutonomousGoalWorkflowTests(TestCase):
         run = SystemAgentRun.objects.get(thread_id="candidate-thread")
         self.assertEqual(run.input["cwd"], "/repo-worktree")
 
-    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     @patch(
-        "hitch.main.workflows.system_agents.snapshot_worktree_to_commit",
+        "hitch.main.workflows.autonomous_goals.snapshot_worktree_to_commit",
         return_value="c" * 40,
     )
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -9750,7 +9751,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_spawn.side_effect = [candidate_1, judge_1, candidate_2, judge_2]
 
-        workflow = system_agents.start_autonomous_goal_workflow(
+        workflow = autonomous_goals.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal,
             use_worktrees=True,
         )
@@ -9840,7 +9841,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.step, system_agents.STEP_AUTONOMOUS_GOAL_PROPOSED)
         mock_cleanup.assert_called_once_with("/repo-worktree-1")
 
-    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     def test_accepted_stack_proposal_cancels_running_continuation_on_finish(
         self, mock_cleanup: MagicMock
     ) -> None:
@@ -9880,7 +9881,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -9929,7 +9930,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(proposal.accepted_session, accepted_candidate)
         mock_cleanup.assert_called_once_with("/repo-worktree-3")
 
-    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     def test_rejected_stack_proposal_cancels_running_continuation_on_finish(
         self, mock_cleanup: MagicMock
     ) -> None:
@@ -9968,7 +9969,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -10052,7 +10053,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -10080,7 +10081,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             status=SystemAgentRun.STATUS_RUNNING,
         )
 
-        stopped = system_agents.stop_running_autonomous_goal_stack_after_proposal_resolution(
+        stopped = autonomous_goals.stop_running_autonomous_goal_stack_after_proposal_resolution(
             autonomous_goal.pk,
             accepted_proposal.pk,
             ProposedSession.OUTCOME_ACCEPTED,
@@ -10093,7 +10094,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_RUNNING)
         self.assertEqual(run.status, SystemAgentRun.STATUS_RUNNING)
 
-    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
     def test_stack_proposal_stop_cleans_worktree_between_agent_turns(
         self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
@@ -10128,7 +10129,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -10157,7 +10158,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             status=SystemAgentRun.STATUS_COMPLETED,
         )
 
-        stopped = system_agents.stop_running_autonomous_goal_stack_after_proposal_resolution(
+        stopped = autonomous_goals.stop_running_autonomous_goal_stack_after_proposal_resolution(
             autonomous_goal.pk,
             proposal.pk,
             ProposedSession.OUTCOME_ACCEPTED,
@@ -10174,7 +10175,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_cleanup.assert_called_once_with("/repo-worktree-3")
 
-    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
     def test_stack_proposal_stop_keeps_accepted_worktree_before_next_candidate(
         self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
@@ -10209,7 +10210,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -10219,7 +10220,7 @@ class AutonomousGoalWorkflowTests(TestCase):
                 "autonomous_goal_id": autonomous_goal.pk,
                 "proposal_id": proposal.pk,
                 "session_cwd": "/repo-worktree-2",
-                system_agents._AUTONOMOUS_GOAL_STACKED_FORK_CWD_STATE_KEY: (
+                autonomous_goals._AUTONOMOUS_GOAL_STACKED_FORK_CWD_STATE_KEY: (
                     "/repo-worktree-2"
                 ),
                 "stacked_diff_depth": 3,
@@ -10227,7 +10228,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             },
         )
 
-        stopped = system_agents.stop_running_autonomous_goal_stack_after_proposal_resolution(
+        stopped = autonomous_goals.stop_running_autonomous_goal_stack_after_proposal_resolution(
             autonomous_goal.pk,
             proposal.pk,
             ProposedSession.OUTCOME_ACCEPTED,
@@ -10243,7 +10244,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_cleanup.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     @patch("hitch.main.workflows.system_agents.codex_pool.interrupt_instance")
     def test_accepted_stack_proposal_stop_leaves_live_uninterrupted_run(
         self, mock_interrupt: MagicMock, mock_cleanup: MagicMock
@@ -10266,7 +10267,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -10317,7 +10318,7 @@ class AutonomousGoalWorkflowTests(TestCase):
 
         mock_interrupt.side_effect = interrupt_side_effect
 
-        stopped = system_agents.stop_running_autonomous_goal_stack_after_proposal_resolution(
+        stopped = autonomous_goals.stop_running_autonomous_goal_stack_after_proposal_resolution(
             autonomous_goal.pk,
             proposal.pk,
             ProposedSession.OUTCOME_ACCEPTED,
@@ -10344,13 +10345,13 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertTrue(handled)
         mock_cleanup.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     @patch(
-        "hitch.main.workflows.system_agents.snapshot_worktree_to_commit",
+        "hitch.main.workflows.autonomous_goals.snapshot_worktree_to_commit",
         return_value="c" * 40,
     )
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -10412,7 +10413,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_spawn.side_effect = [candidate_1, judge_1, candidate_2, judge_2]
 
-        workflow = system_agents.start_autonomous_goal_workflow(
+        workflow = autonomous_goals.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal,
             use_worktrees=True,
         )
@@ -10487,11 +10488,11 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_cleanup.assert_called_once_with("/repo-worktree-2")
 
     @patch(
-        "hitch.main.workflows.system_agents.snapshot_worktree_to_commit",
+        "hitch.main.workflows.autonomous_goals.snapshot_worktree_to_commit",
         side_effect=RuntimeError("snapshot failed"),
     )
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -10531,7 +10532,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_spawn.side_effect = [candidate_1, judge_1]
 
-        workflow = system_agents.start_autonomous_goal_workflow(
+        workflow = autonomous_goals.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal,
             use_worktrees=True,
         )
@@ -10570,13 +10571,13 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_snapshot.assert_called_once_with("/repo-worktree-1")
 
-    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     @patch(
-        "hitch.main.workflows.system_agents.snapshot_worktree_to_commit",
+        "hitch.main.workflows.autonomous_goals.snapshot_worktree_to_commit",
         return_value="c" * 40,
     )
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -10626,7 +10627,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_spawn.side_effect = [candidate_1, judge_1, candidate_2]
 
-        workflow = system_agents.start_autonomous_goal_workflow(
+        workflow = autonomous_goals.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal,
             use_worktrees=True,
         )
@@ -10665,13 +10666,13 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_cleanup.assert_called_once_with("/repo-worktree-2")
 
-    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     @patch(
-        "hitch.main.workflows.system_agents.snapshot_worktree_to_commit",
+        "hitch.main.workflows.autonomous_goals.snapshot_worktree_to_commit",
         return_value="c" * 40,
     )
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -10729,7 +10730,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_spawn.side_effect = [candidate_1, judge_1, candidate_2]
 
-        workflow = system_agents.start_autonomous_goal_workflow(
+        workflow = autonomous_goals.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal,
             use_worktrees=True,
         )
@@ -10768,13 +10769,13 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_cleanup.assert_called_once_with("/repo-worktree-2")
 
-    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     @patch(
-        "hitch.main.workflows.system_agents.snapshot_worktree_to_commit",
+        "hitch.main.workflows.autonomous_goals.snapshot_worktree_to_commit",
         return_value="c" * 40,
     )
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -10829,7 +10830,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_spawn.side_effect = [candidate_1, judge_1, candidate_2, judge_2]
 
-        workflow = system_agents.start_autonomous_goal_workflow(
+        workflow = autonomous_goals.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal,
             use_worktrees=True,
         )
@@ -10885,12 +10886,12 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_cleanup.assert_called_once_with("/repo-worktree-2")
 
-    @patch("hitch.main.workflows.system_agents.cleanup_worktree")
+    @patch("hitch.main.workflows.autonomous_goals.cleanup_worktree")
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
-    @patch("hitch.main.workflows.system_agents.create_worktree_for_session")
+    @patch("hitch.main.workflows.autonomous_goals.create_worktree_for_session")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_workflow_cleans_up_candidate_worktree_when_spawn_fails(
         self,
@@ -10909,7 +10910,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_worktree.return_value = managed_worktree
         mock_spawn.side_effect = RuntimeError("boom")
 
-        workflow = system_agents.start_autonomous_goal_workflow(
+        workflow = autonomous_goals.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal,
             use_worktrees=True,
         )
@@ -10919,7 +10920,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -10939,13 +10940,13 @@ class AutonomousGoalWorkflowTests(TestCase):
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 1)
         workflow = SystemWorkflow.objects.get()
         self.assertEqual(
             workflow.main_thread_id,
-            system_agents._autonomous_goal_main_thread_id(autonomous_goal.pk),
+            autonomous_goals._autonomous_goal_main_thread_id(autonomous_goal.pk),
         )
         self.assertTrue(workflow.state["auto_proposal"])
         self.assertTrue(workflow.state["use_worktrees"])
@@ -10953,13 +10954,13 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.mock_create_worktree.assert_called_with("/repo", base_ref="a" * 40)
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     @patch(
-        "hitch.main.workflows.system_agents.snapshot_worktree_to_commit",
+        "hitch.main.workflows.autonomous_goals.snapshot_worktree_to_commit",
         return_value="c" * 40,
     )
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -11018,7 +11019,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_spawn.side_effect = [candidate_2, judge_2]
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 1)
         workflow = SystemWorkflow.objects.get()
@@ -11059,7 +11060,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         workflow.state = {
             **workflow.state,
             autonomous_goal_prompts._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY: (
-                system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT
+                autonomous_goals._AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT
             ),
             autonomous_goal_prompts._AUTONOMOUS_GOAL_LAST_FAILURE_STATE_KEY: {
                 "reason": "judge_confidence_below_threshold"
@@ -11091,7 +11092,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_cleanup.assert_called_once_with("/repo-worktree-1")
 
-    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.autonomous_goals.default_branch_commit_hash")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_blocks_when_any_extra_pending_proposal_exists(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
@@ -11127,14 +11128,14 @@ class AutonomousGoalWorkflowTests(TestCase):
             },
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 0)
         self.assertFalse(SystemWorkflow.objects.exists())
         mock_default_sha.assert_not_called()
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.autonomous_goals.default_branch_commit_hash")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_blocks_pending_proposal_without_stack_metadata(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
@@ -11161,7 +11162,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             candidate_session=candidate_session,
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 0)
         self.assertFalse(SystemWorkflow.objects.exists())
@@ -11173,9 +11174,9 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_default_sha.assert_not_called()
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.autonomous_goals.default_branch_commit_hash")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
-    @patch("hitch.main.workflows.system_agents._claim_autonomous_goal_stack_continuation_proposal")
+    @patch("hitch.main.workflows.autonomous_goals._claim_autonomous_goal_stack_continuation_proposal")
     def test_auto_proposal_does_not_start_when_stack_claim_loses_race(
         self,
         mock_claim: MagicMock,
@@ -11209,7 +11210,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_default_sha.return_value = "a" * 40
         mock_claim.return_value = None
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 0)
         self.assertFalse(SystemWorkflow.objects.exists())
@@ -11374,7 +11375,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         with self.assertRaisesRegex(
             ValueError, "stack continuation proposal missing stack metadata"
         ):
-            system_agents._create_autonomous_goal_workflow_record(
+            autonomous_goals._create_autonomous_goal_workflow_record(
                 autonomous_goal=autonomous_goal,
                 auto_proposal=True,
                 default_branch_sha="a" * 40,
@@ -11385,10 +11386,10 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertFalse(SystemWorkflow.objects.exists())
 
     @patch(
-        "hitch.main.workflows.system_agents.snapshot_worktree_to_commit",
+        "hitch.main.workflows.autonomous_goals.snapshot_worktree_to_commit",
         return_value="c" * 40,
     )
-    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.autonomous_goals.default_branch_commit_hash")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_continues_legacy_stopped_stack_proposal_once(
         self,
@@ -11407,7 +11408,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         source_workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -11443,7 +11444,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 1)
         workflow = SystemWorkflow.objects.exclude(pk=source_workflow.pk).get()
@@ -11551,7 +11552,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         stopped_workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 legacy_stopped_stack_goal.pk
             ),
             cwd="/repo",
@@ -11608,13 +11609,13 @@ class AutonomousGoalWorkflowTests(TestCase):
         ]
         self.assertEqual(len(pending_proposal_queries), 1)
 
-    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     @patch(
-        "hitch.main.workflows.system_agents.snapshot_worktree_to_commit",
+        "hitch.main.workflows.autonomous_goals.snapshot_worktree_to_commit",
         return_value="c" * 40,
     )
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -11667,9 +11668,9 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_spawn.return_value = candidate_2
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
         system_agents.on_codex_instance_finished(candidate_2)
-        started_again = system_agents.maybe_start_auto_proposal_workflows(
+        started_again = autonomous_goals.maybe_start_auto_proposal_workflows(
             project=project
         )
 
@@ -11689,11 +11690,11 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_cleanup.assert_called_once_with("/repo-worktree-2")
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch(
-        "hitch.main.workflows.system_agents.commit_hash_for_ref",
+        "hitch.main.workflows.autonomous_goals.commit_hash_for_ref",
         return_value="b" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -11720,7 +11721,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 1)
         workflow = SystemWorkflow.objects.get()
@@ -11734,11 +11735,11 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         self.assertEqual(
             workflow.main_thread_id,
-            system_agents._autonomous_goal_main_thread_id(autonomous_goal.pk),
+            autonomous_goals._autonomous_goal_main_thread_id(autonomous_goal.pk),
         )
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.autonomous_goals.default_branch_commit_hash")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_rechecks_enablement_after_lock(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
@@ -11751,14 +11752,14 @@ class AutonomousGoalWorkflowTests(TestCase):
             auto_proposal_enabled=False,
         )
 
-        started = system_agents._maybe_start_auto_proposal_workflow(autonomous_goal.pk)
+        started = autonomous_goals._maybe_start_auto_proposal_workflow(autonomous_goal.pk)
 
         self.assertFalse(started)
         self.assertFalse(SystemWorkflow.objects.exists())
         mock_default_sha.assert_not_called()
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.autonomous_goals.default_branch_commit_hash")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_ignores_soft_deleted_goal(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
@@ -11772,14 +11773,14 @@ class AutonomousGoalWorkflowTests(TestCase):
             deleted_at=datetime.now(UTC),
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 0)
         self.assertFalse(SystemWorkflow.objects.exists())
         mock_default_sha.assert_not_called()
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.autonomous_goals.default_branch_commit_hash")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_rechecks_enablement_after_sha_lookup(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
@@ -11800,14 +11801,14 @@ class AutonomousGoalWorkflowTests(TestCase):
 
         mock_default_sha.side_effect = disable_goal
 
-        started = system_agents._maybe_start_auto_proposal_workflow(autonomous_goal.pk)
+        started = autonomous_goals._maybe_start_auto_proposal_workflow(autonomous_goal.pk)
 
         self.assertFalse(started)
         self.assertFalse(SystemWorkflow.objects.exists())
         mock_default_sha.assert_called_once_with("/repo")
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents.commit_hash_for_ref")
+    @patch("hitch.main.workflows.autonomous_goals.commit_hash_for_ref")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_rechecks_base_selection_after_sha_lookup(
         self, mock_spawn: MagicMock, mock_ref_sha: MagicMock
@@ -11832,7 +11833,7 @@ class AutonomousGoalWorkflowTests(TestCase):
 
         mock_ref_sha.side_effect = retarget_goal
 
-        started = system_agents._maybe_start_auto_proposal_workflow(autonomous_goal.pk)
+        started = autonomous_goals._maybe_start_auto_proposal_workflow(autonomous_goal.pk)
 
         self.assertFalse(started)
         self.assertFalse(SystemWorkflow.objects.exists())
@@ -11862,12 +11863,10 @@ class AutonomousGoalWorkflowTests(TestCase):
                 raise AutonomousGoal.DoesNotExist
             return True
 
-        with patch.object(
-            system_agents,
-            "_maybe_start_auto_proposal_workflow",
+        with patch.object(autonomous_goals, "_maybe_start_auto_proposal_workflow",
             side_effect=fake_start,
         ) as mock_start:
-            started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+            started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 1)
         self.assertEqual(
@@ -11875,7 +11874,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             [first.pk, second.pk],
         )
 
-    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.autonomous_goals.default_branch_commit_hash")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_pauses_when_usage_quota_is_low(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
@@ -11889,7 +11888,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             auto_proposal_enabled=True,
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 0)
         self.assertFalse(SystemWorkflow.objects.exists())
@@ -11897,7 +11896,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -11932,17 +11931,17 @@ class AutonomousGoalWorkflowTests(TestCase):
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 1)
         workflow = SystemWorkflow.objects.get()
         self.assertEqual(
             workflow.main_thread_id,
-            system_agents._autonomous_goal_main_thread_id(notice_goal.pk),
+            autonomous_goals._autonomous_goal_main_thread_id(notice_goal.pk),
         )
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -11986,13 +11985,13 @@ class AutonomousGoalWorkflowTests(TestCase):
             ),
         ]
 
-        started = system_agents.maybe_start_auto_proposal_workflows()
+        started = autonomous_goals.maybe_start_auto_proposal_workflows()
 
         self.assertEqual(started, 2)
         self.assertEqual(SystemWorkflow.objects.count(), 2)
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -12024,13 +12023,13 @@ class AutonomousGoalWorkflowTests(TestCase):
             },
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 0)
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -12061,13 +12060,13 @@ class AutonomousGoalWorkflowTests(TestCase):
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 1)
         self.assertEqual(SystemWorkflow.objects.count(), 1)
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -12106,7 +12105,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 1)
         self.assertEqual(SystemWorkflow.objects.count(), 1)
@@ -12147,7 +12146,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -12173,17 +12172,17 @@ class AutonomousGoalWorkflowTests(TestCase):
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 1)
         workflow = SystemWorkflow.objects.get()
         self.assertEqual(
             workflow.main_thread_id,
-            system_agents._autonomous_goal_main_thread_id(first_goal.pk),
+            autonomous_goals._autonomous_goal_main_thread_id(first_goal.pk),
         )
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -12222,13 +12221,13 @@ class AutonomousGoalWorkflowTests(TestCase):
             status=CodexInstance.STATUS_RUNNING,
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 0)
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -12269,13 +12268,13 @@ class AutonomousGoalWorkflowTests(TestCase):
             status=CodexInstance.STATUS_RUNNING,
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 0)
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -12317,13 +12316,13 @@ class AutonomousGoalWorkflowTests(TestCase):
             status=CodexInstance.STATUS_RUNNING,
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 0)
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -12362,13 +12361,13 @@ class AutonomousGoalWorkflowTests(TestCase):
             status=CodexInstance.STATUS_RUNNING,
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 0)
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -12422,13 +12421,13 @@ class AutonomousGoalWorkflowTests(TestCase):
                 outcome_metadata={"accepted_by": "autonomous_goal_autonomy"},
             )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 0)
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -12457,13 +12456,13 @@ class AutonomousGoalWorkflowTests(TestCase):
                 inbox_kind=ProposedSession.INBOX_KIND_NOTICE,
             )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 0)
         mock_spawn.assert_not_called()
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -12491,13 +12490,13 @@ class AutonomousGoalWorkflowTests(TestCase):
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 1)
         mock_spawn.assert_called_once()
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value=None,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -12512,14 +12511,14 @@ class AutonomousGoalWorkflowTests(TestCase):
             auto_proposal_enabled=True,
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 0)
         mock_spawn.assert_not_called()
         mock_default_sha.assert_called_once_with("/repo")
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch(
@@ -12565,13 +12564,13 @@ class AutonomousGoalWorkflowTests(TestCase):
         workflow = SystemWorkflow.objects.get()
         self.assertEqual(
             workflow.main_thread_id,
-            system_agents._autonomous_goal_main_thread_id(eligible_goal.pk),
+            autonomous_goals._autonomous_goal_main_thread_id(eligible_goal.pk),
         )
         mock_reconcile_dead.assert_called_once_with()
         mock_spawn.assert_called_once()
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch(
@@ -12624,14 +12623,14 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(
             set(SystemWorkflow.objects.values_list("main_thread_id", flat=True)),
             {
-                system_agents._autonomous_goal_main_thread_id(first_goal.pk),
-                system_agents._autonomous_goal_main_thread_id(second_goal.pk),
+                autonomous_goals._autonomous_goal_main_thread_id(first_goal.pk),
+                autonomous_goals._autonomous_goal_main_thread_id(second_goal.pk),
             },
         )
         mock_reconcile_dead.assert_called_once_with()
         self.assertEqual(mock_spawn.call_count, 2)
 
-    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.autonomous_goals.default_branch_commit_hash")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_proposal_waits_for_default_branch_change_after_no_proposal(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
@@ -12646,7 +12645,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         mock_default_sha.return_value = "a" * 40
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 0)
         mock_spawn.assert_not_called()
@@ -12658,12 +12657,12 @@ class AutonomousGoalWorkflowTests(TestCase):
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 1)
         mock_spawn.assert_called_once()
 
-    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.autonomous_goals.default_branch_commit_hash")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_no_proposal_records_and_suppresses_until_branch_changes(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
@@ -12682,7 +12681,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 1)
         instance = CodexInstance.objects.get(thread_id="candidate-thread")
@@ -12702,7 +12701,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         autonomous_goal.refresh_from_db()
         self.assertEqual(autonomous_goal.auto_proposal_last_no_proposal_sha, "a" * 40)
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 0)
         self.assertEqual(mock_spawn.call_count, 1)
@@ -12714,7 +12713,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        started = system_agents.maybe_start_auto_proposal_workflows(project=project)
+        started = autonomous_goals.maybe_start_auto_proposal_workflows(project=project)
 
         self.assertEqual(started, 1)
         self.assertEqual(mock_spawn.call_count, 2)
@@ -12736,7 +12735,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        system_agents.start_autonomous_goal_workflow(autonomous_goal=autonomous_goal)
+        autonomous_goals.start_autonomous_goal_workflow(autonomous_goal=autonomous_goal)
 
         prompt = mock_spawn.call_args.kwargs["prompt"]
         self.assertIn("bold, high-leverage progress", prompt)
@@ -12774,7 +12773,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        workflow = system_agents.start_autonomous_goal_workflow(
+        workflow = autonomous_goals.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal
         )
 
@@ -12816,7 +12815,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
 
-        workflow = system_agents.start_autonomous_goal_workflow(
+        workflow = autonomous_goals.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal
         )
 
@@ -13033,7 +13032,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -13133,7 +13132,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -13194,7 +13193,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(autonomous_goal.auto_proposal_last_no_proposal_sha, "a" * 40)
         mock_spawn.assert_not_called()
 
-    @patch("hitch.main.workflows.system_agents.default_branch_commit_hash")
+    @patch("hitch.main.workflows.autonomous_goals.default_branch_commit_hash")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_no_proposal_records_workflow_start_sha_snapshot(
         self, mock_spawn: MagicMock, mock_default_sha: MagicMock
@@ -13211,7 +13210,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
-        workflow = system_agents.start_autonomous_goal_workflow(
+        workflow = autonomous_goals.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal,
             auto_proposal=True,
         )
@@ -13263,7 +13262,7 @@ class AutonomousGoalWorkflowTests(TestCase):
 
         mock_spawn.side_effect = spawn_candidate
 
-        workflow = system_agents.start_autonomous_goal_workflow(
+        workflow = autonomous_goals.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal
         )
 
@@ -13295,7 +13294,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -13353,7 +13352,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         self.assertEqual(
             workflow.state[system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY],
-            {system_agents._AUTONOMOUS_GOAL_CANDIDATE_RETRY_KIND: 1},
+            {autonomous_goals._AUTONOMOUS_GOAL_CANDIDATE_RETRY_KIND: 1},
         )
         self.assertEqual(
             SystemAgentRun.objects.filter(
@@ -13373,7 +13372,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         self.assertEqual(
             workflow.state[
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY
+                autonomous_goals._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY
             ],
             {"candidate-thread-1": 400},
         )
@@ -13394,7 +13393,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -13404,7 +13403,7 @@ class AutonomousGoalWorkflowTests(TestCase):
                 "autonomous_goal_id": autonomous_goal.pk,
                 "candidate_session_id": candidate_metadata.pk,
                 system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {
-                    system_agents._AUTONOMOUS_GOAL_CANDIDATE_RETRY_KIND: 1
+                    autonomous_goals._AUTONOMOUS_GOAL_CANDIDATE_RETRY_KIND: 1
                 },
             },
         )
@@ -13455,7 +13454,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -13465,11 +13464,11 @@ class AutonomousGoalWorkflowTests(TestCase):
                 "autonomous_goal_id": autonomous_goal.pk,
                 "candidate_session_id": candidate_metadata.pk,
                 system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {
-                    system_agents._AUTONOMOUS_GOAL_CANDIDATE_RETRY_KIND: 1
+                    autonomous_goals._AUTONOMOUS_GOAL_CANDIDATE_RETRY_KIND: 1
                 },
                 autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
                 autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 400,
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY: {
+                autonomous_goals._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY: {
                     "candidate-thread-1": 400,
                 },
             },
@@ -13557,7 +13556,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         }
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -13608,7 +13607,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.state["candidate"], candidate)
         self.assertEqual(
             workflow.state[system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY],
-            {system_agents._AUTONOMOUS_GOAL_JUDGE_RETRY_KIND: 1},
+            {autonomous_goals._AUTONOMOUS_GOAL_JUDGE_RETRY_KIND: 1},
         )
         replacement_run = SystemAgentRun.objects.get(thread_id="judge-thread-2")
         self.assertEqual(
@@ -13626,7 +13625,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertIn("Add parser coverage", kwargs["prompt"])
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -13644,7 +13643,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
-        system_agents.start_autonomous_goal_workflow(autonomous_goal=autonomous_goal)
+        autonomous_goals.start_autonomous_goal_workflow(autonomous_goal=autonomous_goal)
         instance = CodexInstance.objects.get(thread_id="candidate-thread")
         instance.events_path = _events_file(
             self,
@@ -13664,7 +13663,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         mock_default_sha.assert_not_called()
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value="a" * 40,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -13682,7 +13681,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             purpose=CodexInstance.PURPOSE_SYSTEM_AGENT,
             agent_kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
         )
-        system_agents.start_autonomous_goal_workflow(
+        autonomous_goals.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal,
             auto_proposal=True,
         )
@@ -13719,7 +13718,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -13785,7 +13784,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -13882,7 +13881,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -13903,7 +13902,7 @@ class AutonomousGoalWorkflowTests(TestCase):
                 autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
                 autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 500,
                 system_agents._WORKFLOW_TURN_DEATH_RETRY_STATE_KEY: {
-                    system_agents._AUTONOMOUS_GOAL_JUDGE_RETRY_KIND: 1
+                    autonomous_goals._AUTONOMOUS_GOAL_JUDGE_RETRY_KIND: 1
                 },
             },
         )
@@ -13984,7 +13983,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -14073,7 +14072,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -14124,7 +14123,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertTrue(proposal.outcome_metadata["auto_pr_enabled"])
         self.assertFalse(proposal.outcome_metadata["auto_qa_enabled"])
 
-    @patch("hitch.main.workflows.system_agents.create_worktree_for_session")
+    @patch("hitch.main.workflows.autonomous_goals.create_worktree_for_session")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_auto_merge_worktree_candidate_starts_from_target_branch(
         self, mock_spawn: MagicMock, mock_worktree: MagicMock
@@ -14164,7 +14163,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             judge_instance,
         ]
 
-        workflow = system_agents.start_autonomous_goal_workflow(
+        workflow = autonomous_goals.start_autonomous_goal_workflow(
             autonomous_goal=autonomous_goal,
             use_worktrees=True,
         )
@@ -14202,7 +14201,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(proposal.outcome_metadata["auto_merge_branch"], "release")
 
     @patch(
-        "hitch.main.workflows.system_agents.default_branch_commit_hash",
+        "hitch.main.workflows.autonomous_goals.default_branch_commit_hash",
         return_value=None,
     )
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
@@ -14219,7 +14218,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -14286,7 +14285,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -14344,7 +14343,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -14388,7 +14387,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertFalse(proposal.outcome_metadata["auto_qa_enabled"])
         self.assertEqual(proposal.outcome_status, ProposedSession.OUTCOME_UNSET)
 
-    @patch("hitch.main.workflows.system_agents.create_worktree_for_session")
+    @patch("hitch.main.workflows.autonomous_goals.create_worktree_for_session")
     @patch("hitch.main.workflows.system_agents.codex_pool.spawn_new_session")
     def test_autonomous_goal_auto_merge_config_is_recorded_for_pending_proposal(
         self, mock_spawn: MagicMock, mock_worktree: MagicMock
@@ -14406,7 +14405,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -14470,7 +14469,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -14615,7 +14614,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -14675,7 +14674,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -14721,7 +14720,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         self.assertEqual(workflow.status, SystemWorkflow.STATUS_BLOCKED)
         self.assertFalse(ProposedSession.objects.exists())
 
-    @patch("hitch.main.workflows.system_agents.cleanup_managed_worktree_path")
+    @patch("hitch.main.workflows.autonomous_goals.cleanup_managed_worktree_path")
     def test_deleted_autonomous_goal_terminal_callback_cleans_workflow_worktree(
         self, mock_cleanup: MagicMock
     ) -> None:
@@ -14774,7 +14773,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -14845,7 +14844,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -14943,7 +14942,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
 
         self.assertEqual(
-            system_agents._record_autonomous_goal_proposal_budget_tokens(
+            autonomous_goals._record_autonomous_goal_proposal_budget_tokens(
                 workflow, candidate, 300
             ),
             300,
@@ -14953,19 +14952,19 @@ class AutonomousGoalWorkflowTests(TestCase):
             workflow.state,
         )
         self.assertEqual(
-            system_agents._record_autonomous_goal_proposal_budget_tokens(
+            autonomous_goals._record_autonomous_goal_proposal_budget_tokens(
                 workflow, retry, 450
             ),
             150,
         )
         self.assertEqual(
-            system_agents._record_autonomous_goal_proposal_budget_tokens(
+            autonomous_goals._record_autonomous_goal_proposal_budget_tokens(
                 workflow, judge, 200
             ),
             200,
         )
         self.assertEqual(
-            system_agents._record_autonomous_goal_proposal_budget_tokens(
+            autonomous_goals._record_autonomous_goal_proposal_budget_tokens(
                 workflow, retry, 450
             ),
             0,
@@ -14979,7 +14978,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         self.assertEqual(
             workflow.state[
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY
+                autonomous_goals._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY
             ],
             {
                 "candidate-thread": 450,
@@ -15011,7 +15010,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             instance=instance,
         )
 
-        system_agents._record_autonomous_goal_proposal_budget_tokens(
+        autonomous_goals._record_autonomous_goal_proposal_budget_tokens(
             workflow, instance, None
         )
 
@@ -15020,25 +15019,25 @@ class AutonomousGoalWorkflowTests(TestCase):
             workflow.state,
         )
         self.assertTrue(
-            system_agents._autonomous_goal_proposal_budget_allows_retry(
+            autonomous_goals._autonomous_goal_proposal_budget_allows_retry(
                 workflow, tokens_used=None, token_delta=0
             )
         )
         workflow.state[autonomous_goal_prompts._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY] = (
-            system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT
+            autonomous_goals._AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT
         )
         self.assertFalse(
-            system_agents._autonomous_goal_proposal_budget_allows_retry(
+            autonomous_goals._autonomous_goal_proposal_budget_allows_retry(
                 workflow, tokens_used=None, token_delta=0
             )
         )
         self.assertTrue(
-            system_agents._autonomous_goal_proposal_budget_allows_retry(
+            autonomous_goals._autonomous_goal_proposal_budget_allows_retry(
                 workflow, tokens_used=101, token_delta=101
             )
         )
         self.assertIsNone(
-            system_agents._retry_budgeted_failed_autonomous_goal_candidate(
+            autonomous_goals._retry_budgeted_failed_autonomous_goal_candidate(
                 run,
                 workflow,
                 error="candidate failed",
@@ -15049,7 +15048,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow.step = system_agents.STEP_AUTONOMOUS_GOAL_CANDIDATE_RUNNING
         self.assertIsNone(
-            system_agents._retry_budgeted_unaccepted_autonomous_goal_candidate(
+            autonomous_goals._retry_budgeted_unaccepted_autonomous_goal_candidate(
                 workflow,
                 reason="candidate_no_proposal",
                 tokens_used=100,
@@ -15078,7 +15077,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -15175,7 +15174,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -15240,7 +15239,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         self.assertEqual(
             workflow.state[
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY
+                autonomous_goals._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY
             ],
             {"candidate-thread": 350},
         )
@@ -15267,7 +15266,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -15278,7 +15277,7 @@ class AutonomousGoalWorkflowTests(TestCase):
                 "candidate_session_id": candidate_metadata.pk,
                 autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
                 autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 350,
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY: {
+                autonomous_goals._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY: {
                     "candidate-thread": 350,
                 },
             },
@@ -15347,7 +15346,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         self.assertEqual(
             workflow.state[
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY
+                autonomous_goals._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY
             ],
             {"candidate-thread": 350},
         )
@@ -15385,7 +15384,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -15396,11 +15395,11 @@ class AutonomousGoalWorkflowTests(TestCase):
                 "candidate_session_id": candidate_metadata.pk,
                 autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_STATE_KEY: 1000,
                 autonomous_goal_prompts._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_USED_STATE_KEY: 350,
-                system_agents._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY: {
+                autonomous_goals._AUTONOMOUS_GOAL_PROPOSAL_BUDGET_TOKEN_TOTALS_STATE_KEY: {
                     "candidate-thread": 350,
                 },
                 autonomous_goal_prompts._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY: (
-                    system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT
+                    autonomous_goals._AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT
                 ),
             },
         )
@@ -15453,7 +15452,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             workflow.state[
                 autonomous_goal_prompts._AUTONOMOUS_GOAL_NO_PROGRESS_RETRIES_STATE_KEY
             ],
-            system_agents._AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT,
+            autonomous_goals._AUTONOMOUS_GOAL_NO_PROGRESS_RETRY_LIMIT,
         )
         notice = ProposedSession.objects.get()
         self.assertEqual(notice.inbox_kind, ProposedSession.INBOX_KIND_NOTICE)
@@ -15479,7 +15478,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -15567,7 +15566,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -15674,7 +15673,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -15686,7 +15685,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             },
         )
 
-        system_agents._spawn_autonomous_goal_candidate_retry_or_block(
+        autonomous_goals._spawn_autonomous_goal_candidate_retry_or_block(
             workflow, autonomous_goal
         )
 
@@ -15707,7 +15706,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -15716,7 +15715,7 @@ class AutonomousGoalWorkflowTests(TestCase):
             state={"autonomous_goal_id": autonomous_goal.pk},
         )
 
-        system_agents._spawn_autonomous_goal_candidate_retry_or_block(
+        autonomous_goals._spawn_autonomous_goal_candidate_retry_or_block(
             workflow, autonomous_goal
         )
 
@@ -15746,9 +15745,9 @@ class AutonomousGoalWorkflowTests(TestCase):
             outcome_metadata={"existing": True},
         )
 
-        self.assertTrue(system_agents._publish_current_stack_proposal(existing))
+        self.assertTrue(autonomous_goals._publish_current_stack_proposal(existing))
         self.assertTrue(
-            system_agents._publish_current_stack_proposal(
+            autonomous_goals._publish_current_stack_proposal(
                 budgeted, workflow=workflow
             )
         )
@@ -15783,7 +15782,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         workflow.save(update_fields=["state"])
 
         self.assertEqual(
-            system_agents._autonomous_goal_current_stack_proposal(workflow), proposal
+            autonomous_goals._autonomous_goal_current_stack_proposal(workflow), proposal
         )
 
     def test_below_threshold_notice_copy_handles_missing_candidate_title(self) -> None:
@@ -15822,7 +15821,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
@@ -15890,7 +15889,7 @@ class AutonomousGoalWorkflowTests(TestCase):
         )
         workflow = SystemWorkflow.objects.create(
             kind=system_agents.AUTONOMOUS_GOAL_AGENT_KIND,
-            main_thread_id=system_agents._autonomous_goal_main_thread_id(
+            main_thread_id=autonomous_goals._autonomous_goal_main_thread_id(
                 autonomous_goal.pk
             ),
             cwd="/repo",
