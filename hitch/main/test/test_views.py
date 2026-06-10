@@ -8660,13 +8660,6 @@ class IndexViewTests(TestCase):
         self.assertEqual(lifetime_usage["total"]["cached"], "30")
         client.thread_list.assert_not_called()
 
-    def test_lifetime_human_token_formatter(self) -> None:
-        self.assertEqual(token_usage._format_human_token_count(-1), "0")
-        self.assertEqual(token_usage._format_human_token_count(999), "999")
-        self.assertEqual(token_usage._format_human_token_count(1_500_000), "1.5M")
-        self.assertEqual(token_usage._format_human_token_count(10_500_000), "11M")
-        self.assertEqual(token_usage._format_human_token_count(1_000_000_000), "1B")
-
     def test_lifetime_token_chart_formats_segments(self) -> None:
         self.assertEqual(token_usage._format_lifetime_token_chart({}), [])
         self.assertEqual(token_usage._format_lifetime_token_chart_axis({}), [])

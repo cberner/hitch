@@ -169,3 +169,33 @@ def render_markdown(text: str) -> SafeString:
     """
     html: str = _RENDERER.render(text)
     return mark_safe(html)
+
+_TOKEN_UNITS = (
+    (1_000_000_000, "B"),
+    (1_000_000, "M"),
+    (1_000, "K"),
+)
+
+
+def format_token_count(value: int) -> str:
+    """Render a token count compactly (999, 1.2K, 13M, 1B)."""
+    value = max(0, value)
+    for index, (scale, suffix) in enumerate(_TOKEN_UNITS):
+        if value < scale:
+            continue
+        amount = _format_token_amount(value, scale)
+        if amount == "1000" and index > 0:
+            next_scale, next_suffix = _TOKEN_UNITS[index - 1]
+            return _format_token_amount(value, next_scale) + next_suffix
+        return amount + suffix
+    return str(value)
+
+
+def _format_token_amount(value: int, scale: int) -> str:
+    if value >= 10 * scale:
+        return str((value + scale // 2) // scale)
+    tenths = (value * 10 + scale // 2) // scale
+    whole, fraction = divmod(tenths, 10)
+    if fraction == 0:
+        return str(whole)
+    return f"{whole}.{fraction}"

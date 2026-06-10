@@ -27,7 +27,7 @@ from typing import Any
 
 from django.db import close_old_connections
 
-from hitch.main import codex_events, codex_pool, system_agents
+from hitch.main import codex_events, codex_pool, formatting, system_agents
 from hitch.main.db import run_ignoring_database_locks
 from hitch.main.models import (
     CodexInstance,
@@ -70,11 +70,6 @@ _IDLE_MAX_STREAM_SECONDS = 5 * 60
 # the case where the subprocess never started writing.
 _FILE_APPEAR_TIMEOUT = 30.0
 
-_COMPACT_TOKEN_UNITS = (
-    (1_000_000_000, "B"),
-    (1_000_000, "M"),
-    (1_000, "K"),
-)
 
 
 def stream_for_instance(
@@ -582,14 +577,14 @@ def qa_agent_status_text_for_instance(instance: CodexInstance | None) -> str:
             return "PR follow-up agent working..."
         return (
             "PR follow-up agent working..."
-            f"{_format_compact_token_count(tokens_used)} tokens"
+            f"{formatting.format_token_count(tokens_used)} tokens"
         )
     if not _is_qa_agent_instance(instance):
         return ""
     tokens_used = codex_events.latest_goal_tokens_for_instance(instance)
     if tokens_used is None:
         return "QA agent working..."
-    return f"QA agent working...{_format_compact_token_count(tokens_used)} tokens"
+    return f"QA agent working...{formatting.format_token_count(tokens_used)} tokens"
 
 
 def system_workflow_status_text(workflow: SystemWorkflow | None) -> str:
@@ -630,29 +625,6 @@ def _is_qa_agent_instance(instance: CodexInstance) -> bool:
         instance.display_author == system_agents.QA_DISPLAY_AUTHOR
         or instance.agent_kind == system_agents.PR_QA_AGENT_KIND
     )
-
-
-def _format_compact_token_count(value: int) -> str:
-    value = max(0, value)
-    for index, (scale, suffix) in enumerate(_COMPACT_TOKEN_UNITS):
-        if value < scale:
-            continue
-        amount = _format_compact_token_amount(value, scale)
-        if amount == "1000" and index > 0:
-            next_scale, next_suffix = _COMPACT_TOKEN_UNITS[index - 1]
-            return _format_compact_token_amount(value, next_scale) + next_suffix
-        return amount + suffix
-    return str(value)
-
-
-def _format_compact_token_amount(value: int, scale: int) -> str:
-    if value >= 10 * scale:
-        return str((value + scale // 2) // scale)
-    tenths = (value * 10 + scale // 2) // scale
-    whole, fraction = divmod(tenths, 10)
-    if fraction == 0:
-        return str(whole)
-    return f"{whole}.{fraction}"
 
 
 def _running_system_workflow(
