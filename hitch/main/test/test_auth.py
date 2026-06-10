@@ -1,16 +1,23 @@
-import base64
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
-from django.core import signing
-from django.test import Client, TestCase
+from django.test import TestCase
 from django.urls import reverse
-from openai_codex.errors import MethodNotFoundError
 
 from hitch.main.models import UserSettings
+from hitch.main.test.support import (
+    _cookie_value,
+    _decode_extra_system_prompt,
+    _encode_extra_system_prompt,
+    _seed_cookies,
+    _setup_codex,
+)
+from hitch.main.test.support import (
+    _make_model as _model,
+)
 
 _MODEL_COOKIE = "hitch_model"
 _EFFORT_COOKIE = "hitch_reasoning_effort"
@@ -26,53 +33,9 @@ _LAST_SELECTED_REPO_COOKIE = "hitch_last_selected_repo"
 _ENABLE_MEMORIES_COOKIE = "hitch_enable_memories"
 
 
-def _sign(name: str, value: str) -> str:
-    return signing.get_cookie_signer(salt=name).sign(value)
-
-
-def _seed_cookies(client: Client, **values: str) -> None:
-    for name, value in values.items():
-        client.cookies[name] = _sign(name, value)
-
-
-def _cookie_value(response: object, name: str) -> str:
-    raw = response.cookies[name].value  # type: ignore[attr-defined]
-    return signing.get_cookie_signer(salt=name).unsign(raw)
-
-
-def _encode_extra_system_prompt(value: str) -> str:
-    return base64.urlsafe_b64encode(value.encode()).decode("ascii")
-
-
-def _decode_extra_system_prompt(value: str) -> str:
-    return base64.urlsafe_b64decode(value.encode("ascii")).decode()
-
-
 def _make_user(username: str = "dev@example.com", password: str = "StrongPass123!") -> Any:
     user_model = get_user_model()
     return user_model.objects.create_user(username=username, password=password)
-
-
-def _setup_codex(mock_codex: MagicMock, *, models: list[Any] | None = None) -> None:
-    ctx = mock_codex.return_value.__enter__.return_value
-    ctx.thread_list.return_value.data = []
-    ctx.models.return_value.data = models or []
-    ctx._client.request.side_effect = MethodNotFoundError(
-        -32601, "method not found", None
-    )
-
-
-def _model(model_id: str, *, is_default: bool = False) -> SimpleNamespace:
-    return SimpleNamespace(
-        id=model_id,
-        display_name=model_id,
-        is_default=is_default,
-        default_reasoning_effort=SimpleNamespace(value="medium"),
-        supported_reasoning_efforts=[
-            SimpleNamespace(reasoning_effort=SimpleNamespace(value=v), description=v)
-            for v in ("low", "medium", "high")
-        ],
-    )
 
 
 class AuthViewTests(TestCase):

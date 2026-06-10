@@ -19,7 +19,6 @@ from typing import Any, cast, override
 from unittest.mock import MagicMock, call, patch
 
 from django.contrib.auth import get_user_model
-from django.core import signing
 from django.core.exceptions import SuspiciousOperation
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, OperationalError, connection
@@ -36,7 +35,7 @@ from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 from django.utils import timezone
 from openai_codex import Codex
-from openai_codex.errors import AppServerError, InvalidRequestError, MethodNotFoundError
+from openai_codex.errors import AppServerError, InvalidRequestError
 from openai_codex.generated.v2_all import (
     GetAccountRateLimitsResponse,
     SortDirection,
@@ -91,6 +90,14 @@ from hitch.main.models import (
     UserSettings,
 )
 from hitch.main.rollout_state import _RolloutFileState
+from hitch.main.test.support import (
+    _cookie_value,
+    _encode_extra_system_prompt,
+    _make_model,
+    _rollout_line,
+    _seed_cookies,
+    _setup_codex,
+)
 from hitch.main.worktrees import (
     ManagedWorktree,
     WorktreeCleanupError,
@@ -142,15 +149,6 @@ class _UnreadableUpload(SimpleUploadedFile):
     @override
     def read(self, *_args: object, **_kwargs: object) -> bytes:
         raise OSError("/tmp/private/screen.png")
-
-
-def _rollout_line(
-    line_type: str,
-    payload: dict[str, object],
-    *,
-    timestamp: str = "2025-01-05T12:00:00Z",
-) -> str:
-    return json.dumps({"timestamp": timestamp, "type": line_type, "payload": payload})
 
 
 def _token_count_line(
@@ -320,33 +318,6 @@ def _cache_token_usage(
     )
 
 
-def _setup_codex(
-    mock_codex: MagicMock,
-    *,
-    threads: list[Any] | None = None,
-    archived_threads: list[Any] | None = None,
-    models: list[Any] | None = None,
-) -> MagicMock:
-    """Configure the Codex mock with ``thread_list`` and ``models``.
-
-    The index view reads both active and, when enabled, archived thread
-    lists. Also stubs ``_client.request`` to raise
-    MethodNotFound so the rate-limits fetch falls through its
-    unsupported-endpoint branch — tests that care set their own value."""
-    ctx: MagicMock = mock_codex.return_value.__enter__.return_value
-
-    def thread_list(*, archived: bool | None = None, **_: Any) -> SimpleNamespace:
-        data = archived_threads if archived else threads
-        return SimpleNamespace(data=data or [])
-
-    ctx.thread_list.side_effect = thread_list
-    ctx.models.return_value.data = models or []
-    ctx._client.request.side_effect = MethodNotFoundError(
-        -32601, "method not found", None
-    )
-    return ctx
-
-
 def _run_borrowed_with(
     client: Any,
 ) -> Callable[..., object]:
@@ -356,37 +327,6 @@ def _run_borrowed_with(
         return operation(client)
 
     return side_effect
-
-
-def _make_model(model_id: str, *, is_default: bool = False) -> SimpleNamespace:
-    return SimpleNamespace(
-        id=model_id,
-        display_name=model_id,
-        is_default=is_default,
-        default_reasoning_effort=SimpleNamespace(value="medium"),
-        supported_reasoning_efforts=[
-            SimpleNamespace(reasoning_effort=SimpleNamespace(value=v), description=v)
-            for v in ("low", "medium", "high")
-        ],
-    )
-
-
-def _sign(name: str, value: str) -> str:
-    return signing.get_cookie_signer(salt=name).sign(value)
-
-
-def _encode_extra_system_prompt(value: str) -> str:
-    return base64.urlsafe_b64encode(value.encode()).decode("ascii")
-
-
-def _seed_cookies(client: Client, **values: str) -> None:
-    for name, value in values.items():
-        client.cookies[name] = _sign(name, value)
-
-
-def _cookie_value(response: object, name: str) -> str:
-    raw = response.cookies[name].value  # type: ignore[attr-defined]
-    return signing.get_cookie_signer(salt=name).unsign(raw)
 
 
 def _session(

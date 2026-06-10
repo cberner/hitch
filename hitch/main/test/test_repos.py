@@ -1,4 +1,3 @@
-import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import patch
@@ -14,16 +13,7 @@ from hitch.main.repos import (
     git_common_dir,
     same_repo_or_worktree,
 )
-
-
-def _git(cwd: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(cwd), *args],
-        capture_output=True,
-        check=True,
-        text=True,
-    )
-    return result.stdout.strip()
+from hitch.main.test.support import _git
 
 
 class DiscoverReposTests(TestCase):

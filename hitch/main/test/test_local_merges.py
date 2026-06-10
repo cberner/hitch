@@ -18,37 +18,12 @@ from hitch.main.local_merges import (
     local_branch_names,
     merge_worktree_diff_to_branch,
 )
-
-
-def _git(repo: Path, *args: str) -> str:
-    env = {
-        **os.environ,
-        "GIT_AUTHOR_NAME": "Hitch Tests",
-        "GIT_AUTHOR_EMAIL": "hitch@example.com",
-        "GIT_COMMITTER_NAME": "Hitch Tests",
-        "GIT_COMMITTER_EMAIL": "hitch@example.com",
-    }
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        check=True,
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip()
+from hitch.main.test.support import _git
+from hitch.main.test.support import _init_repo as support_init_repo
 
 
 def _init_repo(repo: Path) -> None:
-    subprocess.run(
-        ["git", "init", "--initial-branch=main", str(repo)],
-        check=True,
-        capture_output=True,
-    )
-    _git(repo, "config", "user.name", "Hitch Tests")
-    _git(repo, "config", "user.email", "hitch@example.com")
-    (repo / "README.md").write_text("hello\n")
-    _git(repo, "add", "README.md")
-    _git(repo, "commit", "-m", "initial")
+    support_init_repo(repo, initial_branch="main", configure_user=True)
 
 
 def _merge_reviewed_patch(source_cwd: Path, branch: str) -> LocalBranchMergeResult:

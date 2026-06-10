@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 from django.test import SimpleTestCase, override_settings
 
 from hitch.main import worktrees
+from hitch.main.test.support import _git, _init_repo
 from hitch.main.worktrees import (
     WorktreeCleanupError,
     WorktreeCreationError,
@@ -18,35 +19,6 @@ from hitch.main.worktrees import (
     is_managed_worktree_path,
     snapshot_worktree_to_commit,
 )
-
-
-def _git(repo: Path, *args: str) -> str:
-    env = {
-        **os.environ,
-        "GIT_AUTHOR_NAME": "Hitch Tests",
-        "GIT_AUTHOR_EMAIL": "hitch@example.com",
-        "GIT_COMMITTER_NAME": "Hitch Tests",
-        "GIT_COMMITTER_EMAIL": "hitch@example.com",
-    }
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args],
-        check=True,
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    return result.stdout.strip()
-
-
-def _init_repo(repo: Path) -> None:
-    subprocess.run(
-        ["git", "init", "--initial-branch=master", str(repo)],
-        check=True,
-        capture_output=True,
-    )
-    (repo / "README.md").write_text("hello\n")
-    _git(repo, "add", "README.md")
-    _git(repo, "commit", "-m", "initial")
 
 
 def _init_unborn_repo(repo: Path) -> None:

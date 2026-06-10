@@ -6,7 +6,6 @@ from typing import cast, override
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
-from django.core import signing
 from django.test import Client, SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -21,6 +20,11 @@ from hitch.main import (
     settings_cookies,
 )
 from hitch.main.models import GlobalSettings, Project, UserSettings
+from hitch.main.test.support import (
+    _cookie_value,
+    _encode_extra_system_prompt,
+    _seed_cookies,
+)
 from hitch.settings import common as common_settings
 
 _MODEL_COOKIE = "hitch_model"
@@ -224,21 +228,6 @@ def _rate_limit_snapshot(
     )
 
 
-def _signer(name: str) -> signing.Signer:
-    return signing.get_cookie_signer(salt=name)
-
-
-def _seed_cookies(client: Client, **values: str) -> None:
-    for name, value in values.items():
-        client.cookies[name] = _signer(name).sign(value)
-
-
-def _cookie_value(response: object, name: str) -> str:
-    """Pull a signed cookie's plaintext value out of a TestClient response."""
-    raw = response.cookies[name].value  # type: ignore[attr-defined]
-    return _signer(name).unsign(raw)
-
-
 def _new_session_form_html(response: object) -> str:
     content: bytes = response.content  # type: ignore[attr-defined]
     body = content.decode()
@@ -252,10 +241,6 @@ def _input_tag_containing(html: str, marker: str) -> str:
     start = html.rfind("<input", 0, marker_pos)
     end = html.index(">", marker_pos) + 1
     return html[start:end]
-
-
-def _encode_extra_system_prompt(value: str) -> str:
-    return base64.urlsafe_b64encode(value.encode()).decode("ascii")
 
 
 def _extra_system_prompt_value(response: object) -> str:
