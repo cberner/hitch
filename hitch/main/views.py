@@ -67,6 +67,7 @@ from hitch.main.autonomous_goal_form import (
     _attach_autonomous_goal_display_state,
     _validated_autonomous_goal_values,
 )
+from hitch.main.autonomous_goal_proposal_stack import _proposal_outcome_metadata
 from hitch.main.autonomous_goal_run_display import (
     _attach_autonomous_goal_run_state,
     _attach_proposed_session_display_state,
@@ -4471,22 +4472,6 @@ def _rename_codex_thread_from_proposal(
         proposed_session, session_metadata
     )
     return True
-
-
-def _proposal_outcome_metadata(
-    proposed_session: ProposedSession, updates: dict[str, object]
-) -> dict[str, object]:
-    metadata = (
-        dict(proposed_session.outcome_metadata)
-        if isinstance(proposed_session.outcome_metadata, dict)
-        else {}
-    )
-    for key, value in updates.items():
-        if value is None:
-            metadata.pop(key, None)
-        else:
-            metadata[key] = value
-    return metadata
 
 
 def _posted_bool_override(
