@@ -412,13 +412,13 @@ class CodexPoolKeepaliveTests(SimpleTestCase):
         self.assertFalse(codex_pool.start_codex_pool_keepalive())
 
     def test_starts_one_daemon_thread(self) -> None:
-        self.addCleanup(setattr, codex_pool, "_keepalive_started", False)
-        codex_pool._keepalive_started = False
+        self.addCleanup(codex_pool._keepalive.reset_for_tests)
+        codex_pool._keepalive.reset_for_tests()
         with (
             mock.patch.object(
                 codex_pool, "_codex_pool_keepalive_enabled", return_value=True
             ),
-            mock.patch("hitch.main.codex_pool.threading.Thread") as thread_cls,
+            mock.patch("hitch.main.server_lifecycle.threading.Thread") as thread_cls,
         ):
             started = codex_pool.start_codex_pool_keepalive()
             # Idempotent: a second call does not start another thread.

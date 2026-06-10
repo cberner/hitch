@@ -27,25 +27,16 @@ _PR_STAGE_REFRESH_LIMIT_PER_TICK = 5
 _PR_MONITOR_BACKOFF_LIMIT_PER_TICK = 5
 _SCHEDULER_ENV = "HITCH_WORKFLOW_MAINTENANCE_SCHEDULER"
 
-_scheduler_lock = threading.Lock()
-_scheduler_started = False
+_scheduler = server_lifecycle.SchedulerHandle(
+    thread_name="hitch-workflow-maintenance"
+)
 
 
 def start_workflow_maintenance_scheduler() -> bool:
     """Start the in-process workflow maintenance scheduler when enabled."""
-    global _scheduler_started
     if not _workflow_maintenance_scheduler_enabled():
         return False
-    with _scheduler_lock:
-        if _scheduler_started:
-            return False
-        _scheduler_started = True
-        threading.Thread(
-            target=_workflow_maintenance_scheduler_loop,
-            name="hitch-workflow-maintenance",
-            daemon=True,
-        ).start()
-        return True
+    return _scheduler.start(_workflow_maintenance_scheduler_loop)
 
 
 def _workflow_maintenance_scheduler_enabled() -> bool:
